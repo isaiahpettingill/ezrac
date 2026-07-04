@@ -33,7 +33,9 @@ stmt = _{
 }
 
 let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
-assign_stmt = { ident ~ assign_op ~ expr ~ semi? }
+assign_stmt = { place ~ assign_op ~ expr ~ semi? }
+place = { index_place | ident }
+index_place = { ident ~ "[" ~ expr ~ "]" }
 if_stmt = { "if" ~ expr ~ block ~ ("else" ~ block)? }
 while_stmt = { "while" ~ expr ~ block }
 loop_stmt = { "loop" ~ block }
@@ -56,9 +58,12 @@ shift = { additive ~ (shift_op ~ additive)* }
 additive = { multiplicative ~ (add_op ~ multiplicative)* }
 multiplicative = { unary ~ (mul_op ~ unary)* }
 unary = { unary_op* ~ primary }
-primary = { cast_expr | in_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
+primary = { cast_expr | in_expr | addr_index_expr | array_lit | index_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
 cast_expr = { "cast" ~ "<" ~ ty ~ ">" ~ "(" ~ expr ~ ")" }
 in_expr = ${ "in" ~ (" " | "\t" | "\r" | "\n")+ ~ ident }
+addr_index_expr = { "&" ~ ident ~ "[" ~ expr ~ "]" }
+index_expr = { ident ~ "[" ~ expr ~ "]" }
+array_lit = { "[" ~ args? ~ "]" }
 call_expr = { path ~ "(" ~ args? ~ ")" }
 args = { expr ~ ("," ~ expr)* ~ ","? }
 path_expr = { path }

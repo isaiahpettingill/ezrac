@@ -6,7 +6,7 @@ use pest_derive::Parser;
 use crate::{
     ast::{
         AliasDecl, AssignOp, BinaryOp, ConstDecl, Declaration, Expr, Function, GlobalDecl,
-        MmioDecl, Param, PortDecl, Program, Stmt, Type, UnaryOp,
+        MmioDecl, Param, Place, PortDecl, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -211,7 +211,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
         Rule::assign_stmt => {
             let mut inner = pair.into_inner();
             Ok(Stmt::Assign {
-                target: inner.next().unwrap().as_str().to_owned(),
+                target: build_place(inner.next().unwrap())?,
                 op: build_assign_op(inner.next().unwrap().as_str()),
                 value: build_expr(inner.next().unwrap())?,
             })
@@ -254,6 +254,21 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
         }
         Rule::expr_stmt => Ok(Stmt::Expr(build_expr(pair.into_inner().next().unwrap())?)),
         _ => unreachable!("unexpected stmt rule {:?}", pair.as_rule()),
+    }
+}
+
+fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::ident => Ok(Place::Ident(inner.as_str().to_owned())),
+        Rule::index_place => {
+            let mut parts = inner.into_inner();
+            Ok(Place::Index {
+                name: parts.next().unwrap().as_str().to_owned(),
+                index: Box::new(build_expr(parts.next().unwrap())?),
+            })
+        }
+        _ => unreachable!("unexpected place rule {:?}", inner.as_rule()),
     }
 }
 
@@ -314,6 +329,28 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
         Rule::in_expr => Ok(Expr::In(
             pair.into_inner().next().unwrap().as_str().to_owned(),
         )),
+        Rule::addr_index_expr => {
+            let mut inner = pair.into_inner();
+            Ok(Expr::AddressOfIndex {
+                name: inner.next().unwrap().as_str().to_owned(),
+                index: Box::new(build_expr(inner.next().unwrap())?),
+            })
+        }
+        Rule::index_expr => {
+            let mut inner = pair.into_inner();
+            Ok(Expr::Index {
+                name: inner.next().unwrap().as_str().to_owned(),
+                index: Box::new(build_expr(inner.next().unwrap())?),
+            })
+        }
+        Rule::array_lit => {
+            let values = pair
+                .into_inner()
+                .next()
+                .map(|args| args.into_inner().map(build_expr).collect())
+                .unwrap_or_else(|| Ok(Vec::new()))?;
+            Ok(Expr::Array(values))
+        }
         Rule::call_expr => {
             let mut inner = pair.into_inner();
             let path = split_path(inner.next().unwrap().as_str());
@@ -515,5 +552,16 @@ mod tests {
         .unwrap();
 
         assert!(matches!(program.declarations[0], Declaration::Alias(_)));
+    }
+
+    #[test]
+    fn parses_array_literal_index_and_address_of_index() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "global palette: [u8; 4] = [1, 2]\nfn main() { palette[1] = 3\nlet p: ptr<u8> = &palette[0] }",
+        )
+        .unwrap();
+
+        assert!(program.main_function().is_some());
     }
 }

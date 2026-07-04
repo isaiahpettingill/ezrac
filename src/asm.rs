@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Program, Stmt, Type, UnaryOp},
+    ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, Type, UnaryOp},
     diagnostic::Diagnostic,
 };
 
@@ -39,11 +39,16 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Variable {
     addr: u32,
-    size: u8,
+    size: u32,
+    element_size: Option<u8>,
+    len: Option<u32>,
 }
 
 impl Variable {
     fn width(self) -> Result<ValueWidth, Diagnostic> {
+        if self.element_size.is_some() {
+            return Err(Diagnostic::new("array value cannot be used as a scalar"));
+        }
         match self.size {
             1 => Ok(ValueWidth::U8),
             2 => Ok(ValueWidth::U16),
@@ -166,7 +171,7 @@ impl Symbols {
                     symbols.constants.insert(decl.name.clone(), value);
                 }
                 Declaration::Global(decl) => {
-                    let variable = symbols.alloc_var(symbols.type_width(&decl.ty)?.bytes());
+                    let variable = symbols.alloc_storage(&decl.ty)?;
                     symbols.globals.insert(decl.name.clone(), variable);
                 }
                 _ => {}
@@ -179,9 +184,23 @@ impl Symbols {
     fn alloc_var(&mut self, size: u8) -> Variable {
         let variable = Variable {
             addr: self.next_addr,
-            size,
+            size: size as u32,
+            element_size: None,
+            len: None,
         };
         self.next_addr += size as u32;
+        variable
+    }
+
+    fn alloc_array(&mut self, element_size: u8, len: u32) -> Variable {
+        let size = element_size as u32 * len;
+        let variable = Variable {
+            addr: self.next_addr,
+            size,
+            element_size: Some(element_size),
+            len: Some(len),
+        };
+        self.next_addr += size;
         variable
     }
 
@@ -207,6 +226,29 @@ impl Symbols {
                 "array storage codegen is not implemented yet",
             )),
         }
+    }
+
+    fn alloc_storage(&mut self, ty: &Type) -> Result<Variable, Diagnostic> {
+        match ty {
+            Type::Array { element, len } => {
+                let element_size = self.type_width(element)?.bytes();
+                let len = self.array_len(len)?;
+                Ok(self.alloc_array(element_size, len))
+            }
+            _ => Ok(self.alloc_var(self.type_width(ty)?.bytes())),
+        }
+    }
+
+    fn array_len(&self, text: &str) -> Result<u32, Diagnostic> {
+        let value = if let Some(value) = self.constants.get(text).copied() {
+            value
+        } else {
+            parse_int_text(text)?
+        };
+        if value < 0 {
+            return Err(Diagnostic::new(format!("array length {value} is negative")));
+        }
+        Ok(value as u32)
     }
 
     fn eval_i64(&self, expr: &Expr) -> Result<i64, Diagnostic> {
@@ -252,7 +294,12 @@ impl Symbols {
                 })
             }
             Expr::Cast { expr, .. } => self.eval_i64(expr),
-            Expr::In(_) | Expr::Call { .. } | Expr::String(_) => Err(Diagnostic::new(format!(
+            Expr::Array(_)
+            | Expr::Index { .. }
+            | Expr::AddressOfIndex { .. }
+            | Expr::In(_)
+            | Expr::Call { .. }
+            | Expr::String(_) => Err(Diagnostic::new(format!(
                 "expression `{expr:?}` is not a compile-time integer"
             ))),
         }
@@ -301,8 +348,12 @@ impl Emitter {
                 .get(&decl.name)
                 .copied()
                 .expect("global allocation exists");
-            self.emit_expr_to_width(&decl.value, variable.width()?)?;
-            self.emit_store_width(variable);
+            if variable.element_size.is_some() {
+                self.emit_array_initializer(variable, &decl.value)?;
+            } else {
+                self.emit_expr_to_width(&decl.value, variable.width()?)?;
+                self.emit_store_width(variable);
+            }
         }
         Ok(())
     }
@@ -376,16 +427,17 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match stmt {
             Stmt::Let { name, ty, value } => {
-                let width = self.symbols.type_width(ty)?;
-                let variable = self.symbols.alloc_var(width.bytes());
+                let variable = self.symbols.alloc_storage(ty)?;
                 self.current_scope_mut().insert(name.clone(), variable);
-                self.emit_expr_to_width(value, width)?;
-                self.emit_store_width(variable);
+                if variable.element_size.is_some() {
+                    self.emit_array_initializer(variable, value)?;
+                } else {
+                    self.emit_expr_to_width(value, variable.width()?)?;
+                    self.emit_store_width(variable);
+                }
             }
             Stmt::Assign { target, op, value } => {
-                let variable = self.variable(target)?;
-                self.emit_assignment_value(variable, *op, value)?;
-                self.emit_store_width(variable);
+                self.emit_assignment(target, *op, value)?;
             }
             Stmt::Out { port, value } => {
                 let port = self.port(port)?;
@@ -561,6 +613,70 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_assignment(
+        &mut self,
+        target: &Place,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        match target {
+            Place::Ident(name) => {
+                let variable = self.variable(name)?;
+                self.emit_assignment_value(variable, op, value)?;
+                self.emit_store_width(variable);
+            }
+            Place::Index { name, index } => {
+                if op != AssignOp::Set {
+                    return Err(Diagnostic::new(
+                        "compound indexed assignment is not implemented yet",
+                    ));
+                }
+                let element = self.array_element_variable(name, index)?;
+                self.emit_expr_to_width(value, element.width()?)?;
+                self.emit_store_width(element);
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_array_initializer(
+        &mut self,
+        variable: Variable,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let Expr::Array(values) = value else {
+            return Err(Diagnostic::new(
+                "array initializer must be an array literal",
+            ));
+        };
+        let element_size = variable
+            .element_size
+            .ok_or_else(|| Diagnostic::new("scalar variable cannot use array initializer"))?;
+        let len = variable
+            .len
+            .ok_or_else(|| Diagnostic::new("array variable missing length"))?;
+        if values.len() as u32 > len {
+            return Err(Diagnostic::new(format!(
+                "array initializer has {} values but array length is {len}",
+                values.len()
+            )));
+        }
+        for index in 0..len {
+            let element = scalar_var(variable.addr + index * element_size as u32, element_size);
+            if let Some(value) = values.get(index as usize) {
+                self.emit_expr_to_width(value, element.width()?)?;
+            } else {
+                self.line(match element_size {
+                    1 => "    ld a, 00h",
+                    2 | 3 => "    ld hl, 000000h",
+                    _ => unreachable!("unsupported array element size"),
+                });
+            }
+            self.emit_store_width(element);
+        }
+        Ok(())
+    }
+
     fn emit_wide_assignment_op(
         &mut self,
         variable: Variable,
@@ -582,7 +698,7 @@ impl Emitter {
         value: &Expr,
     ) -> Result<(), Diagnostic> {
         let count = self.const_shift_count(value)?;
-        let temp = self.symbols.alloc_var(variable.size);
+        let temp = self.symbols.alloc_var(variable.width()?.bytes());
         self.emit_load_width(variable);
         self.emit_store_width(temp);
         self.emit_shift_memory(temp, op, count)?;
@@ -762,6 +878,20 @@ impl Emitter {
                     self.line(&format!("    ld hl, {:06X}h", value));
                 }
             }
+            Expr::AddressOfIndex { name, index } => {
+                let element = self.array_element_variable(name, index)?;
+                self.line(&format!("    ld hl, {:06X}h", element.addr));
+            }
+            Expr::Index { name, index } => {
+                let element = self.array_element_variable(name, index)?;
+                if element.size == 1 {
+                    self.emit_load_a(element);
+                    self.line("    ld h, 00h");
+                    self.line("    ld l, a");
+                } else {
+                    self.emit_load_width(element);
+                }
+            }
             Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Cast { .. } => {
                 let value = self.value_for_width(expr, width)?;
                 self.line(&format!("    ld hl, {:06X}h", value));
@@ -796,7 +926,7 @@ impl Emitter {
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
-            Expr::In(_) | Expr::Call { .. } | Expr::String(_) => {
+            Expr::Array(_) | Expr::In(_) | Expr::Call { .. } | Expr::String(_) => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u16 codegen"
                 )));
@@ -882,6 +1012,10 @@ impl Emitter {
                 let port = self.port(port)?;
                 self.line(&format!("    in0 a, ({port:02X}h)"));
             }
+            Expr::Index { name, index } => {
+                let element = self.array_element_variable(name, index)?;
+                self.emit_load_a(element);
+            }
             Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Cast { .. } => {
                 let value = self.u8(expr)?;
                 self.line(&format!("    ld a, {:02X}h", value));
@@ -896,7 +1030,7 @@ impl Emitter {
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
-            Expr::Call { .. } | Expr::String(_) => {
+            Expr::AddressOfIndex { .. } | Expr::Array(_) | Expr::Call { .. } | Expr::String(_) => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u8 codegen"
                 )));
@@ -1310,6 +1444,26 @@ impl Emitter {
         }
     }
 
+    fn array_element_variable(&self, name: &str, index: &Expr) -> Result<Variable, Diagnostic> {
+        let array = self.variable(name)?;
+        let element_size = array
+            .element_size
+            .ok_or_else(|| Diagnostic::new(format!("`{name}` is not an array")))?;
+        let len = array
+            .len
+            .ok_or_else(|| Diagnostic::new(format!("array `{name}` is missing length")))?;
+        let index_value = self.symbols.eval_i64(index)?;
+        if index_value < 0 || index_value as u32 >= len {
+            return Err(Diagnostic::new(format!(
+                "array index {index_value} is out of bounds for `{name}` length {len}"
+            )));
+        }
+        Ok(scalar_var(
+            array.addr + index_value as u32 * element_size as u32,
+            element_size,
+        ))
+    }
+
     fn u8(&self, expr: &Expr) -> Result<u8, Diagnostic> {
         let value = self.symbols.eval_i64(expr)?;
         if !(0..=0xFF).contains(&value) {
@@ -1374,6 +1528,9 @@ impl Emitter {
                 }
             }
             Expr::Char(_) | Expr::Bool(_) | Expr::In(_) | Expr::String(_) => Ok(ValueWidth::U8),
+            Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar width")),
+            Expr::Index { name, index } => self.array_element_variable(name, index)?.width(),
+            Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
             Expr::Cast { ty, .. } => self.symbols.type_width(ty),
             Expr::Call { path, .. }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
@@ -1473,6 +1630,24 @@ fn trunc_mod_or_zero(left: i64, right: i64) -> i64 {
     }
 }
 
+fn parse_int_text(text: &str) -> Result<i64, Diagnostic> {
+    let digits = text
+        .trim_end_matches("u8")
+        .trim_end_matches("i8")
+        .trim_end_matches("u16")
+        .trim_end_matches("i16")
+        .trim_end_matches("u24")
+        .trim_end_matches("i24");
+    if let Some(hex) = digits.strip_prefix("0x") {
+        i64::from_str_radix(hex, 16)
+    } else if let Some(bin) = digits.strip_prefix("0b") {
+        i64::from_str_radix(bin, 2)
+    } else {
+        digits.parse()
+    }
+    .map_err(|_| Diagnostic::new(format!("invalid integer literal `{text}`")))
+}
+
 fn const_shl_or_zero(left: i64, right: i64) -> i64 {
     if !(0..64).contains(&right) {
         0
@@ -1491,6 +1666,15 @@ fn const_shr_or_zero(left: i64, right: i64) -> i64 {
 
 fn path_text(path: &[String]) -> String {
     path.join(".")
+}
+
+fn scalar_var(addr: u32, size: u8) -> Variable {
+    Variable {
+        addr,
+        size: size as u32,
+        element_size: None,
+        len: None,
+    }
 }
 
 fn is_comparison(op: BinaryOp) -> bool {
@@ -1995,6 +2179,42 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_static_arrays() {
+        let source = r#"
+            global palette: [u8; 4] = [1, 2, 3]
+            global words: [u16; 3] = [0x0100, 0x0200]
+
+            fn main() {
+                test.assert_eq_u8(palette[0], 1, 1)
+                test.assert_eq_u8(palette[3], 0, 2)
+                palette[1] = 9
+                test.assert_eq_u8(palette[1], 9, 3)
+
+                let local: [u8; 3] = [4, 5, 6]
+                local[2] = palette[1] + 1
+                test.assert_eq_u8(local[2], 10, 4)
+
+                test.assert_eq_u16(words[0], 0x0100, 5)
+                test.assert_eq_u16(words[2], 0, 6)
+                words[2] = 0x1234
+                test.assert_eq_u16(words[2], 0x1234, 7)
+
+                let p: ptr<u8> = &palette[1]
+                mem.poke8(p, 0x44)
+                test.assert_eq_u8(mem.peek8(p), 0x44, 8)
+                test.assert_eq_u8(palette[1], 0x44, 9)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

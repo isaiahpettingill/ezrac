@@ -77,7 +77,7 @@ pub enum Stmt {
         value: Expr,
     },
     Assign {
-        target: String,
+        target: Place,
         op: AssignOp,
         value: Expr,
     },
@@ -103,6 +103,12 @@ pub enum Stmt {
     Expr(Expr),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum Place {
+    Ident(String),
+    Index { name: String, index: Box<Expr> },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AssignOp {
     Set,
@@ -121,8 +127,17 @@ pub enum Expr {
     Bool(bool),
     Char(u8),
     String(String),
+    Array(Vec<Expr>),
     Ident(String),
     In(String),
+    Index {
+        name: String,
+        index: Box<Expr>,
+    },
+    AddressOfIndex {
+        name: String,
+        index: Box<Expr>,
+    },
     Call {
         path: Vec<String>,
         args: Vec<Expr>,
