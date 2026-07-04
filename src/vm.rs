@@ -111,10 +111,12 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld a, c"
             | "ld a, h"
             | "ld a, l"
+            | "ld a, (hl)"
             | "ld h, b"
             | "ld h, a"
             | "ld l, c"
             | "ld l, a"
+            | "ld (hl), a"
             | "add hl, bc"
             | "add a, a"
             | "add a, b"
@@ -182,6 +184,10 @@ fn emit_instruction(
     } else if let Some(target) = text.strip_prefix("jp ") {
         bytes.push(0xC3);
         push24(bytes, parse_addr(target.trim(), labels)?);
+    } else if text == "ld a, (hl)" {
+        bytes.push(0x7E);
+    } else if text == "ld (hl), a" {
+        bytes.push(0x77);
     } else if let Some(rest) = text.strip_prefix("ld hl, (") {
         let addr = rest
             .strip_suffix(')')

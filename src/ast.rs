@@ -8,6 +8,7 @@ pub enum Declaration {
     Import(String),
     Const(ConstDecl),
     Port(PortDecl),
+    Mmio(MmioDecl),
     Global(GlobalDecl),
     Function(Function),
 }
@@ -24,6 +25,15 @@ pub struct ConstDecl {
 pub struct PortDecl {
     pub public: bool,
     pub name: String,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MmioDecl {
+    pub public: bool,
+    pub volatile: bool,
+    pub name: String,
+    pub ty: Type,
     pub value: Expr,
 }
 

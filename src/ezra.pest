@@ -2,13 +2,15 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 program = { SOI ~ decl* ~ EOI }
-decl = _{ import_decl | const_decl | port_decl | global_decl | fn_decl }
+decl = _{ import_decl | const_decl | port_decl | mmio_decl | global_decl | fn_decl }
 
 visibility = { "pub" }
+volatile_kw = { "volatile" }
 attr = { "inline" | "naked" | "interrupt" }
 import_decl = { "import" ~ path ~ semi? }
 const_decl = { visibility? ~ "const" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 port_decl = { visibility? ~ "port" ~ ident ~ ":" ~ "u8" ~ "=" ~ expr ~ semi? }
+mmio_decl = { visibility? ~ volatile_kw? ~ "mmio" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 global_decl = { visibility? ~ "global" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 fn_decl = { attr* ~ visibility? ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ block }
 params = { param ~ ("," ~ param)* ~ ","? }

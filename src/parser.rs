@@ -5,8 +5,8 @@ use pest_derive::Parser;
 
 use crate::{
     ast::{
-        AssignOp, BinaryOp, ConstDecl, Declaration, Expr, Function, GlobalDecl, Param, PortDecl,
-        Program, Stmt, Type, UnaryOp,
+        AssignOp, BinaryOp, ConstDecl, Declaration, Expr, Function, GlobalDecl, MmioDecl, Param,
+        PortDecl, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -36,6 +36,7 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
         )),
         Rule::const_decl => build_const(pair).map(Declaration::Const),
         Rule::port_decl => build_port(pair).map(Declaration::Port),
+        Rule::mmio_decl => build_mmio(pair).map(Declaration::Mmio),
         Rule::global_decl => build_global(pair).map(Declaration::Global),
         Rule::fn_decl => build_fn(pair).map(Declaration::Function),
         _ => unreachable!("unexpected decl rule {:?}", pair.as_rule()),
@@ -101,6 +102,31 @@ fn build_port(pair: Pair<'_, Rule>) -> Result<PortDecl, Diagnostic> {
     Ok(PortDecl {
         public,
         name: name.unwrap(),
+        value: value.unwrap(),
+    })
+}
+
+fn build_mmio(pair: Pair<'_, Rule>) -> Result<MmioDecl, Diagnostic> {
+    let mut public = false;
+    let mut volatile = false;
+    let mut name = None;
+    let mut ty = None;
+    let mut value = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::visibility => public = true,
+            Rule::volatile_kw => volatile = true,
+            Rule::ident => name = Some(inner.as_str().to_owned()),
+            Rule::ty => ty = Some(build_type(inner)?),
+            Rule::expr => value = Some(build_expr(inner)?),
+            _ => {}
+        }
+    }
+    Ok(MmioDecl {
+        public,
+        volatile,
+        name: name.unwrap(),
+        ty: ty.unwrap(),
         value: value.unwrap(),
     })
 }
@@ -447,5 +473,16 @@ mod tests {
         .unwrap();
 
         assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_volatile_mmio_declaration() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "volatile mmio FRAMEBUFFER: ptr<u8> = 0x080000\nfn main() {}",
+        )
+        .unwrap();
+
+        assert!(matches!(program.declarations[0], Declaration::Mmio(_)));
     }
 }

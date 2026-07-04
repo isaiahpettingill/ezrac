@@ -138,6 +138,17 @@ impl Symbols {
                     }
                     symbols.ports.insert(decl.name.clone(), value as u8);
                 }
+                Declaration::Mmio(decl) => {
+                    type_width(&decl.ty)?;
+                    let value = symbols.eval_i64(&decl.value)?;
+                    if !(0..=0xFF_FFFF).contains(&value) {
+                        return Err(Diagnostic::new(format!(
+                            "mmio `{}` value {value} is outside 24-bit address range",
+                            decl.name
+                        )));
+                    }
+                    symbols.constants.insert(decl.name.clone(), value);
+                }
                 Declaration::Global(decl) => {
                     let variable = symbols.alloc_var(type_width(&decl.ty)?.bytes());
                     symbols.globals.insert(decl.name.clone(), variable);
@@ -611,6 +622,9 @@ impl Emitter {
                 self.emit_expr_to_a(expr)?;
                 self.emit_out_a(0x0C);
             }
+            "mem.poke8" | "ezra.mem.poke8" => {
+                self.emit_mem_poke8(args)?;
+            }
             path if path.contains('.') => {
                 self.line(&format!("    call _{}", path.replace('.', "_")))
             }
@@ -825,6 +839,11 @@ impl Emitter {
             }
             Expr::Unary { op, expr } => self.emit_unary_to_a(*op, expr)?,
             Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right)?,
+            Expr::Call { path, args }
+                if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
+            {
+                self.emit_mem_peek8(args)?;
+            }
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
@@ -834,6 +853,31 @@ impl Emitter {
                 )));
             }
         }
+        Ok(())
+    }
+
+    fn emit_mem_peek8(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        if args.len() != 1 {
+            return Err(Diagnostic::new("mem.peek8 requires one argument"));
+        }
+        self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
+        self.line("    ld a, (hl)");
+        Ok(())
+    }
+
+    fn emit_mem_poke8(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        if args.len() != 2 {
+            return Err(Diagnostic::new("mem.poke8 requires two arguments"));
+        }
+        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let value = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
+        self.emit_store_hl(addr);
+        self.emit_expr_to_a(&args[1])?;
+        self.emit_store_a(value);
+        self.emit_load_hl(addr);
+        self.emit_load_a(value);
+        self.line("    ld (hl), a");
         Ok(())
     }
 
@@ -1292,8 +1336,9 @@ fn type_width(ty: &Type) -> Result<ValueWidth, Diagnostic> {
         Type::Named(name) => Err(Diagnostic::new(format!(
             "type `{name}` is parsed but not implemented in assembly codegen yet"
         ))),
-        Type::Ptr(_) | Type::Array { .. } => Err(Diagnostic::new(
-            "pointer and array storage codegen is not implemented yet",
+        Type::Ptr(_) => Ok(ValueWidth::U24),
+        Type::Array { .. } => Err(Diagnostic::new(
+            "array storage codegen is not implemented yet",
         )),
     }
 }
@@ -1760,6 +1805,44 @@ mod tests {
         assert!(asm.contains("out0 (10h), a"), "{asm}");
         assert!(asm.contains("out0 (11h), a"), "{asm}");
         assert!(asm.contains("out0 (9Bh), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_generic_mmio_peek_poke_examples() {
+        let source = r#"
+            volatile mmio SCRATCH: ptr<u8> = 0x040120
+            volatile mmio TI_LCD_BUFFER: ptr<u8> = 0x080000
+            volatile mmio AGON_VDP_BUFFER: ptr<u8> = 0x0C0000
+
+            fn ti_write(value: u8) {
+                mem.poke8(TI_LCD_BUFFER, value)
+            }
+
+            fn agon_write(value: u8) {
+                mem.poke8(AGON_VDP_BUFFER, value)
+            }
+
+            fn main() {
+                let ptr: ptr<u8> = cast<ptr<u8>>(0x040121)
+                mem.poke8(SCRATCH, 0x5A)
+                mem.poke8(ptr, mem.peek8(SCRATCH) + 1)
+                ti_write(mem.peek8(ptr))
+                agon_write(0xC3)
+                test.assert_eq_u8(mem.peek8(SCRATCH), 0x5A, 1)
+                test.assert_eq_u8(mem.peek8(ptr), 0x5B, 2)
+                test.assert_eq_u8(mem.peek8(TI_LCD_BUFFER), 0x5B, 3)
+                test.assert_eq_u8(mem.peek8(AGON_VDP_BUFFER), 0xC3, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("ld a, (hl)"), "{asm}");
+        assert!(asm.contains("ld (hl), a"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
