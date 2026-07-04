@@ -340,6 +340,7 @@ impl Symbols {
             Expr::Array(_)
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
+            | Expr::AddressOf(_)
             | Expr::Deref(_)
             | Expr::In(_)
             | Expr::Call { .. }
@@ -939,6 +940,9 @@ impl Emitter {
             Expr::AddressOfIndex { name, index } => {
                 self.emit_array_element_address(name, index)?;
             }
+            Expr::AddressOf(name) => {
+                self.emit_variable_address(name)?;
+            }
             Expr::String(value) => {
                 self.emit_string_literal_address(value)?;
             }
@@ -1160,7 +1164,11 @@ impl Emitter {
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
-            Expr::AddressOfIndex { .. } | Expr::Array(_) | Expr::Call { .. } | Expr::String(_) => {
+            Expr::AddressOfIndex { .. }
+            | Expr::AddressOf(_)
+            | Expr::Array(_)
+            | Expr::Call { .. }
+            | Expr::String(_) => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u8 codegen"
                 )));
@@ -1704,6 +1712,17 @@ impl Emitter {
         scalar_var(0, element_size).width()
     }
 
+    fn emit_variable_address(&mut self, name: &str) -> Result<(), Diagnostic> {
+        let variable = self.variable(name)?;
+        if variable.element_size.is_some() {
+            return Err(Diagnostic::new(format!(
+                "array `{name}` does not decay to a pointer; use `&{name}[0]`"
+            )));
+        }
+        self.line(&format!("    ld hl, {:06X}h", variable.addr));
+        Ok(())
+    }
+
     fn array_element_type(&self, name: &str) -> Result<Type, Diagnostic> {
         let Some(ty) = self.variable_type(name) else {
             return Err(Diagnostic::new(format!("unknown array `{name}`")));
@@ -1891,6 +1910,17 @@ impl Emitter {
             Expr::AddressOfIndex { name, .. } => {
                 Ok(Type::Ptr(Box::new(self.array_element_type(name)?)))
             }
+            Expr::AddressOf(name) => {
+                let Some(ty) = self.variable_type(name) else {
+                    return Err(Diagnostic::new(format!("unknown variable `{name}`")));
+                };
+                match self.symbols.resolved_type(ty)? {
+                    Type::Array { .. } => Err(Diagnostic::new(format!(
+                        "array `{name}` does not decay to a pointer; use `&{name}[0]`"
+                    ))),
+                    scalar => Ok(Type::Ptr(Box::new(scalar))),
+                }
+            }
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => Ok(*inner),
                 Type::Named(name) if name == "ptr24" => Err(Diagnostic::new(
@@ -1965,6 +1995,7 @@ impl Emitter {
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar width")),
             Expr::Index { name, .. } => self.array_element_width(name),
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
+            Expr::AddressOf(_) => Ok(ValueWidth::U24),
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => self.symbols.type_width(&inner),
                 Type::Named(name) if name == "ptr24" => Err(Diagnostic::new(
@@ -2783,6 +2814,41 @@ mod tests {
                 let l: ptr<u24> = &longs[0];
                 *(l + 2) = 0x010203;
                 test.assert_eq_u24(longs[2], 0x010203, 4);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_scalar_address_of() {
+        let source = r#"
+            global byte_value: u8 = 0
+            global word_value: u16 = 0
+            global long_value: u24 = 0
+            global word_ptr: ptr<u16> = &word_value
+
+            fn write_byte(ptr: ptr<u8>, value: u8) {
+                *ptr = value
+            }
+
+            fn main() {
+                let byte_ptr: ptr<u8> = &byte_value;
+                write_byte(byte_ptr, 0x5A);
+                test.assert_eq_u8(byte_value, 0x5A, 1);
+                test.assert_eq_u8(*byte_ptr, 0x5A, 2);
+
+                *word_ptr = 0x1234;
+                test.assert_eq_u16(word_value, 0x1234, 3);
+
+                let long_ptr: ptr<u24> = &long_value;
+                *long_ptr = 0x010203;
+                test.assert_eq_u24(long_value, 0x010203, 4);
                 test.pass()
             }
         "#;

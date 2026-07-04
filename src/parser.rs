@@ -351,6 +351,9 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
                 index: Box::new(build_expr(inner.next().unwrap())?),
             })
         }
+        Rule::addr_expr => Ok(Expr::AddressOf(
+            pair.into_inner().next().unwrap().as_str().to_owned(),
+        )),
         Rule::deref_expr => Ok(Expr::Deref(Box::new(build_deref_operand(
             pair.into_inner().next().unwrap(),
         )?))),
@@ -601,6 +604,17 @@ mod tests {
         let program = parse_program(
             Path::new("game.ezra"),
             "global title: ptr<u8> = \"EZRA\"\nfn main() { let text: ptr<u8> = \"OK\" }",
+        )
+        .unwrap();
+
+        assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_scalar_address_of_expression() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "global value: u16 = 0\nfn main() { let p: ptr<u16> = &value }",
         )
         .unwrap();
 

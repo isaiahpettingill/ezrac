@@ -139,6 +139,7 @@ pub enum Expr {
         name: String,
         index: Box<Expr>,
     },
+    AddressOf(String),
     Deref(Box<Expr>),
     Call {
         path: Vec<String>,
