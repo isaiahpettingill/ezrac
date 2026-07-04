@@ -19,6 +19,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         label_counter: 0,
         scopes: Vec::new(),
         loop_stack: Vec::new(),
+        return_stack: Vec::new(),
     };
     emitter.emit_prelude();
     emitter.emit_global_initializers(program)?;
@@ -41,6 +42,33 @@ struct Variable {
     size: u8,
 }
 
+impl Variable {
+    fn width(self) -> Result<ValueWidth, Diagnostic> {
+        match self.size {
+            1 => Ok(ValueWidth::U8),
+            2 => Ok(ValueWidth::U16),
+            size => Err(Diagnostic::new(format!(
+                "unsupported variable size {size} in codegen"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValueWidth {
+    U8,
+    U16,
+}
+
+impl ValueWidth {
+    fn bytes(self) -> u8 {
+        match self {
+            Self::U8 => 1,
+            Self::U16 => 2,
+        }
+    }
+}
+
 struct Symbols {
     constants: HashMap<String, i64>,
     ports: HashMap<String, u8>,
@@ -49,9 +77,11 @@ struct Symbols {
     next_addr: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct FunctionSig {
     arity: usize,
+    params: Vec<ValueWidth>,
+    return_width: ValueWidth,
 }
 
 impl Symbols {
@@ -67,12 +97,23 @@ impl Symbols {
         for declaration in &program.declarations {
             if let Declaration::Function(function) = declaration {
                 for param in &function.params {
-                    type_size(&param.ty)?;
+                    type_width(&param.ty)?;
                 }
                 symbols.functions.insert(
                     function.name.clone(),
                     FunctionSig {
                         arity: function.params.len(),
+                        params: function
+                            .params
+                            .iter()
+                            .map(|param| type_width(&param.ty))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        return_width: function
+                            .return_type
+                            .as_ref()
+                            .map(type_width)
+                            .transpose()?
+                            .unwrap_or(ValueWidth::U8),
                     },
                 );
             }
@@ -95,7 +136,7 @@ impl Symbols {
                     symbols.ports.insert(decl.name.clone(), value as u8);
                 }
                 Declaration::Global(decl) => {
-                    let variable = symbols.alloc_var(type_size(&decl.ty)?);
+                    let variable = symbols.alloc_var(type_width(&decl.ty)?.bytes());
                     symbols.globals.insert(decl.name.clone(), variable);
                 }
                 _ => {}
@@ -176,6 +217,7 @@ struct Emitter {
     label_counter: usize,
     scopes: Vec<HashMap<String, Variable>>,
     loop_stack: Vec<LoopLabels>,
+    return_stack: Vec<ValueWidth>,
 }
 
 impl Emitter {
@@ -205,8 +247,8 @@ impl Emitter {
                 .get(&decl.name)
                 .copied()
                 .expect("global allocation exists");
-            self.emit_expr_to_a(&decl.value)?;
-            self.emit_store_a(variable);
+            self.emit_expr_to_width(&decl.value, variable.width()?)?;
+            self.emit_store_width(variable);
         }
         Ok(())
     }
@@ -214,10 +256,19 @@ impl Emitter {
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
+        self.return_stack.push(
+            function
+                .return_type
+                .as_ref()
+                .map(type_width)
+                .transpose()?
+                .unwrap_or(ValueWidth::U8),
+        );
         self.bind_params(function)?;
         for stmt in &function.body {
             self.emit_stmt(stmt)?;
         }
+        self.return_stack.pop();
         self.scopes.pop();
         if function.name == "main" {
             self.line("    jp __ezra_exit");
@@ -237,16 +288,29 @@ impl Emitter {
         }
 
         for (index, param) in function.params.iter().enumerate() {
-            let variable = self.symbols.alloc_var(type_size(&param.ty)?);
+            let width = type_width(&param.ty)?;
+            let variable = self.symbols.alloc_var(width.bytes());
             self.current_scope_mut()
                 .insert(param.name.clone(), variable);
-            match index {
-                0 => {}
-                1 => self.line("    ld a, b"),
-                2 => self.line("    ld a, c"),
-                _ => unreachable!("param count checked"),
+            match width {
+                ValueWidth::U8 => {
+                    match index {
+                        0 => {}
+                        1 => self.line("    ld a, b"),
+                        2 => self.line("    ld a, c"),
+                        _ => unreachable!("param count checked"),
+                    }
+                    self.emit_store_a(variable);
+                }
+                ValueWidth::U16 => {
+                    if index != 0 {
+                        return Err(Diagnostic::new(
+                            "current u16 codegen supports u16 only as the first parameter",
+                        ));
+                    }
+                    self.emit_store_hl(variable);
+                }
             }
-            self.emit_store_a(variable);
         }
         Ok(())
     }
@@ -254,15 +318,16 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match stmt {
             Stmt::Let { name, ty, value } => {
-                let variable = self.symbols.alloc_var(type_size(ty)?);
+                let width = type_width(ty)?;
+                let variable = self.symbols.alloc_var(width.bytes());
                 self.current_scope_mut().insert(name.clone(), variable);
-                self.emit_expr_to_a(value)?;
-                self.emit_store_a(variable);
+                self.emit_expr_to_width(value, width)?;
+                self.emit_store_width(variable);
             }
             Stmt::Assign { target, op, value } => {
                 let variable = self.variable(target)?;
                 self.emit_assignment_value(variable, *op, value)?;
-                self.emit_store_a(variable);
+                self.emit_store_width(variable);
             }
             Stmt::Out { port, value } => {
                 let port = self.port(port)?;
@@ -340,7 +405,7 @@ impl Emitter {
             }
             Stmt::Return(None) => self.line("    ret"),
             Stmt::Return(Some(expr)) => {
-                self.emit_expr_to_a(expr)?;
+                self.emit_expr_to_width(expr, self.current_return_width())?;
                 self.line("    ret");
             }
         }
@@ -353,6 +418,25 @@ impl Emitter {
         op: AssignOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
+        if variable.size == 2 {
+            match op {
+                AssignOp::Set => self.emit_expr_to_hl(value)?,
+                AssignOp::Add => {
+                    self.emit_load_hl(variable);
+                    self.line("    push hl");
+                    self.emit_expr_to_hl(value)?;
+                    self.line("    pop bc");
+                    self.line("    add hl, bc");
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "only assignment and += are implemented for u16 codegen",
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
         match op {
             AssignOp::Set => self.emit_expr_to_a(value)?,
             AssignOp::Add => {
@@ -427,6 +511,25 @@ impl Emitter {
                 self.emit_out(0x0E, 1);
                 self.line(&format!("{ok}:"));
             }
+            "test.assert_eq_u16" | "ezra.test.assert_eq_u16" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new(
+                        "test.assert_eq_u16 requires three arguments",
+                    ));
+                }
+                let ok = self.next_label("assert_ok");
+                self.emit_expr_to_hl(&args[0])?;
+                self.line("    push hl");
+                self.emit_expr_to_hl(&args[1])?;
+                self.line("    pop bc");
+                self.line("    or a");
+                self.line("    sbc hl, bc");
+                self.line(&format!("    jp z, {ok}"));
+                self.emit_expr_to_a(&args[2])?;
+                self.emit_out_a(0x0D);
+                self.emit_out(0x0E, 1);
+                self.line(&format!("{ok}:"));
+            }
             "debug.char" | "ezra.debug.char" => {
                 let expr = args
                     .first()
@@ -447,7 +550,7 @@ impl Emitter {
             .symbols
             .functions
             .get(name)
-            .copied()
+            .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
         if sig.arity != args.len() {
             return Err(Diagnostic::new(format!(
@@ -464,25 +567,93 @@ impl Emitter {
         }
 
         let mut temps = Vec::with_capacity(args.len());
-        for arg in args {
-            let temp = self.symbols.alloc_var(1);
-            self.emit_expr_to_a(arg)?;
-            self.emit_store_a(temp);
+        for (index, arg) in args.iter().enumerate() {
+            let width = sig.params[index];
+            let temp = self.symbols.alloc_var(width.bytes());
+            self.emit_expr_to_width(arg, width)?;
+            self.emit_store_width(temp);
             temps.push(temp);
         }
 
         if let Some(temp) = temps.get(1).copied() {
+            if temp.size != 1 {
+                return Err(Diagnostic::new(
+                    "current codegen supports only u8 second arguments",
+                ));
+            }
             self.emit_load_a(temp);
             self.line("    ld b, a");
         }
         if let Some(temp) = temps.get(2).copied() {
+            if temp.size != 1 {
+                return Err(Diagnostic::new(
+                    "current codegen supports only u8 third arguments",
+                ));
+            }
             self.emit_load_a(temp);
             self.line("    ld c, a");
         }
         if let Some(temp) = temps.first().copied() {
-            self.emit_load_a(temp);
+            self.emit_load_width(temp);
         }
         self.line(&format!("    call _{name}"));
+        Ok(())
+    }
+
+    fn emit_expr_to_width(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
+        match width {
+            ValueWidth::U8 => self.emit_expr_to_a(expr),
+            ValueWidth::U16 => self.emit_expr_to_hl(expr),
+        }
+    }
+
+    fn emit_expr_to_hl(&mut self, expr: &Expr) -> Result<(), Diagnostic> {
+        match expr {
+            Expr::Ident(name) => {
+                if let Some(variable) = self.variable_opt(name) {
+                    if variable.size == 1 {
+                        self.emit_load_a(variable);
+                        self.line("    ld h, 00h");
+                        self.line("    ld l, a");
+                    } else {
+                        self.emit_load_hl(variable);
+                    }
+                } else {
+                    let value = self.u16(expr)?;
+                    self.line(&format!("    ld hl, {:06X}h", value));
+                }
+            }
+            Expr::Int(_)
+            | Expr::Char(_)
+            | Expr::Bool(_)
+            | Expr::Unary { .. }
+            | Expr::Cast { .. } => {
+                let value = self.u16(expr)?;
+                self.line(&format!("    ld hl, {:06X}h", value));
+            }
+            Expr::Binary { left, op, right } => match op {
+                BinaryOp::Add => {
+                    self.emit_expr_to_hl(left)?;
+                    self.line("    push hl");
+                    self.emit_expr_to_hl(right)?;
+                    self.line("    pop bc");
+                    self.line("    add hl, bc");
+                }
+                _ => {
+                    return Err(Diagnostic::new(format!(
+                        "binary operator `{op:?}` is not implemented in u16 codegen yet"
+                    )));
+                }
+            },
+            Expr::Call { path, args } if path.len() == 1 => {
+                self.emit_user_call(&path[0], args)?;
+            }
+            Expr::In(_) | Expr::Call { .. } | Expr::String(_) => {
+                return Err(Diagnostic::new(format!(
+                    "expression `{expr:?}` is not supported in u16 codegen"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -660,6 +831,32 @@ impl Emitter {
         self.line(&format!("    ld ({:06X}h), a", variable.addr));
     }
 
+    fn emit_load_hl(&mut self, variable: Variable) {
+        debug_assert_eq!(variable.size, 2);
+        self.line(&format!("    ld hl, ({:06X}h)", variable.addr));
+    }
+
+    fn emit_store_hl(&mut self, variable: Variable) {
+        debug_assert_eq!(variable.size, 2);
+        self.line(&format!("    ld ({:06X}h), hl", variable.addr));
+    }
+
+    fn emit_load_width(&mut self, variable: Variable) {
+        match variable.size {
+            1 => self.emit_load_a(variable),
+            2 => self.emit_load_hl(variable),
+            _ => unreachable!("unsupported variable size {}", variable.size),
+        }
+    }
+
+    fn emit_store_width(&mut self, variable: Variable) {
+        match variable.size {
+            1 => self.emit_store_a(variable),
+            2 => self.emit_store_hl(variable),
+            _ => unreachable!("unsupported variable size {}", variable.size),
+        }
+    }
+
     fn u8(&self, expr: &Expr) -> Result<u8, Diagnostic> {
         let value = self.symbols.eval_i64(expr)?;
         if !(0..=0xFF).contains(&value) {
@@ -668,6 +865,23 @@ impl Emitter {
             )));
         }
         Ok(value as u8)
+    }
+
+    fn u16(&self, expr: &Expr) -> Result<u16, Diagnostic> {
+        let value = self.symbols.eval_i64(expr)?;
+        if !(0..=0xFFFF).contains(&value) {
+            return Err(Diagnostic::new(format!(
+                "value {value} is outside u16 range"
+            )));
+        }
+        Ok(value as u16)
+    }
+
+    fn current_return_width(&self) -> ValueWidth {
+        *self
+            .return_stack
+            .last()
+            .expect("function return width exists during emission")
     }
 
     fn port(&self, name: &str) -> Result<u8, Diagnostic> {
@@ -709,9 +923,10 @@ impl Emitter {
     }
 }
 
-fn type_size(ty: &Type) -> Result<u8, Diagnostic> {
+fn type_width(ty: &Type) -> Result<ValueWidth, Diagnostic> {
     match ty {
-        Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Ok(1),
+        Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Ok(ValueWidth::U8),
+        Type::Named(name) if name == "u16" || name == "i16" => Ok(ValueWidth::U16),
         Type::Named(name) => Err(Diagnostic::new(format!(
             "type `{name}` is parsed but not implemented in assembly codegen yet"
         ))),
@@ -878,6 +1093,30 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_u16_storage_and_return() {
+        let source = r#"
+            global total: u16 = 0x0100
+
+            fn add_base(v: u16) -> u16 {
+                return v + 0x0023
+            }
+
+            fn main() {
+                let x: u16 = add_base(total)
+                x += 0x0010
+                test.assert_eq_u16(x, 0x0133, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

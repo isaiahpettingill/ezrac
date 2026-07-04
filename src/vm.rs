@@ -100,10 +100,14 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         text,
         "ret"
             | "or a"
+            | "push hl"
+            | "pop bc"
             | "ld b, a"
             | "ld c, a"
             | "ld a, b"
             | "ld a, c"
+            | "ld l, a"
+            | "add hl, bc"
             | "add a, b"
             | "add a, c"
             | "sub b"
@@ -118,9 +122,16 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "cp c"
     ) {
         Ok(1)
-    } else if text.starts_with("ld a, (") || text.starts_with("ld (") {
+    } else if text == "sbc hl, bc" {
+        Ok(2)
+    } else if text.starts_with("ld hl, (")
+        || text.starts_with("ld a, (")
+        || text.starts_with("ld (")
+    {
         Ok(4)
-    } else if text.starts_with("ld a,") || text.starts_with("in0 ") {
+    } else if text.starts_with("ld hl,") {
+        Ok(4)
+    } else if text.starts_with("ld h,") || text.starts_with("ld a,") || text.starts_with("in0 ") {
         Ok(2)
     } else if text.starts_with("out0 ") {
         Ok(3)
@@ -157,6 +168,12 @@ fn emit_instruction(
     } else if let Some(target) = text.strip_prefix("jp ") {
         bytes.push(0xC3);
         push24(bytes, parse_addr(target.trim(), labels)?);
+    } else if let Some(rest) = text.strip_prefix("ld hl, (") {
+        let addr = rest
+            .strip_suffix(')')
+            .ok_or_else(|| Diagnostic::new(format!("invalid load syntax `{text}`")))?;
+        bytes.push(0x2A);
+        push24(bytes, parse_addr(addr, labels)?);
     } else if let Some(rest) = text.strip_prefix("ld a, (") {
         let addr = rest
             .strip_suffix(')')
@@ -164,11 +181,18 @@ fn emit_instruction(
         bytes.push(0x3A);
         push24(bytes, parse_addr(addr, labels)?);
     } else if let Some(rest) = text.strip_prefix("ld (") {
-        let addr = rest
-            .strip_suffix("), a")
-            .ok_or_else(|| Diagnostic::new(format!("invalid store syntax `{text}`")))?;
-        bytes.push(0x32);
-        push24(bytes, parse_addr(addr, labels)?);
+        if let Some(addr) = rest.strip_suffix("), a") {
+            bytes.push(0x32);
+            push24(bytes, parse_addr(addr, labels)?);
+        } else if let Some(addr) = rest.strip_suffix("), hl") {
+            bytes.push(0x22);
+            push24(bytes, parse_addr(addr, labels)?);
+        } else {
+            return Err(Diagnostic::new(format!("invalid store syntax `{text}`")));
+        }
+    } else if let Some(value) = text.strip_prefix("ld hl,") {
+        bytes.push(0x21);
+        push24(bytes, parse_addr(value.trim(), labels)?);
     } else if let Some(rest) = text.strip_prefix("in0 ") {
         let port = rest
             .trim()
@@ -188,6 +212,10 @@ fn emit_instruction(
         bytes.push(0xC9);
     } else if text == "or a" {
         bytes.push(0xB7);
+    } else if text == "push hl" {
+        bytes.push(0xE5);
+    } else if text == "pop bc" {
+        bytes.push(0xC1);
     } else if text == "ld b, a" {
         bytes.push(0x47);
     } else if text == "ld c, a" {
@@ -196,6 +224,15 @@ fn emit_instruction(
         bytes.push(0x78);
     } else if text == "ld a, c" {
         bytes.push(0x79);
+    } else if let Some(value) = text.strip_prefix("ld h,") {
+        bytes.push(0x26);
+        bytes.push(parse_u8(value.trim())?);
+    } else if text == "ld l, a" {
+        bytes.push(0x6F);
+    } else if text == "add hl, bc" {
+        bytes.push(0x09);
+    } else if text == "sbc hl, bc" {
+        bytes.extend([0xED, 0x42]);
     } else if text == "add a, b" {
         bytes.push(0x80);
     } else if text == "add a, c" {
