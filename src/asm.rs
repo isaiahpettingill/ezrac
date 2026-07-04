@@ -303,7 +303,7 @@ impl Emitter {
     fn bind_params(&mut self, function: &Function) -> Result<(), Diagnostic> {
         if function.params.len() > 3 {
             return Err(Diagnostic::new(format!(
-                "function `{}` has {} parameters; current codegen supports at most 3 u8 parameters",
+                "function `{}` has {} parameters; current codegen supports at most 3 register parameters",
                 function.name,
                 function.params.len()
             )));
@@ -325,10 +325,14 @@ impl Emitter {
                     self.emit_store_a(variable);
                 }
                 ValueWidth::U16 | ValueWidth::U24 => {
-                    if index != 0 {
-                        return Err(Diagnostic::new(
-                            "current wide-value codegen supports u16/u24 only as the first parameter",
-                        ));
+                    match index {
+                        0 => {}
+                        1 => self.line("    ex de, hl"),
+                        2 => {
+                            self.line("    push bc");
+                            self.line("    pop hl");
+                        }
+                        _ => unreachable!("param count checked"),
                     }
                     self.emit_store_width(variable);
                 }
@@ -657,7 +661,7 @@ impl Emitter {
         }
         if args.len() > 3 {
             return Err(Diagnostic::new(format!(
-                "function `{name}` has {} arguments; current codegen supports at most 3 u8 arguments",
+                "function `{name}` has {} arguments; current codegen supports at most 3 register arguments",
                 args.len()
             )));
         }
@@ -671,23 +675,28 @@ impl Emitter {
             temps.push(temp);
         }
 
-        if let Some(temp) = temps.get(1).copied() {
-            if temp.size != 1 {
-                return Err(Diagnostic::new(
-                    "current codegen supports only u8 second arguments",
-                ));
-            }
-            self.emit_load_a(temp);
-            self.line("    ld b, a");
-        }
         if let Some(temp) = temps.get(2).copied() {
-            if temp.size != 1 {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld c, a");
+            } else if sig.params.get(1).is_some_and(|width| width.bytes() != 1) {
+                self.emit_load_width(temp);
+                self.line("    push hl");
+                self.line("    pop bc");
+            } else {
                 return Err(Diagnostic::new(
-                    "current codegen supports only u8 third arguments",
+                    "current codegen supports a wide third argument only when the second argument is also wide",
                 ));
             }
-            self.emit_load_a(temp);
-            self.line("    ld c, a");
+        }
+        if let Some(temp) = temps.get(1).copied() {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld b, a");
+            } else {
+                self.emit_load_width(temp);
+                self.line("    ex de, hl");
+            }
         }
         if let Some(temp) = temps.first().copied() {
             self.emit_load_width(temp);
@@ -1595,6 +1604,43 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_user_function_with_wide_register_parameters() {
+        let expected_pair = (0x010000u32 + 0x000123) & 0x00FF_FFFF;
+        let expected_three = (0x000100u32 + 0x000020 + 0x000003) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            fn add_pair(a: u24, b: u24) -> u24 {{
+                return a + b
+            }}
+
+            fn add_three(a: u24, b: u24, c: u24) -> u24 {{
+                return a + b + c
+            }}
+
+            fn add_count(base: u24, count: u8) -> u24 {{
+                return base + count
+            }}
+
+            fn main() {{
+                let pair: u24 = add_pair(0x010000, 0x000123)
+                let three: u24 = add_three(0x000100, 0x000020, 0x000003)
+                let mixed: u24 = add_count(0x000200, 5)
+                test.assert_eq_u24(pair, 0x{expected_pair:06X}, 1)
+                test.assert_eq_u24(three, 0x{expected_three:06X}, 2)
+                test.assert_eq_u24(mixed, 0x000205, 3)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
