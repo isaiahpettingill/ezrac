@@ -5,8 +5,8 @@ use pest_derive::Parser;
 
 use crate::{
     ast::{
-        AssignOp, BinaryOp, ConstDecl, Declaration, Expr, Function, GlobalDecl, MmioDecl, Param,
-        PortDecl, Program, Stmt, Type, UnaryOp,
+        AliasDecl, AssignOp, BinaryOp, ConstDecl, Declaration, Expr, Function, GlobalDecl,
+        MmioDecl, Param, PortDecl, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -35,6 +35,7 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
             pair.into_inner().next().unwrap().as_str().to_owned(),
         )),
         Rule::const_decl => build_const(pair).map(Declaration::Const),
+        Rule::alias_decl => build_alias(pair).map(Declaration::Alias),
         Rule::port_decl => build_port(pair).map(Declaration::Port),
         Rule::mmio_decl => build_mmio(pair).map(Declaration::Mmio),
         Rule::global_decl => build_global(pair).map(Declaration::Global),
@@ -84,6 +85,25 @@ fn build_const(pair: Pair<'_, Rule>) -> Result<ConstDecl, Diagnostic> {
         name: name.unwrap(),
         ty: ty.unwrap(),
         value: value.unwrap(),
+    })
+}
+
+fn build_alias(pair: Pair<'_, Rule>) -> Result<AliasDecl, Diagnostic> {
+    let mut public = false;
+    let mut name = None;
+    let mut ty = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::visibility => public = true,
+            Rule::ident => name = Some(inner.as_str().to_owned()),
+            Rule::ty => ty = Some(build_type(inner)?),
+            _ => {}
+        }
+    }
+    Ok(AliasDecl {
+        public,
+        name: name.unwrap(),
+        ty: ty.unwrap(),
     })
 }
 
@@ -484,5 +504,16 @@ mod tests {
         .unwrap();
 
         assert!(matches!(program.declarations[0], Declaration::Mmio(_)));
+    }
+
+    #[test]
+    fn parses_type_alias_declaration() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "pub alias subpx = i24\nfn main() { let x: subpx = 0 }",
+        )
+        .unwrap();
+
+        assert!(matches!(program.declarations[0], Declaration::Alias(_)));
     }
 }

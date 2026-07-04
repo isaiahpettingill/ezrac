@@ -7,6 +7,7 @@ pub struct Program {
 pub enum Declaration {
     Import(String),
     Const(ConstDecl),
+    Alias(AliasDecl),
     Port(PortDecl),
     Mmio(MmioDecl),
     Global(GlobalDecl),
@@ -19,6 +20,13 @@ pub struct ConstDecl {
     pub name: String,
     pub ty: Type,
     pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AliasDecl {
+    pub public: bool,
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -82,6 +82,7 @@ impl ValueWidth {
 
 struct Symbols {
     constants: HashMap<String, i64>,
+    aliases: HashMap<String, Type>,
     ports: HashMap<String, u8>,
     globals: HashMap<String, Variable>,
     functions: HashMap<String, FunctionSig>,
@@ -99,6 +100,7 @@ impl Symbols {
     fn from_program(program: &Program) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
             constants: sdk_constants(),
+            aliases: HashMap::new(),
             ports: sdk_ports(),
             globals: HashMap::new(),
             functions: HashMap::new(),
@@ -106,9 +108,15 @@ impl Symbols {
         };
 
         for declaration in &program.declarations {
+            if let Declaration::Alias(decl) = declaration {
+                symbols.aliases.insert(decl.name.clone(), decl.ty.clone());
+            }
+        }
+
+        for declaration in &program.declarations {
             if let Declaration::Function(function) = declaration {
                 for param in &function.params {
-                    type_width(&param.ty)?;
+                    symbols.type_width(&param.ty)?;
                 }
                 symbols.functions.insert(
                     function.name.clone(),
@@ -117,12 +125,12 @@ impl Symbols {
                         params: function
                             .params
                             .iter()
-                            .map(|param| type_width(&param.ty))
+                            .map(|param| symbols.type_width(&param.ty))
                             .collect::<Result<Vec<_>, _>>()?,
                         return_width: function
                             .return_type
                             .as_ref()
-                            .map(type_width)
+                            .map(|ty| symbols.type_width(ty))
                             .transpose()?
                             .unwrap_or(ValueWidth::U8),
                     },
@@ -147,7 +155,7 @@ impl Symbols {
                     symbols.ports.insert(decl.name.clone(), value as u8);
                 }
                 Declaration::Mmio(decl) => {
-                    type_width(&decl.ty)?;
+                    symbols.type_width(&decl.ty)?;
                     let value = symbols.eval_i64(&decl.value)?;
                     if !(0..=0xFF_FFFF).contains(&value) {
                         return Err(Diagnostic::new(format!(
@@ -158,7 +166,7 @@ impl Symbols {
                     symbols.constants.insert(decl.name.clone(), value);
                 }
                 Declaration::Global(decl) => {
-                    let variable = symbols.alloc_var(type_width(&decl.ty)?.bytes());
+                    let variable = symbols.alloc_var(symbols.type_width(&decl.ty)?.bytes());
                     symbols.globals.insert(decl.name.clone(), variable);
                 }
                 _ => {}
@@ -175,6 +183,30 @@ impl Symbols {
         };
         self.next_addr += size as u32;
         variable
+    }
+
+    fn type_width(&self, ty: &Type) -> Result<ValueWidth, Diagnostic> {
+        match ty {
+            Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => {
+                Ok(ValueWidth::U8)
+            }
+            Type::Named(name) if name == "u16" || name == "i16" => Ok(ValueWidth::U16),
+            Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => {
+                Ok(ValueWidth::U24)
+            }
+            Type::Named(name) => {
+                let Some(alias) = self.aliases.get(name) else {
+                    return Err(Diagnostic::new(format!(
+                        "type `{name}` is parsed but not implemented in assembly codegen yet"
+                    )));
+                };
+                self.type_width(alias)
+            }
+            Type::Ptr(_) => Ok(ValueWidth::U24),
+            Type::Array { .. } => Err(Diagnostic::new(
+                "array storage codegen is not implemented yet",
+            )),
+        }
     }
 
     fn eval_i64(&self, expr: &Expr) -> Result<i64, Diagnostic> {
@@ -282,7 +314,7 @@ impl Emitter {
             function
                 .return_type
                 .as_ref()
-                .map(type_width)
+                .map(|ty| self.symbols.type_width(ty))
                 .transpose()?
                 .unwrap_or(ValueWidth::U8),
         );
@@ -310,7 +342,7 @@ impl Emitter {
         }
 
         for (index, param) in function.params.iter().enumerate() {
-            let width = type_width(&param.ty)?;
+            let width = self.symbols.type_width(&param.ty)?;
             let variable = self.symbols.alloc_var(width.bytes());
             self.current_scope_mut()
                 .insert(param.name.clone(), variable);
@@ -344,7 +376,7 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match stmt {
             Stmt::Let { name, ty, value } => {
-                let width = type_width(ty)?;
+                let width = self.symbols.type_width(ty)?;
                 let variable = self.symbols.alloc_var(width.bytes());
                 self.current_scope_mut().insert(name.clone(), variable);
                 self.emit_expr_to_width(value, width)?;
@@ -1342,7 +1374,7 @@ impl Emitter {
                 }
             }
             Expr::Char(_) | Expr::Bool(_) | Expr::In(_) | Expr::String(_) => Ok(ValueWidth::U8),
-            Expr::Cast { ty, .. } => type_width(ty),
+            Expr::Cast { ty, .. } => self.symbols.type_width(ty),
             Expr::Call { path, .. }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
             {
@@ -1422,23 +1454,6 @@ impl Emitter {
     fn line(&mut self, line: &str) {
         self.out.push_str(line);
         self.out.push('\n');
-    }
-}
-
-fn type_width(ty: &Type) -> Result<ValueWidth, Diagnostic> {
-    match ty {
-        Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Ok(ValueWidth::U8),
-        Type::Named(name) if name == "u16" || name == "i16" => Ok(ValueWidth::U16),
-        Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => {
-            Ok(ValueWidth::U24)
-        }
-        Type::Named(name) => Err(Diagnostic::new(format!(
-            "type `{name}` is parsed but not implemented in assembly codegen yet"
-        ))),
-        Type::Ptr(_) => Ok(ValueWidth::U24),
-        Type::Array { .. } => Err(Diagnostic::new(
-            "array storage codegen is not implemented yet",
-        )),
     }
 }
 
@@ -1948,6 +1963,39 @@ mod tests {
         assert!(asm.contains("out0 (10h), a"), "{asm}");
         assert!(asm.contains("out0 (11h), a"), "{asm}");
         assert!(asm.contains("out0 (9Bh), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_type_aliases() {
+        let source = r#"
+            alias subpx = i24
+            alias addr = ptr<u8>
+            alias byte = u8
+
+            volatile mmio SCRATCH: addr = 0x040180
+            global player_x: subpx = 0x000100
+
+            fn add_pos(x: subpx, dx: subpx) -> subpx {
+                return x + dx
+            }
+
+            fn main() {
+                let x: subpx = add_pos(player_x, 0x000080)
+                let p: addr = cast<addr>(0x040181)
+                let value: byte = 0x37
+                mem.poke8(SCRATCH, value)
+                mem.poke8(p, mem.peek8(SCRATCH) + 1)
+                test.assert_eq_u24(x, 0x000180, 1)
+                test.assert_eq_u8(mem.peek8(p), 0x38, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
