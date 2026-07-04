@@ -18,6 +18,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         out: String::new(),
         label_counter: 0,
         scopes: Vec::new(),
+        scope_types: Vec::new(),
         loop_stack: Vec::new(),
         return_stack: Vec::new(),
     };
@@ -60,7 +61,7 @@ impl Variable {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum ValueWidth {
     U8,
     U16,
@@ -87,9 +88,11 @@ impl ValueWidth {
 
 struct Symbols {
     constants: HashMap<String, i64>,
+    constant_types: HashMap<String, Type>,
     aliases: HashMap<String, Type>,
     ports: HashMap<String, u8>,
     globals: HashMap<String, Variable>,
+    global_types: HashMap<String, Type>,
     functions: HashMap<String, FunctionSig>,
     next_addr: u32,
 }
@@ -99,15 +102,18 @@ struct FunctionSig {
     arity: usize,
     params: Vec<ValueWidth>,
     return_width: ValueWidth,
+    return_type: Option<Type>,
 }
 
 impl Symbols {
     fn from_program(program: &Program) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
             constants: sdk_constants(),
+            constant_types: HashMap::new(),
             aliases: HashMap::new(),
             ports: sdk_ports(),
             globals: HashMap::new(),
+            global_types: HashMap::new(),
             functions: HashMap::new(),
             next_addr: VAR_BASE,
         };
@@ -138,6 +144,7 @@ impl Symbols {
                             .map(|ty| symbols.type_width(ty))
                             .transpose()?
                             .unwrap_or(ValueWidth::U8),
+                        return_type: function.return_type.clone(),
                     },
                 );
             }
@@ -148,6 +155,9 @@ impl Symbols {
                 Declaration::Const(decl) => {
                     let value = symbols.eval_i64(&decl.value)?;
                     symbols.constants.insert(decl.name.clone(), value);
+                    symbols
+                        .constant_types
+                        .insert(decl.name.clone(), decl.ty.clone());
                 }
                 Declaration::Port(decl) => {
                     let value = symbols.eval_i64(&decl.value)?;
@@ -169,10 +179,16 @@ impl Symbols {
                         )));
                     }
                     symbols.constants.insert(decl.name.clone(), value);
+                    symbols
+                        .constant_types
+                        .insert(decl.name.clone(), decl.ty.clone());
                 }
                 Declaration::Global(decl) => {
                     let variable = symbols.alloc_storage(&decl.ty)?;
                     symbols.globals.insert(decl.name.clone(), variable);
+                    symbols
+                        .global_types
+                        .insert(decl.name.clone(), decl.ty.clone());
                 }
                 _ => {}
             }
@@ -225,6 +241,32 @@ impl Symbols {
             Type::Array { .. } => Err(Diagnostic::new(
                 "array storage codegen is not implemented yet",
             )),
+        }
+    }
+
+    fn resolved_type(&self, ty: &Type) -> Result<Type, Diagnostic> {
+        match ty {
+            Type::Named(name) => {
+                if let Some(alias) = self.aliases.get(name) {
+                    self.resolved_type(alias)
+                } else {
+                    Ok(ty.clone())
+                }
+            }
+            Type::Ptr(inner) => Ok(Type::Ptr(Box::new(self.resolved_type(inner)?))),
+            Type::Array { element, len } => Ok(Type::Array {
+                element: Box::new(self.resolved_type(element)?),
+                len: len.clone(),
+            }),
+        }
+    }
+
+    fn type_size(&self, ty: &Type) -> Result<u8, Diagnostic> {
+        match self.resolved_type(ty)? {
+            Type::Array { .. } => Err(Diagnostic::new(
+                "array value cannot be used where scalar storage size is required",
+            )),
+            scalar => Ok(self.type_width(&scalar)?.bytes()),
         }
     }
 
@@ -318,6 +360,7 @@ struct Emitter {
     out: String,
     label_counter: usize,
     scopes: Vec<HashMap<String, Variable>>,
+    scope_types: Vec<HashMap<String, Type>>,
     loop_stack: Vec<LoopLabels>,
     return_stack: Vec<ValueWidth>,
 }
@@ -362,6 +405,7 @@ impl Emitter {
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
+        self.scope_types.push(HashMap::new());
         self.return_stack.push(
             function
                 .return_type
@@ -375,6 +419,7 @@ impl Emitter {
             self.emit_stmt(stmt)?;
         }
         self.return_stack.pop();
+        self.scope_types.pop();
         self.scopes.pop();
         if function.name == "main" {
             self.line("    jp __ezra_exit");
@@ -398,6 +443,8 @@ impl Emitter {
             let variable = self.symbols.alloc_var(width.bytes());
             self.current_scope_mut()
                 .insert(param.name.clone(), variable);
+            self.current_scope_types_mut()
+                .insert(param.name.clone(), param.ty.clone());
             match width {
                 ValueWidth::U8 => {
                     match index {
@@ -430,6 +477,8 @@ impl Emitter {
             Stmt::Let { name, ty, value } => {
                 let variable = self.symbols.alloc_storage(ty)?;
                 self.current_scope_mut().insert(name.clone(), variable);
+                self.current_scope_types_mut()
+                    .insert(name.clone(), ty.clone());
                 if variable.element_size.is_some() {
                     self.emit_array_initializer(variable, value)?;
                 } else {
@@ -904,6 +953,11 @@ impl Emitter {
             },
             Expr::Unary { op, expr } => self.emit_unary_to_hl(*op, expr, width)?,
             Expr::Binary { left, op, right } => match op {
+                BinaryOp::Add | BinaryOp::Sub
+                    if self.emit_pointer_arithmetic(left, *op, right)? =>
+                {
+                    return Ok(());
+                }
                 BinaryOp::Add
                 | BinaryOp::Sub
                 | BinaryOp::BitAnd
@@ -948,6 +1002,65 @@ impl Emitter {
         let temp = self.symbols.alloc_var(ValueWidth::U16.bytes());
         self.emit_store_hl16(temp);
         self.emit_load_hl16(temp);
+    }
+
+    fn emit_pointer_arithmetic(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<bool, Diagnostic> {
+        let left_scale = self.pointer_pointee_size(left)?;
+        let right_scale = self.pointer_pointee_size(right)?;
+        match (op, left_scale, right_scale) {
+            (BinaryOp::Add, Some(scale), _) => {
+                self.emit_expr_to_hl(left, ValueWidth::U24)?;
+                self.line("    push hl");
+                self.emit_scaled_offset_to_hl(right, scale)?;
+                self.line("    pop bc");
+                self.line("    add hl, bc");
+                Ok(true)
+            }
+            (BinaryOp::Add, None, Some(scale)) => {
+                self.emit_expr_to_hl(right, ValueWidth::U24)?;
+                self.line("    push hl");
+                self.emit_scaled_offset_to_hl(left, scale)?;
+                self.line("    pop bc");
+                self.line("    add hl, bc");
+                Ok(true)
+            }
+            (BinaryOp::Sub, Some(scale), None) => {
+                self.emit_expr_to_hl(left, ValueWidth::U24)?;
+                self.line("    push hl");
+                self.emit_scaled_offset_to_hl(right, scale)?;
+                self.line("    ex de, hl");
+                self.line("    pop hl");
+                self.line("    or a");
+                self.line("    sbc hl, de");
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn emit_scaled_offset_to_hl(&mut self, expr: &Expr, scale: u8) -> Result<(), Diagnostic> {
+        self.emit_expr_to_hl(expr, ValueWidth::U24)?;
+        match scale {
+            1 => {}
+            2 => self.line("    add hl, hl"),
+            3 => {
+                self.line("    push hl");
+                self.line("    add hl, hl");
+                self.line("    pop bc");
+                self.line("    add hl, bc");
+            }
+            _ => {
+                return Err(Diagnostic::new(format!(
+                    "pointer arithmetic scale {scale} is not implemented yet"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn emit_wide_op_with_left_in_bc(
@@ -1106,7 +1219,19 @@ impl Emitter {
     }
 
     fn emit_deref_assignment(&mut self, ptr: &Expr, value: &Expr) -> Result<(), Diagnostic> {
-        let width = self.expr_width(value)?;
+        let width = match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
+            Type::Ptr(inner) => self.symbols.type_width(&inner)?,
+            Type::Named(name) if name == "ptr24" => {
+                return Err(Diagnostic::new(
+                    "raw ptr24 dereference requires an explicit typed pointer cast",
+                ));
+            }
+            other => {
+                return Err(Diagnostic::new(format!(
+                    "cannot assign through non-pointer expression of type `{other:?}`"
+                )));
+            }
+        };
         if width == ValueWidth::U8 {
             let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
             let stored = self.symbols.alloc_var(ValueWidth::U8.bytes());
@@ -1547,6 +1672,26 @@ impl Emitter {
         scalar_var(0, element_size).width()
     }
 
+    fn array_element_type(&self, name: &str) -> Result<Type, Diagnostic> {
+        let Some(ty) = self.variable_type(name) else {
+            return Err(Diagnostic::new(format!("unknown array `{name}`")));
+        };
+        match self.symbols.resolved_type(ty)? {
+            Type::Array { element, .. } => Ok(*element),
+            _ => Err(Diagnostic::new(format!("`{name}` is not an array"))),
+        }
+    }
+
+    fn pointer_pointee_size(&self, expr: &Expr) -> Result<Option<u8>, Diagnostic> {
+        match self.expr_type(expr) {
+            Ok(ty) => match self.symbols.resolved_type(&ty)? {
+                Type::Ptr(inner) => Ok(Some(self.symbols.type_size(&inner)?)),
+                _ => Ok(None),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
     fn emit_array_element_address(&mut self, name: &str, index: &Expr) -> Result<(), Diagnostic> {
         if let Ok(element) = self.array_element_variable(name, index) {
             self.line(&format!("    ld hl, {:06X}h", element.addr));
@@ -1691,6 +1836,73 @@ impl Emitter {
         }
     }
 
+    fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
+        match expr {
+            Expr::Ident(name) => self
+                .named_value_type(name)
+                .cloned()
+                .ok_or_else(|| Diagnostic::new(format!("unknown value `{name}`"))),
+            Expr::Int(value) => {
+                if (0..=0xFF).contains(value) {
+                    Ok(Type::Named("u8".to_owned()))
+                } else if (0..=0xFFFF).contains(value) {
+                    Ok(Type::Named("u16".to_owned()))
+                } else {
+                    Ok(Type::Named("u24".to_owned()))
+                }
+            }
+            Expr::Char(_) | Expr::In(_) => Ok(Type::Named("u8".to_owned())),
+            Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
+            Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
+            Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar type")),
+            Expr::Index { name, .. } => self.array_element_type(name),
+            Expr::AddressOfIndex { name, .. } => {
+                Ok(Type::Ptr(Box::new(self.array_element_type(name)?)))
+            }
+            Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
+                Type::Ptr(inner) => Ok(*inner),
+                Type::Named(name) if name == "ptr24" => Err(Diagnostic::new(
+                    "raw ptr24 dereference requires an explicit typed pointer cast",
+                )),
+                other => Err(Diagnostic::new(format!(
+                    "cannot dereference non-pointer expression of type `{other:?}`"
+                ))),
+            },
+            Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::Call { path, .. } if path.len() == 1 => self
+                .symbols
+                .functions
+                .get(&path[0])
+                .and_then(|sig| sig.return_type.clone())
+                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path[0]))),
+            Expr::Call { path, .. }
+                if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
+            {
+                Ok(Type::Named("u8".to_owned()))
+            }
+            Expr::Call { .. } => Ok(Type::Named("u8".to_owned())),
+            Expr::Unary { expr, op } => match op {
+                UnaryOp::Not => Ok(Type::Named("bool".to_owned())),
+                UnaryOp::Neg | UnaryOp::BitNot => self.expr_type(expr),
+            },
+            Expr::Binary { left, op, right } => {
+                if is_comparison(*op) || matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    Ok(Type::Named("bool".to_owned()))
+                } else if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                    && self.pointer_pointee_size(left)?.is_some()
+                {
+                    self.expr_type(left)
+                } else if *op == BinaryOp::Add && self.pointer_pointee_size(right)?.is_some() {
+                    self.expr_type(right)
+                } else if self.expr_width(left)? >= self.expr_width(right)? {
+                    self.expr_type(left)
+                } else {
+                    self.expr_type(right)
+                }
+            }
+        }
+    }
+
     fn expr_width(&self, expr: &Expr) -> Result<ValueWidth, Diagnostic> {
         match expr {
             Expr::Ident(name) => {
@@ -1718,11 +1930,17 @@ impl Emitter {
             }
             Expr::Char(_) | Expr::Bool(_) | Expr::In(_) | Expr::String(_) => Ok(ValueWidth::U8),
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar width")),
-            Expr::Index { name, index } => self.array_element_variable(name, index)?.width(),
+            Expr::Index { name, .. } => self.array_element_width(name),
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
-            Expr::Deref(_) => Err(Diagnostic::new(
-                "dereference expression width must come from context",
-            )),
+            Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
+                Type::Ptr(inner) => self.symbols.type_width(&inner),
+                Type::Named(name) if name == "ptr24" => Err(Diagnostic::new(
+                    "raw ptr24 dereference requires an explicit typed pointer cast",
+                )),
+                other => Err(Diagnostic::new(format!(
+                    "cannot dereference non-pointer expression of type `{other:?}`"
+                ))),
+            },
             Expr::Cast { ty, .. } => self.symbols.type_width(ty),
             Expr::Call { path, .. }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
@@ -1788,10 +2006,29 @@ impl Emitter {
             .or_else(|| self.symbols.globals.get(name).copied())
     }
 
+    fn variable_type(&self, name: &str) -> Option<&Type> {
+        self.scope_types
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .or_else(|| self.symbols.global_types.get(name))
+    }
+
+    fn named_value_type(&self, name: &str) -> Option<&Type> {
+        self.variable_type(name)
+            .or_else(|| self.symbols.constant_types.get(name))
+    }
+
     fn current_scope_mut(&mut self) -> &mut HashMap<String, Variable> {
         self.scopes
             .last_mut()
             .expect("function scope exists during statement emission")
+    }
+
+    fn current_scope_types_mut(&mut self) -> &mut HashMap<String, Type> {
+        self.scope_types
+            .last_mut()
+            .expect("function type scope exists during statement emission")
     }
 
     fn next_label(&mut self, prefix: &str) -> String {
@@ -2472,12 +2709,12 @@ mod tests {
                 test.assert_eq_u8(*p, 0x12, 1);
                 test.assert_eq_u8(*(p + 1), 0x34, 2);
 
-                let w: ptr<u8> = &words[1];
+                let w: ptr<u16> = &words[1];
                 *w = 0x5678;
                 test.assert_eq_u16(words[1], 0x5678, 3);
                 test.assert_eq_u16(*w, 0x5678, 4);
 
-                let l: ptr<u8> = &longs[1];
+                let l: ptr<u24> = &longs[1];
                 *l = 0x010203;
                 test.assert_eq_u24(longs[1], 0x010203, 5);
                 test.assert_eq_u24(*l, 0x010203, 6);
@@ -2487,6 +2724,38 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_scaled_pointer_arithmetic() {
+        let source = r#"
+            global bytes: [u8; 4] = [0, 0, 0, 0]
+            global words: [u16; 3] = [0, 0, 0]
+            global longs: [u24; 3] = [0, 0, 0]
+
+            fn main() {
+                let b: ptr<u8> = &bytes[0];
+                *(b + 2) = 0x7A;
+                test.assert_eq_u8(bytes[2], 0x7A, 1);
+
+                let w: ptr<u16> = &words[0];
+                *(w + 2) = 0x4567;
+                test.assert_eq_u16(words[2], 0x4567, 2);
+                *(w + 2 - 1) = 0x1234;
+                test.assert_eq_u16(words[1], 0x1234, 3);
+
+                let l: ptr<u24> = &longs[0];
+                *(l + 2) = 0x010203;
+                test.assert_eq_u24(longs[2], 0x010203, 4);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
