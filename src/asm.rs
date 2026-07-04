@@ -45,7 +45,13 @@ struct Symbols {
     constants: HashMap<String, i64>,
     ports: HashMap<String, u8>,
     globals: HashMap<String, Variable>,
+    functions: HashMap<String, FunctionSig>,
     next_addr: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FunctionSig {
+    arity: usize,
 }
 
 impl Symbols {
@@ -54,8 +60,23 @@ impl Symbols {
             constants: sdk_constants(),
             ports: sdk_ports(),
             globals: HashMap::new(),
+            functions: HashMap::new(),
             next_addr: VAR_BASE,
         };
+
+        for declaration in &program.declarations {
+            if let Declaration::Function(function) = declaration {
+                for param in &function.params {
+                    type_size(&param.ty)?;
+                }
+                symbols.functions.insert(
+                    function.name.clone(),
+                    FunctionSig {
+                        arity: function.params.len(),
+                    },
+                );
+            }
+        }
 
         for declaration in &program.declarations {
             match declaration {
@@ -193,6 +214,7 @@ impl Emitter {
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
+        self.bind_params(function)?;
         for stmt in &function.body {
             self.emit_stmt(stmt)?;
         }
@@ -201,6 +223,30 @@ impl Emitter {
             self.line("    jp __ezra_exit");
         } else {
             self.line("    ret");
+        }
+        Ok(())
+    }
+
+    fn bind_params(&mut self, function: &Function) -> Result<(), Diagnostic> {
+        if function.params.len() > 3 {
+            return Err(Diagnostic::new(format!(
+                "function `{}` has {} parameters; current codegen supports at most 3 u8 parameters",
+                function.name,
+                function.params.len()
+            )));
+        }
+
+        for (index, param) in function.params.iter().enumerate() {
+            let variable = self.symbols.alloc_var(type_size(&param.ty)?);
+            self.current_scope_mut()
+                .insert(param.name.clone(), variable);
+            match index {
+                0 => {}
+                1 => self.line("    ld a, b"),
+                2 => self.line("    ld a, c"),
+                _ => unreachable!("param count checked"),
+            }
+            self.emit_store_a(variable);
         }
         Ok(())
     }
@@ -388,8 +434,55 @@ impl Emitter {
                 self.emit_expr_to_a(expr)?;
                 self.emit_out_a(0x0C);
             }
-            path => self.line(&format!("    call _{}", path.replace('.', "_"))),
+            path if path.contains('.') => {
+                self.line(&format!("    call _{}", path.replace('.', "_")))
+            }
+            path => self.emit_user_call(path, args)?,
         }
+        Ok(())
+    }
+
+    fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        let sig = self
+            .symbols
+            .functions
+            .get(name)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if sig.arity != args.len() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` expects {} arguments but got {}",
+                sig.arity,
+                args.len()
+            )));
+        }
+        if args.len() > 3 {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` has {} arguments; current codegen supports at most 3 u8 arguments",
+                args.len()
+            )));
+        }
+
+        let mut temps = Vec::with_capacity(args.len());
+        for arg in args {
+            let temp = self.symbols.alloc_var(1);
+            self.emit_expr_to_a(arg)?;
+            self.emit_store_a(temp);
+            temps.push(temp);
+        }
+
+        if let Some(temp) = temps.get(1).copied() {
+            self.emit_load_a(temp);
+            self.line("    ld b, a");
+        }
+        if let Some(temp) = temps.get(2).copied() {
+            self.emit_load_a(temp);
+            self.line("    ld c, a");
+        }
+        if let Some(temp) = temps.first().copied() {
+            self.emit_load_a(temp);
+        }
+        self.line(&format!("    call _{name}"));
         Ok(())
     }
 
@@ -437,12 +530,7 @@ impl Emitter {
                 self.line(&format!("    in0 a, ({port:02X}h)"));
             }
             Expr::Call { path, args } if path.len() == 1 => {
-                if !args.is_empty() {
-                    return Err(Diagnostic::new(
-                        "function call arguments are not implemented in codegen yet",
-                    ));
-                }
-                self.line(&format!("    call _{}", path[0]));
+                self.emit_user_call(&path[0], args)?;
             }
             Expr::Call { .. } | Expr::String(_) => {
                 return Err(Diagnostic::new(format!(
@@ -737,6 +825,37 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_user_function_with_u8_parameters() {
+        let source = r#"
+            fn inc(v: u8) -> u8 {
+                return v + 1
+            }
+
+            fn add(a: u8, b: u8) -> u8 {
+                return a + b
+            }
+
+            fn mix(a: u8, b: u8, c: u8) -> u8 {
+                return a + b + c
+            }
+
+            fn main() {
+                let x: u8 = inc(4)
+                let y: u8 = add(x, 6)
+                let z: u8 = mix(y, 2, 3)
+                test.assert_eq_u8(z, 16, 8)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
