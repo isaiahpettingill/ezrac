@@ -181,8 +181,8 @@ impl Symbols {
                 let right = self.eval_i64(right)?;
                 Ok(match op {
                     BinaryOp::Mul => left * right,
-                    BinaryOp::Div => floor_div_or_zero(left, right),
-                    BinaryOp::Mod => floor_mod_or_zero(left, right),
+                    BinaryOp::Div => trunc_div_or_zero(left, right),
+                    BinaryOp::Mod => trunc_mod_or_zero(left, right),
                     BinaryOp::Add => left + right,
                     BinaryOp::Sub => left - right,
                     BinaryOp::Shl => const_shl_or_zero(left, right),
@@ -1298,29 +1298,19 @@ fn type_width(ty: &Type) -> Result<ValueWidth, Diagnostic> {
     }
 }
 
-fn floor_div_or_zero(left: i64, right: i64) -> i64 {
+fn trunc_div_or_zero(left: i64, right: i64) -> i64 {
     if right == 0 {
         0
     } else {
-        let left = left as i128;
-        let right = right as i128;
-        let quotient = left / right;
-        let remainder = left % right;
-        let quotient = if remainder != 0 && ((remainder > 0) != (right > 0)) {
-            quotient - 1
-        } else {
-            quotient
-        };
-        quotient as i64
+        ((left as i128) / (right as i128)) as i64
     }
 }
 
-fn floor_mod_or_zero(left: i64, right: i64) -> i64 {
+fn trunc_mod_or_zero(left: i64, right: i64) -> i64 {
     if right == 0 {
         0
     } else {
-        let quotient = floor_div_or_zero(left, right) as i128;
-        (left as i128 - quotient * right as i128) as i64
+        ((left as i128) % (right as i128)) as i64
     }
 }
 
@@ -1713,15 +1703,16 @@ mod tests {
     }
 
     #[test]
-    fn constant_division_uses_floor_semantics() {
-        assert_eq!(floor_div_or_zero(7, 3), 2);
-        assert_eq!(floor_mod_or_zero(7, 3), 1);
-        assert_eq!(floor_div_or_zero(-7, 3), -3);
-        assert_eq!(floor_mod_or_zero(-7, 3), 2);
-        assert_eq!(floor_div_or_zero(7, -3), -3);
-        assert_eq!(floor_mod_or_zero(7, -3), -2);
-        assert_eq!(floor_div_or_zero(7, 0), 0);
-        assert_eq!(floor_mod_or_zero(7, 0), 0);
+    fn constant_division_uses_truncating_semantics() {
+        assert_eq!(trunc_div_or_zero(7, 3), 2);
+        assert_eq!(trunc_mod_or_zero(7, 3), 1);
+        assert_eq!(trunc_div_or_zero(-7, 3), -2);
+        assert_eq!(trunc_mod_or_zero(-7, 3), -1);
+        assert_eq!(trunc_div_or_zero(7, -3), -2);
+        assert_eq!(trunc_mod_or_zero(7, -3), 1);
+        assert_eq!(trunc_div_or_zero(-3, 2), -1);
+        assert_eq!(trunc_div_or_zero(7, 0), 0);
+        assert_eq!(trunc_mod_or_zero(7, 0), 0);
     }
 
     #[test]

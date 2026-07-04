@@ -507,7 +507,7 @@ Signed arithmetic uses two’s-complement representation and wraps on overflow.
 
 EZRA arithmetic is fully defined. It does not have undefined signed overflow.
 
-Division uses floor division. Remainder uses the matching floor-division remainder.
+Unsigned division is ordinary integer division. Signed division truncates toward zero, so `-3 / 2 == -1`. Remainder uses the matching truncating-division rule and has the same sign as the dividend.
 
 Division or remainder by zero evaluates to zero.
 
