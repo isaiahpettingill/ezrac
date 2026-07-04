@@ -107,6 +107,7 @@ pub enum Stmt {
 pub enum Place {
     Ident(String),
     Index { name: String, index: Box<Expr> },
+    Deref(Box<Expr>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,6 +139,7 @@ pub enum Expr {
         name: String,
         index: Box<Expr>,
     },
+    Deref(Box<Expr>),
     Call {
         path: Vec<String>,
         args: Vec<Expr>,

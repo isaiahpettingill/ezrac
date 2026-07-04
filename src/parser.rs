@@ -258,9 +258,17 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
 }
 
 fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {
+    if pair.as_rule() == Rule::deref_place {
+        return Ok(Place::Deref(Box::new(build_deref_operand(
+            pair.into_inner().next().unwrap(),
+        )?)));
+    }
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::ident => Ok(Place::Ident(inner.as_str().to_owned())),
+        Rule::deref_place => Ok(Place::Deref(Box::new(build_deref_operand(
+            inner.into_inner().next().unwrap(),
+        )?))),
         Rule::index_place => {
             let mut parts = inner.into_inner();
             Ok(Place::Index {
@@ -269,6 +277,13 @@ fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {
             })
         }
         _ => unreachable!("unexpected place rule {:?}", inner.as_rule()),
+    }
+}
+
+fn build_deref_operand(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
+    match pair.as_rule() {
+        Rule::ident => Ok(Expr::Ident(pair.as_str().to_owned())),
+        _ => build_expr(pair),
     }
 }
 
@@ -336,6 +351,9 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
                 index: Box::new(build_expr(inner.next().unwrap())?),
             })
         }
+        Rule::deref_expr => Ok(Expr::Deref(Box::new(build_deref_operand(
+            pair.into_inner().next().unwrap(),
+        )?))),
         Rule::index_expr => {
             let mut inner = pair.into_inner();
             Ok(Expr::Index {
@@ -559,6 +577,19 @@ mod tests {
         let program = parse_program(
             Path::new("game.ezra"),
             "global palette: [u8; 4] = [1, 2]\nfn main() { palette[1] = 3\nlet p: ptr<u8> = &palette[0] }",
+        )
+        .unwrap();
+
+        assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_pointer_dereference_expression_and_assignment() {
+        EzraParser::parse(Rule::assign_stmt, "*p = 7").unwrap();
+        assert!(EzraParser::parse(Rule::expr_stmt, "*p = 7").is_err());
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "global bytes: [u8; 2] = [0, 0]\nfn main() { let p: ptr<u8> = &bytes[0]; *p = 7; let x: u8 = *(p + 1) }",
         )
         .unwrap();
 

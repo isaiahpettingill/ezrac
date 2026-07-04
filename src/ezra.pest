@@ -21,6 +21,7 @@ ret_ty = { "->" ~ ty }
 block = { "{" ~ stmt* ~ "}" }
 stmt = _{
     let_stmt
+  | assign_stmt
   | if_stmt
   | while_stmt
   | loop_stmt
@@ -28,13 +29,13 @@ stmt = _{
   | continue_stmt
   | return_stmt
   | out_stmt
-  | assign_stmt
   | expr_stmt
 }
 
 let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 assign_stmt = { place ~ assign_op ~ expr ~ semi? }
-place = { index_place | ident }
+place = { deref_place | index_place | ident }
+deref_place = { "*" ~ (ident | "(" ~ expr ~ ")") }
 index_place = { ident ~ "[" ~ expr ~ "]" }
 if_stmt = { "if" ~ expr ~ block ~ ("else" ~ block)? }
 while_stmt = { "while" ~ expr ~ block }
@@ -43,7 +44,7 @@ break_stmt = { "break" ~ semi? }
 continue_stmt = { "continue" ~ semi? }
 return_stmt = { "return" ~ expr? ~ semi? }
 out_stmt = { "out" ~ ident ~ "," ~ expr ~ semi? }
-expr_stmt = { expr ~ semi? }
+expr_stmt = { expr ~ !(WHITESPACE* ~ assign_op) ~ semi? }
 assign_op = { "=" | "+=" | "-=" | "&=" | "|=" | "^=" | "<<=" | ">>=" }
 
 expr = { logical_or }
@@ -58,10 +59,11 @@ shift = { additive ~ (shift_op ~ additive)* }
 additive = { multiplicative ~ (add_op ~ multiplicative)* }
 multiplicative = { unary ~ (mul_op ~ unary)* }
 unary = { unary_op* ~ primary }
-primary = { cast_expr | in_expr | addr_index_expr | array_lit | index_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
+primary = { cast_expr | in_expr | addr_index_expr | deref_expr | array_lit | index_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
 cast_expr = { "cast" ~ "<" ~ ty ~ ">" ~ "(" ~ expr ~ ")" }
 in_expr = ${ "in" ~ (" " | "\t" | "\r" | "\n")+ ~ ident }
 addr_index_expr = { "&" ~ ident ~ "[" ~ expr ~ "]" }
+deref_expr = { "*" ~ (ident | "(" ~ expr ~ ")") }
 index_expr = { ident ~ "[" ~ expr ~ "]" }
 array_lit = { "[" ~ args? ~ "]" }
 call_expr = { path ~ "(" ~ args? ~ ")" }

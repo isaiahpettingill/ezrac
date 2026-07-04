@@ -297,6 +297,7 @@ impl Symbols {
             Expr::Array(_)
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
+            | Expr::Deref(_)
             | Expr::In(_)
             | Expr::Call { .. }
             | Expr::String(_) => Err(Diagnostic::new(format!(
@@ -633,6 +634,14 @@ impl Emitter {
                 }
                 self.emit_index_assignment(name, index, value)?;
             }
+            Place::Deref(ptr) => {
+                if op != AssignOp::Set {
+                    return Err(Diagnostic::new(
+                        "compound pointer dereference assignment is not implemented yet",
+                    ));
+                }
+                self.emit_deref_assignment(ptr, value)?;
+            }
         }
         Ok(())
     }
@@ -879,6 +888,9 @@ impl Emitter {
             Expr::AddressOfIndex { name, index } => {
                 self.emit_array_element_address(name, index)?;
             }
+            Expr::Deref(ptr) => {
+                self.emit_deref_to_hl(ptr, width)?;
+            }
             Expr::Index { name, index } => {
                 self.emit_load_indexed_element_to_hl(name, index)?;
             }
@@ -1009,6 +1021,9 @@ impl Emitter {
             Expr::Index { name, index } => {
                 self.emit_load_indexed_element_to_a(name, index)?;
             }
+            Expr::Deref(ptr) => {
+                self.emit_deref_to_a(ptr)?;
+            }
             Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => {
                 let value = self.u8(expr)?;
                 self.line(&format!("    ld a, {:02X}h", value));
@@ -1058,6 +1073,67 @@ impl Emitter {
         self.emit_load_hl(addr);
         self.emit_load_a(value);
         self.line("    ld (hl), a");
+        Ok(())
+    }
+
+    fn emit_deref_to_a(&mut self, ptr: &Expr) -> Result<(), Diagnostic> {
+        self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
+        self.line("    ld a, (hl)");
+        Ok(())
+    }
+
+    fn emit_deref_to_hl(&mut self, ptr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
+        self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
+        match width {
+            ValueWidth::U8 => {
+                self.line("    ld a, (hl)");
+                self.line("    ld hl, 000000h");
+                self.line("    ld l, a");
+            }
+            ValueWidth::U16 | ValueWidth::U24 => {
+                let result = self.symbols.alloc_var(width.bytes());
+                for offset in 0..width.bytes() {
+                    if offset != 0 {
+                        self.line("    inc hl");
+                    }
+                    self.line("    ld a, (hl)");
+                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+                }
+                self.emit_load_width(result);
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_deref_assignment(&mut self, ptr: &Expr, value: &Expr) -> Result<(), Diagnostic> {
+        let width = self.expr_width(value)?;
+        if width == ValueWidth::U8 {
+            let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+            let stored = self.symbols.alloc_var(ValueWidth::U8.bytes());
+            self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
+            self.emit_store_hl(addr);
+            self.emit_expr_to_a(value)?;
+            self.emit_store_a(stored);
+            self.emit_load_hl(addr);
+            self.emit_load_a(stored);
+            self.line("    ld (hl), a");
+            return Ok(());
+        }
+
+        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let stored = self.symbols.alloc_var(width.bytes());
+        self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
+        self.emit_store_hl(addr);
+        self.emit_expr_to_hl(value, width)?;
+        self.emit_store_width(stored);
+        self.emit_load_hl(addr);
+        for offset in 0..width.bytes() {
+            if offset != 0 {
+                self.line("    inc hl");
+            }
+            self.line(&format!("    ld a, ({:06X}h)", stored.addr + offset as u32));
+            self.line("    ld (hl), a");
+        }
         Ok(())
     }
 
@@ -1644,6 +1720,9 @@ impl Emitter {
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar width")),
             Expr::Index { name, index } => self.array_element_variable(name, index)?.width(),
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
+            Expr::Deref(_) => Err(Diagnostic::new(
+                "dereference expression width must come from context",
+            )),
             Expr::Cast { ty, .. } => self.symbols.type_width(ty),
             Expr::Call { path, .. }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
@@ -2374,6 +2453,40 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_pointer_dereferences() {
+        let source = r#"
+            global bytes: [u8; 4] = [0, 0, 0, 0]
+            global words: [u16; 2] = [0, 0]
+            global longs: [u24; 2] = [0, 0]
+
+            fn main() {
+                let p: ptr<u8> = &bytes[0];
+                *p = 0x12;
+                *(p + 1) = 0x34;
+                test.assert_eq_u8(*p, 0x12, 1);
+                test.assert_eq_u8(*(p + 1), 0x34, 2);
+
+                let w: ptr<u8> = &words[1];
+                *w = 0x5678;
+                test.assert_eq_u16(words[1], 0x5678, 3);
+                test.assert_eq_u16(*w, 0x5678, 4);
+
+                let l: ptr<u8> = &longs[1];
+                *l = 0x010203;
+                test.assert_eq_u24(longs[1], 0x010203, 5);
+                test.assert_eq_u24(*l, 0x010203, 6);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
