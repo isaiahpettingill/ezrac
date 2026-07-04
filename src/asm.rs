@@ -24,6 +24,14 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
     emitter.emit_global_initializers(program)?;
     emitter.emit_start_tail();
     emitter.emit_function(main)?;
+    for declaration in &program.declarations {
+        let Declaration::Function(function) = declaration else {
+            continue;
+        };
+        if function.name != "main" {
+            emitter.emit_function(function)?;
+        }
+    }
     Ok(emitter.out)
 }
 
@@ -428,6 +436,14 @@ impl Emitter {
                 };
                 self.line(&format!("    in0 a, ({port:02X}h)"));
             }
+            Expr::Call { path, args } if path.len() == 1 => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "function call arguments are not implemented in codegen yet",
+                    ));
+                }
+                self.line(&format!("    call _{}", path[0]));
+            }
             Expr::Call { .. } | Expr::String(_) => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u8 codegen"
@@ -694,6 +710,27 @@ mod tests {
                     i += 1
                 }
                 test.assert_eq_u8(total, 8, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_user_function_returning_u8() {
+        let source = r#"
+            fn answer() -> u8 {
+                return 42
+            }
+
+            fn main() {
+                let x: u8 = answer()
+                test.assert_eq_u8(x, 42, 9)
                 test.pass()
             }
         "#;
