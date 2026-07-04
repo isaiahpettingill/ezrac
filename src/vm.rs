@@ -126,6 +126,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "or c"
             | "xor b"
             | "xor c"
+            | "xor a"
             | "cp b"
             | "cp c"
     ) {
@@ -140,6 +141,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     } else if text.starts_with("ld hl,") {
         Ok(4)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") || text.starts_with("in0 ") {
+        Ok(2)
+    } else if text.starts_with("xor ") {
         Ok(2)
     } else if text.starts_with("out0 ") {
         Ok(3)
@@ -279,6 +282,11 @@ fn emit_instruction(
         bytes.push(0xA8);
     } else if text == "xor c" {
         bytes.push(0xA9);
+    } else if text == "xor a" {
+        bytes.push(0xAF);
+    } else if let Some(value) = text.strip_prefix("xor ") {
+        bytes.push(0xEE);
+        bytes.push(parse_u8(value.trim())?);
     } else if text == "cp b" {
         bytes.push(0xB8);
     } else if text == "cp c" {

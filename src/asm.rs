@@ -687,14 +687,11 @@ impl Emitter {
                     self.line(&format!("    ld hl, {:06X}h", value));
                 }
             }
-            Expr::Int(_)
-            | Expr::Char(_)
-            | Expr::Bool(_)
-            | Expr::Unary { .. }
-            | Expr::Cast { .. } => {
+            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Cast { .. } => {
                 let value = self.value_for_width(expr, width)?;
                 self.line(&format!("    ld hl, {:06X}h", value));
             }
+            Expr::Unary { op, expr } => self.emit_unary_to_hl(*op, expr, width)?,
             Expr::Binary { left, op, right } => match op {
                 BinaryOp::Add
                 | BinaryOp::Sub
@@ -722,7 +719,16 @@ impl Emitter {
                 )));
             }
         }
+        if width == ValueWidth::U16 {
+            self.zero_extend_hl16();
+        }
         Ok(())
+    }
+
+    fn zero_extend_hl16(&mut self) {
+        let temp = self.symbols.alloc_var(ValueWidth::U16.bytes());
+        self.emit_store_hl16(temp);
+        self.emit_load_hl16(temp);
     }
 
     fn emit_wide_op_with_left_in_bc(
@@ -793,14 +799,11 @@ impl Emitter {
                 let port = self.port(port)?;
                 self.line(&format!("    in0 a, ({port:02X}h)"));
             }
-            Expr::Int(_)
-            | Expr::Char(_)
-            | Expr::Bool(_)
-            | Expr::Unary { .. }
-            | Expr::Cast { .. } => {
+            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Cast { .. } => {
                 let value = self.u8(expr)?;
                 self.line(&format!("    ld a, {:02X}h", value));
             }
+            Expr::Unary { op, expr } => self.emit_unary_to_a(*op, expr)?,
             Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right)?,
             Expr::Call { path, args }
                 if matches!(
@@ -866,6 +869,81 @@ impl Emitter {
                 return Err(Diagnostic::new(format!(
                     "binary operator `{op:?}` is not implemented in u8 codegen yet"
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_unary_to_a(&mut self, op: UnaryOp, expr: &Expr) -> Result<(), Diagnostic> {
+        match op {
+            UnaryOp::Neg => {
+                self.emit_expr_to_a(expr)?;
+                self.line("    ld b, a");
+                self.line("    xor a");
+                self.line("    sub b");
+            }
+            UnaryOp::BitNot => {
+                self.emit_expr_to_a(expr)?;
+                self.line("    xor FFh");
+            }
+            UnaryOp::Not => {
+                let true_label = self.next_label("not_true");
+                let end_label = self.next_label("not_end");
+                self.emit_expr_to_a(expr)?;
+                self.line("    or a");
+                self.line(&format!("    jp z, {true_label}"));
+                self.line("    ld a, 00h");
+                self.line(&format!("    jp {end_label}"));
+                self.line(&format!("{true_label}:"));
+                self.line("    ld a, 01h");
+                self.line(&format!("{end_label}:"));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_unary_to_hl(
+        &mut self,
+        op: UnaryOp,
+        expr: &Expr,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        match op {
+            UnaryOp::Neg => {
+                self.emit_expr_to_hl(expr, width)?;
+                self.line("    push hl");
+                self.line("    ld hl, 000000h");
+                self.line("    pop bc");
+                self.line("    or a");
+                self.line("    sbc hl, bc");
+            }
+            UnaryOp::BitNot => {
+                self.emit_expr_to_hl(expr, width)?;
+                let value = self.symbols.alloc_var(width.bytes());
+                self.emit_store_width(value);
+                let result = self.symbols.alloc_var(width.bytes());
+                for offset in 0..width.bytes() {
+                    self.line(&format!("    ld a, ({:06X}h)", value.addr + offset as u32));
+                    self.line("    xor FFh");
+                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+                }
+                self.emit_load_width(result);
+            }
+            UnaryOp::Not => {
+                let true_label = self.next_label("not_true");
+                let end_label = self.next_label("not_end");
+                self.emit_expr_to_hl(expr, width)?;
+                self.line("    push hl");
+                self.line("    ld hl, 000000h");
+                self.line("    pop bc");
+                self.line("    or a");
+                self.line("    sbc hl, bc");
+                self.line(&format!("    jp z, {true_label}"));
+                self.line("    ld hl, 000000h");
+                self.line(&format!("    jp {end_label}"));
+                self.line(&format!("{true_label}:"));
+                self.line("    ld hl, 000001h");
+                self.line(&format!("{end_label}:"));
             }
         }
         Ok(())
@@ -1354,6 +1432,45 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_dynamic_unary_ops() {
+        let expected_u8_neg = 0u8.wrapping_sub(5);
+        let expected_u8_not = !0x5Au8;
+        let expected_u16_neg = 0u16.wrapping_sub(0x0023);
+        let expected_u16_not = !0x120Fu16;
+        let expected_u24_neg = (0u32.wrapping_sub(0x000123)) & 0x00FF_FFFF;
+        let expected_u24_not = (!0x010203u32) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            fn main() {{
+                let a: u8 = 5
+                let b: u8 = 0x5A
+                test.assert_eq_u8(-a, 0x{expected_u8_neg:02X}, 1)
+                test.assert_eq_u8(~b, 0x{expected_u8_not:02X}, 2)
+                test.assert_eq_u8(!0, 1, 3)
+                test.assert_eq_u8(!a, 0, 4)
+
+                let c: u16 = 0x0023
+                let d: u16 = 0x120F
+                test.assert_eq_u16(-c, 0x{expected_u16_neg:04X}, 5)
+                test.assert_eq_u16(~d, 0x{expected_u16_not:04X}, 6)
+
+                let e: u24 = 0x000123
+                let f: u24 = 0x010203
+                test.assert_eq_u24(-e, 0x{expected_u24_neg:06X}, 7)
+                test.assert_eq_u24(~f, 0x{expected_u24_not:06X}, 8)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
