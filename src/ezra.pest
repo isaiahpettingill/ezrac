@@ -1,0 +1,92 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
+
+program = { SOI ~ decl* ~ EOI }
+decl = _{ import_decl | const_decl | port_decl | global_decl | fn_decl }
+
+visibility = { "pub" }
+attr = { "inline" | "naked" | "interrupt" }
+import_decl = { "import" ~ path ~ semi? }
+const_decl = { visibility? ~ "const" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
+port_decl = { visibility? ~ "port" ~ ident ~ ":" ~ "u8" ~ "=" ~ expr ~ semi? }
+global_decl = { visibility? ~ "global" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
+fn_decl = { attr* ~ visibility? ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ block }
+params = { param ~ ("," ~ param)* ~ ","? }
+param = { ident ~ ":" ~ ty }
+ret_ty = { "->" ~ ty }
+
+block = { "{" ~ stmt* ~ "}" }
+stmt = _{
+    let_stmt
+  | if_stmt
+  | while_stmt
+  | loop_stmt
+  | break_stmt
+  | continue_stmt
+  | return_stmt
+  | out_stmt
+  | assign_stmt
+  | expr_stmt
+}
+
+let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
+assign_stmt = { ident ~ assign_op ~ expr ~ semi? }
+if_stmt = { "if" ~ expr ~ block ~ ("else" ~ block)? }
+while_stmt = { "while" ~ expr ~ block }
+loop_stmt = { "loop" ~ block }
+break_stmt = { "break" ~ semi? }
+continue_stmt = { "continue" ~ semi? }
+return_stmt = { "return" ~ expr? ~ semi? }
+out_stmt = { "out" ~ ident ~ "," ~ expr ~ semi? }
+expr_stmt = { expr ~ semi? }
+assign_op = { "=" | "+=" | "-=" | "&=" | "|=" | "^=" | "<<=" | ">>=" }
+
+expr = { logical_or }
+logical_or = { logical_and ~ (or_op ~ logical_and)* }
+logical_and = { bit_or ~ (and_op ~ bit_or)* }
+bit_or = { bit_xor ~ (bit_or_op ~ bit_xor)* }
+bit_xor = { bit_and ~ (bit_xor_op ~ bit_and)* }
+bit_and = { equality ~ (bit_and_op ~ equality)* }
+equality = { comparison ~ (eq_op ~ comparison)* }
+comparison = { shift ~ (cmp_op ~ shift)* }
+shift = { additive ~ (shift_op ~ additive)* }
+additive = { multiplicative ~ (add_op ~ multiplicative)* }
+multiplicative = { unary ~ (mul_op ~ unary)* }
+unary = { unary_op* ~ primary }
+primary = { cast_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
+cast_expr = { "cast" ~ "<" ~ ty ~ ">" ~ "(" ~ expr ~ ")" }
+call_expr = { path ~ "(" ~ args? ~ ")" }
+args = { expr ~ ("," ~ expr)* ~ ","? }
+path_expr = { path }
+literal = { bool_lit | char_lit | string_lit | int_lit }
+
+or_op = { "||" }
+and_op = { "&&" }
+bit_or_op = { "|" }
+bit_xor_op = { "^" }
+bit_and_op = { "&" }
+eq_op = { "==" | "!=" }
+cmp_op = { "<=" | ">=" | "<" | ">" }
+shift_op = { "<<" | ">>" }
+add_op = { "+" | "-" }
+mul_op = { "*" | "/" | "%" }
+unary_op = { "-" | "~" | "!" }
+
+ty = { ptr_ty | array_ty | named_ty }
+ptr_ty = { "ptr" ~ "<" ~ ty ~ ">" }
+array_ty = { "[" ~ ty ~ ";" ~ expr ~ "]" }
+named_ty = { ident }
+
+path = @{ ident ~ ("." ~ ident)* }
+ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+bool_lit = { "true" | "false" }
+int_lit = @{ (hex_lit | bin_lit | dec_lit) ~ int_suffix? }
+hex_lit = { "0x" ~ ASCII_HEX_DIGIT+ }
+bin_lit = { "0b" ~ ("0" | "1")+ }
+dec_lit = { ASCII_DIGIT+ }
+int_suffix = { "u8" | "i8" | "u16" | "i16" | "u24" | "i24" }
+char_lit = @{ "'" ~ (escape | !"'" ~ ANY) ~ "'" }
+string_lit = @{ "\"" ~ (escape | !"\"" ~ ANY)* ~ "\"" }
+escape = { "\\" ~ ("n" | "0" | "t" | "\\" | "'" | "\"") }
+semi = _{ ";" }

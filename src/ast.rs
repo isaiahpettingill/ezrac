@@ -1,0 +1,171 @@
+#[derive(Clone, Debug, PartialEq)]
+pub struct Program {
+    pub declarations: Vec<Declaration>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Declaration {
+    Import(String),
+    Const(ConstDecl),
+    Port(PortDecl),
+    Global(GlobalDecl),
+    Function(Function),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstDecl {
+    pub public: bool,
+    pub name: String,
+    pub ty: Type,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PortDecl {
+    pub public: bool,
+    pub name: String,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlobalDecl {
+    pub public: bool,
+    pub name: String,
+    pub ty: Type,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Function {
+    pub public: bool,
+    pub attrs: Vec<String>,
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Param {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stmt {
+    Let {
+        name: String,
+        ty: Type,
+        value: Expr,
+    },
+    Assign {
+        target: String,
+        op: AssignOp,
+        value: Expr,
+    },
+    If {
+        condition: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+    },
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
+    Loop {
+        body: Vec<Stmt>,
+    },
+    Break,
+    Continue,
+    Return(Option<Expr>),
+    Out {
+        port: String,
+        value: Expr,
+    },
+    Expr(Expr),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssignOp {
+    Set,
+    Add,
+    Sub,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Expr {
+    Int(i64),
+    Bool(bool),
+    Char(u8),
+    String(String),
+    Ident(String),
+    Call {
+        path: Vec<String>,
+        args: Vec<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        left: Box<Expr>,
+        op: BinaryOp,
+        right: Box<Expr>,
+    },
+    Cast {
+        ty: Type,
+        expr: Box<Expr>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnaryOp {
+    Neg,
+    BitNot,
+    Not,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BinaryOp {
+    Mul,
+    Div,
+    Mod,
+    Add,
+    Sub,
+    Shl,
+    Shr,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+    BitAnd,
+    BitXor,
+    BitOr,
+    And,
+    Or,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Type {
+    Named(String),
+    Ptr(Box<Type>),
+    Array { element: Box<Type>, len: String },
+}
+
+impl Program {
+    pub fn main_function(&self) -> Option<&Function> {
+        self.declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Function(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+    }
+}
