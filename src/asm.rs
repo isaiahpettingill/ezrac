@@ -631,9 +631,7 @@ impl Emitter {
                         "compound indexed assignment is not implemented yet",
                     ));
                 }
-                let element = self.array_element_variable(name, index)?;
-                self.emit_expr_to_width(value, element.width()?)?;
-                self.emit_store_width(element);
+                self.emit_index_assignment(name, index, value)?;
             }
         }
         Ok(())
@@ -866,7 +864,7 @@ impl Emitter {
                 if let Some(variable) = self.variable_opt(name) {
                     if variable.size == 1 {
                         self.emit_load_a(variable);
-                        self.line("    ld h, 00h");
+                        self.line("    ld hl, 000000h");
                         self.line("    ld l, a");
                     } else if variable.size == 2 {
                         self.emit_load_hl16(variable);
@@ -879,23 +877,19 @@ impl Emitter {
                 }
             }
             Expr::AddressOfIndex { name, index } => {
-                let element = self.array_element_variable(name, index)?;
-                self.line(&format!("    ld hl, {:06X}h", element.addr));
+                self.emit_array_element_address(name, index)?;
             }
             Expr::Index { name, index } => {
-                let element = self.array_element_variable(name, index)?;
-                if element.size == 1 {
-                    self.emit_load_a(element);
-                    self.line("    ld h, 00h");
-                    self.line("    ld l, a");
-                } else {
-                    self.emit_load_width(element);
-                }
+                self.emit_load_indexed_element_to_hl(name, index)?;
             }
-            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Cast { .. } => {
+            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => {
                 let value = self.value_for_width(expr, width)?;
                 self.line(&format!("    ld hl, {:06X}h", value));
             }
+            Expr::Cast { expr, .. } => match self.value_for_width(expr, width) {
+                Ok(value) => self.line(&format!("    ld hl, {:06X}h", value)),
+                Err(_) => self.emit_expr_to_width(expr, width)?,
+            },
             Expr::Unary { op, expr } => self.emit_unary_to_hl(*op, expr, width)?,
             Expr::Binary { left, op, right } => match op {
                 BinaryOp::Add
@@ -1013,13 +1007,16 @@ impl Emitter {
                 self.line(&format!("    in0 a, ({port:02X}h)"));
             }
             Expr::Index { name, index } => {
-                let element = self.array_element_variable(name, index)?;
-                self.emit_load_a(element);
+                self.emit_load_indexed_element_to_a(name, index)?;
             }
-            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::Cast { .. } => {
+            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => {
                 let value = self.u8(expr)?;
                 self.line(&format!("    ld a, {:02X}h", value));
             }
+            Expr::Cast { expr, .. } => match self.u8(expr) {
+                Ok(value) => self.line(&format!("    ld a, {:02X}h", value)),
+                Err(_) => self.emit_expr_to_a(expr)?,
+            },
             Expr::Unary { op, expr } => self.emit_unary_to_a(*op, expr)?,
             Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right)?,
             Expr::Call { path, args }
@@ -1445,13 +1442,7 @@ impl Emitter {
     }
 
     fn array_element_variable(&self, name: &str, index: &Expr) -> Result<Variable, Diagnostic> {
-        let array = self.variable(name)?;
-        let element_size = array
-            .element_size
-            .ok_or_else(|| Diagnostic::new(format!("`{name}` is not an array")))?;
-        let len = array
-            .len
-            .ok_or_else(|| Diagnostic::new(format!("array `{name}` is missing length")))?;
+        let (array, element_size, len) = self.array_info(name)?;
         let index_value = self.symbols.eval_i64(index)?;
         if index_value < 0 || index_value as u32 >= len {
             return Err(Diagnostic::new(format!(
@@ -1462,6 +1453,128 @@ impl Emitter {
             array.addr + index_value as u32 * element_size as u32,
             element_size,
         ))
+    }
+
+    fn array_info(&self, name: &str) -> Result<(Variable, u8, u32), Diagnostic> {
+        let array = self.variable(name)?;
+        let element_size = array
+            .element_size
+            .ok_or_else(|| Diagnostic::new(format!("`{name}` is not an array")))?;
+        let len = array
+            .len
+            .ok_or_else(|| Diagnostic::new(format!("array `{name}` is missing length")))?;
+        Ok((array, element_size, len))
+    }
+
+    fn array_element_width(&self, name: &str) -> Result<ValueWidth, Diagnostic> {
+        let (_, element_size, _) = self.array_info(name)?;
+        scalar_var(0, element_size).width()
+    }
+
+    fn emit_array_element_address(&mut self, name: &str, index: &Expr) -> Result<(), Diagnostic> {
+        if let Ok(element) = self.array_element_variable(name, index) {
+            self.line(&format!("    ld hl, {:06X}h", element.addr));
+            return Ok(());
+        }
+
+        let (array, element_size, _) = self.array_info(name)?;
+        self.emit_expr_to_hl(index, ValueWidth::U24)?;
+        match element_size {
+            1 => {}
+            2 => self.line("    add hl, hl"),
+            3 => {
+                self.line("    push hl");
+                self.line("    add hl, hl");
+                self.line("    pop bc");
+                self.line("    add hl, bc");
+            }
+            _ => unreachable!("unsupported array element size"),
+        }
+        self.line("    push hl");
+        self.line(&format!("    ld hl, {:06X}h", array.addr));
+        self.line("    pop bc");
+        self.line("    add hl, bc");
+        Ok(())
+    }
+
+    fn emit_load_indexed_element_to_a(
+        &mut self,
+        name: &str,
+        index: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let width = self.array_element_width(name)?;
+        if width != ValueWidth::U8 {
+            return Err(Diagnostic::new(format!(
+                "array `{name}` element is not u8-sized"
+            )));
+        }
+        self.emit_array_element_address(name, index)?;
+        self.line("    ld a, (hl)");
+        Ok(())
+    }
+
+    fn emit_load_indexed_element_to_hl(
+        &mut self,
+        name: &str,
+        index: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let (_, element_size, _) = self.array_info(name)?;
+        if let Ok(element) = self.array_element_variable(name, index) {
+            self.emit_load_width(element);
+            return Ok(());
+        }
+
+        self.emit_array_element_address(name, index)?;
+        match element_size {
+            1 => {
+                self.line("    ld a, (hl)");
+                self.line("    ld hl, 000000h");
+                self.line("    ld l, a");
+            }
+            2 | 3 => {
+                let result = self.symbols.alloc_var(element_size);
+                for offset in 0..element_size {
+                    if offset != 0 {
+                        self.line("    inc hl");
+                    }
+                    self.line("    ld a, (hl)");
+                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+                }
+                self.emit_load_width(result);
+            }
+            _ => unreachable!("unsupported array element size"),
+        }
+        Ok(())
+    }
+
+    fn emit_index_assignment(
+        &mut self,
+        name: &str,
+        index: &Expr,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        if let Ok(element) = self.array_element_variable(name, index) {
+            self.emit_expr_to_width(value, element.width()?)?;
+            self.emit_store_width(element);
+            return Ok(());
+        }
+
+        let (_, element_size, _) = self.array_info(name)?;
+        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let stored = self.symbols.alloc_var(element_size);
+        self.emit_array_element_address(name, index)?;
+        self.emit_store_hl(addr);
+        self.emit_expr_to_width(value, scalar_var(0, element_size).width()?)?;
+        self.emit_store_width(stored);
+        self.emit_load_hl(addr);
+        for offset in 0..element_size {
+            if offset != 0 {
+                self.line("    inc hl");
+            }
+            self.line(&format!("    ld a, ({:06X}h)", stored.addr + offset as u32));
+            self.line("    ld (hl), a");
+        }
+        Ok(())
     }
 
     fn u8(&self, expr: &Expr) -> Result<u8, Diagnostic> {
@@ -2215,6 +2328,52 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_runtime_array_indexes() {
+        let source = r#"
+            global bytes: [u8; 4] = [0, 0, 0, 0]
+            global words: [u16; 3] = [0, 0, 0]
+            global longs: [u24; 2] = [0, 0]
+
+            fn main() {
+                let i: u8 = 0
+                while i < 4 {
+                    bytes[i] = i + 1
+                    i += 1
+                }
+                test.assert_eq_u8(bytes[0], 1, 1)
+                test.assert_eq_u8(bytes[3], 4, 2)
+
+                let j: u8 = 0
+                while j < 3 {
+                    words[j] = cast<u16>(j) + 0x0100
+                    j += 1
+                }
+                test.assert_eq_u16(words[0], 0x0100, 3)
+                test.assert_eq_u16(words[2], 0x0102, 4)
+
+                let k: u8 = 0
+                while k < 2 {
+                    longs[k] = cast<u24>(k) + 0x010000
+                    k += 1
+                }
+                test.assert_eq_u24(longs[0], 0x010000, 5)
+                test.assert_eq_u24(longs[1], 0x010001, 6)
+
+                let p: ptr<u8> = &bytes[i - 2]
+                mem.poke8(p, 0x7E)
+                test.assert_eq_u8(bytes[2], 0x7E, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
