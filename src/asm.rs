@@ -70,6 +70,14 @@ impl ValueWidth {
             Self::U24 => 3,
         }
     }
+
+    fn max(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::U24, _) | (_, Self::U24) => Self::U24,
+            (Self::U16, _) | (_, Self::U16) => Self::U16,
+            (Self::U8, Self::U8) => Self::U8,
+        }
+    }
 }
 
 struct Symbols {
@@ -887,6 +895,13 @@ impl Emitter {
         op: BinaryOp,
         right: &Expr,
     ) -> Result<(), Diagnostic> {
+        if is_comparison(op) {
+            let width = self.expr_width(left)?.max(self.expr_width(right)?);
+            if width != ValueWidth::U8 {
+                self.emit_wide_comparison(left, op, right, width)?;
+                return Ok(());
+            }
+        }
         if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
             let count = self.const_shift_count(right)?;
             self.emit_expr_to_a(left)?;
@@ -922,6 +937,24 @@ impl Emitter {
                 )));
             }
         }
+        Ok(())
+    }
+
+    fn emit_wide_comparison(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        self.emit_expr_to_hl(left, width)?;
+        self.line("    push hl");
+        self.emit_expr_to_hl(right, width)?;
+        self.line("    ex de, hl");
+        self.line("    pop hl");
+        self.line("    or a");
+        self.line("    sbc hl, de");
+        self.emit_comparison_from_flags(op);
         Ok(())
     }
 
@@ -1106,10 +1139,14 @@ impl Emitter {
     }
 
     fn emit_comparison(&mut self, op: BinaryOp) {
+        self.line("    cp c");
+        self.emit_comparison_from_flags(op);
+    }
+
+    fn emit_comparison_from_flags(&mut self, op: BinaryOp) {
         let true_label = self.next_label("cmp_true");
         let end_label = self.next_label("cmp_end");
         let false_label = self.next_label("cmp_false");
-        self.line("    cp c");
         match op {
             BinaryOp::Eq => self.line(&format!("    jp z, {true_label}")),
             BinaryOp::Ne => self.line(&format!("    jp nz, {true_label}")),
@@ -1270,6 +1307,59 @@ impl Emitter {
         }
     }
 
+    fn expr_width(&self, expr: &Expr) -> Result<ValueWidth, Diagnostic> {
+        match expr {
+            Expr::Ident(name) => {
+                if let Some(variable) = self.variable_opt(name) {
+                    variable.width()
+                } else {
+                    let value = self.symbols.eval_i64(expr)?;
+                    if (0..=0xFF).contains(&value) {
+                        Ok(ValueWidth::U8)
+                    } else if (0..=0xFFFF).contains(&value) {
+                        Ok(ValueWidth::U16)
+                    } else {
+                        Ok(ValueWidth::U24)
+                    }
+                }
+            }
+            Expr::Int(value) => {
+                if (0..=0xFF).contains(value) {
+                    Ok(ValueWidth::U8)
+                } else if (0..=0xFFFF).contains(value) {
+                    Ok(ValueWidth::U16)
+                } else {
+                    Ok(ValueWidth::U24)
+                }
+            }
+            Expr::Char(_) | Expr::Bool(_) | Expr::In(_) | Expr::String(_) => Ok(ValueWidth::U8),
+            Expr::Cast { ty, .. } => type_width(ty),
+            Expr::Call { path, .. }
+                if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
+            {
+                Ok(ValueWidth::U8)
+            }
+            Expr::Call { path, .. } if path.len() == 1 => self
+                .symbols
+                .functions
+                .get(&path[0])
+                .map(|sig| sig.return_width)
+                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path[0]))),
+            Expr::Call { .. } => Ok(ValueWidth::U8),
+            Expr::Unary { expr, op } => match op {
+                UnaryOp::Not => Ok(ValueWidth::U8),
+                UnaryOp::Neg | UnaryOp::BitNot => self.expr_width(expr),
+            },
+            Expr::Binary { left, op, right } => {
+                if is_comparison(*op) || matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    Ok(ValueWidth::U8)
+                } else {
+                    Ok(self.expr_width(left)?.max(self.expr_width(right)?))
+                }
+            }
+        }
+    }
+
     fn const_shift_count(&self, expr: &Expr) -> Result<u8, Diagnostic> {
         let value = self.symbols.eval_i64(expr)?;
         if !(0..=24).contains(&value) {
@@ -1377,6 +1467,13 @@ fn const_shr_or_zero(left: i64, right: i64) -> i64 {
 
 fn path_text(path: &[String]) -> String {
     path.join(".")
+}
+
+fn is_comparison(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    )
 }
 
 fn sdk_constants() -> HashMap<String, i64> {
@@ -1843,6 +1940,44 @@ mod tests {
 
         assert!(asm.contains("ld a, (hl)"), "{asm}");
         assert!(asm.contains("ld (hl), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_wide_comparisons() {
+        let source = r#"
+            fn main() {
+                let a: u16 = 0x0100
+                let b: u16 = 0x0200
+                test.assert_eq_u8(a < b, 1, 1)
+                test.assert_eq_u8(b > a, 1, 2)
+                test.assert_eq_u8(a >= b, 0, 3)
+                test.assert_eq_u8(a != b, 1, 4)
+
+                let c: u24 = 0x010000
+                let d: u24 = 0x010000
+                let e: u24 = 0x020000
+                test.assert_eq_u8(c == d, 1, 5)
+                test.assert_eq_u8(c <= d, 1, 6)
+                test.assert_eq_u8(e <= c, 0, 7)
+
+                let count: u8 = 0
+                while c < e {
+                    c += 0x008000
+                    count += 1
+                }
+                if c >= e {
+                    count += 1
+                }
+                test.assert_eq_u8(count, 3, 8)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
