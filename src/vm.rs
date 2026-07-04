@@ -106,6 +106,9 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld c, a"
             | "ld a, b"
             | "ld a, c"
+            | "ld a, h"
+            | "ld a, l"
+            | "ld h, a"
             | "ld l, a"
             | "add hl, bc"
             | "add a, b"
@@ -224,6 +227,12 @@ fn emit_instruction(
         bytes.push(0x78);
     } else if text == "ld a, c" {
         bytes.push(0x79);
+    } else if text == "ld a, h" {
+        bytes.push(0x7C);
+    } else if text == "ld a, l" {
+        bytes.push(0x7D);
+    } else if text == "ld h, a" {
+        bytes.push(0x67);
     } else if let Some(value) = text.strip_prefix("ld h,") {
         bytes.push(0x26);
         bytes.push(parse_u8(value.trim())?);

@@ -47,6 +47,7 @@ impl Variable {
         match self.size {
             1 => Ok(ValueWidth::U8),
             2 => Ok(ValueWidth::U16),
+            3 => Ok(ValueWidth::U24),
             size => Err(Diagnostic::new(format!(
                 "unsupported variable size {size} in codegen"
             ))),
@@ -58,6 +59,7 @@ impl Variable {
 enum ValueWidth {
     U8,
     U16,
+    U24,
 }
 
 impl ValueWidth {
@@ -65,6 +67,7 @@ impl ValueWidth {
         match self {
             Self::U8 => 1,
             Self::U16 => 2,
+            Self::U24 => 3,
         }
     }
 }
@@ -302,13 +305,13 @@ impl Emitter {
                     }
                     self.emit_store_a(variable);
                 }
-                ValueWidth::U16 => {
+                ValueWidth::U16 | ValueWidth::U24 => {
                     if index != 0 {
                         return Err(Diagnostic::new(
-                            "current u16 codegen supports u16 only as the first parameter",
+                            "current wide-value codegen supports u16/u24 only as the first parameter",
                         ));
                     }
-                    self.emit_store_hl(variable);
+                    self.emit_store_width(variable);
                 }
             }
         }
@@ -420,17 +423,35 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         if variable.size == 2 {
             match op {
-                AssignOp::Set => self.emit_expr_to_hl(value)?,
+                AssignOp::Set => self.emit_expr_to_hl(value, variable.width()?)?,
                 AssignOp::Add => {
-                    self.emit_load_hl(variable);
+                    self.emit_load_hl16(variable);
                     self.line("    push hl");
-                    self.emit_expr_to_hl(value)?;
+                    self.emit_expr_to_hl(value, variable.width()?)?;
                     self.line("    pop bc");
                     self.line("    add hl, bc");
                 }
                 _ => {
                     return Err(Diagnostic::new(
                         "only assignment and += are implemented for u16 codegen",
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        if variable.size == 3 {
+            match op {
+                AssignOp::Set => self.emit_expr_to_hl(value, ValueWidth::U24)?,
+                AssignOp::Add => {
+                    self.emit_load_hl(variable);
+                    self.line("    push hl");
+                    self.emit_expr_to_hl(value, ValueWidth::U24)?;
+                    self.line("    pop bc");
+                    self.line("    add hl, bc");
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "only assignment and += are implemented for u24 codegen",
                     ));
                 }
             }
@@ -518,9 +539,28 @@ impl Emitter {
                     ));
                 }
                 let ok = self.next_label("assert_ok");
-                self.emit_expr_to_hl(&args[0])?;
+                self.emit_expr_to_hl(&args[0], ValueWidth::U16)?;
                 self.line("    push hl");
-                self.emit_expr_to_hl(&args[1])?;
+                self.emit_expr_to_hl(&args[1], ValueWidth::U16)?;
+                self.line("    pop bc");
+                self.line("    or a");
+                self.line("    sbc hl, bc");
+                self.line(&format!("    jp z, {ok}"));
+                self.emit_expr_to_a(&args[2])?;
+                self.emit_out_a(0x0D);
+                self.emit_out(0x0E, 1);
+                self.line(&format!("{ok}:"));
+            }
+            "test.assert_eq_u24" | "ezra.test.assert_eq_u24" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new(
+                        "test.assert_eq_u24 requires three arguments",
+                    ));
+                }
+                let ok = self.next_label("assert_ok");
+                self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
+                self.line("    push hl");
+                self.emit_expr_to_hl(&args[1], ValueWidth::U24)?;
                 self.line("    pop bc");
                 self.line("    or a");
                 self.line("    sbc hl, bc");
@@ -603,11 +643,11 @@ impl Emitter {
     fn emit_expr_to_width(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
         match width {
             ValueWidth::U8 => self.emit_expr_to_a(expr),
-            ValueWidth::U16 => self.emit_expr_to_hl(expr),
+            ValueWidth::U16 | ValueWidth::U24 => self.emit_expr_to_hl(expr, width),
         }
     }
 
-    fn emit_expr_to_hl(&mut self, expr: &Expr) -> Result<(), Diagnostic> {
+    fn emit_expr_to_hl(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
         match expr {
             Expr::Ident(name) => {
                 if let Some(variable) = self.variable_opt(name) {
@@ -615,11 +655,13 @@ impl Emitter {
                         self.emit_load_a(variable);
                         self.line("    ld h, 00h");
                         self.line("    ld l, a");
+                    } else if variable.size == 2 {
+                        self.emit_load_hl16(variable);
                     } else {
                         self.emit_load_hl(variable);
                     }
                 } else {
-                    let value = self.u16(expr)?;
+                    let value = self.value_for_width(expr, width)?;
                     self.line(&format!("    ld hl, {:06X}h", value));
                 }
             }
@@ -628,14 +670,14 @@ impl Emitter {
             | Expr::Bool(_)
             | Expr::Unary { .. }
             | Expr::Cast { .. } => {
-                let value = self.u16(expr)?;
+                let value = self.value_for_width(expr, width)?;
                 self.line(&format!("    ld hl, {:06X}h", value));
             }
             Expr::Binary { left, op, right } => match op {
                 BinaryOp::Add => {
-                    self.emit_expr_to_hl(left)?;
+                    self.emit_expr_to_hl(left, width)?;
                     self.line("    push hl");
-                    self.emit_expr_to_hl(right)?;
+                    self.emit_expr_to_hl(right, width)?;
                     self.line("    pop bc");
                     self.line("    add hl, bc");
                 }
@@ -832,19 +874,37 @@ impl Emitter {
     }
 
     fn emit_load_hl(&mut self, variable: Variable) {
-        debug_assert_eq!(variable.size, 2);
+        debug_assert_eq!(variable.size, 3);
         self.line(&format!("    ld hl, ({:06X}h)", variable.addr));
     }
 
     fn emit_store_hl(&mut self, variable: Variable) {
-        debug_assert_eq!(variable.size, 2);
+        debug_assert_eq!(variable.size, 3);
         self.line(&format!("    ld ({:06X}h), hl", variable.addr));
+    }
+
+    fn emit_load_hl16(&mut self, variable: Variable) {
+        debug_assert_eq!(variable.size, 2);
+        self.line("    ld hl, 000000h");
+        self.line(&format!("    ld a, ({:06X}h)", variable.addr));
+        self.line("    ld l, a");
+        self.line(&format!("    ld a, ({:06X}h)", variable.addr + 1));
+        self.line("    ld h, a");
+    }
+
+    fn emit_store_hl16(&mut self, variable: Variable) {
+        debug_assert_eq!(variable.size, 2);
+        self.line("    ld a, l");
+        self.line(&format!("    ld ({:06X}h), a", variable.addr));
+        self.line("    ld a, h");
+        self.line(&format!("    ld ({:06X}h), a", variable.addr + 1));
     }
 
     fn emit_load_width(&mut self, variable: Variable) {
         match variable.size {
             1 => self.emit_load_a(variable),
-            2 => self.emit_load_hl(variable),
+            2 => self.emit_load_hl16(variable),
+            3 => self.emit_load_hl(variable),
             _ => unreachable!("unsupported variable size {}", variable.size),
         }
     }
@@ -852,7 +912,8 @@ impl Emitter {
     fn emit_store_width(&mut self, variable: Variable) {
         match variable.size {
             1 => self.emit_store_a(variable),
-            2 => self.emit_store_hl(variable),
+            2 => self.emit_store_hl16(variable),
+            3 => self.emit_store_hl(variable),
             _ => unreachable!("unsupported variable size {}", variable.size),
         }
     }
@@ -875,6 +936,24 @@ impl Emitter {
             )));
         }
         Ok(value as u16)
+    }
+
+    fn u24(&self, expr: &Expr) -> Result<u32, Diagnostic> {
+        let value = self.symbols.eval_i64(expr)?;
+        if !(0..=0xFF_FFFF).contains(&value) {
+            return Err(Diagnostic::new(format!(
+                "value {value} is outside u24 range"
+            )));
+        }
+        Ok(value as u32)
+    }
+
+    fn value_for_width(&self, expr: &Expr, width: ValueWidth) -> Result<u32, Diagnostic> {
+        match width {
+            ValueWidth::U8 => self.u8(expr).map(u32::from),
+            ValueWidth::U16 => self.u16(expr).map(u32::from),
+            ValueWidth::U24 => self.u24(expr),
+        }
     }
 
     fn current_return_width(&self) -> ValueWidth {
@@ -927,6 +1006,9 @@ fn type_width(ty: &Type) -> Result<ValueWidth, Diagnostic> {
     match ty {
         Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Ok(ValueWidth::U8),
         Type::Named(name) if name == "u16" || name == "i16" => Ok(ValueWidth::U16),
+        Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => {
+            Ok(ValueWidth::U24)
+        }
         Type::Named(name) => Err(Diagnostic::new(format!(
             "type `{name}` is parsed but not implemented in assembly codegen yet"
         ))),
@@ -1111,6 +1193,50 @@ mod tests {
                 let x: u16 = add_base(total)
                 x += 0x0010
                 test.assert_eq_u16(x, 0x0133, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_byte_accurate_u16_store_without_clobbering_next_variable() {
+        let source = r#"
+            fn main() {
+                let wide: u16 = 0x1234
+                let guard: u8 = 0x7A
+                wide += 1
+                test.assert_eq_u16(wide, 0x1235, 6)
+                test.assert_eq_u8(guard, 0x7A, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_u24_storage_and_return() {
+        let source = r#"
+            global base: u24 = 0x010000
+
+            fn bump(v: u24) -> u24 {
+                return v + 0x000123
+            }
+
+            fn main() {
+                let x: u24 = bump(base)
+                x += 0x000010
+                test.assert_eq_u24(x, 0x010133, 8)
                 test.pass()
             }
         "#;
