@@ -595,4 +595,15 @@ mod tests {
 
         assert!(program.main_function().is_some());
     }
+
+    #[test]
+    fn parses_string_literal_pointer_values() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "global title: ptr<u8> = \"EZRA\"\nfn main() { let text: ptr<u8> = \"OK\" }",
+        )
+        .unwrap();
+
+        assert!(program.main_function().is_some());
+    }
 }

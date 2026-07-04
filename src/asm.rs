@@ -19,6 +19,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         label_counter: 0,
         scopes: Vec::new(),
         scope_types: Vec::new(),
+        string_literals: HashMap::new(),
         loop_stack: Vec::new(),
         return_stack: Vec::new(),
     };
@@ -361,6 +362,7 @@ struct Emitter {
     label_counter: usize,
     scopes: Vec<HashMap<String, Variable>>,
     scope_types: Vec<HashMap<String, Type>>,
+    string_literals: HashMap<String, Variable>,
     loop_stack: Vec<LoopLabels>,
     return_stack: Vec<ValueWidth>,
 }
@@ -937,6 +939,9 @@ impl Emitter {
             Expr::AddressOfIndex { name, index } => {
                 self.emit_array_element_address(name, index)?;
             }
+            Expr::String(value) => {
+                self.emit_string_literal_address(value)?;
+            }
             Expr::Deref(ptr) => {
                 self.emit_deref_to_hl(ptr, width)?;
             }
@@ -986,7 +991,7 @@ impl Emitter {
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
-            Expr::Array(_) | Expr::In(_) | Expr::Call { .. } | Expr::String(_) => {
+            Expr::Array(_) | Expr::In(_) | Expr::Call { .. } => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u16 codegen"
                 )));
@@ -1186,6 +1191,33 @@ impl Emitter {
         self.emit_load_hl(addr);
         self.emit_load_a(value);
         self.line("    ld (hl), a");
+        Ok(())
+    }
+
+    fn emit_string_literal_address(&mut self, value: &str) -> Result<(), Diagnostic> {
+        if let Some(variable) = self.string_literals.get(value).copied() {
+            self.line(&format!("    ld hl, {:06X}h", variable.addr));
+            return Ok(());
+        }
+
+        let len = value
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("string literal is too large"))?;
+        if len > u32::MAX as usize {
+            return Err(Diagnostic::new("string literal is too large"));
+        }
+
+        let variable = self.symbols.alloc_array(ValueWidth::U8.bytes(), len as u32);
+        for (offset, byte) in value.bytes().chain(std::iter::once(0)).enumerate() {
+            self.line(&format!("    ld a, {byte:02X}h"));
+            self.emit_store_a(scalar_var(
+                variable.addr + offset as u32,
+                ValueWidth::U8.bytes(),
+            ));
+        }
+        self.string_literals.insert(value.to_owned(), variable);
+        self.line(&format!("    ld hl, {:06X}h", variable.addr));
         Ok(())
     }
 
@@ -1928,7 +1960,8 @@ impl Emitter {
                     Ok(ValueWidth::U24)
                 }
             }
-            Expr::Char(_) | Expr::Bool(_) | Expr::In(_) | Expr::String(_) => Ok(ValueWidth::U8),
+            Expr::Char(_) | Expr::Bool(_) | Expr::In(_) => Ok(ValueWidth::U8),
+            Expr::String(_) => Ok(ValueWidth::U24),
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar width")),
             Expr::Index { name, .. } => self.array_element_width(name),
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
@@ -2756,6 +2789,35 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_zero_terminated_string_literals() {
+        let source = r#"
+            global title: ptr<u8> = "EZ"
+
+            fn same(a: ptr<u8>, b: ptr<u8>) -> bool {
+                return a == b
+            }
+
+            fn main() {
+                let text: ptr<u8> = "OK";
+                test.assert_eq_u8(*text, 'O', 1);
+                test.assert_eq_u8(*(text + 1), 'K', 2);
+                test.assert_eq_u8(*(text + 2), 0, 3);
+                test.assert_eq_u8(*title, 'E', 4);
+                test.assert_eq_u8(*(title + 1), 'Z', 5);
+                test.assert_eq_u8(*(title + 2), 0, 6);
+                test.assert_eq_u8(same("OK", "OK"), true, 7);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 10_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
