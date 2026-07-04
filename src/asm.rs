@@ -157,7 +157,7 @@ impl Symbols {
                 })
             }
             Expr::Cast { expr, .. } => self.eval_i64(expr),
-            Expr::Call { .. } | Expr::String(_) => Err(Diagnostic::new(format!(
+            Expr::In(_) | Expr::Call { .. } | Expr::String(_) => Err(Diagnostic::new(format!(
                 "expression `{expr:?}` is not a compile-time integer"
             ))),
         }
@@ -495,6 +495,10 @@ impl Emitter {
                     let value = self.u8(expr)?;
                     self.line(&format!("    ld a, {:02X}h", value));
                 }
+            }
+            Expr::In(port) => {
+                let port = self.port(port)?;
+                self.line(&format!("    in0 a, ({port:02X}h)"));
             }
             Expr::Int(_)
             | Expr::Char(_)
@@ -856,6 +860,24 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_direct_port_read() {
+        let source = r#"
+            port PAD1_LO: u8 = 0x01
+            fn main() {
+                let pad: u8 = in PAD1_LO
+                test.assert_eq_u8(pad, 0, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

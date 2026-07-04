@@ -104,6 +104,7 @@ pub enum Expr {
     Char(u8),
     String(String),
     Ident(String),
+    In(String),
     Call {
         path: Vec<String>,
         args: Vec<Expr>,

@@ -265,6 +265,9 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
                 expr: Box::new(build_expr(inner.next().unwrap())?),
             })
         }
+        Rule::in_expr => Ok(Expr::In(
+            pair.into_inner().next().unwrap().as_str().to_owned(),
+        )),
         Rule::call_expr => {
             let mut inner = pair.into_inner();
             let path = split_path(inner.next().unwrap().as_str());
@@ -433,5 +436,16 @@ mod tests {
 
         assert!(program.main_function().is_some());
         assert_eq!(program.declarations.len(), 2);
+    }
+
+    #[test]
+    fn parses_in_port_expression() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "port PAD1_LO: u8 = 0x01\nfn main() { let pad: u8 = in PAD1_LO }",
+        )
+        .unwrap();
+
+        assert!(program.main_function().is_some());
     }
 }
