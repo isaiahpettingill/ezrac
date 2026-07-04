@@ -116,6 +116,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld l, c"
             | "ld l, a"
             | "add hl, bc"
+            | "add a, a"
             | "add a, b"
             | "add a, c"
             | "sub b"
@@ -131,6 +132,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "cp c"
     ) {
         Ok(1)
+    } else if matches!(text, "srl a" | "rl a" | "rr a") {
+        Ok(2)
     } else if text == "sbc hl, bc" || text == "sbc hl, de" {
         Ok(2)
     } else if text.starts_with("ld hl, (")
@@ -258,6 +261,8 @@ fn emit_instruction(
         bytes.push(0x69);
     } else if text == "add hl, bc" {
         bytes.push(0x09);
+    } else if text == "add a, a" {
+        bytes.push(0x87);
     } else if text == "sbc hl, bc" {
         bytes.extend([0xED, 0x42]);
     } else if text == "sbc hl, de" {
@@ -291,6 +296,12 @@ fn emit_instruction(
         bytes.push(0xB8);
     } else if text == "cp c" {
         bytes.push(0xB9);
+    } else if text == "srl a" {
+        bytes.extend([0xCB, 0x3F]);
+    } else if text == "rl a" {
+        bytes.extend([0xCB, 0x17]);
+    } else if text == "rr a" {
+        bytes.extend([0xCB, 0x1F]);
     } else if let Some(value) = text.strip_prefix("ld a,") {
         bytes.push(0x3E);
         bytes.push(parse_u8(value.trim())?);

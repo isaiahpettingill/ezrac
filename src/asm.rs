@@ -435,11 +435,8 @@ impl Emitter {
                 AssignOp::BitXor => {
                     self.emit_wide_assignment_op(variable, BinaryOp::BitXor, value)?
                 }
-                _ => {
-                    return Err(Diagnostic::new(
-                        "shift assignment is not implemented for u16 codegen",
-                    ));
-                }
+                AssignOp::Shl => self.emit_wide_assignment_shift(variable, BinaryOp::Shl, value)?,
+                AssignOp::Shr => self.emit_wide_assignment_shift(variable, BinaryOp::Shr, value)?,
             }
             return Ok(());
         }
@@ -457,11 +454,8 @@ impl Emitter {
                 AssignOp::BitXor => {
                     self.emit_wide_assignment_op(variable, BinaryOp::BitXor, value)?
                 }
-                _ => {
-                    return Err(Diagnostic::new(
-                        "shift assignment is not implemented for u24 codegen",
-                    ));
-                }
+                AssignOp::Shl => self.emit_wide_assignment_shift(variable, BinaryOp::Shl, value)?,
+                AssignOp::Shr => self.emit_wide_assignment_shift(variable, BinaryOp::Shr, value)?,
             }
             return Ok(());
         }
@@ -500,10 +494,13 @@ impl Emitter {
                 self.emit_expr_to_a(value)?;
                 self.line("    xor b");
             }
-            AssignOp::Shl | AssignOp::Shr => {
-                return Err(Diagnostic::new(
-                    "shift assignment codegen is not implemented yet",
-                ));
+            AssignOp::Shl => {
+                self.emit_load_a(variable);
+                self.emit_shift_a(BinaryOp::Shl, self.const_shift_count(value)?)?;
+            }
+            AssignOp::Shr => {
+                self.emit_load_a(variable);
+                self.emit_shift_a(BinaryOp::Shr, self.const_shift_count(value)?)?;
             }
         }
         Ok(())
@@ -520,6 +517,21 @@ impl Emitter {
         self.emit_expr_to_hl(value, variable.width()?)?;
         self.line("    pop bc");
         self.emit_wide_op_with_left_in_bc(op, variable.width()?)?;
+        Ok(())
+    }
+
+    fn emit_wide_assignment_shift(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let count = self.const_shift_count(value)?;
+        let temp = self.symbols.alloc_var(variable.size);
+        self.emit_load_width(variable);
+        self.emit_store_width(temp);
+        self.emit_shift_memory(temp, op, count)?;
+        self.emit_load_width(temp);
         Ok(())
     }
 
@@ -704,6 +716,14 @@ impl Emitter {
                     self.line("    pop bc");
                     self.emit_wide_op_with_left_in_bc(*op, width)?;
                 }
+                BinaryOp::Shl | BinaryOp::Shr => {
+                    let count = self.const_shift_count(right)?;
+                    let temp = self.symbols.alloc_var(width.bytes());
+                    self.emit_expr_to_hl(left, width)?;
+                    self.emit_store_width(temp);
+                    self.emit_shift_memory(temp, *op, count)?;
+                    self.emit_load_width(temp);
+                }
                 _ => {
                     return Err(Diagnostic::new(format!(
                         "binary operator `{op:?}` is not implemented in wide codegen yet"
@@ -847,6 +867,13 @@ impl Emitter {
         op: BinaryOp,
         right: &Expr,
     ) -> Result<(), Diagnostic> {
+        if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+            let count = self.const_shift_count(right)?;
+            self.emit_expr_to_a(left)?;
+            self.emit_shift_a(op, count)?;
+            return Ok(());
+        }
+
         self.emit_expr_to_a(left)?;
         self.line("    ld b, a");
         self.emit_expr_to_a(right)?;
@@ -872,6 +899,58 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn emit_shift_a(&mut self, op: BinaryOp, count: u8) -> Result<(), Diagnostic> {
+        for _ in 0..count {
+            match op {
+                BinaryOp::Shl => self.line("    add a, a"),
+                BinaryOp::Shr => self.line("    srl a"),
+                _ => unreachable!("not a shift op"),
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_shift_memory(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        count: u8,
+    ) -> Result<(), Diagnostic> {
+        for _ in 0..count {
+            match op {
+                BinaryOp::Shl => self.emit_shift_memory_left_once(variable),
+                BinaryOp::Shr => self.emit_shift_memory_right_once(variable),
+                _ => unreachable!("not a shift op"),
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_shift_memory_left_once(&mut self, variable: Variable) {
+        self.line(&format!("    ld a, ({:06X}h)", variable.addr));
+        self.line("    add a, a");
+        self.line(&format!("    ld ({:06X}h), a", variable.addr));
+        for offset in 1..variable.size {
+            let addr = variable.addr + offset as u32;
+            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.line("    rl a");
+            self.line(&format!("    ld ({addr:06X}h), a"));
+        }
+    }
+
+    fn emit_shift_memory_right_once(&mut self, variable: Variable) {
+        for offset in (0..variable.size).rev() {
+            let addr = variable.addr + offset as u32;
+            self.line(&format!("    ld a, ({addr:06X}h)"));
+            if offset == variable.size - 1 {
+                self.line("    srl a");
+            } else {
+                self.line("    rr a");
+            }
+            self.line(&format!("    ld ({addr:06X}h), a"));
+        }
     }
 
     fn emit_unary_to_a(&mut self, op: UnaryOp, expr: &Expr) -> Result<(), Diagnostic> {
@@ -1112,6 +1191,16 @@ impl Emitter {
             ValueWidth::U16 => self.u16(expr).map(u32::from),
             ValueWidth::U24 => self.u24(expr),
         }
+    }
+
+    fn const_shift_count(&self, expr: &Expr) -> Result<u8, Diagnostic> {
+        let value = self.symbols.eval_i64(expr)?;
+        if !(0..=24).contains(&value) {
+            return Err(Diagnostic::new(format!(
+                "shift count {value} is outside supported range 0..=24"
+            )));
+        }
+        Ok(value as u8)
     }
 
     fn current_return_width(&self) -> ValueWidth {
@@ -1471,6 +1560,50 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_constant_shift_ops() {
+        let expected_u8_assign = 0x12u8.wrapping_shl(2) >> 1;
+        let expected_u8_expr = 0x81u8 >> 3;
+        let expected_u16_expr = 0x1234u16.wrapping_shl(3) >> 2;
+        let expected_u16_assign = 0x00F0u16.wrapping_shl(4) >> 3;
+        let expected_u24_expr = ((0x010203u32 << 4) & 0x00FF_FFFF) >> 3;
+        let expected_u24_assign = ((0x000F00u32 << 5) & 0x00FF_FFFF) >> 2;
+        let source = format!(
+            r#"
+            fn main() {{
+                let a: u8 = 0x12
+                a <<= 2
+                a >>= 1
+                test.assert_eq_u8(a, 0x{expected_u8_assign:02X}, 1)
+                test.assert_eq_u8(0x81 >> 3, 0x{expected_u8_expr:02X}, 2)
+
+                let b: u16 = 0x1234
+                let c: u16 = (b << 3) >> 2
+                test.assert_eq_u16(c, 0x{expected_u16_expr:04X}, 3)
+                let d: u16 = 0x00F0
+                d <<= 4
+                d >>= 3
+                test.assert_eq_u16(d, 0x{expected_u16_assign:04X}, 4)
+
+                let e: u24 = 0x010203
+                let f: u24 = (e << 4) >> 3
+                test.assert_eq_u24(f, 0x{expected_u24_expr:06X}, 5)
+                let g: u24 = 0x000F00
+                g <<= 5
+                g >>= 2
+                test.assert_eq_u24(g, 0x{expected_u24_assign:06X}, 6)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 10_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
