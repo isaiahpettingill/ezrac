@@ -424,16 +424,20 @@ impl Emitter {
         if variable.size == 2 {
             match op {
                 AssignOp::Set => self.emit_expr_to_hl(value, variable.width()?)?,
-                AssignOp::Add => {
-                    self.emit_load_hl16(variable);
-                    self.line("    push hl");
-                    self.emit_expr_to_hl(value, variable.width()?)?;
-                    self.line("    pop bc");
-                    self.line("    add hl, bc");
+                AssignOp::Add => self.emit_wide_assignment_op(variable, BinaryOp::Add, value)?,
+                AssignOp::Sub => self.emit_wide_assignment_op(variable, BinaryOp::Sub, value)?,
+                AssignOp::BitAnd => {
+                    self.emit_wide_assignment_op(variable, BinaryOp::BitAnd, value)?
+                }
+                AssignOp::BitOr => {
+                    self.emit_wide_assignment_op(variable, BinaryOp::BitOr, value)?
+                }
+                AssignOp::BitXor => {
+                    self.emit_wide_assignment_op(variable, BinaryOp::BitXor, value)?
                 }
                 _ => {
                     return Err(Diagnostic::new(
-                        "only assignment and += are implemented for u16 codegen",
+                        "shift assignment is not implemented for u16 codegen",
                     ));
                 }
             }
@@ -442,16 +446,20 @@ impl Emitter {
         if variable.size == 3 {
             match op {
                 AssignOp::Set => self.emit_expr_to_hl(value, ValueWidth::U24)?,
-                AssignOp::Add => {
-                    self.emit_load_hl(variable);
-                    self.line("    push hl");
-                    self.emit_expr_to_hl(value, ValueWidth::U24)?;
-                    self.line("    pop bc");
-                    self.line("    add hl, bc");
+                AssignOp::Add => self.emit_wide_assignment_op(variable, BinaryOp::Add, value)?,
+                AssignOp::Sub => self.emit_wide_assignment_op(variable, BinaryOp::Sub, value)?,
+                AssignOp::BitAnd => {
+                    self.emit_wide_assignment_op(variable, BinaryOp::BitAnd, value)?
+                }
+                AssignOp::BitOr => {
+                    self.emit_wide_assignment_op(variable, BinaryOp::BitOr, value)?
+                }
+                AssignOp::BitXor => {
+                    self.emit_wide_assignment_op(variable, BinaryOp::BitXor, value)?
                 }
                 _ => {
                     return Err(Diagnostic::new(
-                        "only assignment and += are implemented for u24 codegen",
+                        "shift assignment is not implemented for u24 codegen",
                     ));
                 }
             }
@@ -498,6 +506,20 @@ impl Emitter {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn emit_wide_assignment_op(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        self.emit_load_width(variable);
+        self.line("    push hl");
+        self.emit_expr_to_hl(value, variable.width()?)?;
+        self.line("    pop bc");
+        self.emit_wide_op_with_left_in_bc(op, variable.width()?)?;
         Ok(())
     }
 
@@ -674,16 +696,20 @@ impl Emitter {
                 self.line(&format!("    ld hl, {:06X}h", value));
             }
             Expr::Binary { left, op, right } => match op {
-                BinaryOp::Add => {
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor => {
                     self.emit_expr_to_hl(left, width)?;
                     self.line("    push hl");
                     self.emit_expr_to_hl(right, width)?;
                     self.line("    pop bc");
-                    self.line("    add hl, bc");
+                    self.emit_wide_op_with_left_in_bc(*op, width)?;
                 }
                 _ => {
                     return Err(Diagnostic::new(format!(
-                        "binary operator `{op:?}` is not implemented in u16 codegen yet"
+                        "binary operator `{op:?}` is not implemented in wide codegen yet"
                     )));
                 }
             },
@@ -696,6 +722,60 @@ impl Emitter {
                 )));
             }
         }
+        Ok(())
+    }
+
+    fn emit_wide_op_with_left_in_bc(
+        &mut self,
+        op: BinaryOp,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        match op {
+            BinaryOp::Add => {
+                self.line("    add hl, bc");
+            }
+            BinaryOp::Sub => {
+                self.line("    ex de, hl");
+                self.line("    push bc");
+                self.line("    pop hl");
+                self.line("    or a");
+                self.line("    sbc hl, de");
+            }
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                self.emit_wide_bitwise_from_bc_hl(op, width)?;
+            }
+            _ => unreachable!("unsupported wide op"),
+        }
+        Ok(())
+    }
+
+    fn emit_wide_bitwise_from_bc_hl(
+        &mut self,
+        op: BinaryOp,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        let right = self.symbols.alloc_var(width.bytes());
+        self.emit_store_width(right);
+        self.line("    push bc");
+        self.line("    pop hl");
+        let left = self.symbols.alloc_var(width.bytes());
+        self.emit_store_width(left);
+        let result = self.symbols.alloc_var(width.bytes());
+
+        for offset in 0..width.bytes() {
+            self.line(&format!("    ld a, ({:06X}h)", left.addr + offset as u32));
+            self.line("    ld b, a");
+            self.line(&format!("    ld a, ({:06X}h)", right.addr + offset as u32));
+            match op {
+                BinaryOp::BitAnd => self.line("    and b"),
+                BinaryOp::BitOr => self.line("    or b"),
+                BinaryOp::BitXor => self.line("    xor b"),
+                _ => unreachable!("not a bitwise op"),
+            }
+            self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+        }
+
+        self.emit_load_width(result);
         Ok(())
     }
 
@@ -1243,6 +1323,37 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_wide_sub_and_bitwise_ops() {
+        let expected_u16 = (((0x12F0u16 - 0x0010) & 0x0FF0) | 0x1000) ^ 0x00F0;
+        let expected_u24 =
+            ((((0x010123u32 - 0x000020) & 0x01FFFF) | 0x020000) ^ 0x000003) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            fn main() {{
+                let a: u16 = 0x12F0 - 0x0010
+                a &= 0x0FF0
+                a |= 0x1000
+                a ^= 0x00F0
+                test.assert_eq_u16(a, 0x{expected_u16:04X}, 10)
+
+                let b: u24 = 0x010123 - 0x000020
+                b &= 0x01FFFF
+                b |= 0x020000
+                b ^= 0x000003
+                test.assert_eq_u24(b, 0x{expected_u24:06X}, 11)
+                test.pass()
+            }}
+        "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

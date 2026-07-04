@@ -100,15 +100,20 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         text,
         "ret"
             | "or a"
+            | "ex de, hl"
+            | "push bc"
             | "push hl"
             | "pop bc"
+            | "pop hl"
             | "ld b, a"
             | "ld c, a"
             | "ld a, b"
             | "ld a, c"
             | "ld a, h"
             | "ld a, l"
+            | "ld h, b"
             | "ld h, a"
+            | "ld l, c"
             | "ld l, a"
             | "add hl, bc"
             | "add a, b"
@@ -125,7 +130,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "cp c"
     ) {
         Ok(1)
-    } else if text == "sbc hl, bc" {
+    } else if text == "sbc hl, bc" || text == "sbc hl, de" {
         Ok(2)
     } else if text.starts_with("ld hl, (")
         || text.starts_with("ld a, (")
@@ -215,10 +220,16 @@ fn emit_instruction(
         bytes.push(0xC9);
     } else if text == "or a" {
         bytes.push(0xB7);
+    } else if text == "ex de, hl" {
+        bytes.push(0xEB);
+    } else if text == "push bc" {
+        bytes.push(0xC5);
     } else if text == "push hl" {
         bytes.push(0xE5);
     } else if text == "pop bc" {
         bytes.push(0xC1);
+    } else if text == "pop hl" {
+        bytes.push(0xE1);
     } else if text == "ld b, a" {
         bytes.push(0x47);
     } else if text == "ld c, a" {
@@ -231,6 +242,8 @@ fn emit_instruction(
         bytes.push(0x7C);
     } else if text == "ld a, l" {
         bytes.push(0x7D);
+    } else if text == "ld h, b" {
+        bytes.push(0x60);
     } else if text == "ld h, a" {
         bytes.push(0x67);
     } else if let Some(value) = text.strip_prefix("ld h,") {
@@ -238,10 +251,14 @@ fn emit_instruction(
         bytes.push(parse_u8(value.trim())?);
     } else if text == "ld l, a" {
         bytes.push(0x6F);
+    } else if text == "ld l, c" {
+        bytes.push(0x69);
     } else if text == "add hl, bc" {
         bytes.push(0x09);
     } else if text == "sbc hl, bc" {
         bytes.extend([0xED, 0x42]);
+    } else if text == "sbc hl, de" {
+        bytes.extend([0xED, 0x52]);
     } else if text == "add a, b" {
         bytes.push(0x80);
     } else if text == "add a, c" {
