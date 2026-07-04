@@ -505,7 +505,11 @@ Unsigned arithmetic wraps modulo the type width.
 
 Signed arithmetic uses two’s-complement representation and wraps on overflow.
 
-EZRA does not have undefined signed overflow.
+EZRA arithmetic is fully defined. It does not have undefined signed overflow.
+
+Division uses floor division. Remainder uses the matching floor-division remainder.
+
+Division or remainder by zero evaluates to zero.
 
 ---
 
@@ -595,7 +599,7 @@ parentheses
 casts
 ```
 
-Constant division by zero is a compile error.
+Constant evaluation uses the same arithmetic rules as runtime evaluation. Constant division or remainder by zero evaluates to zero.
 
 ---
 
@@ -908,7 +912,7 @@ let px: u8 = *(FRAMEBUFFER + 0)
 
 ## 22. Ports
 
-Ports are named hardware resources.
+Ports are named hardware resources. The examples below use the default fantasy-console port map, but applications and SDKs may declare any target-specific 8-bit I/O ports needed by the hardware.
 
 ```text
 port PAD1_LO: u8 = 0x01
@@ -1518,7 +1522,7 @@ fn peek_audio(offset: u24) -> u8
 
 ## 33. Standard SDK Modules
 
-Required SDK modules:
+Example SDK modules:
 
 ```text
 ezra.core
@@ -1531,7 +1535,11 @@ ezra.math
 ezra.test
 ```
 
-### 33.1 ezra.input
+These modules are platform libraries built from normal EZRA features such as constants, `port` declarations, volatile MMIO declarations, functions, and inline assembly. They are not language intrinsics, and the compiler should not hardcode controller, video, or audio behavior into ordinary codegen.
+
+Targets may provide different SDKs for hardware such as the TI-84 Plus CE or Agon Light. Those SDKs should follow the same rules: expose typed constants and functions over generic port/MMIO primitives, keep volatile operations visible in generated assembly, and use compiler intrinsics only for target-independent operations.
+
+### 33.1 ezra.input Example
 
 ```text
 pub const BTN_B: u16      = 0x0001
@@ -1551,7 +1559,7 @@ pub fn read_pad(index: u8) -> u16
 pub fn pressed(pad: u16, button: u16) -> bool
 ```
 
-### 33.2 ezra.video
+### 33.2 ezra.video Example
 
 ```text
 pub const VRAM_BASE: ptr<u8> = 0x080000
@@ -1563,7 +1571,7 @@ pub fn peek(offset: u24) -> u8
 pub fn blit(dst: ptr<u8>, src: ptr<u8>, len: u24)
 ```
 
-### 33.3 ezra.audio
+### 33.3 ezra.audio Example
 
 ```text
 pub const AUDIO_BASE: ptr<u8> = 0x0C0000

@@ -181,12 +181,12 @@ impl Symbols {
                 let right = self.eval_i64(right)?;
                 Ok(match op {
                     BinaryOp::Mul => left * right,
-                    BinaryOp::Div => checked_div(left, right)?,
-                    BinaryOp::Mod => checked_mod(left, right)?,
+                    BinaryOp::Div => floor_div_or_zero(left, right),
+                    BinaryOp::Mod => floor_mod_or_zero(left, right),
                     BinaryOp::Add => left + right,
                     BinaryOp::Sub => left - right,
-                    BinaryOp::Shl => left << right,
-                    BinaryOp::Shr => left >> right,
+                    BinaryOp::Shl => const_shl_or_zero(left, right),
+                    BinaryOp::Shr => const_shr_or_zero(left, right),
                     BinaryOp::Lt => i64::from(left < right),
                     BinaryOp::Le => i64::from(left <= right),
                     BinaryOp::Gt => i64::from(left > right),
@@ -825,30 +825,6 @@ impl Emitter {
             }
             Expr::Unary { op, expr } => self.emit_unary_to_a(*op, expr)?,
             Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right)?,
-            Expr::Call { path, args }
-                if matches!(
-                    path_text(path).as_str(),
-                    "input.read_pad" | "ezra.input.read_pad"
-                ) =>
-            {
-                let index = args
-                    .first()
-                    .map(|expr| self.u8(expr))
-                    .transpose()?
-                    .unwrap_or(0);
-                let port = match index {
-                    0 => 0x01,
-                    1 => 0x03,
-                    2 => 0x05,
-                    3 => 0x07,
-                    _ => {
-                        return Err(Diagnostic::new(
-                            "input.read_pad index must be 0..3 in current codegen",
-                        ));
-                    }
-                };
-                self.line(&format!("    in0 a, ({port:02X}h)"));
-            }
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
@@ -871,6 +847,10 @@ impl Emitter {
             let count = self.const_shift_count(right)?;
             self.emit_expr_to_a(left)?;
             self.emit_shift_a(op, count)?;
+            return Ok(());
+        }
+        if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+            self.emit_u8_div_mod(left, right, op)?;
             return Ok(());
         }
 
@@ -897,6 +877,59 @@ impl Emitter {
                     "binary operator `{op:?}` is not implemented in u8 codegen yet"
                 )));
             }
+        }
+        Ok(())
+    }
+
+    fn emit_u8_div_mod(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        op: BinaryOp,
+    ) -> Result<(), Diagnostic> {
+        let dividend = self.symbols.alloc_var(1);
+        let divisor = self.symbols.alloc_var(1);
+        let quotient = self.symbols.alloc_var(1);
+        let loop_label = self.next_label("div_loop");
+        let zero_label = self.next_label("div_zero");
+        let done_label = self.next_label("div_done");
+
+        self.emit_expr_to_a(left)?;
+        self.emit_store_a(dividend);
+        self.emit_expr_to_a(right)?;
+        self.emit_store_a(divisor);
+        self.line("    or a");
+        self.line(&format!("    jp z, {zero_label}"));
+        self.line("    xor a");
+        self.emit_store_a(quotient);
+        self.line(&format!("{loop_label}:"));
+        self.emit_load_a(dividend);
+        self.line("    ld b, a");
+        self.emit_load_a(divisor);
+        self.line("    ld c, a");
+        self.line("    ld a, b");
+        self.line("    cp c");
+        self.line(&format!("    jp c, {done_label}"));
+        self.line("    sub c");
+        self.emit_store_a(dividend);
+        self.emit_load_a(quotient);
+        self.line("    ld b, a");
+        self.line("    ld a, 01h");
+        self.line("    add a, b");
+        self.emit_store_a(quotient);
+        self.line(&format!("    jp {loop_label}"));
+        self.line(&format!("{zero_label}:"));
+        self.line("    xor a");
+        self.emit_store_a(dividend);
+        self.line("    xor a");
+        self.emit_store_a(quotient);
+        self.line("    xor a");
+        self.line(&format!("    jp {done_label}"));
+        self.line(&format!("{done_label}:"));
+        match op {
+            BinaryOp::Div => self.emit_load_a(quotient),
+            BinaryOp::Mod => self.emit_load_a(dividend),
+            _ => unreachable!("not a division op"),
         }
         Ok(())
     }
@@ -1265,19 +1298,45 @@ fn type_width(ty: &Type) -> Result<ValueWidth, Diagnostic> {
     }
 }
 
-fn checked_div(left: i64, right: i64) -> Result<i64, Diagnostic> {
+fn floor_div_or_zero(left: i64, right: i64) -> i64 {
     if right == 0 {
-        Err(Diagnostic::new("constant division by zero"))
+        0
     } else {
-        Ok(left / right)
+        let left = left as i128;
+        let right = right as i128;
+        let quotient = left / right;
+        let remainder = left % right;
+        let quotient = if remainder != 0 && ((remainder > 0) != (right > 0)) {
+            quotient - 1
+        } else {
+            quotient
+        };
+        quotient as i64
     }
 }
 
-fn checked_mod(left: i64, right: i64) -> Result<i64, Diagnostic> {
+fn floor_mod_or_zero(left: i64, right: i64) -> i64 {
     if right == 0 {
-        Err(Diagnostic::new("constant modulo by zero"))
+        0
     } else {
-        Ok(left % right)
+        let quotient = floor_div_or_zero(left, right) as i128;
+        (left as i128 - quotient * right as i128) as i64
+    }
+}
+
+fn const_shl_or_zero(left: i64, right: i64) -> i64 {
+    if !(0..64).contains(&right) {
+        0
+    } else {
+        left.wrapping_shl(right as u32)
+    }
+}
+
+fn const_shr_or_zero(left: i64, right: i64) -> i64 {
+    if !(0..64).contains(&right) {
+        0
+    } else {
+        left.wrapping_shr(right as u32)
     }
 }
 
@@ -1605,6 +1664,111 @@ mod tests {
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 10_000).unwrap();
 
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_defined_u8_division_and_modulo() {
+        let expected_div = 23u8 / 5;
+        let expected_mod = 23u8 % 5;
+        let expected_div_zero = 0u8;
+        let expected_mod_zero = 0u8;
+        let expected_const_div_zero = 0u8;
+        let expected_const_mod_zero = 0u8;
+        let source = format!(
+            r#"
+            const CONST_DIV_ZERO: u8 = 10 / 0
+            const CONST_MOD_ZERO: u8 = 10 % 0
+
+            fn div(v: u8, by: u8) -> u8 {{
+                return v / by
+            }}
+
+            fn rem(v: u8, by: u8) -> u8 {{
+                return v % by
+            }}
+
+            fn main() {{
+                let a: u8 = div(23, 5)
+                let b: u8 = rem(23, 5)
+                let c: u8 = div(23, 0)
+                let d: u8 = rem(23, 0)
+                test.assert_eq_u8(a, {expected_div}, 1)
+                test.assert_eq_u8(b, {expected_mod}, 2)
+                test.assert_eq_u8(c, {expected_div_zero}, 3)
+                test.assert_eq_u8(d, {expected_mod_zero}, 4)
+                test.assert_eq_u8(CONST_DIV_ZERO, {expected_const_div_zero}, 5)
+                test.assert_eq_u8(CONST_MOD_ZERO, {expected_const_mod_zero}, 6)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn constant_division_uses_floor_semantics() {
+        assert_eq!(floor_div_or_zero(7, 3), 2);
+        assert_eq!(floor_mod_or_zero(7, 3), 1);
+        assert_eq!(floor_div_or_zero(-7, 3), -3);
+        assert_eq!(floor_mod_or_zero(-7, 3), 2);
+        assert_eq!(floor_div_or_zero(7, -3), -3);
+        assert_eq!(floor_mod_or_zero(7, -3), -2);
+        assert_eq!(floor_div_or_zero(7, 0), 0);
+        assert_eq!(floor_mod_or_zero(7, 0), 0);
+    }
+
+    #[test]
+    fn emits_and_runs_generic_hardware_port_examples() {
+        let source = r#"
+            port PAD1_LO: u8 = 0x01
+            port PAD1_HI: u8 = 0x02
+            port TI_LCD_CMD: u8 = 0x10
+            port TI_LCD_DATA: u8 = 0x11
+            port AGON_VDP_DATA: u8 = 0x9B
+
+            fn read_pad_low() -> u8 {
+                return in PAD1_LO
+            }
+
+            fn ti_lcd_command(cmd: u8) {
+                out TI_LCD_CMD, cmd
+            }
+
+            fn ti_lcd_data(value: u8) {
+                out TI_LCD_DATA, value
+            }
+
+            fn agon_vdp_byte(value: u8) {
+                out AGON_VDP_DATA, value
+            }
+
+            fn main() {
+                let pad_lo: u8 = read_pad_low()
+                let pad_hi: u8 = in PAD1_HI
+                ti_lcd_command(0x2A)
+                ti_lcd_data(pad_lo)
+                agon_vdp_byte(pad_hi)
+                test.assert_eq_u8(pad_lo, 0, 1)
+                test.assert_eq_u8(pad_hi, 0, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(asm.contains("in0 a, (01h)"), "{asm}");
+        assert!(asm.contains("in0 a, (02h)"), "{asm}");
+        assert!(asm.contains("out0 (10h), a"), "{asm}");
+        assert!(asm.contains("out0 (11h), a"), "{asm}");
+        assert!(asm.contains("out0 (9Bh), a"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
