@@ -1189,12 +1189,19 @@ struct LoopLabels {
     break_label: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LocalConstant {
+    value: i64,
+    ty: Type,
+}
+
 struct Emitter {
     symbols: Symbols,
     out: String,
     label_counter: usize,
     scopes: Vec<HashMap<String, Variable>>,
     scope_types: Vec<HashMap<String, Type>>,
+    local_constants: Vec<HashMap<String, LocalConstant>>,
     string_literals: HashMap<String, Variable>,
     loop_stack: Vec<LoopLabels>,
     return_type_stack: Vec<Option<Type>>,
@@ -1204,6 +1211,7 @@ struct Emitter {
     function_interrupt_stack: Vec<bool>,
     function_naked_stack: Vec<bool>,
     function_storage_stack: Vec<Vec<Variable>>,
+    assigned_names_stack: Vec<HashSet<String>>,
     recursive_call_edges: HashSet<(String, String)>,
     debug_comments: bool,
     stack_top: Address24,
@@ -1222,6 +1230,7 @@ impl Emitter {
             label_counter: 0,
             scopes: Vec::new(),
             scope_types: Vec::new(),
+            local_constants: Vec::new(),
             string_literals: HashMap::new(),
             loop_stack: Vec::new(),
             return_type_stack: Vec::new(),
@@ -1231,6 +1240,7 @@ impl Emitter {
             function_interrupt_stack: Vec::new(),
             function_naked_stack: Vec::new(),
             function_storage_stack: Vec::new(),
+            assigned_names_stack: Vec::new(),
             recursive_call_edges,
             debug_comments: options.debug_comments,
             stack_top: options.stack_top,
@@ -1638,6 +1648,9 @@ impl Emitter {
         self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
+        self.local_constants.push(HashMap::new());
+        self.assigned_names_stack
+            .push(assigned_names_in_block(&function.body));
         if let Some(return_type) = &function.return_type {
             self.symbols.type_width(return_type)?;
         }
@@ -1676,6 +1689,8 @@ impl Emitter {
         self.function_storage_stack.pop();
         self.return_value_stack.pop();
         self.return_type_stack.pop();
+        self.assigned_names_stack.pop();
+        self.local_constants.pop();
         self.scope_types.pop();
         self.scopes.pop();
         if naked {
@@ -1805,6 +1820,7 @@ impl Emitter {
                 self.current_scope_types_mut()
                     .insert(name.clone(), ty.clone());
                 self.emit_storage_initializer(variable, ty, value)?;
+                self.record_local_constant(name, ty, value);
             }
             Stmt::Assign { target, op, value } => {
                 self.emit_assignment(target, *op, value)?;
@@ -1988,6 +2004,7 @@ impl Emitter {
         }
         for output in outputs {
             self.emit_inline_asm_output_store(output)?;
+            self.invalidate_local_constant(&output.name);
         }
         Ok(())
     }
@@ -2244,19 +2261,26 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         match target {
             Place::Ident(name) => {
+                self.invalidate_local_constant(name);
                 let variable = self.variable(name)?;
+                let ty = self.variable_type(name).cloned();
                 let signed = self
                     .variable_type(name)
                     .map(|ty| self.type_is_signed(ty))
                     .transpose()?
                     .unwrap_or(false);
                 if op == AssignOp::Set {
-                    if let Some(ty) = self.variable_type(name) {
+                    if let Some(ty) = ty.as_ref() {
                         self.validate_expr_assignable_to_type(value, ty)?;
                     }
                 }
                 self.emit_assignment_value(variable, op, value, signed)?;
                 self.emit_store_width(variable);
+                if op == AssignOp::Set {
+                    if let Some(ty) = ty {
+                        self.record_local_constant(name, &ty, value);
+                    }
+                }
             }
             Place::Index { name, index } => {
                 self.emit_index_assignment(name, index, op, value)?;
@@ -2804,6 +2828,9 @@ impl Emitter {
 
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
+        self.local_constants.push(HashMap::new());
+        self.assigned_names_stack
+            .push(assigned_names_in_block(prefix));
         for (param, temp) in function.params.iter().zip(temps.iter().copied()) {
             self.current_scope_mut().insert(param.name.clone(), temp);
             self.current_scope_types_mut()
@@ -2813,6 +2840,8 @@ impl Emitter {
             self.emit_inline_prefix_stmt(stmt)?;
         }
         let result = self.emit_expr_to_type(&expr, return_type);
+        self.assigned_names_stack.pop();
+        self.local_constants.pop();
         self.scope_types.pop();
         self.scopes.pop();
         result?;
@@ -2833,6 +2862,7 @@ impl Emitter {
         self.current_scope_types_mut()
             .insert(name.clone(), ty.clone());
         self.emit_storage_initializer(variable, ty, value)?;
+        self.record_local_constant(name, ty, value);
         Ok(())
     }
 
@@ -2852,7 +2882,7 @@ impl Emitter {
             return Ok(());
         }
         if !self.is_pointer_arithmetic_expr(expr)? {
-            if let Ok(value) = self.symbols.eval_i64(expr) {
+            if let Ok(value) = self.eval_i64_with_local_constants(expr) {
                 let value = self.value_for_type(value, ty, width)?;
                 match width {
                     ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
@@ -2879,7 +2909,7 @@ impl Emitter {
         self.validate_cast(expr, ty)?;
         let width = self.symbols.type_width(ty)?;
         if !self.is_pointer_arithmetic_expr(expr)? {
-            if let Ok(value) = self.symbols.eval_i64(expr) {
+            if let Ok(value) = self.eval_i64_with_local_constants(expr) {
                 let bits = u32::from(width.bytes()) * 8;
                 let mask = (1_i128 << bits) - 1;
                 let value = ((value as i128) & mask) as u32;
@@ -2945,7 +2975,9 @@ impl Emitter {
     fn emit_expr_to_hl(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
         match expr {
             Expr::Ident(name) => {
-                if let Some(variable) = self.variable_opt(name) {
+                if let Some(value) = self.local_constant_value_for_width(name, width)? {
+                    self.line(&format!("    ld hl, {value:06X}h"));
+                } else if let Some(variable) = self.variable_opt(name) {
                     if variable.size == 1 {
                         self.emit_load_a(variable);
                         self.line("    ld hl, 000000h");
@@ -3241,7 +3273,9 @@ impl Emitter {
     fn emit_expr_to_a(&mut self, expr: &Expr) -> Result<(), Diagnostic> {
         match expr {
             Expr::Ident(name) => {
-                if let Some(variable) = self.variable_opt(name) {
+                if let Some(value) = self.local_constant_value_for_width(name, ValueWidth::U8)? {
+                    self.line(&format!("    ld a, {value:02X}h"));
+                } else if let Some(variable) = self.variable_opt(name) {
                     self.emit_load_a(variable);
                 } else {
                     let value = self.u8(expr)?;
@@ -5106,6 +5140,68 @@ impl Emitter {
         }
     }
 
+    fn eval_i64_with_local_constants(&self, expr: &Expr) -> Result<i64, Diagnostic> {
+        match expr {
+            Expr::Ident(name) => self
+                .local_constant(name)
+                .map(|constant| constant.value)
+                .map(Ok)
+                .unwrap_or_else(|| self.symbols.eval_i64(expr)),
+            Expr::Unary { op, expr } => {
+                let value = self.eval_i64_with_local_constants(expr)?;
+                Ok(match op {
+                    UnaryOp::Neg => value.wrapping_neg(),
+                    UnaryOp::BitNot => !value,
+                    UnaryOp::Not => i64::from(value == 0),
+                })
+            }
+            Expr::Binary { left, op, right } => {
+                let left = self.eval_i64_with_local_constants(left)?;
+                let right = self.eval_i64_with_local_constants(right)?;
+                Ok(match op {
+                    BinaryOp::Mul => left.wrapping_mul(right),
+                    BinaryOp::Div => trunc_div_or_zero(left, right),
+                    BinaryOp::Mod => trunc_mod_or_zero(left, right),
+                    BinaryOp::Add => left.wrapping_add(right),
+                    BinaryOp::Sub => left.wrapping_sub(right),
+                    BinaryOp::Shl => const_shl_or_zero(left, right),
+                    BinaryOp::Shr => const_shr_or_zero(left, right),
+                    BinaryOp::Lt => i64::from(left < right),
+                    BinaryOp::Le => i64::from(left <= right),
+                    BinaryOp::Gt => i64::from(left > right),
+                    BinaryOp::Ge => i64::from(left >= right),
+                    BinaryOp::Eq => i64::from(left == right),
+                    BinaryOp::Ne => i64::from(left != right),
+                    BinaryOp::BitAnd => left & right,
+                    BinaryOp::BitXor => left ^ right,
+                    BinaryOp::BitOr => left | right,
+                    BinaryOp::And => i64::from(left != 0 && right != 0),
+                    BinaryOp::Or => i64::from(left != 0 || right != 0),
+                })
+            }
+            Expr::Cast { expr, ty } => {
+                let value = self.eval_i64_with_local_constants(expr)?;
+                self.symbols.const_cast_value(value, ty)
+            }
+            _ => self.symbols.eval_i64(expr),
+        }
+    }
+
+    fn local_constant_value_for_width(
+        &self,
+        name: &str,
+        width: ValueWidth,
+    ) -> Result<Option<u32>, Diagnostic> {
+        let Some(constant) = self.local_constant(name) else {
+            return Ok(None);
+        };
+        if self.symbols.type_width(&constant.ty)? != width {
+            return Ok(None);
+        }
+        let value = self.value_for_type(constant.value, &constant.ty, width)?;
+        Ok(Some(value))
+    }
+
     fn value_for_type(&self, value: i64, ty: &Type, width: ValueWidth) -> Result<u32, Diagnostic> {
         let resolved = self.symbols.resolved_type(ty)?;
         self.symbols.validate_value_for_type(value, &resolved)?;
@@ -5803,6 +5899,80 @@ impl Emitter {
             .expect("function type scope exists during statement emission")
     }
 
+    fn current_local_constants_mut(&mut self) -> &mut HashMap<String, LocalConstant> {
+        self.local_constants
+            .last_mut()
+            .expect("function local constant scope exists during statement emission")
+    }
+
+    fn local_constant(&self, name: &str) -> Option<&LocalConstant> {
+        for index in (0..self.local_constants.len()).rev() {
+            if let Some(constant) = self.local_constants[index].get(name) {
+                return Some(constant);
+            }
+            if self
+                .scope_types
+                .get(index)
+                .is_some_and(|scope| scope.contains_key(name))
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn current_function_assigns(&self, name: &str) -> bool {
+        self.assigned_names_stack
+            .last()
+            .is_some_and(|names| names.contains(name))
+    }
+
+    fn record_local_constant(&mut self, name: &str, ty: &Type, value: &Expr) {
+        if self.current_function_assigns(name) {
+            self.current_local_constants_mut().remove(name);
+            return;
+        }
+        if !self.local_constant_supported_type(ty) {
+            self.current_local_constants_mut().remove(name);
+            return;
+        }
+        let Ok(width) = self.symbols.type_width(ty) else {
+            return;
+        };
+        let Ok(value) = self.eval_i64_with_local_constants(value) else {
+            self.current_local_constants_mut().remove(name);
+            return;
+        };
+        if self.value_for_type(value, ty, width).is_ok() {
+            self.current_local_constants_mut().insert(
+                name.to_owned(),
+                LocalConstant {
+                    value,
+                    ty: ty.clone(),
+                },
+            );
+        }
+    }
+
+    fn local_constant_supported_type(&self, ty: &Type) -> bool {
+        matches!(
+            self.symbols.resolved_type(ty),
+            Ok(Type::Named(name))
+                if matches!(
+                    name.as_str(),
+                    "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24"
+                )
+        )
+    }
+
+    fn invalidate_local_constant(&mut self, name: &str) {
+        for scope in self.local_constants.iter_mut().rev() {
+            if scope.remove(name).is_some() {
+                return;
+            }
+        }
+    }
+
     fn next_label(&mut self, prefix: &str) -> String {
         let label = format!(".L_{prefix}_{}", self.label_counter);
         self.label_counter += 1;
@@ -6360,6 +6530,36 @@ fn stmt_terminates_current_block(stmt: &Stmt) -> bool {
             block_terminates_current_block(then_body) && block_terminates_current_block(else_body)
         }
         _ => false,
+    }
+}
+
+fn assigned_names_in_block(stmts: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_assigned_names(stmts, &mut names);
+    names
+}
+
+fn collect_assigned_names(stmts: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign { target, .. } => collect_assigned_place(target, names),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_assigned_names(then_body, names);
+                collect_assigned_names(else_body, names);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => collect_assigned_names(body, names),
+            _ => {}
+        }
+    }
+}
+
+fn collect_assigned_place(place: &Place, names: &mut HashSet<String>) {
+    if let Place::Ident(name) = place {
+        names.insert(name.clone());
     }
 }
 
@@ -7506,6 +7706,47 @@ section .text
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "value 256 is outside u8 range");
+    }
+
+    #[test]
+    fn propagates_local_scalar_constants_until_assignment() {
+        let source = r#"
+            fn copied() -> u8 {
+                let base: u8 = 4
+                let derived: u8 = base + 3
+                return derived
+            }
+
+            fn assigned() -> u8 {
+                let value: u8 = 4
+                value = value + 1
+                return value
+            }
+
+            fn main() {
+                test.assert_eq_u8(copied(), 7, 1)
+                test.assert_eq_u8(assigned(), 5, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+        let copied = asm
+            .split("_copied:")
+            .nth(1)
+            .and_then(|tail| tail.split("_assigned:").next())
+            .unwrap();
+        let assigned = asm
+            .split("_assigned:")
+            .nth(1)
+            .and_then(|tail| tail.split("section .header").next())
+            .unwrap();
+
+        assert!(copied.contains("    ld a, 07h\n    ret"), "{asm}");
+        assert!(assigned.contains("    ld a, (040"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
