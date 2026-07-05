@@ -9224,6 +9224,30 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_recursive_function_with_stack_arguments() {
+        let source = r#"
+            fn stepped(value: u8, base: u8, filler: u8, step: u8) -> u8 {
+                if value == 0 {
+                    return base
+                }
+                let saved_step: u8 = step
+                return saved_step + stepped(value - 1, base, filler, step)
+            }
+
+            fn main() {
+                test.assert_eq_u8(stepped(3, 2, 7, 4), 14, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn omits_unused_private_functions_but_preserves_public_functions() {
         let source = r#"
             fn used(value: u8) -> u8 {
