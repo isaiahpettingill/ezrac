@@ -419,7 +419,7 @@ impl Symbols {
                 }
                 Declaration::Global(decl) => {
                     if !symbols.globals.contains_key(&decl.name) {
-                        symbols.allocate_global_declaration(decl)?;
+                        symbols.allocate_global_declaration(decl, program)?;
                     }
                 }
                 Declaration::Struct(_) => {}
@@ -584,7 +584,7 @@ impl Symbols {
                     self.allocate_embed_declaration(decl, program)?;
                 }
                 Declaration::Global(decl) if !self.globals.contains_key(&decl.name) => {
-                    self.allocate_global_declaration(decl)?;
+                    self.allocate_global_declaration(decl, program)?;
                 }
                 _ => {}
             }
@@ -598,6 +598,9 @@ impl Symbols {
         decl: &crate::ast::EmbedDecl,
         program: &Program,
     ) -> Result<(), Diagnostic> {
+        if let Some(align) = &decl.align {
+            self.ensure_const_dependencies_evaluated(align, program)?;
+        }
         let align = decl
             .align
             .as_ref()
@@ -638,6 +641,7 @@ impl Symbols {
     fn allocate_global_declaration(
         &mut self,
         decl: &crate::ast::GlobalDecl,
+        program: &Program,
     ) -> Result<(), Diagnostic> {
         if let Some(original) = module_alias_original_name(&decl.name) {
             if let Some(variable) = self.globals.get(original).copied() {
@@ -648,10 +652,26 @@ impl Symbols {
                 return Ok(());
             }
         }
+        self.ensure_type_const_dependencies_evaluated(&decl.ty, program)?;
         let variable = self.alloc_storage(&decl.ty)?;
         self.globals.insert(decl.name.clone(), variable);
         self.global_types.insert(decl.name.clone(), decl.ty.clone());
         Ok(())
+    }
+
+    fn ensure_type_const_dependencies_evaluated(
+        &mut self,
+        ty: &Type,
+        program: &Program,
+    ) -> Result<(), Diagnostic> {
+        match ty {
+            Type::Ptr(inner) => self.ensure_type_const_dependencies_evaluated(inner, program),
+            Type::Array { element, len } => {
+                self.ensure_type_const_dependencies_evaluated(element, program)?;
+                self.ensure_const_dependencies_evaluated(len, program)
+            }
+            Type::Named(_) => Ok(()),
+        }
     }
 
     fn embed_bytes(&self, source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
@@ -9642,6 +9662,34 @@ section .text
                 test.assert_eq_u8(bytes[1], 0x44, 3)
                 test.assert_eq_u8(bytes[2], 0x99, 4)
                 test.assert_eq_u16(pair.right, 0x5678, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 20_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_forward_constants_in_storage_layout() {
+        let source = r#"
+            global prefix: u8 = 0
+            global bytes: [u8; LEN + EXTRA] = [0x11, 0x22, 0x33, 0x44]
+            embed marker: bytes = bytes [0xAA] align ALIGN
+
+            const LEN: u8 = BASE + 1
+            const EXTRA: u8 = 1
+            const BASE: u8 = 2
+            const ALIGN: u8 = 8
+
+            fn main() {
+                test.assert_eq_u8(bytes[0], 0x11, 1)
+                test.assert_eq_u8(bytes[3], 0x44, 2)
+                test.assert_eq_u24(cast<u24>(marker.ptr) & 7, 0, 3)
+                test.assert_eq_u24(cast<u24>(&bytes[0]), cast<u24>(&prefix) + 1, 4)
                 test.pass()
             }
         "#;
