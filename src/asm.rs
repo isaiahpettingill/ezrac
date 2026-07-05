@@ -11193,6 +11193,14 @@ section .text
         let expected_i16_mod = ((-300i16) % 7) as u16;
         let expected_i24_div = ((-0x012345i32) / 17) & 0x00FF_FFFF;
         let expected_i24_mod = ((-0x012345i32) % 17) & 0x00FF_FFFF;
+        let expected_i8_neg_divisor_div = (7i8 / -3) as u8;
+        let expected_i8_neg_divisor_mod = (7i8 % -3) as u8;
+        let expected_i8_both_negative_div = (-7i8 / -3) as u8;
+        let expected_i8_both_negative_mod = (-7i8 % -3) as u8;
+        let expected_i16_neg_divisor_div = (300i16 / -7) as u16;
+        let expected_i16_neg_divisor_mod = (300i16 % -7) as u16;
+        let expected_i24_both_negative_div = ((-0x012345i32) / -17) & 0x00FF_FFFF;
+        let expected_i24_both_negative_mod = ((-0x012345i32) % -17) & 0x00FF_FFFF;
         let expected_i8_overflow_div = i8::MIN as u8;
         let expected_i16_overflow_div = i16::MIN as u16;
         let expected_i24_overflow_div = 0x800000u32;
@@ -11233,6 +11241,10 @@ section .text
                 test.assert_eq_u8(mod8(a, 0), 0, 4)
                 test.assert_eq_u8(div8(-128, -1), 0x{expected_i8_overflow_div:02X}, 5)
                 test.assert_eq_u8(mod8(-128, -1), 0, 6)
+                test.assert_eq_u8(div8(7, -3), 0x{expected_i8_neg_divisor_div:02X}, 15)
+                test.assert_eq_u8(mod8(7, -3), 0x{expected_i8_neg_divisor_mod:02X}, 16)
+                test.assert_eq_u8(div8(-7, -3), 0x{expected_i8_both_negative_div:02X}, 17)
+                test.assert_eq_u8(mod8(-7, -3), 0x{expected_i8_both_negative_mod:02X}, 18)
 
                 let c: i16 = -300
                 let d: i16 = 7
@@ -11240,6 +11252,8 @@ section .text
                 test.assert_eq_u16(mod16(c, d), 0x{expected_i16_mod:04X}, 8)
                 test.assert_eq_u16(div16(-32768, -1), 0x{expected_i16_overflow_div:04X}, 9)
                 test.assert_eq_u16(mod16(-32768, -1), 0, 10)
+                test.assert_eq_u16(div16(300, -7), 0x{expected_i16_neg_divisor_div:04X}, 19)
+                test.assert_eq_u16(mod16(300, -7), 0x{expected_i16_neg_divisor_mod:04X}, 20)
 
                 let e: subpx = -0x012345
                 let f: subpx = 17
@@ -11247,13 +11261,15 @@ section .text
                 test.assert_eq_u24(mod24(e, f), 0x{expected_i24_mod:06X}, 12)
                 test.assert_eq_u24(div24(-0x800000, -1), 0x{expected_i24_overflow_div:06X}, 13)
                 test.assert_eq_u24(mod24(-0x800000, -1), 0, 14)
+                test.assert_eq_u24(div24(-0x012345, -17), 0x{expected_i24_both_negative_div:06X}, 21)
+                test.assert_eq_u24(mod24(-0x012345, -17), 0x{expected_i24_both_negative_mod:06X}, 22)
                 test.pass()
             }}
             "#
         );
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
-        let run = run_assembly_test(&asm, 300_000).unwrap();
+        let run = run_assembly_test(&asm, 1_000_000).unwrap();
 
         assert!(asm.contains("    call __ezra_div_i24"), "{asm}");
         assert!(asm.contains("    call __ezra_mod_i24"), "{asm}");
