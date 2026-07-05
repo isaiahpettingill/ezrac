@@ -1369,11 +1369,11 @@ impl Emitter {
             }
             AssignOp::Shl => {
                 self.emit_load_a(variable);
-                self.emit_shift_a(BinaryOp::Shl, self.const_shift_count(value)?)?;
+                self.emit_shift_a_by_expr(BinaryOp::Shl, value)?;
             }
             AssignOp::Shr => {
                 self.emit_load_a(variable);
-                self.emit_shift_a(BinaryOp::Shr, self.const_shift_count(value)?)?;
+                self.emit_shift_a_by_expr(BinaryOp::Shr, value)?;
             }
         }
         Ok(())
@@ -1529,11 +1529,10 @@ impl Emitter {
         op: BinaryOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
-        let count = self.const_shift_count(value)?;
         let temp = self.symbols.alloc_var(variable.width()?.bytes());
         self.emit_load_width(variable);
         self.emit_store_width(temp);
-        self.emit_shift_memory(temp, op, count)?;
+        self.emit_shift_memory_by_expr(temp, op, value)?;
         self.emit_load_width(temp);
         Ok(())
     }
@@ -1856,11 +1855,10 @@ impl Emitter {
                     self.emit_wide_op_with_left_in_bc(*op, width)?;
                 }
                 BinaryOp::Shl | BinaryOp::Shr => {
-                    let count = self.const_shift_count(right)?;
                     let temp = self.symbols.alloc_var(width.bytes());
                     self.emit_expr_to_hl(left, width)?;
                     self.emit_store_width(temp);
-                    self.emit_shift_memory(temp, *op, count)?;
+                    self.emit_shift_memory_by_expr(temp, *op, right)?;
                     self.emit_load_width(temp);
                 }
                 BinaryOp::Div | BinaryOp::Mod => {
@@ -2238,9 +2236,8 @@ impl Emitter {
             }
         }
         if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
-            let count = self.const_shift_count(right)?;
             self.emit_expr_to_a(left)?;
-            self.emit_shift_a(op, count)?;
+            self.emit_shift_a_by_expr(op, right)?;
             return Ok(());
         }
         if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
@@ -2635,6 +2632,19 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_shift_a_by_expr(&mut self, op: BinaryOp, count: &Expr) -> Result<(), Diagnostic> {
+        if let Some(count) = self.maybe_const_shift_count(count)? {
+            return self.emit_shift_a(op, count);
+        }
+        let temp = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        self.emit_store_a(temp);
+        self.emit_expr_to_a(count)?;
+        self.line("    ld b, a");
+        self.emit_shift_memory_dynamic(temp, op)?;
+        self.emit_load_a(temp);
+        Ok(())
+    }
+
     fn emit_shift_memory(
         &mut self,
         variable: Variable,
@@ -2648,6 +2658,42 @@ impl Emitter {
                 _ => unreachable!("not a shift op"),
             }
         }
+        Ok(())
+    }
+
+    fn emit_shift_memory_by_expr(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        count: &Expr,
+    ) -> Result<(), Diagnostic> {
+        if let Some(count) = self.maybe_const_shift_count(count)? {
+            return self.emit_shift_memory(variable, op, count);
+        }
+        self.emit_expr_to_a(count)?;
+        self.line("    ld b, a");
+        self.emit_shift_memory_dynamic(variable, op)
+    }
+
+    fn emit_shift_memory_dynamic(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+    ) -> Result<(), Diagnostic> {
+        let loop_label = self.next_label("shift_loop");
+        let done_label = self.next_label("shift_done");
+        self.line(&format!("{loop_label}:"));
+        self.line("    ld a, b");
+        self.line("    or a");
+        self.line(&format!("    jp z, {done_label}"));
+        match op {
+            BinaryOp::Shl => self.emit_shift_memory_left_once(variable),
+            BinaryOp::Shr => self.emit_shift_memory_right_once(variable),
+            _ => unreachable!("not a shift op"),
+        }
+        self.line("    dec b");
+        self.line(&format!("    jp {loop_label}"));
+        self.line(&format!("{done_label}:"));
         Ok(())
     }
 
@@ -3384,8 +3430,14 @@ impl Emitter {
         }
     }
 
-    fn const_shift_count(&self, expr: &Expr) -> Result<u8, Diagnostic> {
-        let value = self.symbols.eval_i64(expr)?;
+    fn maybe_const_shift_count(&self, expr: &Expr) -> Result<Option<u8>, Diagnostic> {
+        match self.symbols.eval_i64(expr) {
+            Ok(value) => self.validate_shift_count(value).map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn validate_shift_count(&self, value: i64) -> Result<u8, Diagnostic> {
         if !(0..=24).contains(&value) {
             return Err(Diagnostic::new(format!(
                 "shift count {value} is outside supported range 0..=24"
@@ -5192,6 +5244,56 @@ mod tests {
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 10_000).unwrap();
 
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_runtime_shift_counts() {
+        let source = r#"
+            fn shl8(value: u8, count: u8) -> u8 {
+                return value << count
+            }
+
+            fn shr8(value: u8, count: u8) -> u8 {
+                return value >> count
+            }
+
+            fn main() {
+                let count: u8 = 3
+                test.assert_eq_u8(shl8(0x12, count), 0x90, 1)
+                test.assert_eq_u8(shr8(0x81, count), 0x10, 2)
+
+                let word_count: u8 = 4
+                let word: u16 = 0x1234 << word_count
+                test.assert_eq_u16(word, 0x2340, 3)
+
+                let word_shift: u8 = 3
+                let word_assign: u16 = word
+                word_assign >>= word_shift
+                test.assert_eq_u16(word_assign, 0x0468, 4)
+
+                let wide_count: u8 = 4
+                let wide: u24 = 0x010203 << wide_count
+                test.assert_eq_u24(wide, 0x102030, 5)
+
+                let wide_assign: u24 = wide
+                let wide_shift: u8 = 2
+                wide_assign >>= wide_shift
+                test.assert_eq_u24(wide_assign, 0x04080C, 6)
+
+                let byte: u8 = 0x80
+                let byte_shift: u8 = 8
+                let zero: u8 = byte >> byte_shift
+                test.assert_eq_u8(zero, 0, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 40_000).unwrap();
+
+        assert!(asm.contains("    dec b"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
