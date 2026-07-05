@@ -171,6 +171,7 @@ impl ValueWidth {
 struct Symbols {
     constants: HashMap<String, i64>,
     constant_types: HashMap<String, Type>,
+    evaluating_constants: HashSet<String>,
     aliases: HashMap<String, Type>,
     structs: HashMap<String, StructLayout>,
     embeds: HashMap<String, EmbedObject>,
@@ -220,6 +221,7 @@ impl Symbols {
         let mut symbols = Self {
             constants: sdk_constants(),
             constant_types: HashMap::new(),
+            evaluating_constants: HashSet::new(),
             aliases: HashMap::new(),
             structs: HashMap::new(),
             embeds: HashMap::new(),
@@ -363,25 +365,7 @@ impl Symbols {
         for declaration in &program.declarations {
             match declaration {
                 Declaration::Const(decl) => {
-                    symbols.validate_const_expr_arithmetic_compatibility(&decl.value)?;
-                    let mut value = if let Expr::String(text) = &decl.value {
-                        if symbols.resolved_type(&decl.ty)? != ptr_u8_type() {
-                            return Err(Diagnostic::new("type mismatch"));
-                        }
-                        symbols.intern_string_literal(text)?.addr as i64
-                    } else {
-                        symbols.eval_i64(&decl.value)?
-                    };
-                    if !matches!(decl.value, Expr::String(_))
-                        && symbols.const_expr_uses_wrapping_arithmetic(&decl.value)
-                    {
-                        value = symbols.wrap_value_for_type(value, &decl.ty)?;
-                    }
-                    symbols.validate_value_for_type(value, &decl.ty)?;
-                    symbols.constants.insert(decl.name.clone(), value);
-                    symbols
-                        .constant_types
-                        .insert(decl.name.clone(), decl.ty.clone());
+                    symbols.evaluate_const_declaration(decl, program)?;
                 }
                 Declaration::Port(decl) => {
                     let resolved = symbols.resolved_type(&decl.ty)?;
@@ -429,58 +413,14 @@ impl Symbols {
                         .insert(decl.name.clone(), decl.ty.clone());
                 }
                 Declaration::Embed(decl) => {
-                    let align = decl
-                        .align
-                        .as_ref()
-                        .map(|expr| symbols.eval_i64(expr))
-                        .transpose()?
-                        .unwrap_or(1);
-                    if align <= 0 || (align & (align - 1)) != 0 {
-                        return Err(Diagnostic::new(format!(
-                            "embed `{}` alignment {align} is not a positive power of two",
-                            decl.name
-                        )));
+                    if !symbols.embeds.contains_key(&decl.name) {
+                        symbols.allocate_embed_declaration(decl, program)?;
                     }
-                    let align = u32::try_from(align).map_err(|_| {
-                        Diagnostic::new(format!(
-                            "embed `{}` alignment {align} exceeds 24-bit address space",
-                            decl.name
-                        ))
-                    })?;
-                    if let Some(original) = module_alias_original_name(&decl.name) {
-                        if let Some(embed) = symbols.embeds.get(original).cloned() {
-                            symbols.register_embed_properties(
-                                &decl.name,
-                                embed.variable,
-                                embed.variable.len.unwrap_or(0),
-                            );
-                            continue;
-                        }
-                    }
-                    let bytes = symbols.embed_bytes(&decl.source, &program.source_path)?;
-                    symbols.align_next_addr(align);
-                    let variable =
-                        symbols.alloc_array(u32::from(ValueWidth::U8.bytes()), bytes.len() as u32);
-                    symbols.register_embed_properties(&decl.name, variable, bytes.len() as u32);
-                    symbols
-                        .embeds
-                        .insert(decl.name.clone(), EmbedObject { variable, bytes });
                 }
                 Declaration::Global(decl) => {
-                    if let Some(original) = module_alias_original_name(&decl.name) {
-                        if let Some(variable) = symbols.globals.get(original).copied() {
-                            symbols.globals.insert(decl.name.clone(), variable);
-                            if let Some(ty) = symbols.global_types.get(original).cloned() {
-                                symbols.global_types.insert(decl.name.clone(), ty);
-                            }
-                            continue;
-                        }
+                    if !symbols.globals.contains_key(&decl.name) {
+                        symbols.allocate_global_declaration(decl)?;
                     }
-                    let variable = symbols.alloc_storage(&decl.ty)?;
-                    symbols.globals.insert(decl.name.clone(), variable);
-                    symbols
-                        .global_types
-                        .insert(decl.name.clone(), decl.ty.clone());
                 }
                 Declaration::Struct(_) => {}
                 _ => {}
@@ -548,6 +488,146 @@ impl Symbols {
             self.constants.insert(key.clone(), value);
             self.constant_types.insert(key, ty);
         }
+    }
+
+    fn evaluate_const_declaration(
+        &mut self,
+        decl: &crate::ast::ConstDecl,
+        program: &Program,
+    ) -> Result<(), Diagnostic> {
+        if self.constant_types.contains_key(&decl.name) {
+            return Ok(());
+        }
+        if !self.evaluating_constants.insert(decl.name.clone()) {
+            return Err(Diagnostic::new(format!(
+                "circular constant reference involving `{}`",
+                decl.name
+            )));
+        }
+
+        let result = (|| {
+            let mut address_roots = Vec::new();
+            collect_const_address_roots(&decl.value, &mut address_roots);
+            for root in address_roots {
+                if !self.globals.contains_key(&root) {
+                    self.ensure_global_storage_allocated_through(&root, program)?;
+                }
+            }
+            self.validate_const_expr_arithmetic_compatibility(&decl.value)?;
+            let mut value = if let Expr::String(text) = &decl.value {
+                if self.resolved_type(&decl.ty)? != ptr_u8_type() {
+                    return Err(Diagnostic::new("type mismatch"));
+                }
+                self.intern_string_literal(text)?.addr as i64
+            } else {
+                self.eval_i64(&decl.value)?
+            };
+            if !matches!(decl.value, Expr::String(_))
+                && self.const_expr_uses_wrapping_arithmetic(&decl.value)
+            {
+                value = self.wrap_value_for_type(value, &decl.ty)?;
+            }
+            self.validate_value_for_type(value, &decl.ty)?;
+            self.constants.insert(decl.name.clone(), value);
+            self.constant_types.insert(decl.name.clone(), decl.ty.clone());
+            Ok(())
+        })();
+
+        self.evaluating_constants.remove(&decl.name);
+        result
+    }
+
+    fn ensure_global_storage_allocated_through(
+        &mut self,
+        target: &str,
+        program: &Program,
+    ) -> Result<(), Diagnostic> {
+        let Some(target_index) = program.declarations.iter().position(
+            |declaration| matches!(declaration, Declaration::Global(decl) if decl.name == target),
+        ) else {
+            return Ok(());
+        };
+
+        for declaration in &program.declarations[..=target_index] {
+            match declaration {
+                Declaration::Const(decl)
+                    if !self.constant_types.contains_key(&decl.name)
+                        && !self.evaluating_constants.contains(&decl.name) =>
+                {
+                    self.evaluate_const_declaration(decl, program)?;
+                }
+                Declaration::Embed(decl) if !self.embeds.contains_key(&decl.name) => {
+                    self.allocate_embed_declaration(decl, program)?;
+                }
+                Declaration::Global(decl) if !self.globals.contains_key(&decl.name) => {
+                    self.allocate_global_declaration(decl)?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn allocate_embed_declaration(
+        &mut self,
+        decl: &crate::ast::EmbedDecl,
+        program: &Program,
+    ) -> Result<(), Diagnostic> {
+        let align = decl
+            .align
+            .as_ref()
+            .map(|expr| self.eval_i64(expr))
+            .transpose()?
+            .unwrap_or(1);
+        if align <= 0 || (align & (align - 1)) != 0 {
+            return Err(Diagnostic::new(format!(
+                "embed `{}` alignment {align} is not a positive power of two",
+                decl.name
+            )));
+        }
+        let align = u32::try_from(align).map_err(|_| {
+            Diagnostic::new(format!(
+                "embed `{}` alignment {align} exceeds 24-bit address space",
+                decl.name
+            ))
+        })?;
+        if let Some(original) = module_alias_original_name(&decl.name) {
+            if let Some(embed) = self.embeds.get(original).cloned() {
+                self.register_embed_properties(
+                    &decl.name,
+                    embed.variable,
+                    embed.variable.len.unwrap_or(0),
+                );
+                return Ok(());
+            }
+        }
+        let bytes = self.embed_bytes(&decl.source, &program.source_path)?;
+        self.align_next_addr(align);
+        let variable = self.alloc_array(u32::from(ValueWidth::U8.bytes()), bytes.len() as u32);
+        self.register_embed_properties(&decl.name, variable, bytes.len() as u32);
+        self.embeds
+            .insert(decl.name.clone(), EmbedObject { variable, bytes });
+        Ok(())
+    }
+
+    fn allocate_global_declaration(
+        &mut self,
+        decl: &crate::ast::GlobalDecl,
+    ) -> Result<(), Diagnostic> {
+        if let Some(original) = module_alias_original_name(&decl.name) {
+            if let Some(variable) = self.globals.get(original).copied() {
+                self.globals.insert(decl.name.clone(), variable);
+                if let Some(ty) = self.global_types.get(original).cloned() {
+                    self.global_types.insert(decl.name.clone(), ty);
+                }
+                return Ok(());
+            }
+        }
+        let variable = self.alloc_storage(&decl.ty)?;
+        self.globals.insert(decl.name.clone(), variable);
+        self.global_types.insert(decl.name.clone(), decl.ty.clone());
+        Ok(())
     }
 
     fn embed_bytes(&self, source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
@@ -6706,6 +6786,65 @@ fn declaration_name(declaration: &Declaration) -> Option<&str> {
     }
 }
 
+fn collect_const_address_roots(expr: &Expr, roots: &mut Vec<String>) {
+    match expr {
+        Expr::AddressOf(name) => roots.push(name.clone()),
+        Expr::AddressOfIndex { name, index } => {
+            roots.push(name.clone());
+            collect_const_address_roots(index, roots);
+        }
+        Expr::AddressOfField { base, .. } => roots.push(base.clone()),
+        Expr::AddressOfAccess(path) => {
+            roots.push(path.root.clone());
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_const_address_roots(index, roots);
+                }
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            collect_const_address_roots(expr, roots)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_const_address_roots(left, roots);
+            collect_const_address_roots(right, roots);
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_const_address_roots(value, roots);
+            }
+        }
+        Expr::Index { index, .. } => {
+            collect_const_address_roots(index, roots);
+        }
+        Expr::Access(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_const_address_roots(index, roots);
+                }
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_const_address_roots(value, roots);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_const_address_roots(arg, roots);
+            }
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. } => {}
+    }
+}
+
 fn has_attr(function: &Function, attr: &str) -> bool {
     function.attrs.iter().any(|candidate| candidate == attr)
 }
@@ -9360,6 +9499,47 @@ section .text
                 test.assert_eq_u16(cell.next, 0x3344, 3)
                 test.assert_eq_u16(packet.cells[1].next, 0x5566, 4)
                 test.assert_eq_u8(bytes[2], 0x77, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 20_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_forward_constant_storage_addresses() {
+        let source = r#"
+            struct Pair {
+                left: u8
+                right: u16
+            }
+
+            const SECOND: ptr<u8> = &bytes[1]
+            const PAIR_RIGHT: ptr<u16> = &pair.right
+            const RAW_THIRD: ptr24 = cast<ptr24>(&bytes[2])
+
+            embed marker: bytes = bytes [0xAA, 0xBB]
+            global prefix: u8 = 0
+            global bytes: [u8; 3] = [0, 0, 0]
+            global pair: Pair = Pair { left: 0, right: 0 }
+
+            fn main() {
+                let second: ptr<u8> = SECOND;
+                let pair_right: ptr<u16> = PAIR_RIGHT;
+                *(second) = 0x44;
+                *(pair_right) = 0x5678;
+                let third: ptr<u8> = cast<ptr<u8>>(RAW_THIRD);
+                *(third) = 0x99;
+
+                test.assert_eq_u24(cast<u24>(&prefix), cast<u24>(marker.end), 1)
+                test.assert_eq_u24(cast<u24>(&bytes[0]), cast<u24>(&prefix) + 1, 2)
+                test.assert_eq_u8(bytes[1], 0x44, 3)
+                test.assert_eq_u8(bytes[2], 0x99, 4)
+                test.assert_eq_u16(pair.right, 0x5678, 5)
                 test.pass()
             }
         "#;
