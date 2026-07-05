@@ -208,8 +208,7 @@ impl Symbols {
                 .iter()
                 .map(|param| symbols.type_width(&param.ty))
                 .collect::<Result<Vec<_>, _>>()?;
-            let uses_arg_slots = params.len() <= 3
-                && param_widths.get(2).is_some_and(|third| third.bytes() != 1)
+            let uses_arg_slots = param_widths.get(2).is_some_and(|third| third.bytes() != 1)
                 && param_widths
                     .get(1)
                     .is_some_and(|second| second.bytes() == 1);
@@ -5675,22 +5674,30 @@ mod tests {
 
     #[test]
     fn emits_and_runs_user_function_with_spilled_parameters() {
-        let source = r#"
-            fn add_four(a: u8, b: u8, c: u8, d: u8) -> u8 {
+        let expected_mixed = 0x000100u32 + 5 + 0x000020 + 7;
+        let source = format!(
+            r#"
+            fn add_four(a: u8, b: u8, c: u8, d: u8) -> u8 {{
                 return a + b + c + d
-            }
+            }}
 
-            fn wide_third(a: u24, b: u8, c: u24) -> u24 {
+            fn wide_third(a: u24, b: u8, c: u24) -> u24 {{
                 return a + b + c
-            }
+            }}
 
-            fn main() {
+            fn wide_third_with_extra(a: u24, b: u8, c: u24, d: u8) -> u24 {{
+                return a + b + c + d
+            }}
+
+            fn main() {{
                 test.assert_eq_u8(add_four(1, 2, 3, 4), 10, 1)
                 test.assert_eq_u24(wide_third(0x000100, 5, 0x000020), 0x000125, 2)
+                test.assert_eq_u24(wide_third_with_extra(0x000100, 5, 0x000020, 7), 0x{expected_mixed:06X}, 3)
                 test.pass()
-            }
-        "#;
-        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            }}
+        "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
 
