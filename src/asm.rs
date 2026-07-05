@@ -4753,6 +4753,53 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_imported_module_qualified_types() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_module_types_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/types.ezra"),
+            r#"
+            pub alias Byte = u8
+            pub struct Pair {
+                lo: Byte
+                hi: Byte
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.types
+            fn main() {
+                let lo: types.Byte = 3
+                let pair: types.Pair = types.Pair { lo: lo, hi: 4 }
+                test.assert_eq_u8(pair.lo, 3, 1)
+                test.assert_eq_u8(pair.hi, 4, 2)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_imported_module_qualified_ports() {
         let root = std::env::temp_dir().join(format!(
             "ezra_module_ports_{}_{}",

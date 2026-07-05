@@ -878,6 +878,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_module_qualified_types_and_struct_literals() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                let value: types.Byte = 7
+                let pair: types.Pair = types.Pair { lo: value, hi: 8 }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Let {
+                ty: Type::Named(name),
+                ..
+            } if name == "types.Byte"
+        ));
+        assert!(matches!(
+            &main.body[1],
+            Stmt::Let {
+                ty: Type::Named(name),
+                value: Expr::StructInit { ty, .. },
+                ..
+            } if name == "types.Pair" && ty == "types.Pair"
+        ));
+    }
+
+    #[test]
     fn parses_array_literal_index_and_address_of_index() {
         let program = parse_program(
             Path::new("game.ezra"),

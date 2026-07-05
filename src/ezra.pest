@@ -89,7 +89,7 @@ addr_index_expr = { "&" ~ ident ~ "[" ~ expr ~ "]" }
 addr_field_expr = { "&" ~ ident ~ "." ~ ident ~ !("(") }
 addr_expr = { "&" ~ ident }
 deref_expr = { "*" ~ (ident | "(" ~ expr ~ ")") }
-struct_lit = { ident ~ "{" ~ field_inits? ~ "}" }
+struct_lit = { path ~ "{" ~ field_inits? ~ "}" }
 field_inits = { field_init ~ ("," ~ field_init)* ~ ","? }
 field_init = { ident ~ ":" ~ expr }
 index_expr = { ident ~ "[" ~ expr ~ "]" }
@@ -115,7 +115,7 @@ unary_op = { "-" | "~" | "!" }
 ty = { ptr_ty | array_ty | named_ty }
 ptr_ty = { "ptr" ~ "<" ~ ty ~ ">" }
 array_ty = { "[" ~ ty ~ ";" ~ expr ~ "]" }
-named_ty = { ident }
+named_ty = { path }
 
 path = @{ ident ~ ("." ~ ident)* }
 ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

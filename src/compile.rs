@@ -135,6 +135,11 @@ fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<
     declarations
         .iter()
         .filter_map(|declaration| match declaration {
+            Declaration::Alias(decl) if decl.public => {
+                let mut alias = decl.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Alias(alias))
+            }
             Declaration::Const(decl) if decl.public => {
                 let mut alias = decl.clone();
                 alias.name = format!("{module}.{}", alias.name);
@@ -149,6 +154,11 @@ fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<
                 let mut alias = decl.clone();
                 alias.name = format!("{module}.{}", alias.name);
                 Some(Declaration::Mmio(alias))
+            }
+            Declaration::Struct(decl) if decl.public => {
+                let mut alias = decl.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Struct(alias))
             }
             Declaration::Function(function) if function.public && function.name != "main" => {
                 let mut alias = function.clone();
@@ -179,12 +189,14 @@ fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
             ))
         })?;
         let imported = parse_program(&import_path, &source)?;
+        let module = import.rsplit('.').next().unwrap_or(import);
         for declaration in &imported.declarations {
             let Some(name) = declaration_name(declaration) else {
                 continue;
             };
             if !declaration_is_public(declaration) {
                 private_imports.insert(name.to_owned(), import.clone());
+                private_imports.insert(format!("{module}.{name}"), import.clone());
             }
         }
     }
@@ -645,6 +657,19 @@ mod tests {
         assert_eq!(
             error.message,
             "declaration `Secret` from import `lib.types` is private"
+        );
+
+        std::fs::write(
+            &main_path,
+            "import lib.types\nfn main() { let x: types.Secret = types.Secret { value: 1 }; test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `types.Secret` from import `lib.types` is private"
         );
 
         let _ = std::fs::remove_dir_all(root);
