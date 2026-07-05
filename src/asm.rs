@@ -3021,6 +3021,7 @@ impl Emitter {
     }
 
     fn array_element_variable(&self, name: &str, index: &Expr) -> Result<Variable, Diagnostic> {
+        self.validate_array_index_type(index)?;
         let (array, element_size, len) = self.array_info(name)?;
         let index_value = self.symbols.eval_i64(index)?;
         if index_value < 0 || index_value as u32 >= len {
@@ -3131,6 +3132,28 @@ impl Emitter {
         }
     }
 
+    fn validate_array_index_type(&self, index: &Expr) -> Result<(), Diagnostic> {
+        if expr_is_untyped_literal(index) {
+            let value = self.symbols.eval_i64(index)?;
+            if !(0..=0xFF_FFFF).contains(&value) {
+                return Err(Diagnostic::new(format!(
+                    "array index value {value} is outside u24 range"
+                )));
+            }
+            return Ok(());
+        }
+
+        let ty = self.symbols.resolved_type(&self.expr_type(index)?)?;
+        if matches!(&ty, Type::Named(name) if matches!(name.as_str(), "u8" | "u16" | "u24")) {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(format!(
+                "array index type `{}` is not supported; use u8, u16, or u24",
+                type_display(&ty)
+            )))
+        }
+    }
+
     fn pointer_pointee_size(&self, expr: &Expr) -> Result<Option<u8>, Diagnostic> {
         match self.expr_type(expr) {
             Ok(ty) => match self.symbols.resolved_type(&ty)? {
@@ -3142,6 +3165,7 @@ impl Emitter {
     }
 
     fn emit_array_element_address(&mut self, name: &str, index: &Expr) -> Result<(), Diagnostic> {
+        self.validate_array_index_type(index)?;
         if let Ok(element) = self.array_element_variable(name, index) {
             self.line(&format!("    ld hl, {:06X}h", element.addr));
             return Ok(());
@@ -4171,6 +4195,62 @@ mod tests {
                 fn main() { test.pass() }
                 "#,
                 "type mismatch",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_array_index_types() {
+        let cases = [
+            (
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    let flag: bool = true
+                    let value: u8 = bytes[flag]
+                    test.pass()
+                }
+                "#,
+                "array index type `bool` is not supported; use u8, u16, or u24",
+            ),
+            (
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    let idx: i8 = 1
+                    bytes[idx] = 7
+                    test.pass()
+                }
+                "#,
+                "array index type `i8` is not supported; use u8, u16, or u24",
+            ),
+            (
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    let ptr: ptr<u8> = &bytes[0]
+                    let p: ptr<u8> = &bytes[ptr]
+                    test.pass()
+                }
+                "#,
+                "array index type `ptr<u8>` is not supported; use u8, u16, or u24",
+            ),
+            (
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    let value: u8 = bytes[-1]
+                    test.pass()
+                }
+                "#,
+                "array index value -1 is outside u24 range",
             ),
         ];
 
