@@ -153,7 +153,7 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     }
 
     let layout_table = serialize_layout_table(layout);
-    let symbol_table = serialize_symbol_table(symbols);
+    let symbol_table = serialize_symbol_table(symbols)?;
     let assets = collect_assets(program)?;
     let asset_table_len = asset_table_len(&assets)?;
     let loaded_text_len = loaded_text_len(
@@ -332,7 +332,7 @@ pub fn cartridge_map_entries(
     let code_len = u32::try_from(code_len)
         .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
     let layout_table = serialize_layout_table(layout);
-    let symbol_table = serialize_symbol_table(symbols);
+    let symbol_table = serialize_symbol_table(symbols)?;
     let assets = collect_assets(program)?;
     let asset_table_len = asset_table_len(&assets)?;
     let code_len_usize = usize::try_from(code_len)
@@ -1676,19 +1676,21 @@ fn serialize_layout_table(layout: &Layout) -> Vec<u8> {
     out
 }
 
-fn serialize_symbol_table(symbols: &[AssemblySymbol]) -> Vec<u8> {
+fn serialize_symbol_table(symbols: &[AssemblySymbol]) -> Result<Vec<u8>, Diagnostic> {
     let mut out = Vec::new();
     for symbol in symbols {
+        if symbol.addr > Address24::MAX {
+            return Err(Diagnostic::new(format!(
+                "assembly symbol `{}` address 0x{:X} is outside the 24-bit address space",
+                symbol.name, symbol.addr
+            )));
+        }
         push_line(
             &mut out,
-            format!(
-                "symbol {} 0x{:06X}",
-                symbol.name,
-                symbol.addr & Address24::MAX
-            ),
+            format!("symbol {} 0x{:06X}", symbol.name, symbol.addr),
         );
     }
-    out
+    Ok(out)
 }
 
 fn push_line(out: &mut Vec<u8>, line: String) {
@@ -2409,6 +2411,26 @@ mod tests {
         let text = std::str::from_utf8(&image[symbol_table..]).unwrap();
         assert!(text.starts_with("symbol __ezra_start 0x010040\n"), "{text}");
         assert!(text.contains("symbol _main 0x010064\n"), "{text}");
+    }
+
+    #[test]
+    fn cartridge_rejects_symbols_outside_address_space() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let symbols = [AssemblySymbol {
+            name: "_bad".to_owned(),
+            addr: 0x01_000000,
+        }];
+
+        let image_error =
+            build_cartridge_with_code_and_symbols(&program, &[], &symbols).unwrap_err();
+        let map_error =
+            build_cartridge_map(&program, &Layout::ezra_default(), 0, &symbols).unwrap_err();
+
+        assert_eq!(
+            image_error.message,
+            "assembly symbol `_bad` address 0x1000000 is outside the 24-bit address space"
+        );
+        assert_eq!(map_error.message, image_error.message);
     }
 
     #[test]
