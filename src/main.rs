@@ -786,6 +786,52 @@ mod tests {
     }
 
     #[test]
+    fn commands_reject_custom_layouts_missing_required_sections() {
+        let root = temp_root("layout_missing_required_sections");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        let layout_path = root.join("game.ezralayout");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout incomplete {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xEFFE00;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    section .header -> code align 64;
+                    section .text -> code align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = check(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        })
+        .unwrap_err();
+        let prefix = format!("layout is invalid:\n{}:1:1:", layout_path.display());
+        assert!(
+            error.starts_with(&prefix),
+            "expected `{error}` to start with `{prefix}`"
+        );
+        for section in [".rodata", ".data", ".bss", ".assets", ".scratch"] {
+            let diagnostic = format!("layout is missing required section `{section}`");
+            assert!(
+                error.contains(&diagnostic),
+                "expected `{error}` to contain `{diagnostic}`"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn parses_test_port_metadata() {
         let metadata = parse_test_metadata(
             r#"
