@@ -2687,11 +2687,25 @@ impl Emitter {
         for input in inputs {
             self.emit_inline_asm_input_load(input)?;
         }
+        let preserve_ix = !self.current_function_is_naked() && asm_clobbers_include(clobbers, "ix");
+        let preserve_iy = !self.current_function_is_naked() && asm_clobbers_include(clobbers, "iy");
+        if preserve_ix {
+            self.line("    push ix");
+        }
+        if preserve_iy {
+            self.line("    push iy");
+        }
         for line in lines {
             self.line(&format!(
                 "    {}",
                 substitute_inline_asm_operands(line, &operands)?
             ));
+        }
+        if preserve_iy {
+            self.line("    pop iy");
+        }
+        if preserve_ix {
+            self.line("    pop ix");
         }
         for output in outputs {
             self.emit_inline_asm_output_store(output)?;
@@ -13528,6 +13542,63 @@ section .text
             assert!(run.halted, "{asm}");
             assert_eq!(run.result_code, 0, "{asm}");
         }
+    }
+
+    #[test]
+    fn normal_inline_asm_preserves_callee_saved_index_registers() {
+        let source = r#"
+            fn main() {
+                asm volatile(clobber ix, clobber iy) {
+                    "ld ix, 012345h"
+                    "ld iy, 06789Ah"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let main = asm.split("_main:").nth(1).unwrap();
+        let main = main.split("section .header").next().unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(
+            main.contains(
+                "    push ix\n    push iy\n    ld ix, 012345h\n    ld iy, 06789Ah\n    pop iy\n    pop ix"
+            ),
+            "{asm}"
+        );
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn naked_inline_asm_keeps_declared_index_clobbers_raw() {
+        let source = r#"
+            naked fn raw_entry() {
+                asm volatile(clobber ix, clobber iy) {
+                    "ld ix, 012345h"
+                    "ld iy, 06789Ah"
+                    "ret"
+                }
+            }
+
+            fn main() {
+                raw_entry()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let raw_entry = asm.split("_raw_entry:").nth(1).unwrap();
+        let raw_entry = raw_entry.split("_main:").next().unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(!raw_entry.contains("    push ix"), "{asm}");
+        assert!(!raw_entry.contains("    push iy"), "{asm}");
+        assert!(raw_entry.contains("    ld ix, 012345h"), "{asm}");
+        assert!(raw_entry.contains("    ld iy, 06789Ah"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
