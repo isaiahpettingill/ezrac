@@ -1019,7 +1019,19 @@ impl Emitter {
         self.line("    call _main");
         self.line("__ezra_exit:");
         self.line("    jp __ezra_exit");
+        self.emit_runtime_test_helpers();
         self.line("");
+    }
+
+    fn emit_runtime_test_helpers(&mut self) {
+        self.line("__ezra_pass:");
+        self.emit_out(0x0D, 0);
+        self.emit_out(0x0E, 1);
+        self.line("    ret");
+        self.line("__ezra_fail:");
+        self.emit_out_a(0x0D);
+        self.emit_out(0x0E, 1);
+        self.line("    ret");
     }
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
@@ -1813,14 +1825,12 @@ impl Emitter {
     fn emit_call(&mut self, path: &[String], args: &[Expr]) -> Result<(), Diagnostic> {
         match path_text(path).as_str() {
             "test.pass" | "ezra.test.pass" => {
-                self.emit_out(0x0D, 0);
-                self.emit_out(0x0E, 1);
+                self.line("    call __ezra_pass");
             }
             "test.fail" | "ezra.test.fail" => {
                 let expr = args.first().cloned().unwrap_or(Expr::Int(1));
                 self.emit_expr_to_a(&expr)?;
-                self.emit_out_a(0x0D);
-                self.emit_out(0x0E, 1);
+                self.emit_test_fail_call();
             }
             "test.assert_eq_u8" | "ezra.test.assert_eq_u8" => {
                 if args.len() != 3 {
@@ -1837,8 +1847,7 @@ impl Emitter {
                 self.line("    cp c");
                 self.line(&format!("    jp z, {ok}"));
                 self.emit_expr_to_a(&args[2])?;
-                self.emit_out_a(0x0D);
-                self.emit_out(0x0E, 1);
+                self.emit_test_fail_call();
                 self.line(&format!("{ok}:"));
             }
             "test.assert_eq_u16" | "ezra.test.assert_eq_u16" => {
@@ -1856,8 +1865,7 @@ impl Emitter {
                 self.line("    sbc hl, bc");
                 self.line(&format!("    jp z, {ok}"));
                 self.emit_expr_to_a(&args[2])?;
-                self.emit_out_a(0x0D);
-                self.emit_out(0x0E, 1);
+                self.emit_test_fail_call();
                 self.line(&format!("{ok}:"));
             }
             "test.assert_eq_u24" | "ezra.test.assert_eq_u24" => {
@@ -1875,8 +1883,7 @@ impl Emitter {
                 self.line("    sbc hl, bc");
                 self.line(&format!("    jp z, {ok}"));
                 self.emit_expr_to_a(&args[2])?;
-                self.emit_out_a(0x0D);
-                self.emit_out(0x0E, 1);
+                self.emit_test_fail_call();
                 self.line(&format!("{ok}:"));
             }
             "debug.char" | "ezra.debug.char" => {
@@ -1892,6 +1899,10 @@ impl Emitter {
             path => self.emit_user_call(path, args)?,
         }
         Ok(())
+    }
+
+    fn emit_test_fail_call(&mut self) {
+        self.line("    call __ezra_fail");
     }
 
     fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
@@ -5051,8 +5062,27 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
 
+        assert!(asm.contains("__ezra_pass:"));
+        assert!(asm.contains("__ezra_fail:"));
+        assert!(asm.contains("    call __ezra_pass"));
         assert!(asm.contains("out0 (0Dh), a"));
         assert!(asm.contains("out0 (0Eh), a"));
+    }
+
+    #[test]
+    fn emits_test_fail_helper_calls() {
+        let source = r#"
+            fn main() {
+                test.fail(7)
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(asm.contains("    call __ezra_fail"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 7, "{asm}");
     }
 
     #[test]
