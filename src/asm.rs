@@ -901,7 +901,7 @@ impl Emitter {
                 .copied()
                 .expect("global allocation exists");
             if variable.element_size.is_some() {
-                self.emit_array_initializer(variable, &decl.value)?;
+                self.emit_array_initializer(variable, &decl.ty, &decl.value)?;
             } else if self.is_struct_type(&decl.ty)? {
                 self.emit_struct_initializer(variable, &decl.ty, &decl.value)?;
             } else {
@@ -1110,7 +1110,7 @@ impl Emitter {
                 self.current_scope_types_mut()
                     .insert(name.clone(), ty.clone());
                 if variable.element_size.is_some() {
-                    self.emit_array_initializer(variable, value)?;
+                    self.emit_array_initializer(variable, ty, value)?;
                 } else if self.is_struct_type(ty)? {
                     self.emit_struct_initializer(variable, ty, value)?;
                 } else {
@@ -1532,6 +1532,7 @@ impl Emitter {
     fn emit_array_initializer(
         &mut self,
         variable: Variable,
+        ty: &Type,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
         let Expr::Array(values) = value else {
@@ -1545,6 +1546,13 @@ impl Emitter {
         let len = variable
             .len
             .ok_or_else(|| Diagnostic::new("array variable missing length"))?;
+        let Type::Array {
+            element: element_ty,
+            ..
+        } = self.symbols.resolved_type(ty)?
+        else {
+            return Err(Diagnostic::new("array initializer requires an array type"));
+        };
         if values.len() as u32 > len {
             return Err(Diagnostic::new(format!(
                 "array initializer has {} values but array length is {len}",
@@ -1554,6 +1562,7 @@ impl Emitter {
         for index in 0..len {
             let element = scalar_var(variable.addr + index * element_size as u32, element_size);
             if let Some(value) = values.get(index as usize) {
+                self.validate_expr_assignable_to_type(value, &element_ty)?;
                 self.emit_expr_to_width(value, element.width()?)?;
             } else {
                 self.line(match element_size {
@@ -1604,6 +1613,7 @@ impl Emitter {
                 )));
             }
             let field_var = scalar_var(variable.addr + field.offset, field.size);
+            self.validate_expr_assignable_to_type(field_value, &field.ty)?;
             self.emit_expr_to_width(field_value, field_var.width()?)?;
             self.emit_store_width(field_var);
         }
@@ -4808,6 +4818,63 @@ mod tests {
                 }
                 "#,
                 "narrowing without cast",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_initializer_type_changes_without_cast() {
+        let cases = [
+            (
+                r#"
+                global words: [u16; 2] = [1, 2]
+                fn main() {
+                    let small: u8 = 1
+                    let values: [u16; 2] = [small, 2]
+                    test.pass()
+                }
+                "#,
+                "widening without cast",
+            ),
+            (
+                r#"
+                global values: [i8; 1] = [0]
+                fn main() {
+                    let unsigned: u8 = 1
+                    let local: [i8; 1] = [unsigned]
+                    test.pass()
+                }
+                "#,
+                "signed/unsigned mix without cast",
+            ),
+            (
+                r#"
+                struct Pair { value: u8 }
+                fn main() {
+                    let wide: u16 = 1
+                    let pair: Pair = Pair { value: wide }
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                struct Pair { value: i8 }
+                fn main() {
+                    let unsigned: u8 = 1
+                    let pair: Pair = Pair { value: unsigned }
+                    test.pass()
+                }
+                "#,
+                "signed/unsigned mix without cast",
             ),
         ];
 
