@@ -8900,6 +8900,29 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_extern_asm_stack_arguments() {
+        let source = r#"
+            extern asm fn raw_add4(a: u8, b: u8, c: u8, d: u8) -> u8
+
+            fn main() {
+                test.assert_eq_u8(raw_add4(1, 2, 3, 4), 10, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let linked = format!(
+            "{asm}\n_raw_add4:\n    add a, b\n    add a, c\n    ld b, a\n    ld hl, 000003h\n    add hl, sp\n    ld a, (hl)\n    add a, b\n    ret\n"
+        );
+        let run = run_assembly_test(&linked, 4_000).unwrap();
+
+        assert!(asm.contains("    call _raw_add4"), "{asm}");
+        assert!(!asm.contains("_raw_add4:"), "{asm}");
+        assert!(run.halted, "{linked}");
+        assert_eq!(run.result_code, 0, "{linked}");
+    }
+
+    #[test]
     fn emits_and_runs_u16_storage_and_return() {
         let source = r#"
             global total: u16 = 0x0100
