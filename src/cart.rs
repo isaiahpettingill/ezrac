@@ -3,6 +3,7 @@ use std::{fs, path::Path};
 use crate::{
     ast::{BinaryOp, Declaration, EmbedSource, Expr, Program, UnaryOp},
     diagnostic::Diagnostic,
+    layout::Layout,
     target::{
         Address24, CART_MAGIC, CPU_MODE_EZ80_ADL, EZRA_ASSET_BASE, EZRA_AUDIO_BASE,
         EZRA_ENTRY_ADDR, EZRA_RAM_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE, FORMAT_VERSION,
@@ -93,14 +94,21 @@ struct PackedAssetEntry {
 }
 
 pub fn build_cartridge(program: &Program) -> Result<Vec<u8>, Diagnostic> {
+    let layout_table = serialize_layout_table(&Layout::ezra_default());
+    let layout_table_addr = Address24::new(u32::from(HEADER_SIZE));
     let assets = collect_assets(program)?;
-    if assets.is_empty() {
-        return Ok(CartridgeHeader::default().serialize().to_vec());
-    }
-
-    let table_addr = Address24::new(u32::from(HEADER_SIZE));
+    let asset_table_addr = if assets.is_empty() {
+        None
+    } else {
+        Some(checked_image_addr(
+            u32::from(HEADER_SIZE)
+                + u32::try_from(layout_table.len())
+                    .map_err(|_| Diagnostic::new("layout table exceeds 24-bit address space"))?,
+        )?)
+    };
     let mut header = CartridgeHeader {
-        asset_table_addr: Some(table_addr),
+        layout_table_addr: Some(layout_table_addr),
+        asset_table_addr,
         ..CartridgeHeader::default()
     };
     let mut table = Vec::with_capacity(assets.len() * ASSET_TABLE_ENTRY_SIZE);
@@ -145,6 +153,7 @@ pub fn build_cartridge(program: &Program) -> Result<Vec<u8>, Diagnostic> {
     }
 
     let mut image = header.serialize().to_vec();
+    image.extend_from_slice(&layout_table);
     image.append(&mut table);
     image.append(&mut names);
     image.append(&mut payload);
@@ -315,6 +324,48 @@ fn checked_asset_addr(offset: u32) -> Result<Address24, Diagnostic> {
     Address24::try_from(addr).map_err(|error| Diagnostic::new(error.to_string()))
 }
 
+fn checked_image_addr(offset: u32) -> Result<Address24, Diagnostic> {
+    Address24::try_from(offset).map_err(|error| Diagnostic::new(error.to_string()))
+}
+
+fn serialize_layout_table(layout: &Layout) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_line(&mut out, format!("layout {}", layout.name));
+    push_line(&mut out, format!("load {}", layout.load));
+    push_line(&mut out, format!("entry {}", layout.entry));
+    push_line(&mut out, format!("stack {}", layout.stack));
+    for region in &layout.regions {
+        push_line(
+            &mut out,
+            format!(
+                "region {} {}..{} flags {:02X}",
+                region.name,
+                region.start,
+                region.end,
+                region.flags.bits()
+            ),
+        );
+    }
+    for section in &layout.sections {
+        push_line(
+            &mut out,
+            format!(
+                "section {} {} align {}",
+                section.name, section.region, section.align
+            ),
+        );
+    }
+    for symbol in &layout.symbols {
+        push_line(&mut out, format!("symbol {} {}", symbol.name, symbol.value));
+    }
+    out
+}
+
+fn push_line(out: &mut Vec<u8>, line: String) {
+    out.extend_from_slice(line.as_bytes());
+    out.push(b'\n');
+}
+
 fn module_alias_original_name(name: &str) -> Option<&str> {
     name.rsplit_once('.').map(|(_, original)| original)
 }
@@ -349,11 +400,16 @@ mod tests {
     }
 
     #[test]
-    fn cartridge_without_embeds_is_header_only() {
+    fn cartridge_without_embeds_writes_layout_table() {
         let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
         let image = build_cartridge(&program).unwrap();
 
-        assert_eq!(image, CartridgeHeader::default().serialize());
+        assert_eq!(&image[0x00..0x04], b"EZRA");
+        assert_eq!(read_addr24(&image, 0x1E), u32::from(HEADER_SIZE));
+        assert_eq!(read_addr24(&image, 0x21), 0);
+        assert!(image[HEADER_SIZE as usize..].starts_with(b"layout ezra_default\n"));
+        let layout_text = std::str::from_utf8(&image[HEADER_SIZE as usize..]).unwrap();
+        assert!(layout_text.contains("symbol EZRA_LOAD_ADDR"));
     }
 
     #[test]
@@ -367,9 +423,12 @@ mod tests {
         let image = build_cartridge(&program).unwrap();
 
         assert_eq!(&image[0x00..0x04], b"EZRA");
-        assert_eq!(&image[0x21..0x24], &[0x40, 0x00, 0x00]);
+        let layout_table = read_addr24(&image, 0x1E) as usize;
+        let table = read_addr24(&image, 0x21) as usize;
+        assert_eq!(layout_table, HEADER_SIZE as usize);
+        assert!(image[layout_table..].starts_with(b"layout ezra_default\n"));
+        assert!(table > layout_table);
 
-        let table = 0x40;
         assert_eq!(&image[table..table + 3], &[0x00, 0x00, 0x10]);
         assert_eq!(&image[table + 3..table + 6], &[0x03, 0x00, 0x00]);
         assert_eq!(&image[table + 6..table + 8], &[0x00, 0x00]);
@@ -389,5 +448,11 @@ mod tests {
             &image[names + 14..],
             &[0x11, 0x22, 0x33, 0x00, b'O', b'K', 0]
         );
+    }
+
+    fn read_addr24(bytes: &[u8], offset: usize) -> u32 {
+        u32::from(bytes[offset])
+            | (u32::from(bytes[offset + 1]) << 8)
+            | (u32::from(bytes[offset + 2]) << 16)
     }
 }

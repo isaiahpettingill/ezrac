@@ -255,7 +255,8 @@ mod tests {
         assert!(asm.contains("_add_one:"));
         assert!(map.contains(".header"));
         assert_eq!(&cart[0..4], b"EZRA");
-        assert_eq!(&cart[0x21..0x24], &[0x40, 0x00, 0x00]);
+        assert_eq!(read_addr24(&cart, 0x1E), 0x40);
+        assert!(read_addr24(&cart, 0x21) > read_addr24(&cart, 0x1E));
         assert!(cart.len() > 64);
         assert!(cart.ends_with(&[0x11, 0x22]));
 
@@ -283,5 +284,11 @@ mod tests {
         assert!(debug_asm.contains("; source: x += 1"), "{debug_asm}");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn read_addr24(bytes: &[u8], offset: usize) -> u32 {
+        u32::from(bytes[offset])
+            | (u32::from(bytes[offset + 1]) << 8)
+            | (u32::from(bytes[offset + 2]) << 16)
     }
 }
