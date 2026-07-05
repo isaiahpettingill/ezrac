@@ -89,7 +89,7 @@ pub fn run_assembly_test_with_options_at(
 
     let code = assemble_ez80_subset_at(assembly, base_addr)?;
     let code_start = base_addr;
-    let code_end = code_start + code.len() as u32;
+    let code_end = checked_code_end(code_start, code.len())?;
     let mut machine = TestMachine::new();
     for (port, value) in &options.initial_ports {
         machine.ports[*port as usize] = *value;
@@ -177,6 +177,11 @@ pub fn assemble_ez80_subset_with_symbols_at(
     assembly: &str,
     base_addr: u32,
 ) -> Result<AssembledProgram, Diagnostic> {
+    if base_addr > Address24::MAX {
+        return Err(Diagnostic::new(format!(
+            "assembly base address 0x{base_addr:X} is outside the 24-bit address space"
+        )));
+    }
     let instructions = assembly.lines().filter_map(parse_line).collect::<Vec<_>>();
     let mut labels = BTreeMap::new();
     let mut pc = base_addr & 0xFF_FFFF;
@@ -211,6 +216,20 @@ pub fn assemble_ez80_subset_with_symbols_at(
         }
     }
     Ok(AssembledProgram { bytes, symbols })
+}
+
+fn checked_code_end(base_addr: u32, len: usize) -> Result<u32, Diagnostic> {
+    let len = u32::try_from(len)
+        .map_err(|_| Diagnostic::new("test program exceeds the 24-bit address space"))?;
+    let end = base_addr
+        .checked_add(len)
+        .ok_or_else(|| Diagnostic::new("test program exceeds the 24-bit address space"))?;
+    if end > Address24::MAX + 1 {
+        return Err(Diagnostic::new(format!(
+            "test program at 0x{base_addr:06X} with length 0x{len:X} exceeds the 24-bit address space"
+        )));
+    }
+    Ok(end)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2171,6 +2190,36 @@ mod tests {
         assert_eq!(
             error.message,
             "test memory address 0x1000000 is outside the 24-bit address space"
+        );
+    }
+
+    #[test]
+    fn rejects_assembly_base_outside_address_space() {
+        let error = assemble_ez80_subset_at("ret\n", 0x01_000000).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "assembly base address 0x1000000 is outside the 24-bit address space"
+        );
+    }
+
+    #[test]
+    fn rejects_test_program_that_exceeds_address_space() {
+        let error = run_assembly_test_with_options_at(
+            "nop\nnop\n",
+            &TestRunOptions {
+                instruction_budget: 100,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: EZRA_STACK_TOP.get(),
+            },
+            0xFF_FFFF,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "test program at 0xFFFFFF with length 0x2 exceeds the 24-bit address space"
         );
     }
 
