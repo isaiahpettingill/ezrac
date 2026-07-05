@@ -2012,8 +2012,8 @@ field         = ident ":" ty
 
 extern_decl   = visibility? "extern" "asm" "fn" ident "(" params? ")" ret_ty?
 
-fn_decl       = attrs visibility? "fn" ident "(" params? ")" ret_ty? block
-attrs         = ("inline" | "naked" | "interrupt")*
+fn_decl       = fn_modifier* "fn" ident "(" params? ")" ret_ty? block
+fn_modifier   = "pub" | "inline" | "naked" | "interrupt"
 
 params        = param ("," param)*
 param         = ident ":" ty
@@ -2054,6 +2054,8 @@ primitive_ty  = "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "bool" | "ptr24"
 
 expr          = logical_or
 ```
+
+Function modifiers may appear in any order before `fn`, but each modifier may appear at most once.
 
 ---
 
