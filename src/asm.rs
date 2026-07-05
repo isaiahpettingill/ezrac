@@ -7627,6 +7627,10 @@ section .text
                 return value + 3
             }
 
+            pub inline fn exported_inline(value: u8) -> u8 {
+                return value + 4
+            }
+
             fn main() {
                 test.assert_eq_u8(used(4), 5, 1)
                 test.pass()
@@ -7640,6 +7644,7 @@ section .text
         assert_eq!(run.result_code, 0, "{asm}");
         assert!(asm.contains("_used:"));
         assert!(asm.contains("_exported:"));
+        assert!(asm.contains("_exported_inline:"));
         assert!(!asm.contains("_unused_private:"));
     }
 

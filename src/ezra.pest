@@ -18,6 +18,7 @@ layout_symbol = { "symbol" ~ ident ~ "=" ~ expr ~ semi? }
 visibility = { "pub" }
 volatile_kw = { "volatile" }
 attr = { "inline" | "naked" | "interrupt" }
+fn_modifier = _{ attr | visibility }
 import_decl = { "import" ~ path ~ semi? }
 const_decl = { visibility? ~ "const" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 alias_decl = { visibility? ~ "alias" ~ ident ~ "=" ~ ty ~ semi? }
@@ -36,7 +37,7 @@ global_decl = { visibility? ~ "global" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 struct_decl = { visibility? ~ "struct" ~ ident ~ "{" ~ field_decl* ~ "}" }
 field_decl = { ident ~ ":" ~ ty ~ semi? }
 extern_decl = { visibility? ~ "extern" ~ "asm" ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ semi? }
-fn_decl = { attr* ~ visibility? ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ block }
+fn_decl = { fn_modifier* ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ block }
 params = { param ~ ("," ~ param)* ~ ","? }
 param = { ident ~ ":" ~ ty }
 ret_ty = { "->" ~ ty }

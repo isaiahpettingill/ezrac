@@ -263,7 +263,12 @@ fn build_fn(pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::attr => attrs.push(inner.as_str().to_owned()),
-            Rule::visibility => public = true,
+            Rule::visibility => {
+                if public {
+                    return Err(Diagnostic::new("duplicate visibility `pub` on function"));
+                }
+                public = true;
+            }
             Rule::ident => name = Some(inner.as_str().to_owned()),
             Rule::params => params = build_params(inner)?,
             Rule::ret_ty => return_type = Some(build_type(inner.into_inner().next().unwrap())?),
@@ -1322,6 +1327,54 @@ mod tests {
                     && function.name == "read_status"
                     && function.return_type == Some(Type::Named("u8".to_owned()))
         ));
+    }
+
+    #[test]
+    fn parses_public_function_attributes_in_either_order() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            pub inline fn exported_add(value: u8) -> u8 {
+                return value + 1
+            }
+
+            interrupt pub fn exported_irq() {
+                return
+            }
+
+            fn main() {}
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &program.declarations[0],
+            Declaration::Function(function)
+                if function.public
+                    && function.attrs == ["inline"]
+                    && function.name == "exported_add"
+        ));
+        assert!(matches!(
+            &program.declarations[1],
+            Declaration::Function(function)
+                if function.public
+                    && function.attrs == ["interrupt"]
+                    && function.name == "exported_irq"
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_function_visibility() {
+        let error = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            pub inline pub fn invalid() {}
+            fn main() {}
+            "#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "duplicate visibility `pub` on function");
     }
 
     #[test]
