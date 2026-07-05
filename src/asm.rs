@@ -11627,6 +11627,36 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_null_pointer_constants() {
+        let source = r#"
+            const NULL_BYTE: ptr<u8> = 0
+            const NULL_WORD: ptr<u16> = cast<ptr<u16>>(0u24)
+            const NULL_RAW: ptr24 = cast<ptr24>(NULL_BYTE)
+
+            fn is_null(p: ptr<u8>) -> bool {
+                return p == NULL_BYTE
+            }
+
+            fn main() {
+                let local_null: ptr<u8> = cast<ptr<u8>>(0u24)
+                test.assert_eq_u24(cast<u24>(NULL_BYTE), 0, 1)
+                test.assert_eq_u24(cast<u24>(NULL_WORD), 0, 2)
+                test.assert_eq_u24(cast<u24>(local_null), 0, 3)
+                test.assert_eq_u24(cast<u24>(cast<ptr<u8>>(NULL_RAW)), 0, 4)
+                test.assert_eq_u8(is_null(local_null), true, 5)
+                test.assert_eq_u8(local_null != cast<ptr<u8>>(0u24), false, 6)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_pointer_u24_cast_round_trip() {
         let source = r#"
             global byte: u8 = 0
