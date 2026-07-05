@@ -2,7 +2,7 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
     asm::{AssemblyOptions, emit_ez80_assembly, emit_ez80_assembly_with_options},
-    cart::{CartridgeHeader, build_cartridge_with_layout_code_and_symbols},
+    cart::{CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
     layout::{Layout, parse_layout},
     vm::{assemble_ez80_subset_with_symbols_at, run_assembly_test},
@@ -134,23 +134,24 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     let map_path = dir.join(format!("{stem}.map"));
     let cart_path = dir.join(format!("{stem}.ezra.cart"));
 
-    fs::write(&asm_path, &assembly)
-        .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
-    fs::write(&map_path, layout.map_summary())
-        .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
     let assembled = assemble_ez80_subset_with_symbols_at(&assembly, layout.entry.get())
         .map_err(|error| error.to_string())?;
-    fs::write(
-        &cart_path,
-        build_cartridge_with_layout_code_and_symbols(
-            &program,
-            &layout,
-            &assembled.bytes,
-            &assembled.symbols,
-        )
-        .map_err(|error| error.to_string())?,
+    let map = build_cartridge_map(&program, &layout, assembled.bytes.len(), &assembled.symbols)
+        .map_err(|error| error.to_string())?;
+    let cart = build_cartridge_with_layout_code_and_symbols(
+        &program,
+        &layout,
+        &assembled.bytes,
+        &assembled.symbols,
     )
-    .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
+    .map_err(|error| error.to_string())?;
+
+    fs::write(&asm_path, &assembly)
+        .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
+    fs::write(&map_path, map)
+        .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
+    fs::write(&cart_path, cart)
+        .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
 
     Ok(BuildOutputs {
         asm: asm_path,
@@ -314,7 +315,19 @@ mod tests {
 
         assert!(asm.contains("__ezra_start:"));
         assert!(asm.contains("_add_one:"));
-        assert!(map.contains(".header"));
+        assert!(
+            map.starts_with("section      start      end        size\n"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".header      0x010000 0x01003F 0x000040"),
+            "{map}"
+        );
+        assert!(map.contains(".text        0x010040"), "{map}");
+        assert!(
+            map.contains(".assets:palette 0x100000 0x100001 0x000002"),
+            "{map}"
+        );
         assert_eq!(&cart[0..4], b"EZRA");
         assert_eq!(read_addr24(&cart, 0x08), EZRA_ENTRY_ADDR.get());
         assert_eq!(&cart[64..69], &[0xF3, 0x31, 0x00, 0x00, 0xF0]);
@@ -396,7 +409,11 @@ mod tests {
         let asm = std::fs::read_to_string(&outputs.asm).unwrap();
         let cart = std::fs::read(&outputs.cart).unwrap();
 
-        assert!(map.contains(".text"));
+        assert!(
+            map.starts_with("section      start      end        size\n"),
+            "{map}"
+        );
+        assert!(map.contains(".text        0x020040"), "{map}");
         assert!(asm.contains("    ld sp, EFFF00h"), "{asm}");
         assert_eq!(read_addr24(&cart, 0x08), 0x020040);
         assert_eq!(read_addr24(&cart, 0x0B), 0xEFFF00);

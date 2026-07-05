@@ -96,6 +96,14 @@ struct PackedAssetEntry {
     flags: u8,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CartridgeMapEntry {
+    pub name: String,
+    pub start: Address24,
+    pub end: Address24,
+    pub size: u32,
+}
+
 pub fn build_cartridge(program: &Program) -> Result<Vec<u8>, Diagnostic> {
     build_cartridge_with_code(program, &[])
 }
@@ -257,6 +265,141 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     header.header_size = HEADER_SIZE;
     image[..HEADER_SIZE as usize].copy_from_slice(&header.serialize());
     Ok(image)
+}
+
+pub fn build_cartridge_map(
+    program: &Program,
+    layout: &Layout,
+    code_len: usize,
+    symbols: &[AssemblySymbol],
+) -> Result<String, Diagnostic> {
+    let entries = cartridge_map_entries(program, layout, code_len, symbols)?;
+    let mut out = String::from("section      start      end        size\n");
+    for entry in entries {
+        out.push_str(&format!(
+            "{:<12} {} {} 0x{:06X}\n",
+            entry.name, entry.start, entry.end, entry.size
+        ));
+    }
+    Ok(out)
+}
+
+pub fn cartridge_map_entries(
+    program: &Program,
+    layout: &Layout,
+    code_len: usize,
+    symbols: &[AssemblySymbol],
+) -> Result<Vec<CartridgeMapEntry>, Diagnostic> {
+    let code_offset = layout
+        .entry
+        .get()
+        .checked_sub(layout.load.get())
+        .ok_or_else(|| {
+            Diagnostic::new(format!(
+                "entry {} is below load address {}",
+                layout.entry, layout.load
+            ))
+        })?;
+    if code_offset < u32::from(HEADER_SIZE) {
+        return Err(Diagnostic::new(format!(
+            "entry {} overlaps the cartridge header at {}",
+            layout.entry, layout.load
+        )));
+    }
+
+    let code_len = u32::try_from(code_len)
+        .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
+    let layout_table = serialize_layout_table(layout);
+    let symbol_table = serialize_symbol_table(symbols);
+    let layout_len = u32::try_from(layout_table.len())
+        .map_err(|_| Diagnostic::new("layout table exceeds 24-bit address space"))?;
+    let symbol_len = u32::try_from(symbol_table.len())
+        .map_err(|_| Diagnostic::new("symbol table exceeds 24-bit address space"))?;
+    let layout_offset = code_offset
+        .checked_add(code_len)
+        .ok_or_else(|| Diagnostic::new("program code exceeds 24-bit address space"))?;
+    let symbol_offset = layout_offset
+        .checked_add(layout_len)
+        .ok_or_else(|| Diagnostic::new("layout table exceeds 24-bit address space"))?;
+    let asset_table_offset = symbol_offset
+        .checked_add(symbol_len)
+        .ok_or_else(|| Diagnostic::new("symbol table exceeds 24-bit address space"))?;
+
+    let mut entries = Vec::new();
+    entries.push(map_entry(
+        ".header",
+        layout.load.get(),
+        u32::from(HEADER_SIZE),
+    )?);
+    entries.push(map_entry(".text", layout.entry.get(), code_len)?);
+    entries.push(map_entry(
+        ".layout_table",
+        checked_image_addr(layout.load, layout_offset)?.get(),
+        layout_len,
+    )?);
+    if symbol_len > 0 {
+        entries.push(map_entry(
+            ".symbol_table",
+            checked_image_addr(layout.load, symbol_offset)?.get(),
+            symbol_len,
+        )?);
+    }
+
+    let assets = collect_assets(program)?;
+    if assets.is_empty() {
+        return Ok(entries);
+    }
+
+    let mut asset_table_len = u32::try_from(assets.len() * ASSET_TABLE_ENTRY_SIZE)
+        .map_err(|_| Diagnostic::new("asset table exceeds 24-bit address space"))?;
+    asset_table_len = asset_table_len
+        .checked_add(
+            assets
+                .iter()
+                .map(|asset| asset.name.len() + 1)
+                .sum::<usize>()
+                .try_into()
+                .map_err(|_| Diagnostic::new("asset name table exceeds 24-bit address space"))?,
+        )
+        .ok_or_else(|| Diagnostic::new("asset table exceeds 24-bit address space"))?;
+    entries.push(map_entry(
+        ".asset_table",
+        checked_image_addr(layout.load, asset_table_offset)?.get(),
+        asset_table_len,
+    )?);
+
+    let mut section_cursors = Vec::<(String, u32)>::new();
+    for asset in assets {
+        let (section, section_align) = layout_section_placement(layout, &asset.section)?;
+        let cursor = section_cursor(&mut section_cursors, &asset.section, section.start.get());
+        *cursor = align_addr(*cursor, asset.align.max(section_align))?;
+        let asset_addr =
+            Address24::try_from(*cursor).map_err(|error| Diagnostic::new(error.to_string()))?;
+        let asset_len = u32::try_from(asset.bytes.len())
+            .map_err(|_| Diagnostic::new("asset length exceeds 24-bit address space"))?;
+        let asset_end = asset_addr
+            .get()
+            .checked_add(asset_len.saturating_sub(1))
+            .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
+        let asset_end =
+            Address24::try_from(asset_end).map_err(|error| Diagnostic::new(error.to_string()))?;
+        if asset_len > 0 && !section.contains_range(asset_addr, asset_end) {
+            return Err(Diagnostic::new(format!(
+                "embed `{}` exceeds section `{}` region `{}`",
+                asset.name, asset.section, section.name
+            )));
+        }
+        entries.push(map_entry(
+            &format!("{}:{}", asset.section, asset.name),
+            asset_addr.get(),
+            asset_len,
+        )?);
+        *cursor = cursor
+            .checked_add(asset_len)
+            .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
+    }
+
+    Ok(entries)
 }
 
 fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
@@ -450,6 +593,22 @@ fn align_addr(addr: u32, align: u32) -> Result<u32, Diagnostic> {
         .ok_or_else(|| Diagnostic::new("asset alignment exceeds 24-bit address space"))
 }
 
+fn map_entry(name: &str, start: u32, size: u32) -> Result<CartridgeMapEntry, Diagnostic> {
+    let end = if size == 0 {
+        start
+    } else {
+        start
+            .checked_add(size - 1)
+            .ok_or_else(|| Diagnostic::new("map entry exceeds 24-bit address space"))?
+    };
+    Ok(CartridgeMapEntry {
+        name: name.to_owned(),
+        start: Address24::try_from(start).map_err(|error| Diagnostic::new(error.to_string()))?,
+        end: Address24::try_from(end).map_err(|error| Diagnostic::new(error.to_string()))?,
+        size,
+    })
+}
+
 fn checked_image_addr(load: Address24, offset: u32) -> Result<Address24, Diagnostic> {
     let addr = load
         .get()
@@ -633,6 +792,46 @@ mod tests {
         assert_eq!(
             &image[image_offset(second_addr)..image_offset(second_addr) + 3],
             &[b'O', b'K', 0]
+        );
+    }
+
+    #[test]
+    fn cartridge_map_reports_final_placements() {
+        let source = r#"
+            embed palette: bytes = bytes [0x11, 0x22] section .assets align 1
+            embed title: bytes = cstr("OK") section .rodata align 4
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let symbols = vec![AssemblySymbol {
+            name: "__ezra_start".to_owned(),
+            addr: 0x010040,
+        }];
+        let map = build_cartridge_map(&program, &Layout::ezra_default(), 4, &symbols).unwrap();
+
+        assert!(
+            map.starts_with("section      start      end        size\n"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".header      0x010000 0x01003F 0x000040"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".text        0x010040 0x010043 0x000004"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".layout_table") && map.contains(".symbol_table"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".assets:palette 0x100000 0x100001 0x000002"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".rodata:title 0x020000 0x020002 0x000003"),
+            "{map}"
         );
     }
 
