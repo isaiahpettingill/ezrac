@@ -12219,7 +12219,9 @@ section .text
                 .as_nanos()
         ));
         std::fs::create_dir_all(root.join("sdk")).unwrap();
+        std::fs::create_dir_all(root.join("assets")).unwrap();
         let main_path = root.join("game.ezra");
+        std::fs::write(root.join("assets/player.bin"), [0x2A, 0x7E]).unwrap();
         std::fs::write(
             root.join("sdk/input.ezra"),
             r#"
@@ -12297,6 +12299,8 @@ section .text
 
             alias pos = i24
 
+            embed player_sprite: bytes = file("assets/player.bin") section .assets align 16
+
             global player_x: pos = 20 * SUBPX_ONE
             global player_y: pos = 20 * SUBPX_ONE
 
@@ -12311,18 +12315,28 @@ section .text
                 let sx: u16 = cast<u16>(math.subpx_to_int(player_x))
                 let sy: u16 = cast<u16>(math.subpx_to_int(player_y))
                 let offset: u24 = cast<u24>(sy) * 32 + cast<u24>(sx)
-                video.poke(offset, 15)
+                let color: u8 = *(player_sprite.ptr)
+                video.poke(offset, color)
             }
 
             fn main() {
                 video.clear(0)
-                update()
-                draw()
-                video.present()
+                let frames: u8 = 0
+                loop {
+                    update()
+                    draw()
+                    video.present()
+                    frames += 1
+                    if frames == 2 {
+                        break
+                    }
+                }
 
-                test.assert_eq_u24(cast<u24>(player_x), 0x001500, 1)
-                test.assert_eq_u8(video.peek(661), 15, 2)
+                test.assert_eq_u24(cast<u24>(player_x), 0x001600, 1)
+                test.assert_eq_u8(video.peek(661), 0x2A, 2)
                 test.assert_eq_u8(video.peek(0), 0, 3)
+                test.assert_eq_u8(video.peek(662), 0x2A, 4)
+                test.assert_eq_u24(player_sprite.len, 2, 5)
                 test.pass()
             }
             "#,
@@ -12331,7 +12345,7 @@ section .text
 
         let program = load_program(&main_path).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
-        let run = run_assembly_test(&asm, 80_000).unwrap();
+        let run = run_assembly_test(&asm, 100_000).unwrap();
 
         let _ = std::fs::remove_dir_all(&root);
         assert!(asm.contains("_input_read_pad:"), "{asm}");
