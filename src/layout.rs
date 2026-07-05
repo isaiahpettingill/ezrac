@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::diagnostic::Diagnostic;
 use crate::target::{
@@ -153,8 +153,16 @@ impl Layout {
 
     pub fn validate(&self) -> Result<(), Vec<Diagnostic>> {
         let mut diagnostics = Vec::new();
+        let mut region_names = HashSet::new();
 
         for (index, region) in self.regions.iter().enumerate() {
+            if !region_names.insert(region.name.clone()) {
+                diagnostics.push(Diagnostic::new(format!(
+                    "duplicate region `{}`",
+                    region.name
+                )));
+            }
+
             if region.start > region.end {
                 diagnostics.push(Diagnostic::new(format!(
                     "region `{}` starts after it ends",
@@ -172,7 +180,15 @@ impl Layout {
             }
         }
 
+        let mut section_names = HashSet::new();
         for section in &self.sections {
+            if !section_names.insert(section.name.clone()) {
+                diagnostics.push(Diagnostic::new(format!(
+                    "duplicate section `{}`",
+                    section.name
+                )));
+            }
+
             if section.align == 0 || !section.align.is_power_of_two() {
                 diagnostics.push(Diagnostic::new(format!(
                     "section `{}` alignment must be a power of two",
@@ -196,6 +212,16 @@ impl Layout {
                     "section `{}` targets unknown region `{}`",
                     section.name, section.region
                 ))),
+            }
+        }
+
+        let mut symbol_names = HashSet::new();
+        for symbol in &self.symbols {
+            if !symbol_names.insert(symbol.name.clone()) {
+                diagnostics.push(Diagnostic::new(format!(
+                    "duplicate symbol `{}`",
+                    symbol.name
+                )));
             }
         }
 
@@ -727,6 +753,46 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error.message.contains("unknown region")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_layout_names() {
+        let source = r#"
+            layout duplicate_names {
+                load 0x010000;
+                entry 0x010040;
+                stack 0xF00000;
+
+                region code 0x010000..0x01FFFF read execute;
+                region code 0x020000..0x02FFFF read;
+                section .text -> code align 16;
+                section .text -> code align 32;
+                symbol BASE = 0x010000;
+                symbol BASE = 0x020000;
+            }
+        "#;
+
+        let layout = parse_layout(source).unwrap();
+        let errors = layout.validate().unwrap_err();
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message == "duplicate region `code`"),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message == "duplicate section `.text`"),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message == "duplicate symbol `BASE`"),
             "{errors:?}"
         );
     }
