@@ -5914,14 +5914,23 @@ impl Emitter {
             }
             Expr::Binary { left, op, right } => {
                 let left_signed = self.expr_is_signed(left)?;
+                let left_scale = self.pointer_pointee_size(left)?;
+                let right_scale = self.pointer_pointee_size(right)?;
                 let left = self.eval_i64_with_local_constants(left)?;
                 let right = self.eval_i64_with_local_constants(right)?;
                 Ok(match op {
                     BinaryOp::Mul => left.wrapping_mul(right),
                     BinaryOp::Div => trunc_div_or_zero(left, right),
                     BinaryOp::Mod => trunc_mod_or_zero(left, right),
-                    BinaryOp::Add => left.wrapping_add(right),
-                    BinaryOp::Sub => left.wrapping_sub(right),
+                    BinaryOp::Add => match (left_scale, right_scale) {
+                        (Some(scale), None) => left.wrapping_add(right.wrapping_mul(scale.into())),
+                        (None, Some(scale)) => left.wrapping_mul(scale.into()).wrapping_add(right),
+                        _ => left.wrapping_add(right),
+                    },
+                    BinaryOp::Sub => match (left_scale, right_scale) {
+                        (Some(scale), None) => left.wrapping_sub(right.wrapping_mul(scale.into())),
+                        _ => left.wrapping_sub(right),
+                    },
                     BinaryOp::Shl => const_shl_or_zero(left, right),
                     BinaryOp::Shr => const_shr_or_zero(left, right, left_signed),
                     BinaryOp::Lt => i64::from(left < right),
@@ -6848,14 +6857,14 @@ impl Emitter {
     }
 
     fn local_constant_supported_type(&self, ty: &Type) -> bool {
-        matches!(
-            self.symbols.resolved_type(ty),
-            Ok(Type::Named(name))
-                if matches!(
-                    name.as_str(),
-                    "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24"
-                )
-        )
+        match self.symbols.resolved_type(ty) {
+            Ok(Type::Ptr(_)) => true,
+            Ok(Type::Named(name)) => matches!(
+                name.as_str(),
+                "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr24"
+            ),
+            _ => false,
+        }
     }
 
     fn invalidate_local_constant(&mut self, name: &str) {
@@ -9118,6 +9127,63 @@ section .text
 
         assert!(copied.contains("    ld a, 07h\n    ret"), "{asm}");
         assert!(assigned.contains("    ld a, (040"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn propagates_local_pointer_constants_until_assignment() {
+        let source = r#"
+            global byte: u8 = 0
+
+            fn copied_ptr() -> u24 {
+                let base: ptr<u8> = &byte
+                let copied: ptr<u8> = base
+                return cast<u24>(copied)
+            }
+
+            fn copied_raw() -> u24 {
+                let raw: ptr24 = cast<ptr24>(&byte)
+                return cast<u24>(raw)
+            }
+
+            fn assigned_ptr() -> u24 {
+                let value: ptr<u8> = &byte
+                value = value + 1
+                return cast<u24>(value)
+            }
+
+            fn main() {
+                test.assert_eq_u24(copied_ptr(), cast<u24>(&byte), 1)
+                test.assert_eq_u24(copied_raw(), cast<u24>(&byte), 2)
+                test.assert_eq_u24(assigned_ptr(), cast<u24>(&byte) + 1, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+        let copied_ptr = asm
+            .split("_copied_ptr:")
+            .nth(1)
+            .and_then(|tail| tail.split("_copied_raw:").next())
+            .unwrap();
+        let copied_raw = asm
+            .split("_copied_raw:")
+            .nth(1)
+            .and_then(|tail| tail.split("_assigned_ptr:").next())
+            .unwrap();
+        let assigned_ptr = asm
+            .split("_assigned_ptr:")
+            .nth(1)
+            .and_then(|tail| tail.split("section .header").next())
+            .unwrap();
+
+        assert!(copied_ptr.contains("    ld hl, 040"), "{asm}");
+        assert!(copied_ptr.contains("    ret"), "{asm}");
+        assert!(copied_raw.contains("    ld hl, 040"), "{asm}");
+        assert!(copied_raw.contains("    ret"), "{asm}");
+        assert!(assigned_ptr.contains("    ld hl, (040"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
