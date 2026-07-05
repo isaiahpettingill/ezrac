@@ -1981,8 +1981,8 @@ impl Emitter {
         op: AssignOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
-        let width = match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
-            Type::Ptr(inner) => self.symbols.type_width(&inner)?,
+        let pointee_type = match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
+            Type::Ptr(inner) => *inner,
             Type::Named(name) if name == "ptr24" => {
                 return Err(Diagnostic::new(
                     "raw ptr24 dereference requires an explicit typed pointer cast",
@@ -1994,6 +1994,7 @@ impl Emitter {
                 )));
             }
         };
+        let width = self.symbols.type_width(&pointee_type)?;
 
         let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
         self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
@@ -2011,6 +2012,7 @@ impl Emitter {
             return Ok(());
         }
 
+        self.validate_expr_assignable_to_type(value, &pointee_type)?;
         let stored = self.symbols.alloc_var(width.bytes());
         self.emit_expr_to_width(value, width)?;
         self.emit_store_width(stored);
@@ -2906,6 +2908,10 @@ impl Emitter {
         value: &Expr,
     ) -> Result<(), Diagnostic> {
         if let Ok(element) = self.array_element_variable(name, index) {
+            if op == AssignOp::Set {
+                let ty = self.array_element_type(name)?;
+                self.validate_expr_assignable_to_type(value, &ty)?;
+            }
             self.emit_assignment_value(element, op, value)?;
             self.emit_store_width(element);
             return Ok(());
@@ -2929,6 +2935,10 @@ impl Emitter {
             return Ok(());
         }
 
+        if op == AssignOp::Set {
+            let ty = self.array_element_type(name)?;
+            self.validate_expr_assignable_to_type(value, &ty)?;
+        }
         let stored = self.symbols.alloc_var(element_size);
         self.emit_expr_to_width(value, width)?;
         self.emit_store_width(stored);
@@ -3778,6 +3788,65 @@ mod tests {
                     let wide: u16 = 1
                     let small: u8 = 0
                     small = wide
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_indirect_assignment_type_changes_without_cast() {
+        let cases = [
+            (
+                r#"
+                global bytes: [u8; 2] = [0, 0]
+                fn main() {
+                    let wide: u16 = 0x1234
+                    bytes[0] = wide
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                global words: [u16; 2] = [0, 0]
+                fn main() {
+                    let small: u8 = 1
+                    let index: u8 = 1
+                    words[index] = small
+                    test.pass()
+                }
+                "#,
+                "widening without cast",
+            ),
+            (
+                r#"
+                global signed: [i8; 1] = [0]
+                fn main() {
+                    let unsigned: u8 = 1
+                    signed[0] = unsigned
+                    test.pass()
+                }
+                "#,
+                "signed/unsigned mix without cast",
+            ),
+            (
+                r#"
+                global byte: u8 = 0
+                fn main() {
+                    let p: ptr<u8> = &byte;
+                    let wide: u16 = 1;
+                    *p = wide;
                     test.pass()
                 }
                 "#,
@@ -5085,6 +5154,33 @@ mod tests {
                 *l = 0x010203;
                 test.assert_eq_u24(longs[1], 0x010203, 5);
                 test.assert_eq_u24(*l, 0x010203, 6);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_casted_indirect_assignments() {
+        let source = r#"
+            global bytes: [u8; 2] = [0, 0]
+            global word: u16 = 0
+
+            fn main() {
+                let wide: u16 = 0x12FE
+                bytes[1] = cast<u8>(wide)
+
+                let p: ptr<u16> = &word;
+                let small: u8 = 0x34;
+                *p = cast<u16>(small);
+
+                test.assert_eq_u8(bytes[1], 0xFE, 1)
+                test.assert_eq_u16(word, 0x0034, 2)
                 test.pass()
             }
         "#;
