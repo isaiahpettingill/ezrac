@@ -140,6 +140,11 @@ fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<
                 alias.name = format!("{module}.{}", alias.name);
                 Some(Declaration::Const(alias))
             }
+            Declaration::Port(decl) if decl.public => {
+                let mut alias = decl.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Port(alias))
+            }
             Declaration::Mmio(decl) if decl.public => {
                 let mut alias = decl.clone();
                 alias.name = format!("{module}.{}", alias.name);

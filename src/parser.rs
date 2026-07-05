@@ -502,9 +502,7 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
                 expr: Box::new(build_expr(inner.next().unwrap())?),
             })
         }
-        Rule::in_expr => Ok(Expr::In(
-            pair.into_inner().next().unwrap().as_str().to_owned(),
-        )),
+        Rule::in_expr => Ok(Expr::In(parse_in_port(pair.as_str())?)),
         Rule::addr_index_expr => {
             let mut inner = pair.into_inner();
             Ok(Expr::AddressOfIndex {
@@ -654,6 +652,15 @@ fn build_binary_op(op: &str) -> BinaryOp {
 
 fn split_path(path: &str) -> Vec<String> {
     path.split('.').map(str::to_owned).collect()
+}
+
+fn parse_in_port(value: &str) -> Result<String, Diagnostic> {
+    value
+        .strip_prefix("in")
+        .map(str::trim_start)
+        .filter(|port| !port.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| Diagnostic::new("expected port after `in`"))
 }
 
 enum AsmOperand {
@@ -816,23 +823,36 @@ mod tests {
     fn parses_main_with_out() {
         let program = parse_program(
             Path::new("game.ezra"),
-            "port DEBUG_CHAR: u8 = 0x0C\nfn main() { out DEBUG_CHAR, 'A' }",
+            "port DEBUG_CHAR: u8 = 0x0C\nfn main() { out debug.DEBUG_CHAR, 'A' }",
         )
         .unwrap();
 
         assert!(program.main_function().is_some());
         assert_eq!(program.declarations.len(), 2);
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Out { port, .. } if port == "debug.DEBUG_CHAR"
+        ));
     }
 
     #[test]
     fn parses_in_port_expression() {
         let program = parse_program(
             Path::new("game.ezra"),
-            "port PAD1_LO: u8 = 0x01\nfn main() { let pad: u8 = in PAD1_LO }",
+            "port PAD1_LO: u8 = 0x01\nfn main() { let pad: u8 = in input.PAD1_LO }",
         )
         .unwrap();
 
         assert!(program.main_function().is_some());
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Let {
+                value: Expr::In(port),
+                ..
+            } if port == "input.PAD1_LO"
+        ));
     }
 
     #[test]

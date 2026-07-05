@@ -66,7 +66,7 @@ asm_output = { "out" ~ ident ~ ":" ~ ty ~ "as" ~ asm_operand_class }
 asm_clobber = { "clobber" ~ ident }
 asm_operand_class = { "reg8" | "reg16" | "reg24" | "mem" | "imm" }
 asm_line = { string_lit }
-out_stmt = { "out" ~ ident ~ "," ~ expr ~ semi? }
+out_stmt = { "out" ~ path ~ "," ~ expr ~ semi? }
 expr_stmt = { expr ~ !(WHITESPACE* ~ assign_op) ~ semi? }
 assign_op = { "<<=" | ">>=" | "+=" | "-=" | "&=" | "|=" | "^=" | "=" }
 
@@ -84,7 +84,7 @@ multiplicative = { unary ~ (mul_op ~ unary)* }
 unary = { unary_op* ~ primary }
 primary = { cast_expr | in_expr | addr_index_expr | addr_field_expr | addr_expr | deref_expr | struct_lit | array_lit | field_expr | index_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
 cast_expr = { "cast" ~ "<" ~ ty ~ ">" ~ "(" ~ expr ~ ")" }
-in_expr = ${ "in" ~ (" " | "\t" | "\r" | "\n")+ ~ ident }
+in_expr = ${ "in" ~ (" " | "\t" | "\r" | "\n")+ ~ path }
 addr_index_expr = { "&" ~ ident ~ "[" ~ expr ~ "]" }
 addr_field_expr = { "&" ~ ident ~ "." ~ ident ~ !("(") }
 addr_expr = { "&" ~ ident }

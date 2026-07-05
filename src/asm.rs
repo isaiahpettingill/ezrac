@@ -4753,6 +4753,52 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_imported_module_qualified_ports() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_module_ports_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/hw.ezra"),
+            r#"
+            pub port PAD_LO: u8 = 0x01
+            pub port DEBUG: u8 = 0x0C
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.hw
+            fn main() {
+                let pad: u8 = in hw.PAD_LO
+                out hw.DEBUG, 'P'
+                test.assert_eq_u8(pad, 0, 1)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(asm.contains("in0 a, (01h)"), "{asm}");
+        assert!(asm.contains("out0 (0Ch), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"P", "{asm}");
+    }
+
+    #[test]
     fn rejects_inline_asm_missing_required_clobbers() {
         let cases = [
             (
