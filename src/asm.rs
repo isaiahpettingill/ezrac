@@ -3575,10 +3575,13 @@ impl Emitter {
                 "array index {index_value} is out of bounds for `{name}` length {len}"
             )));
         }
-        Ok(Some(scalar_var(
-            array.addr + index_value as u32 * element_size as u32,
-            element_size,
-        )))
+        let element_type = self.array_element_type(name)?;
+        self.symbols
+            .storage_at(
+                array.addr + index_value as u32 * element_size as u32,
+                &element_type,
+            )
+            .map(Some)
     }
 
     fn array_info(&self, name: &str) -> Result<(Variable, u8, u32), Diagnostic> {
@@ -4107,6 +4110,22 @@ impl Emitter {
         expr: &Expr,
         target: &Type,
     ) -> Result<(), Diagnostic> {
+        if let Expr::Array(values) = expr {
+            let Type::Array { element, len } = self.symbols.resolved_type(target)? else {
+                return Err(Diagnostic::new("type mismatch"));
+            };
+            let len = self.symbols.array_len(&len)?;
+            if values.len() as u32 > len {
+                return Err(Diagnostic::new(format!(
+                    "array initializer has {} values but array length is {len}",
+                    values.len()
+                )));
+            }
+            for value in values {
+                self.validate_expr_assignable_to_type(value, &element)?;
+            }
+            return Ok(());
+        }
         if let Expr::Cast { ty, .. } = expr {
             self.symbols.type_width(ty)?;
             return self.validate_type_assignable_to_type(ty, target);
@@ -8470,6 +8489,61 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 10_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_nested_arrays() {
+        let source = r#"
+            global grid: [[u8; 3]; 3] = [
+                [1, 2, 3],
+                [4, 5, 6]
+            ]
+
+            fn main() {
+                let raw: ptr<u8> = cast<ptr<u8>>(&grid[0])
+                test.assert_eq_u8(mem.peek8(raw + 0), 1, 1)
+                test.assert_eq_u8(mem.peek8(raw + 1), 2, 2)
+                test.assert_eq_u8(mem.peek8(raw + 2), 3, 3)
+                test.assert_eq_u8(mem.peek8(raw + 3), 4, 4)
+                test.assert_eq_u8(mem.peek8(raw + 4), 5, 5)
+                test.assert_eq_u8(mem.peek8(raw + 5), 6, 6)
+                test.assert_eq_u8(mem.peek8(raw + 6), 0, 7)
+                test.assert_eq_u8(mem.peek8(raw + 7), 0, 8)
+                test.assert_eq_u8(mem.peek8(raw + 8), 0, 9)
+
+                let row_index: u8 = 2
+                let third: ptr<u8> = cast<ptr<u8>>(&grid[row_index])
+                test.assert_eq_u24(cast<u24>(third), cast<u24>(raw) + 6, 10)
+
+                grid[2] = [7, 8, 9]
+                test.assert_eq_u8(mem.peek8(third + 0), 7, 11)
+                test.assert_eq_u8(mem.peek8(third + 1), 8, 12)
+                test.assert_eq_u8(mem.peek8(third + 2), 9, 13)
+
+                grid[row_index] = [10, 11, 12]
+                test.assert_eq_u8(mem.peek8(third + 0), 10, 14)
+                test.assert_eq_u8(mem.peek8(third + 1), 11, 15)
+                test.assert_eq_u8(mem.peek8(third + 2), 12, 16)
+
+                let local: [[u16; 2]; 2] = [[0x0102, 0x0304]]
+                let local_raw: ptr<u8> = cast<ptr<u8>>(&local[0])
+                test.assert_eq_u8(mem.peek8(local_raw + 0), 0x02, 17)
+                test.assert_eq_u8(mem.peek8(local_raw + 1), 0x01, 18)
+                test.assert_eq_u8(mem.peek8(local_raw + 2), 0x04, 19)
+                test.assert_eq_u8(mem.peek8(local_raw + 3), 0x03, 20)
+                test.assert_eq_u8(mem.peek8(local_raw + 4), 0, 21)
+                test.assert_eq_u8(mem.peek8(local_raw + 5), 0, 22)
+                test.assert_eq_u8(mem.peek8(local_raw + 6), 0, 23)
+                test.assert_eq_u8(mem.peek8(local_raw + 7), 0, 24)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
