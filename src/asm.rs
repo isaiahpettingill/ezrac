@@ -2244,6 +2244,20 @@ impl Emitter {
         validate_function_attrs(function)?;
         let naked = has_attr(function, "naked");
         let interrupt = has_attr(function, "interrupt");
+        if interrupt {
+            if !function.params.is_empty() {
+                return Err(Diagnostic::new(format!(
+                    "interrupt function `{}` cannot take parameters",
+                    function.name
+                )));
+            }
+            if function.return_type.is_some() {
+                return Err(Diagnostic::new(format!(
+                    "interrupt function `{}` cannot return a value",
+                    function.name
+                )));
+            }
+        }
         if naked {
             for stmt in &function.body {
                 let Stmt::Asm {
@@ -2296,18 +2310,6 @@ impl Emitter {
         self.function_storage_stack.push(Vec::new());
         if !naked {
             if interrupt {
-                if !function.params.is_empty() {
-                    return Err(Diagnostic::new(format!(
-                        "interrupt function `{}` cannot take parameters",
-                        function.name
-                    )));
-                }
-                if function.return_type.is_some() {
-                    return Err(Diagnostic::new(format!(
-                        "interrupt function `{}` cannot return a value",
-                        function.name
-                    )));
-                }
                 self.emit_interrupt_prologue();
             }
             if uses_stack_frame {
@@ -14562,10 +14564,54 @@ section .text
     }
 
     #[test]
+    fn rejects_naked_interrupt_function_parameters() {
+        let source = r#"
+            naked interrupt fn invalid(code: u8) {
+                asm volatile {
+                    "reti"
+                }
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "interrupt function `invalid` cannot take parameters"
+        );
+    }
+
+    #[test]
     fn rejects_interrupt_function_return_values() {
         let source = r#"
             interrupt fn invalid() -> u8 {
                 return 1
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "interrupt function `invalid` cannot return a value"
+        );
+    }
+
+    #[test]
+    fn rejects_naked_interrupt_function_return_values() {
+        let source = r#"
+            naked interrupt fn invalid() -> u8 {
+                asm volatile {
+                    "reti"
+                }
             }
 
             fn main() {
