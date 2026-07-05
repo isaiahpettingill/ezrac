@@ -1514,6 +1514,7 @@ impl Emitter {
     }
 
     fn emit_cast_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+        self.validate_cast(expr, ty)?;
         let width = self.symbols.type_width(ty)?;
         if let Ok(value) = self.symbols.eval_i64(expr) {
             let bits = u32::from(width.bytes()) * 8;
@@ -1556,6 +1557,23 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn validate_cast(&self, expr: &Expr, target: &Type) -> Result<(), Diagnostic> {
+        let source_type = self.symbols.resolved_type(&self.expr_type(expr)?)?;
+        let target_type = self.symbols.resolved_type(target)?;
+        match (&source_type, &target_type) {
+            (Type::Ptr(_), Type::Ptr(_)) => Ok(()),
+            (Type::Ptr(_), Type::Named(name)) if name == "u24" => Ok(()),
+            (Type::Ptr(_), Type::Named(_)) => {
+                Err(Diagnostic::new("pointer-to-integer casts produce u24"))
+            }
+            (Type::Named(name), Type::Ptr(_)) if name == "u24" => Ok(()),
+            (Type::Named(_), Type::Ptr(_)) => {
+                Err(Diagnostic::new("integer-to-pointer casts require u24"))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn emit_expr_to_hl(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
@@ -3801,6 +3819,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_pointer_casts() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let raw: u16 = 0x1234
+                    let p: ptr<u8> = cast<ptr<u8>>(raw)
+                    test.pass()
+                }
+                "#,
+                "integer-to-pointer casts require u24",
+            ),
+            (
+                r#"
+                global byte: u8 = 0
+                fn main() {
+                    let p: ptr<u8> = &byte
+                    let raw: u16 = cast<u16>(p)
+                    test.pass()
+                }
+                "#,
+                "pointer-to-integer casts produce u24",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
     fn rejects_missing_return_value_in_non_void_function() {
         let source = r#"
             fn answer() -> u8 {
@@ -4586,6 +4638,29 @@ mod tests {
                 test.assert_eq_u8(assigned, 0xFE, 3)
                 test.assert_eq_u8(low_byte(0xABCD), 0xCD, 4)
                 test.assert_eq_u16(widen(0x7A), 0x007A, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_pointer_u24_cast_round_trip() {
+        let source = r#"
+            global byte: u8 = 0
+
+            fn main() {
+                let p: ptr<u8> = &byte
+                let raw: u24 = cast<u24>(p)
+                let q: ptr<u8> = cast<ptr<u8>>(raw)
+                mem.poke8(q, 0x6D)
+                test.assert_eq_u8(byte, 0x6D, 1)
+                test.assert_eq_u24(raw, cast<u24>(&byte), 2)
                 test.pass()
             }
         "#;
