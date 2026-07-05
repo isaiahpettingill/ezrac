@@ -64,6 +64,7 @@ pub fn emit_ez80_assembly_with_options(
     let mut emitter = Emitter::new(symbols, options, recursive_call_edges);
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
+    emitter.emit_string_literal_initializers();
     emitter.emit_global_initializers(program)?;
     emitter.emit_start_tail();
     emitter.emit_function(main)?;
@@ -173,6 +174,7 @@ struct Symbols {
     aliases: HashMap<String, Type>,
     structs: HashMap<String, StructLayout>,
     embeds: HashMap<String, EmbedObject>,
+    string_literals: HashMap<String, Variable>,
     ports: HashMap<String, u8>,
     globals: HashMap<String, Variable>,
     global_types: HashMap<String, Type>,
@@ -221,6 +223,7 @@ impl Symbols {
             aliases: HashMap::new(),
             structs: HashMap::new(),
             embeds: HashMap::new(),
+            string_literals: HashMap::new(),
             ports: sdk_ports(),
             globals: HashMap::new(),
             global_types: HashMap::new(),
@@ -361,8 +364,17 @@ impl Symbols {
             match declaration {
                 Declaration::Const(decl) => {
                     symbols.validate_const_expr_arithmetic_compatibility(&decl.value)?;
-                    let mut value = symbols.eval_i64(&decl.value)?;
-                    if symbols.const_expr_uses_wrapping_arithmetic(&decl.value) {
+                    let mut value = if let Expr::String(text) = &decl.value {
+                        if symbols.resolved_type(&decl.ty)? != ptr_u8_type() {
+                            return Err(Diagnostic::new("type mismatch"));
+                        }
+                        symbols.intern_string_literal(text)?.addr as i64
+                    } else {
+                        symbols.eval_i64(&decl.value)?
+                    };
+                    if !matches!(decl.value, Expr::String(_))
+                        && symbols.const_expr_uses_wrapping_arithmetic(&decl.value)
+                    {
                         value = symbols.wrap_value_for_type(value, &decl.ty)?;
                     }
                     symbols.validate_value_for_type(value, &decl.ty)?;
@@ -500,6 +512,22 @@ impl Symbols {
         };
         self.next_addr += size;
         variable
+    }
+
+    fn intern_string_literal(&mut self, value: &str) -> Result<Variable, Diagnostic> {
+        if let Some(variable) = self.string_literals.get(value).copied() {
+            return Ok(variable);
+        }
+        let len = value
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("string literal is too large"))?;
+        if len > u32::MAX as usize {
+            return Err(Diagnostic::new("string literal is too large"));
+        }
+        let variable = self.alloc_array(u32::from(ValueWidth::U8.bytes()), len as u32);
+        self.string_literals.insert(value.to_owned(), variable);
+        Ok(variable)
     }
 
     fn align_next_addr(&mut self, align: u32) {
@@ -1237,6 +1265,7 @@ impl Emitter {
         options: AssemblyOptions,
         recursive_call_edges: HashSet<(String, String)>,
     ) -> Self {
+        let string_literals = symbols.string_literals.clone();
         Self {
             symbols,
             out: String::new(),
@@ -1244,7 +1273,7 @@ impl Emitter {
             scopes: Vec::new(),
             scope_types: Vec::new(),
             local_constants: Vec::new(),
-            string_literals: HashMap::new(),
+            string_literals,
             loop_stack: Vec::new(),
             return_type_stack: Vec::new(),
             return_value_stack: Vec::new(),
@@ -1623,6 +1652,28 @@ impl Emitter {
                     u32::from(ValueWidth::U8.bytes()),
                 ));
             }
+        }
+    }
+
+    fn emit_string_literal_initializers(&mut self) {
+        let mut literals = self
+            .string_literals
+            .iter()
+            .map(|(value, variable)| (variable.addr, value.clone(), *variable))
+            .collect::<Vec<_>>();
+        literals.sort_by_key(|(addr, _, _)| *addr);
+        for (_, value, variable) in literals {
+            self.emit_string_literal_initializer(&value, variable);
+        }
+    }
+
+    fn emit_string_literal_initializer(&mut self, value: &str, variable: Variable) {
+        for (offset, byte) in value.bytes().chain(std::iter::once(0)).enumerate() {
+            self.line(&format!("    ld a, {byte:02X}h"));
+            self.emit_store_a(scalar_var(
+                variable.addr + offset as u32,
+                u32::from(ValueWidth::U8.bytes()),
+            ));
         }
     }
 
@@ -3500,24 +3551,8 @@ impl Emitter {
             return Ok(());
         }
 
-        let len = value
-            .len()
-            .checked_add(1)
-            .ok_or_else(|| Diagnostic::new("string literal is too large"))?;
-        if len > u32::MAX as usize {
-            return Err(Diagnostic::new("string literal is too large"));
-        }
-
-        let variable = self
-            .symbols
-            .alloc_array(u32::from(ValueWidth::U8.bytes()), len as u32);
-        for (offset, byte) in value.bytes().chain(std::iter::once(0)).enumerate() {
-            self.line(&format!("    ld a, {byte:02X}h"));
-            self.emit_store_a(scalar_var(
-                variable.addr + offset as u32,
-                u32::from(ValueWidth::U8.bytes()),
-            ));
-        }
+        let variable = self.symbols.intern_string_literal(value)?;
+        self.emit_string_literal_initializer(value, variable);
         self.string_literals.insert(value.to_owned(), variable);
         self.line(&format!("    ld hl, {:06X}h", variable.addr));
         Ok(())
@@ -13093,6 +13128,33 @@ section .text
                 test.assert_eq_u8(*(title + 1), 'Z', 5);
                 test.assert_eq_u8(*(title + 2), 0, 6);
                 test.assert_eq_u8(same("OK", "OK"), true, 7);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 10_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_const_string_literal_pointers() {
+        let source = r#"
+            const TITLE: ptr<u8> = "EZ"
+            global title_copy: ptr<u8> = TITLE
+
+            fn same(a: ptr<u8>, b: ptr<u8>) -> bool {
+                return a == b
+            }
+
+            fn main() {
+                test.assert_eq_u8(*TITLE, 'E', 1)
+                test.assert_eq_u8(*(TITLE + 1), 'Z', 2)
+                test.assert_eq_u8(*(TITLE + 2), 0, 3)
+                test.assert_eq_u8(*title_copy, 'E', 4)
+                test.assert_eq_u8(same(TITLE, "EZ"), true, 5)
                 test.pass()
             }
         "#;
