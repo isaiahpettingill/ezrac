@@ -2813,48 +2813,15 @@ impl Emitter {
         right: &Expr,
         op: BinaryOp,
     ) -> Result<(), Diagnostic> {
-        let dividend = self.symbols.alloc_var(1);
-        let divisor = self.symbols.alloc_var(1);
-        let quotient = self.symbols.alloc_var(1);
-        let loop_label = self.next_label("div_loop");
-        let zero_label = self.next_label("div_zero");
-        let done_label = self.next_label("div_done");
-
+        let left_var = self.symbols.alloc_var(1);
         self.emit_expr_to_a(left)?;
-        self.emit_store_a(dividend);
+        self.emit_store_a(left_var);
         self.emit_expr_to_a(right)?;
-        self.emit_store_a(divisor);
-        self.line("    or a");
-        self.line(&format!("    jp z, {zero_label}"));
-        self.line("    xor a");
-        self.emit_store_a(quotient);
-        self.line(&format!("{loop_label}:"));
-        self.emit_load_a(dividend);
-        self.line("    ld b, a");
-        self.emit_load_a(divisor);
         self.line("    ld c, a");
-        self.line("    ld a, b");
-        self.line("    cp c");
-        self.line(&format!("    jp c, {done_label}"));
-        self.line("    sub c");
-        self.emit_store_a(dividend);
-        self.emit_load_a(quotient);
-        self.line("    ld b, a");
-        self.line("    ld a, 01h");
-        self.line("    add a, b");
-        self.emit_store_a(quotient);
-        self.line(&format!("    jp {loop_label}"));
-        self.line(&format!("{zero_label}:"));
-        self.line("    xor a");
-        self.emit_store_a(dividend);
-        self.line("    xor a");
-        self.emit_store_a(quotient);
-        self.line("    xor a");
-        self.line(&format!("    jp {done_label}"));
-        self.line(&format!("{done_label}:"));
+        self.emit_load_a(left_var);
         match op {
-            BinaryOp::Div => self.emit_load_a(quotient),
-            BinaryOp::Mod => self.emit_load_a(dividend),
+            BinaryOp::Div => self.line("    call __ezra_div_u8"),
+            BinaryOp::Mod => self.line("    call __ezra_mod_u8"),
             _ => unreachable!("not a division op"),
         }
         Ok(())
@@ -2866,6 +2833,17 @@ impl Emitter {
         right: &Expr,
         width: ValueWidth,
     ) -> Result<(), Diagnostic> {
+        if width == ValueWidth::U8 {
+            let left_var = self.symbols.alloc_var(1);
+            self.emit_expr_to_a(left)?;
+            self.emit_store_a(left_var);
+            self.emit_expr_to_a(right)?;
+            self.line("    ld c, a");
+            self.emit_load_a(left_var);
+            self.line("    call __ezra_mul_u8");
+            return Ok(());
+        }
+
         let left_var = self.symbols.alloc_var(width.bytes());
         let counter = self.symbols.alloc_var(width.bytes());
         let result = self.symbols.alloc_var(width.bytes());
@@ -7776,6 +7754,8 @@ mod tests {
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
 
+        assert!(asm.contains("    call __ezra_div_u8"), "{asm}");
+        assert!(asm.contains("    call __ezra_mod_u8"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
@@ -8111,6 +8091,7 @@ mod tests {
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 120_000).unwrap();
 
+        assert!(asm.contains("    call __ezra_mul_u8"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
