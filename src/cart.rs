@@ -374,6 +374,8 @@ pub fn cartridge_map_entries(
         )?);
     }
 
+    append_layout_section_map_entries(&mut entries, layout, &assets)?;
+
     if assets.is_empty() {
         return Ok(entries);
     }
@@ -428,6 +430,63 @@ pub fn cartridge_map_entries(
     }
 
     Ok(entries)
+}
+
+fn append_layout_section_map_entries(
+    entries: &mut Vec<CartridgeMapEntry>,
+    layout: &Layout,
+    assets: &[AssetEntry],
+) -> Result<(), Diagnostic> {
+    let usage = section_usage_from_assets(layout, assets)?;
+    for section in &layout.sections {
+        if matches!(section.name.as_str(), ".header" | ".text") {
+            continue;
+        }
+        let (region, _) = layout_section_placement(layout, &section.name)?;
+        let size = usage.get(&section.name).copied().unwrap_or(0);
+        entries.push(map_entry(&section.name, region.start.get(), size)?);
+    }
+    Ok(())
+}
+
+fn section_usage_from_assets(
+    layout: &Layout,
+    assets: &[AssetEntry],
+) -> Result<HashMap<String, u32>, Diagnostic> {
+    let mut section_cursors = Vec::<(String, u32)>::new();
+    let mut usage = HashMap::<String, u32>::new();
+    for asset in assets {
+        let (section, section_align) = layout_section_placement(layout, &asset.section)?;
+        let section_start = section.start.get();
+        let cursor = section_cursor(&mut section_cursors, &asset.section, section_start);
+        *cursor = align_addr(*cursor, asset.align.max(section_align))?;
+        let asset_addr =
+            Address24::try_from(*cursor).map_err(|error| Diagnostic::new(error.to_string()))?;
+        let asset_len = u32::try_from(asset.bytes.len())
+            .map_err(|_| Diagnostic::new("asset length exceeds 24-bit address space"))?;
+        let asset_end = asset_addr
+            .get()
+            .checked_add(asset_len.saturating_sub(1))
+            .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
+        let asset_end =
+            Address24::try_from(asset_end).map_err(|error| Diagnostic::new(error.to_string()))?;
+        if asset_len > 0 && !section.contains_range(asset_addr, asset_end) {
+            return Err(Diagnostic::new(format!(
+                "embed `{}` exceeds section `{}` region `{}`",
+                asset.name, asset.section, section.name
+            )));
+        }
+        *cursor = cursor
+            .checked_add(asset_len)
+            .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
+        usage.insert(
+            asset.section.clone(),
+            cursor
+                .checked_sub(section_start)
+                .ok_or_else(|| Diagnostic::new("asset payload starts before section"))?,
+        );
+    }
+    Ok(usage)
 }
 
 fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
@@ -1583,6 +1642,26 @@ mod tests {
         );
         assert!(
             map.contains(".layout_table") && map.contains(".symbol_table"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".rodata      0x020000 0x020002 0x000003"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".data        0x040000 0x040000 0x000000"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".bss         0x040000 0x040000 0x000000"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".assets      0x100000 0x100001 0x000002"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".scratch     0xE00000 0xE00000 0x000000"),
             "{map}"
         );
         assert!(
