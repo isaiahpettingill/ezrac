@@ -3613,6 +3613,7 @@ impl Emitter {
 
     fn emit_scaled_offset_to_hl(&mut self, expr: &Expr, scale: u32) -> Result<(), Diagnostic> {
         self.emit_expr_to_hl(expr, ValueWidth::U24)?;
+        self.emit_sign_extend_pointer_offset(expr)?;
         match scale {
             1 => {}
             _ => {
@@ -3627,6 +3628,25 @@ impl Emitter {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn emit_sign_extend_pointer_offset(&mut self, expr: &Expr) -> Result<(), Diagnostic> {
+        if !self.expr_is_signed(expr)? {
+            return Ok(());
+        }
+        let width = self.symbols.type_width(&self.expr_type(expr)?)?;
+        let (sign_register, extension) = match width {
+            ValueWidth::U8 => ("l", 0xFFFF00),
+            ValueWidth::U16 => ("h", 0xFF0000),
+            ValueWidth::U24 => return Ok(()),
+        };
+        let done = self.next_label("offset_nonnegative");
+        self.line(&format!("    ld a, {sign_register}"));
+        self.line("    cp 80h");
+        self.line(&format!("    jp c, {done}"));
+        self.emit_add_hl_const(extension);
+        self.line(&format!("{done}:"));
         Ok(())
     }
 
@@ -13776,15 +13796,23 @@ section .text
             global longs: [u24; 3] = [0, 0, 0]
 
             fn main() {
-                let b: ptr<u8> = &bytes[0];
+                let b: ptr<u8> = &bytes[1];
                 *(b + 2) = 0x7A;
-                test.assert_eq_u8(bytes[2], 0x7A, 1);
+                test.assert_eq_u8(bytes[3], 0x7A, 1);
+                let back_byte: i8 = -1;
+                *(b + back_byte) = 0x33;
+                test.assert_eq_u8(bytes[0], 0x33, 5);
+                test.assert_eq_u24(cast<u24>(b + back_byte), cast<u24>(&bytes[0]), 7);
 
                 let w: ptr<u16> = &words[0];
                 *(w + 2) = 0x4567;
                 test.assert_eq_u16(words[2], 0x4567, 2);
                 *(w + 2 - 1) = 0x1234;
                 test.assert_eq_u16(words[1], 0x1234, 3);
+                let back_word: i8 = -1;
+                *(w + 2 + back_word) = 0x2345;
+                test.assert_eq_u16(words[1], 0x2345, 6);
+                test.assert_eq_u24(cast<u24>(w + 2 + back_word), cast<u24>(&words[1]), 8);
 
                 let l: ptr<u24> = &longs[0];
                 *(l + 2) = 0x010203;
