@@ -2,7 +2,10 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
-    cart::{CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols},
+    cart::{
+        CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols,
+        layout_section_bases,
+    },
     compile::{CompileOptions, check_source, load_program},
     diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
@@ -134,7 +137,12 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
-        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
+        assembly_options_from_layout_and_program(
+            &layout,
+            &program,
+            options.debug_comments,
+            options.default_sdk_symbols,
+        )?,
     )
     .map_err(|error| {
         error
@@ -211,7 +219,12 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
-        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
+        assembly_options_from_layout_and_program(
+            &layout,
+            &program,
+            options.debug_comments,
+            options.default_sdk_symbols,
+        )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
     let run = run_assembly_test_with_options_at(
@@ -354,7 +367,12 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     }
     emit_ez80_assembly_with_options(
         &program,
-        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
+        assembly_options_from_layout_and_program(
+            &layout,
+            &program,
+            options.debug_comments,
+            options.default_sdk_symbols,
+        )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())
 }
@@ -404,7 +422,12 @@ fn check_source_with_layout(
     }
     emit_ez80_assembly_with_options(
         &program,
-        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
+        assembly_options_from_layout_and_program(
+            &layout,
+            &program,
+            options.debug_comments,
+            options.default_sdk_symbols,
+        )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
 
@@ -462,22 +485,20 @@ fn assembly_options_from_layout(
         audio_base: layout_symbol(layout, "EZRA_AUDIO_BASE").unwrap_or(EZRA_AUDIO_BASE),
         asset_base: layout_symbol(layout, "EZRA_ASSET_BASE").unwrap_or(EZRA_ASSET_BASE),
         rodata_base: layout_symbol(layout, "EZRA_RODATA_BASE").unwrap_or(EZRA_RODATA_BASE),
-        section_bases: section_bases_from_layout(layout),
+        section_bases: Vec::new(),
     }
 }
 
-fn section_bases_from_layout(layout: &Layout) -> Vec<(String, Address24)> {
-    layout
-        .sections
-        .iter()
-        .filter_map(|section| {
-            layout
-                .regions
-                .iter()
-                .find(|region| region.name == section.region)
-                .map(|region| (section.name.clone(), region.start))
-        })
-        .collect()
+fn assembly_options_from_layout_and_program(
+    layout: &Layout,
+    program: &ezra::ast::Program,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+) -> Result<AssemblyOptions, String> {
+    let mut options = assembly_options_from_layout(layout, debug_comments, default_sdk_symbols);
+    options.section_bases =
+        layout_section_bases(program, layout).map_err(|error| error.to_string())?;
+    Ok(options)
 }
 
 fn layout_symbol(layout: &Layout, name: &str) -> Option<Address24> {
@@ -900,6 +921,7 @@ mod tests {
             &source_path,
             r#"
                 embed banked: bytes = bytes [0xA1, 0xA2] section .bank1 align 256
+                embed banked2: bytes = bytes [0xB1] section .bank2 align 256
                 global marker: u8 = 0x42
 
                 fn main() {
@@ -909,6 +931,8 @@ mod tests {
                     test.assert_eq_u24(EZRA_CODE_BASE, 0x020040, 4)
                     test.assert_eq_u24(cast<ptr24>(banked.ptr), 0x120000, 5)
                     test.assert_eq_u8(*(banked.ptr + 1), 0xA2, 6)
+                    test.assert_eq_u24(cast<ptr24>(banked2.ptr), 0x120100, 7)
+                    test.assert_eq_u8(*(banked2.ptr), 0xB1, 8)
                     test.pass()
                 }
             "#,
@@ -930,6 +954,7 @@ mod tests {
                     section .data -> ram align 16;
                     section .bss -> ram align 16;
                     section .bank1 -> bank align 256;
+                    section .bank2 -> bank align 256;
 
                     symbol EZRA_RAM_BASE = 0x030000;
                     symbol EZRA_VRAM_BASE = 0x090000;

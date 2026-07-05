@@ -202,6 +202,8 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     let mut table = Vec::with_capacity(assets.len() * ASSET_TABLE_ENTRY_SIZE);
     let mut names = Vec::new();
     let mut packed = Vec::new();
+    let section_usage = section_usage_without_assets(program)?;
+    let section_starts = layout_section_starts(layout, &section_usage, &assets)?;
     let mut section_cursors = Vec::<(String, u32)>::new();
 
     for asset in assets {
@@ -211,7 +213,8 @@ pub fn build_cartridge_with_layout_code_and_symbols(
         names.push(0);
 
         let (section, section_align) = layout_section_placement(layout, &asset.section)?;
-        let cursor = section_cursor(&mut section_cursors, &asset.section, section.start.get());
+        let section_start = section_start(&section_starts, &asset.section)?;
+        let cursor = section_cursor(&mut section_cursors, &asset.section, section_start);
         *cursor = align_addr(*cursor, asset.align.max(section_align))?;
         let asset_addr =
             Address24::try_from(*cursor).map_err(|error| Diagnostic::new(error.to_string()))?;
@@ -375,7 +378,15 @@ pub fn cartridge_map_entries(
         )?);
     }
 
-    append_layout_section_map_entries(&mut entries, program, layout, &assets)?;
+    let section_usage = section_usage_without_assets(program)?;
+    let section_starts = layout_section_starts(layout, &section_usage, &assets)?;
+    append_layout_section_map_entries(
+        &mut entries,
+        layout,
+        &section_usage,
+        &assets,
+        &section_starts,
+    )?;
 
     if assets.is_empty() {
         return Ok(entries);
@@ -402,7 +413,8 @@ pub fn cartridge_map_entries(
     let mut section_cursors = Vec::<(String, u32)>::new();
     for asset in assets {
         let (section, section_align) = layout_section_placement(layout, &asset.section)?;
-        let cursor = section_cursor(&mut section_cursors, &asset.section, section.start.get());
+        let section_start = section_start(&section_starts, &asset.section)?;
+        let cursor = section_cursor(&mut section_cursors, &asset.section, section_start);
         *cursor = align_addr(*cursor, asset.align.max(section_align))?;
         let asset_addr =
             Address24::try_from(*cursor).map_err(|error| Diagnostic::new(error.to_string()))?;
@@ -435,87 +447,113 @@ pub fn cartridge_map_entries(
 
 fn append_layout_section_map_entries(
     entries: &mut Vec<CartridgeMapEntry>,
-    program: &Program,
     layout: &Layout,
+    section_usage: &HashMap<String, u32>,
     assets: &[AssetEntry],
+    section_starts: &HashMap<String, u32>,
 ) -> Result<(), Diagnostic> {
-    let mut usage = section_usage_from_assets(layout, assets)?;
-    for (section, size) in section_usage_from_globals(program)? {
-        let total = usage
-            .get(&section)
-            .copied()
-            .unwrap_or(0)
-            .checked_add(size)
-            .ok_or_else(|| {
-                Diagnostic::new(format!("section `{section}` exceeds 24-bit address space"))
-            })?;
-        usage.insert(section, total);
-    }
-    add_section_usage(
-        &mut usage,
-        ".rodata",
-        section_usage_from_string_literals(program)?,
-    )?;
-
-    let mut region_cursors = Vec::<(String, u32)>::new();
     for section in &layout.sections {
         if matches!(section.name.as_str(), ".header" | ".text") {
             continue;
         }
-        let (region, section_align) = layout_section_placement(layout, &section.name)?;
-        let size = usage.get(&section.name).copied().unwrap_or(0);
-        let start = if matches!(section.name.as_str(), ".data" | ".bss") {
-            let cursor = section_cursor(&mut region_cursors, &region.name, region.start.get());
-            *cursor = align_addr(*cursor, section_align)?;
-            let start = *cursor;
-            if size > 0 {
-                let end = start.checked_add(size - 1).ok_or_else(|| {
-                    Diagnostic::new(format!(
-                        "section `{}` exceeds 24-bit address space",
-                        section.name
-                    ))
-                })?;
-                let end =
-                    Address24::try_from(end).map_err(|error| Diagnostic::new(error.to_string()))?;
-                if !region.contains_range(
-                    Address24::try_from(start)
-                        .map_err(|error| Diagnostic::new(error.to_string()))?,
-                    end,
-                ) {
-                    return Err(Diagnostic::new(format!(
-                        "section `{}` does not fit in region `{}`",
-                        section.name, region.name
-                    )));
-                }
-                *cursor = cursor.checked_add(size).ok_or_else(|| {
-                    Diagnostic::new(format!(
-                        "section `{}` exceeds 24-bit address space",
-                        section.name
-                    ))
-                })?;
-            }
-            start
-        } else {
-            region.start.get()
-        };
+        let start = section_start(section_starts, &section.name)?;
+        let asset_size = asset_section_usage_at(layout, assets, &section.name, start)?;
+        let size = asset_size
+            .checked_add(section_usage.get(&section.name).copied().unwrap_or(0))
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "section `{}` exceeds 24-bit address space",
+                    section.name
+                ))
+            })?;
         entries.push(map_entry(&section.name, start, size)?);
     }
     Ok(())
 }
 
-fn section_usage_from_assets(
+pub fn layout_section_bases(
+    program: &Program,
     layout: &Layout,
+) -> Result<Vec<(String, Address24)>, Diagnostic> {
+    let assets = collect_assets(program)?;
+    let section_usage = section_usage_without_assets(program)?;
+    let starts = layout_section_starts(layout, &section_usage, &assets)?;
+    layout
+        .sections
+        .iter()
+        .filter_map(|section| {
+            starts
+                .get(&section.name)
+                .copied()
+                .map(|start| (section.name.clone(), start))
+        })
+        .map(|(name, start)| {
+            Ok((
+                name,
+                Address24::try_from(start).map_err(|error| Diagnostic::new(error.to_string()))?,
+            ))
+        })
+        .collect()
+}
+
+fn section_usage_without_assets(program: &Program) -> Result<HashMap<String, u32>, Diagnostic> {
+    let mut usage = section_usage_from_globals(program)?;
+    add_section_usage(
+        &mut usage,
+        ".rodata",
+        section_usage_from_string_literals(program)?,
+    )?;
+    Ok(usage)
+}
+
+fn layout_section_starts(
+    layout: &Layout,
+    section_usage: &HashMap<String, u32>,
     assets: &[AssetEntry],
 ) -> Result<HashMap<String, u32>, Diagnostic> {
-    let mut section_cursors = Vec::<(String, u32)>::new();
-    let mut usage = HashMap::<String, u32>::new();
-    for asset in assets {
-        let (section, section_align) = layout_section_placement(layout, &asset.section)?;
-        let section_start = section.start.get();
-        let cursor = section_cursor(&mut section_cursors, &asset.section, section_start);
-        *cursor = align_addr(*cursor, asset.align.max(section_align))?;
+    let mut region_cursors = Vec::<(String, u32)>::new();
+    let mut starts = HashMap::new();
+    for section in &layout.sections {
+        if matches!(section.name.as_str(), ".header" | ".text") {
+            continue;
+        }
+        let (region, section_align) = layout_section_placement(layout, &section.name)?;
+        let cursor = section_cursor(&mut region_cursors, &region.name, region.start.get());
+        *cursor = align_addr(*cursor, section_align)?;
+        let start = *cursor;
+        starts.insert(section.name.clone(), start);
+        let asset_size = asset_section_usage_at(layout, assets, &section.name, start)?;
+        let size = asset_size
+            .checked_add(section_usage.get(&section.name).copied().unwrap_or(0))
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "section `{}` exceeds 24-bit address space",
+                    section.name
+                ))
+            })?;
+        validate_section_range(region, &section.name, start, size)?;
+        *cursor = cursor.checked_add(size).ok_or_else(|| {
+            Diagnostic::new(format!(
+                "section `{}` exceeds 24-bit address space",
+                section.name
+            ))
+        })?;
+    }
+    Ok(starts)
+}
+
+fn asset_section_usage_at(
+    layout: &Layout,
+    assets: &[AssetEntry],
+    section_name: &str,
+    section_start: u32,
+) -> Result<u32, Diagnostic> {
+    let (section, section_align) = layout_section_placement(layout, section_name)?;
+    let mut cursor = section_start;
+    for asset in assets.iter().filter(|asset| asset.section == section_name) {
+        cursor = align_addr(cursor, asset.align.max(section_align))?;
         let asset_addr =
-            Address24::try_from(*cursor).map_err(|error| Diagnostic::new(error.to_string()))?;
+            Address24::try_from(cursor).map_err(|error| Diagnostic::new(error.to_string()))?;
         let asset_len = u32::try_from(asset.bytes.len())
             .map_err(|_| Diagnostic::new("asset length exceeds 24-bit address space"))?;
         let asset_end = asset_addr
@@ -530,17 +568,46 @@ fn section_usage_from_assets(
                 asset.name, asset.section, section.name
             )));
         }
-        *cursor = cursor
+        cursor = cursor
             .checked_add(asset_len)
             .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
-        usage.insert(
-            asset.section.clone(),
-            cursor
-                .checked_sub(section_start)
-                .ok_or_else(|| Diagnostic::new("asset payload starts before section"))?,
-        );
     }
-    Ok(usage)
+    cursor
+        .checked_sub(section_start)
+        .ok_or_else(|| Diagnostic::new("asset payload starts before section"))
+}
+
+fn validate_section_range(
+    region: &Region,
+    section_name: &str,
+    start: u32,
+    size: u32,
+) -> Result<(), Diagnostic> {
+    if size == 0 {
+        return Ok(());
+    }
+    let start_addr =
+        Address24::try_from(start).map_err(|error| Diagnostic::new(error.to_string()))?;
+    let end = start.checked_add(size - 1).ok_or_else(|| {
+        Diagnostic::new(format!(
+            "section `{section_name}` exceeds 24-bit address space"
+        ))
+    })?;
+    let end_addr = Address24::try_from(end).map_err(|error| Diagnostic::new(error.to_string()))?;
+    if !region.contains_range(start_addr, end_addr) {
+        return Err(Diagnostic::new(format!(
+            "section `{section_name}` does not fit in region `{}`",
+            region.name
+        )));
+    }
+    Ok(())
+}
+
+fn section_start(starts: &HashMap<String, u32>, section: &str) -> Result<u32, Diagnostic> {
+    starts
+        .get(section)
+        .copied()
+        .ok_or_else(|| Diagnostic::new(format!("layout has no section `{section}`")))
 }
 
 fn section_usage_from_globals(program: &Program) -> Result<HashMap<String, u32>, Diagnostic> {
@@ -1971,6 +2038,52 @@ mod tests {
         );
         assert!(
             map.contains(".rodata:title 0x020000 0x020002 0x000003"),
+            "{map}"
+        );
+    }
+
+    #[test]
+    fn cartridge_map_places_shared_region_sections_sequentially() {
+        let source = r#"
+            embed first: bytes = bytes [0xA1, 0xA2] section .bank1 align 1
+            embed second: bytes = bytes [0xB1] section .bank2 align 1
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let layout = parse_layout(
+            r#"
+                layout banked {
+                    load 0x010000;
+                    entry 0x010040;
+                    stack 0xF00000;
+
+                    region code 0x010000..0x01FFFF read execute;
+                    region bank 0x120000..0x12FFFF read;
+
+                    section .header -> code align 64;
+                    section .text -> code align 16;
+                    section .bank1 -> bank align 256;
+                    section .bank2 -> bank align 256;
+                }
+            "#,
+        )
+        .unwrap();
+        let map = build_cartridge_map(&program, &layout, 4, &[]).unwrap();
+
+        assert!(
+            map.contains(".bank1       0x120000 0x120001 0x000002"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".bank2       0x120100 0x120100 0x000001"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".bank1:first 0x120000 0x120001 0x000002"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".bank2:second 0x120100 0x120100 0x000001"),
             "{map}"
         );
     }
