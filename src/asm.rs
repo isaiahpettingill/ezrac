@@ -1902,15 +1902,25 @@ impl Emitter {
         self.line("    ld a, c");
         self.line("    ret");
         self.line("__ezra_mul_u16:");
-        self.line("    ex de, hl");
+        self.line("    ld d, h");
+        self.line("    ld e, l");
+        self.line("    ld h, c");
+        self.line("    mlt hl");
+        self.line("    push hl");
+        self.line("    ld h, d");
+        self.line("    ld l, c");
+        self.line("    mlt hl");
+        self.line("    ld a, l");
+        self.line("    ld h, e");
+        self.line("    ld l, b");
+        self.line("    mlt hl");
+        self.line("    add a, l");
+        self.line("    pop de");
+        self.line("    add a, d");
         self.line("    ld hl, 000000h");
-        self.line(".L_mul_u16_loop:");
-        self.line("    ld a, b");
-        self.line("    or c");
-        self.line("    ret z");
-        self.line("    add hl, de");
-        self.line("    dec bc");
-        self.line("    jp .L_mul_u16_loop");
+        self.line("    ld h, a");
+        self.line("    ld l, e");
+        self.line("    ret");
         self.line("__ezra_mul_u24:");
         self.line("    ex de, hl");
         self.line("    ld hl, 000000h");
@@ -14730,6 +14740,7 @@ section .text
     fn emits_and_runs_runtime_multiplication() {
         let expected_u8 = 17u8.wrapping_mul(15);
         let expected_u16 = 0x0123u16.wrapping_mul(0x0021);
+        let expected_u16_wrap = 0xFFFFu16.wrapping_mul(0xFFFF);
         let expected_u24 = (0x000123u32 * 0x000045) & 0x00FF_FFFF;
         let expected_wrap = (0x00FF00u32 * 0x000101) & 0x00FF_FFFF;
         let source = format!(
@@ -14758,6 +14769,9 @@ section .text
                 let b: u16 = mul16(0x0123, 0x0021)
                 test.assert_eq_u16(b, 0x{expected_u16:04X}, 2)
 
+                let b_wrap: u16 = mul16(0xFFFF, 0xFFFF)
+                test.assert_eq_u16(b_wrap, 0x{expected_u16_wrap:04X}, 7)
+
                 let c: u24 = mul24(0x000123, 0x000045)
                 test.assert_eq_u24(c, 0x{expected_u24:06X}, 3)
 
@@ -14783,6 +14797,10 @@ section .text
             "{asm}"
         );
         assert!(asm.contains("    call __ezra_mul_u16"), "{asm}");
+        assert!(
+            asm.contains("__ezra_mul_u16:\n    ld d, h\n    ld e, l\n    ld h, c\n    mlt hl"),
+            "{asm}"
+        );
         assert!(asm.contains("    call __ezra_mul_u24"), "{asm}");
         assert!(asm.contains("__ezra_mul_u24:"), "{asm}");
         assert!(run.halted, "{asm}");
