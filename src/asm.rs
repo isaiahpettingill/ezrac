@@ -1735,17 +1735,16 @@ impl Emitter {
         self.emit_expr_to_hl(expr, ValueWidth::U24)?;
         match scale {
             1 => {}
-            2 => self.line("    add hl, hl"),
-            3 => {
-                self.line("    push hl");
-                self.line("    add hl, hl");
-                self.line("    pop bc");
-                self.line("    add hl, bc");
-            }
             _ => {
-                return Err(Diagnostic::new(format!(
-                    "pointer arithmetic scale {scale} is not implemented yet"
-                )));
+                let base = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                self.emit_store_width(base);
+                self.line("    ld hl, 000000h");
+                for _ in 0..scale {
+                    self.line("    push hl");
+                    self.emit_load_width(base);
+                    self.line("    pop bc");
+                    self.line("    add hl, bc");
+                }
             }
         }
         Ok(())
@@ -5078,6 +5077,33 @@ mod tests {
                 let l: ptr<u24> = &longs[0];
                 *(l + 2) = 0x010203;
                 test.assert_eq_u24(longs[2], 0x010203, 4);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_struct_pointer_arithmetic_scale() {
+        let source = r#"
+            struct Cell {
+                value: u24
+                flags: u8
+            }
+
+            global cell: Cell = Cell { value: 0x010203, flags: 0x44 }
+
+            fn main() {
+                let p: ptr<Cell> = &cell
+                let q: ptr<Cell> = p + 2
+                let r: ptr<Cell> = q - 1
+                test.assert_eq_u24(cast<u24>(q), cast<u24>(p) + 8, 1)
+                test.assert_eq_u24(cast<u24>(r), cast<u24>(p) + 4, 2)
                 test.pass()
             }
         "#;
