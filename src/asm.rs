@@ -3403,6 +3403,10 @@ impl Emitter {
         if is_comparison(op) {
             self.ensure_comparison_operands_compatible(left, op, right)?;
             let width = self.expr_width(left)?.max(self.expr_width(right)?);
+            if self.binary_operands_are_signed(left, right)? {
+                self.emit_signed_comparison(left, op, right, width)?;
+                return Ok(());
+            }
             if width != ValueWidth::U8 {
                 self.emit_wide_comparison(left, op, right, width)?;
                 return Ok(());
@@ -3524,6 +3528,105 @@ impl Emitter {
         self.line("    or a");
         self.line("    sbc hl, de");
         self.emit_comparison_from_flags(op);
+        Ok(())
+    }
+
+    fn emit_signed_comparison(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            if width == ValueWidth::U8 {
+                let left_var = self.alloc_var(width.bytes());
+                self.emit_expr_to_width(left, width)?;
+                self.emit_store_width(left_var);
+                self.emit_expr_to_width(right, width)?;
+                self.line("    ld c, a");
+                self.emit_load_width(left_var);
+                self.emit_comparison(op);
+                return Ok(());
+            }
+            return self.emit_wide_comparison(left, op, right, width);
+        }
+
+        let left_var = self.alloc_var(width.bytes());
+        let right_var = self.alloc_var(width.bytes());
+        let same_sign_label = self.next_label("scmp_same_sign");
+        let true_label = self.next_label("scmp_true");
+        let false_label = self.next_label("scmp_false");
+        let end_label = self.next_label("scmp_end");
+        let sign_offset = u32::from(width.bytes() - 1);
+
+        self.emit_expr_to_width(left, width)?;
+        self.emit_store_width(left_var);
+        self.emit_expr_to_width(right, width)?;
+        self.emit_store_width(right_var);
+
+        self.line("    ld a, 80h");
+        self.line("    ld c, a");
+        self.line(&format!("    ld a, ({:06X}h)", left_var.addr + sign_offset));
+        self.line("    and c");
+        self.line("    ld b, a");
+        self.line(&format!(
+            "    ld a, ({:06X}h)",
+            right_var.addr + sign_offset
+        ));
+        self.line("    and c");
+        self.line("    cp b");
+        self.line(&format!("    jp z, {same_sign_label}"));
+        self.line("    ld a, b");
+        self.line("    or a");
+        match op {
+            BinaryOp::Lt | BinaryOp::Le => {
+                self.line(&format!("    jp nz, {true_label}"));
+                self.line(&format!("    jp {false_label}"));
+            }
+            BinaryOp::Gt | BinaryOp::Ge => {
+                self.line(&format!("    jp nz, {false_label}"));
+                self.line(&format!("    jp {true_label}"));
+            }
+            _ => unreachable!("not a signed ordering comparison"),
+        }
+
+        self.line(&format!("{same_sign_label}:"));
+        if width == ValueWidth::U8 {
+            self.emit_load_width(right_var);
+            self.line("    ld c, a");
+            self.emit_load_width(left_var);
+            self.line("    cp c");
+        } else {
+            self.emit_load_width(left_var);
+            self.line("    push hl");
+            self.emit_load_width(right_var);
+            self.line("    ex de, hl");
+            self.line("    pop hl");
+            self.line("    or a");
+            self.line("    sbc hl, de");
+        }
+        match op {
+            BinaryOp::Lt => self.line(&format!("    jp c, {true_label}")),
+            BinaryOp::Ge => self.line(&format!("    jp nc, {true_label}")),
+            BinaryOp::Le => {
+                self.line(&format!("    jp c, {true_label}"));
+                self.line(&format!("    jp z, {true_label}"));
+            }
+            BinaryOp::Gt => {
+                self.line(&format!("    jp c, {false_label}"));
+                self.line(&format!("    jp z, {false_label}"));
+                self.line(&format!("    jp {true_label}"));
+            }
+            _ => unreachable!("not a signed ordering comparison"),
+        }
+
+        self.line(&format!("{false_label}:"));
+        self.line("    ld a, 00h");
+        self.line(&format!("    jp {end_label}"));
+        self.line(&format!("{true_label}:"));
+        self.line("    ld a, 01h");
+        self.line(&format!("{end_label}:"));
         Ok(())
     }
 
@@ -11464,6 +11567,51 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_signed_comparisons() {
+        let source = r#"
+            alias subpx = i24
+
+            fn main() {
+                let a: i8 = -1
+                let b: i8 = 1
+                let c: i8 = -2
+                test.assert_eq_u8(a < b, 1, 1)
+                test.assert_eq_u8(b > a, 1, 2)
+                test.assert_eq_u8(c < a, 1, 3)
+                test.assert_eq_u8(a >= c, 1, 4)
+
+                let d: i16 = -300
+                let e: i16 = 7
+                let f: i16 = -301
+                test.assert_eq_u8(d < e, 1, 5)
+                test.assert_eq_u8(e <= d, 0, 6)
+                test.assert_eq_u8(f <= d, 1, 7)
+                test.assert_eq_u8(d != f, 1, 8)
+
+                let g: subpx = -0x010000
+                let h: subpx = 0x000100
+                let i: subpx = -0x020000
+                test.assert_eq_u8(g < h, 1, 9)
+                test.assert_eq_u8(h >= g, 1, 10)
+                test.assert_eq_u8(i < g, 1, 11)
+                test.assert_eq_u8(g == g, 1, 12)
+
+                let min: subpx = -0x800000
+                let max: subpx = 0x7FFFFF
+                test.assert_eq_u8(min < max, 1, 13)
+                test.assert_eq_u8(max > min, 1, 14)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
