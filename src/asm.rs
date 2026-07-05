@@ -2335,11 +2335,13 @@ impl Emitter {
             }
             Stmt::While { condition, body } => {
                 self.ensure_expr_is_bool(condition, "while condition")?;
+                let mut condition_is_always_true = false;
                 if self.eliminate_dead_code {
                     if let Ok(value) = self.eval_i64_with_local_constants(condition) {
                         if value == 0 {
                             return Ok(());
                         }
+                        condition_is_always_true = true;
                     }
                 }
                 let start_label = self.next_label("while");
@@ -2349,9 +2351,11 @@ impl Emitter {
                     break_label: end_label.clone(),
                 });
                 self.line(&format!("{start_label}:"));
-                self.emit_expr_to_a(condition)?;
-                self.line("    or a");
-                self.line(&format!("    jp z, {end_label}"));
+                if !condition_is_always_true {
+                    self.emit_expr_to_a(condition)?;
+                    self.line("    or a");
+                    self.line(&format!("    jp z, {end_label}"));
+                }
                 self.emit_block(body)?;
                 self.line(&format!("    jp {start_label}"));
                 self.line(&format!("{end_label}:"));
@@ -9147,6 +9151,38 @@ section .text
         assert!(!asm.contains("; source: cold()"), "{asm}");
         assert!(!asm.contains("; source: test.fail(7)"), "{asm}");
         assert!(!asm.contains("; source: return 9"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn omits_constant_true_while_condition_checks() {
+        let source = r#"
+            const KEEP_RUNNING: bool = true
+
+            fn main() {
+                let count: u8 = 0
+                while KEEP_RUNNING {
+                    count += 1
+                    if count == 3 {
+                        break
+                    }
+                }
+                test.assert_eq_u8(count, 3, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+        let while_body = asm
+            .split("; source: while KEEP_RUNNING")
+            .nth(1)
+            .and_then(|tail| tail.split("; source: test.assert_eq_u8").next())
+            .unwrap();
+
+        assert!(!while_body.contains("    jp z, .L_endwhile"), "{asm}");
+        assert!(while_body.contains("    jp .L_while"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
