@@ -1967,9 +1967,13 @@ impl Emitter {
         self.line("    push bc");
         self.line("    push de");
         self.line("    push hl");
+        self.line("    push ix");
+        self.line("    push iy");
     }
 
     fn emit_interrupt_epilogue(&mut self) {
+        self.line("    pop iy");
+        self.line("    pop ix");
         self.line("    pop hl");
         self.line("    pop de");
         self.line("    pop bc");
@@ -10965,6 +10969,10 @@ section .text
         let irq = asm.split("_vblank_irq:").nth(1).unwrap();
         let irq = irq.split("_main:").next().unwrap();
         assert!(irq.contains("    push af"), "{asm}");
+        assert!(irq.contains("    push ix"), "{asm}");
+        assert!(irq.contains("    push iy"), "{asm}");
+        assert!(irq.contains("    pop iy"), "{asm}");
+        assert!(irq.contains("    pop ix"), "{asm}");
         assert!(irq.contains("    pop af"), "{asm}");
         assert!(irq.contains("    reti"), "{asm}");
         assert!(run.halted, "{asm}");
@@ -10998,6 +11006,8 @@ section .text
             .split("out0 (0Ch), a")
             .nth(1)
             .expect("debug output in interrupt handler");
+        assert!(return_site.contains("    pop iy"), "{asm}");
+        assert!(return_site.contains("    pop ix"), "{asm}");
         assert!(return_site.contains("    pop hl"), "{asm}");
         assert!(return_site.contains("    pop af"), "{asm}");
         assert!(return_site.contains("    reti"), "{asm}");
