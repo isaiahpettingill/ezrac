@@ -60,7 +60,7 @@ let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 assign_stmt = { place ~ assign_op ~ expr ~ semi? }
 place = { deref_place | access_place | index_place | field_place | ident }
 deref_place = { "*" ~ (ident | "(" ~ expr ~ ")") }
-access_place = { ident ~ index_suffix ~ access_suffix+ }
+access_place = { ident ~ &(access_suffix ~ access_suffix) ~ access_suffix+ }
 index_place = { path ~ "[" ~ expr ~ "]" }
 field_place = { ident ~ "." ~ ident ~ !("." | "(" | "[") }
 if_stmt = { "if" ~ expr ~ block ~ ("else" ~ block)? }

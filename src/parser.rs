@@ -1342,6 +1342,7 @@ mod tests {
         EzraParser::parse(Rule::expr, "&outer.inner.x").unwrap();
         EzraParser::parse(Rule::expr, "&packets[i].bytes[j]").unwrap();
         EzraParser::parse(Rule::stmt, "points[i].x += 1;").unwrap();
+        EzraParser::parse(Rule::stmt, "big.padding[299] = 1;").unwrap();
 
         let program = parse_program(
             Path::new("game.ezra"),

@@ -11353,9 +11353,12 @@ mod tests {
                 test.assert_eq_u8(bytes[299], 0xA5, 1)
                 test.assert_eq_u8(big.tail, 7, 2)
 
+                big.padding[299] = 0x5A
+                test.assert_eq_u8(big.padding[299], 0x5A, 3)
+
                 let local: [u8; 260] = []
                 local[259] = 0xC3
-                test.assert_eq_u8(local[259], 0xC3, 3)
+                test.assert_eq_u8(local[259], 0xC3, 4)
                 test.pass()
             }
         "#;
