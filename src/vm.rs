@@ -268,6 +268,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(3)
     } else if parse_ld_reg8_from_hl(text).is_some() || parse_ld_hl_from_reg8(text).is_some() {
         Ok(1)
+    } else if parse_ld_hl_imm(text)?.is_some() {
+        Ok(2)
     } else if parse_ld_reg8_reg8(text).is_some() {
         Ok(1)
     } else if parse_ld_reg8_imm(text)?.is_some() {
@@ -354,6 +356,9 @@ fn emit_instruction(
         bytes.push(0x46 + register * 8);
     } else if let Some(register) = parse_ld_hl_from_reg8(text) {
         bytes.push(0x70 + register);
+    } else if let Some(value) = parse_ld_hl_imm(text)? {
+        bytes.push(0x36);
+        bytes.push(value);
     } else if text == "ld a, (de)" {
         bytes.push(0x1A);
     } else if let Some(rest) = text.strip_prefix("ld hl, (") {
@@ -601,6 +606,16 @@ fn parse_ld_hl_from_reg8(text: &str) -> Option<u8> {
         return None;
     }
     reg8_code(src)
+}
+
+fn parse_ld_hl_imm(text: &str) -> Result<Option<u8>, Diagnostic> {
+    let Some((dst, value)) = parse_ld_operands(text) else {
+        return Ok(None);
+    };
+    if dst != "(hl)" || reg8_code(value).is_some() || value.starts_with('(') {
+        return Ok(None);
+    }
+    Ok(Some(parse_u8(value)?))
 }
 
 fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
@@ -1003,6 +1018,32 @@ mod tests {
             ld e, (hl)
             ld a, e
             add a, 02h
+            out0 (0Ch), a
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"C");
+    }
+
+    #[test]
+    fn assembles_hl_indirect_immediate_store() {
+        let bytes = assemble_ez80_subset_at("ld (hl), 43h\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0x36, 0x43]);
+    }
+
+    #[test]
+    fn runs_hl_indirect_immediate_store_on_ez80_vm() {
+        let asm = r#"
+            ld hl, 040100h
+            ld (hl), 43h
+            ld a, (hl)
             out0 (0Ch), a
             xor a
             out0 (0Dh), a
