@@ -386,6 +386,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if parse_mlt_reg16(text).is_some() {
         Ok(2)
+    } else if parse_rst(text)?.is_some() {
+        Ok(1)
     } else if text == "sbc hl, bc"
         || text == "sbc hl, de"
         || text == "add ix, sp"
@@ -663,6 +665,8 @@ fn emit_instruction(
         bytes.extend([0xED, opcode]);
     } else if let Some(opcode) = parse_mlt_reg16(text) {
         bytes.extend([0xED, opcode]);
+    } else if let Some(opcode) = parse_rst(text)? {
+        bytes.push(opcode);
     } else if text == "add ix, sp" {
         bytes.extend([0xDD, 0x39]);
     } else if text == "add iy, sp" {
@@ -902,6 +906,19 @@ fn parse_mlt_reg16(text: &str) -> Option<u8> {
         "sp" => Some(0x7C),
         _ => None,
     }
+}
+
+fn parse_rst(text: &str) -> Result<Option<u8>, Diagnostic> {
+    let Some(target) = text.strip_prefix("rst ") else {
+        return Ok(None);
+    };
+    let target = parse_number(target.trim())?;
+    if target > 0x38 || target % 8 != 0 {
+        return Err(Diagnostic::new(format!(
+            "restart target 0x{target:X} is not one of 0x00, 0x08, ..., 0x38"
+        )));
+    }
+    Ok(Some(0xC7 + target as u8))
 }
 
 fn reg8_code(register: &str) -> Option<u8> {
@@ -1386,6 +1403,14 @@ mod tests {
         let bytes = assemble_ez80_subset_at("reti\nretn\n", EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0xED, 0x4D, 0xED, 0x45]);
+    }
+
+    #[test]
+    fn assembles_restart_instructions() {
+        let asm = "rst 00h\nrst 08h\nrst 10h\nrst 18h\nrst 20h\nrst 28h\nrst 30h\nrst 38h\n";
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0xC7, 0xCF, 0xD7, 0xDF, 0xE7, 0xEF, 0xF7, 0xFF]);
     }
 
     #[test]
@@ -2130,6 +2155,24 @@ mod tests {
             error.message,
             "address operand `0x1000000` is outside the 24-bit address space"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_restart_targets() {
+        for (asm, expected) in [
+            (
+                "rst 07h\n",
+                "restart target 0x7 is not one of 0x00, 0x08, ..., 0x38",
+            ),
+            (
+                "rst 40h\n",
+                "restart target 0x40 is not one of 0x00, 0x08, ..., 0x38",
+            ),
+        ] {
+            let error = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
