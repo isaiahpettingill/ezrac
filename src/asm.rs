@@ -997,6 +997,23 @@ impl Symbols {
     ) -> Result<(), Diagnostic> {
         let left_type = self.resolved_type(&self.const_expr_type(left)?)?;
         let right_type = self.resolved_type(&self.const_expr_type(right)?)?;
+        if !type_is_bool(&left_type)
+            && !type_is_bool(&right_type)
+            && !matches!(left_type, Type::Ptr(_))
+            && !matches!(right_type, Type::Ptr(_))
+        {
+            if expr_is_untyped_literal(left) && expr_is_untyped_literal(right) {
+                return Ok(());
+            }
+            if expr_is_untyped_literal(left) {
+                let value = self.eval_i64(left)?;
+                return self.validate_value_for_type(value, &right_type);
+            }
+            if expr_is_untyped_literal(right) {
+                let value = self.eval_i64(right)?;
+                return self.validate_value_for_type(value, &left_type);
+            }
+        }
         validate_comparison_types(&left_type, op, &right_type, || {
             if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
                 None
@@ -5457,6 +5474,23 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
         let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
+        if !type_is_bool(&left_type)
+            && !type_is_bool(&right_type)
+            && !matches!(left_type, Type::Ptr(_))
+            && !matches!(right_type, Type::Ptr(_))
+        {
+            if expr_is_untyped_literal(left) && expr_is_untyped_literal(right) {
+                return Ok(());
+            }
+            if expr_is_untyped_literal(left) {
+                let value = self.symbols.eval_i64(left)?;
+                return self.symbols.validate_value_for_type(value, &right_type);
+            }
+            if expr_is_untyped_literal(right) {
+                let value = self.symbols.eval_i64(right)?;
+                return self.symbols.validate_value_for_type(value, &left_type);
+            }
+        }
         validate_comparison_types(&left_type, op, &right_type, || {
             if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
                 None
@@ -7547,6 +7581,24 @@ mod tests {
                 fn main() { test.pass() }
                 "#,
                 "comparison operands must have same width without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let byte: u8 = 1
+                    let same: bool = byte == 300
+                    test.pass()
+                }
+                "#,
+                "value 300 is outside u8 range",
+            ),
+            (
+                r#"
+                const BYTE: u8 = 1
+                const SAME: bool = BYTE == 300
+                fn main() { test.pass() }
+                "#,
+                "value 300 is outside u8 range",
             ),
         ];
 
@@ -11695,6 +11747,43 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_comparisons_with_fitting_untyped_literals() {
+        let source = r#"
+            const SMALL_NEG: i8 = -2
+            const CONST_SIGNED_LT: bool = SMALL_NEG < -1
+            const CONST_UNSIGNED_EQ: bool = 5 == 5
+
+            fn main() {
+                let a: i8 = -2
+                test.assert_eq_u8(a < -1, 1, 1)
+                test.assert_eq_u8(a >= -2, 1, 2)
+
+                let b: i16 = -300
+                test.assert_eq_u8(b < -1, 1, 3)
+                test.assert_eq_u8(-301 <= b, 1, 4)
+
+                let c: i24 = -0x012345
+                test.assert_eq_u8(c < -1, 1, 5)
+                test.assert_eq_u8(-0x012345 == c, 1, 6)
+
+                let d: u8 = 7
+                test.assert_eq_u8(d == 7, 1, 7)
+                test.assert_eq_u8(7 <= d, 1, 8)
+
+                test.assert_eq_u8(CONST_SIGNED_LT, 1, 9)
+                test.assert_eq_u8(CONST_UNSIGNED_EQ, 1, 10)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
