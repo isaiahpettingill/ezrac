@@ -33,6 +33,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         function_name_stack: Vec::new(),
         function_frame_stack: Vec::new(),
         function_interrupt_stack: Vec::new(),
+        function_naked_stack: Vec::new(),
     };
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
@@ -966,6 +967,7 @@ struct Emitter {
     function_name_stack: Vec<String>,
     function_frame_stack: Vec<bool>,
     function_interrupt_stack: Vec<bool>,
+    function_naked_stack: Vec<bool>,
 }
 
 impl Emitter {
@@ -1068,6 +1070,7 @@ impl Emitter {
         self.function_name_stack.push(function.name.clone());
         self.function_frame_stack.push(uses_stack_frame);
         self.function_interrupt_stack.push(interrupt);
+        self.function_naked_stack.push(naked);
         if !naked {
             if interrupt {
                 if !function.params.is_empty() {
@@ -1086,6 +1089,7 @@ impl Emitter {
         for stmt in &function.body {
             self.emit_stmt(stmt)?;
         }
+        self.function_naked_stack.pop();
         self.function_interrupt_stack.pop();
         self.function_frame_stack.pop();
         self.function_name_stack.pop();
@@ -1390,7 +1394,7 @@ impl Emitter {
         if !clobbers.is_empty() {
             self.line(&format!("    ; clobber {}", clobbers.join(", ")));
         }
-        validate_inline_asm_clobbers(clobbers, lines)?;
+        validate_inline_asm_clobbers(clobbers, lines, self.current_function_is_naked())?;
 
         for input in inputs {
             self.emit_inline_asm_input_load(input)?;
@@ -4032,6 +4036,13 @@ impl Emitter {
             .expect("function interrupt state exists during emission")
     }
 
+    fn current_function_is_naked(&self) -> bool {
+        self.function_naked_stack
+            .last()
+            .copied()
+            .expect("function naked state exists during emission")
+    }
+
     fn port(&self, name: &str) -> Result<u8, Diagnostic> {
         self.symbols
             .ports
@@ -4343,7 +4354,16 @@ fn format_immediate(value: i64, width: ValueWidth) -> String {
     }
 }
 
-fn validate_inline_asm_clobbers(clobbers: &[String], lines: &[String]) -> Result<(), Diagnostic> {
+fn validate_inline_asm_clobbers(
+    clobbers: &[String],
+    lines: &[String],
+    allow_sp_clobber: bool,
+) -> Result<(), Diagnostic> {
+    if asm_clobbers_include(clobbers, "sp") && !allow_sp_clobber {
+        return Err(Diagnostic::new(
+            "inline asm clobber `sp` is only allowed in naked functions",
+        ));
+    }
     for line in lines {
         let lower = line.to_ascii_lowercase();
         for register in ["ix", "iy", "sp"] {
@@ -6182,6 +6202,17 @@ mod tests {
                 "#,
                 "inline asm uses ports without declaring clobber `ports`",
             ),
+            (
+                r#"
+                fn main() {
+                    asm volatile(clobber sp) {
+                        "ld sp, 0F00000h"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm clobber `sp` is only allowed in naked functions",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -6218,6 +6249,29 @@ mod tests {
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"B", "{asm}");
+    }
+
+    #[test]
+    fn emits_naked_asm_functions_with_sp_clobber() {
+        let source = r#"
+            naked fn raw_entry() {
+                asm volatile(clobber sp) {
+                    "ld sp, 0F00000h"
+                    "ret"
+                }
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let raw_entry = asm.split("_raw_entry:").nth(1).unwrap();
+        let raw_entry = raw_entry.split("_main:").next().unwrap();
+
+        assert!(raw_entry.contains("    ld sp, 0F00000h"), "{asm}");
+        assert!(raw_entry.contains("    ret"), "{asm}");
     }
 
     #[test]
