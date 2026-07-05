@@ -7317,6 +7317,9 @@ fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
             Stmt::Out { value, .. } => collect_expr_calls(value, calls),
             Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => {}
         }
+        if stmt_terminates_current_block(stmt) {
+            break;
+        }
     }
 }
 
@@ -9016,6 +9019,33 @@ section .text
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "value 256 is outside u8 range");
+    }
+
+    #[test]
+    fn omits_private_functions_only_called_from_unreachable_statements() {
+        let source = r#"
+            fn unreachable_private() {
+                test.fail(7)
+            }
+
+            fn done() {
+                return;
+                unreachable_private()
+            }
+
+            fn main() {
+                done()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(!asm.contains("_unreachable_private:"), "{asm}");
+        assert!(!asm.contains("; source: unreachable_private()"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
