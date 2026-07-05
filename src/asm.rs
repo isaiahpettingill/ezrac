@@ -975,6 +975,7 @@ impl Emitter {
         if !clobbers.is_empty() {
             self.line(&format!("    ; clobber {}", clobbers.join(", ")));
         }
+        validate_inline_asm_clobbers(clobbers, lines)?;
 
         for input in inputs {
             self.emit_inline_asm_input_load(input)?;
@@ -3526,6 +3527,55 @@ fn format_immediate(value: i64, width: ValueWidth) -> String {
     }
 }
 
+fn validate_inline_asm_clobbers(clobbers: &[String], lines: &[String]) -> Result<(), Diagnostic> {
+    for line in lines {
+        let lower = line.to_ascii_lowercase();
+        for register in ["ix", "iy", "sp"] {
+            if asm_line_mentions_word(&lower, register) && !asm_clobbers_include(clobbers, register)
+            {
+                return Err(Diagnostic::new(format!(
+                    "inline asm uses `{register}` without declaring clobber `{register}`"
+                )));
+            }
+        }
+        if asm_line_uses_ports(&lower) && !asm_clobbers_include(clobbers, "ports") {
+            return Err(Diagnostic::new(
+                "inline asm uses ports without declaring clobber `ports`",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn asm_clobbers_include(clobbers: &[String], name: &str) -> bool {
+    clobbers.iter().any(|clobber| clobber == name)
+}
+
+fn asm_line_uses_ports(line: &str) -> bool {
+    asm_line_mentions_word(line, "out")
+        || asm_line_mentions_word(line, "out0")
+        || asm_line_mentions_word(line, "in")
+        || asm_line_mentions_word(line, "in0")
+}
+
+fn asm_line_mentions_word(line: &str, word: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = line[start..].find(word) {
+        let index = start + offset;
+        let before = line[..index].chars().next_back();
+        let after = line[index + word.len()..].chars().next();
+        if !is_asm_word_char(before) && !is_asm_word_char(after) {
+            return true;
+        }
+        start = index + word.len();
+    }
+    false
+}
+
+fn is_asm_word_char(ch: Option<char>) -> bool {
+    matches!(ch, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 fn substitute_inline_asm_operands(
     line: &str,
     operands: &HashMap<String, String>,
@@ -4302,10 +4352,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_inline_asm_missing_required_clobbers() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "ld ix, 0"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm uses `ix` without declaring clobber `ix`",
+            ),
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "out0 (0Ch), a"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm uses ports without declaring clobber `ports`",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
     fn emits_and_runs_naked_asm_functions_without_epilogue() {
         let source = r#"
             naked fn raw_debug() {
-                asm volatile {
+                asm volatile(clobber ports) {
                     "ld a, 0x42"
                     "out0 (0Ch), a"
                     "ret"
