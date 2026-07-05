@@ -1123,6 +1123,7 @@ impl Emitter {
             }
             Stmt::Out { port, value } => {
                 let port = self.port(port)?;
+                self.validate_expr_assignable_to_type(value, &Type::Named("u8".to_owned()))?;
                 self.emit_expr_to_a(value)?;
                 self.emit_out_a(port);
             }
@@ -5015,6 +5016,51 @@ mod tests {
                 }
                 "#,
                 "while condition must be bool",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_out_value_types() {
+        let cases = [
+            (
+                r#"
+                port DEBUG: u8 = 0x0C
+                fn main() {
+                    let wide: u16 = 0x1234
+                    out DEBUG, wide
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                port DEBUG: u8 = 0x0C
+                fn main() {
+                    let signed: i8 = 1
+                    out DEBUG, signed
+                    test.pass()
+                }
+                "#,
+                "signed/unsigned mix without cast",
+            ),
+            (
+                r#"
+                port DEBUG: u8 = 0x0C
+                fn main() {
+                    out DEBUG, true
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
             ),
         ];
 
