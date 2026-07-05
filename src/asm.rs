@@ -708,6 +708,8 @@ impl Symbols {
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
                     self.ensure_const_expr_is_bool(left, "logical operand")?;
                     self.ensure_const_expr_is_bool(right, "logical operand")?;
+                } else if is_comparison(*op) {
+                    self.validate_const_comparison_operand_types(left, *op, right)?;
                 } else {
                     self.validate_const_binary_operand_types(left, right)?;
                 }
@@ -779,6 +781,26 @@ impl Symbols {
             return Err(Diagnostic::new("signed/unsigned mix without cast"));
         }
         Ok(())
+    }
+
+    fn validate_const_comparison_operand_types(
+        &self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let left_type = self.resolved_type(&self.const_expr_type(left)?)?;
+        let right_type = self.resolved_type(&self.const_expr_type(right)?)?;
+        validate_comparison_types(&left_type, op, &right_type, || {
+            if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
+                None
+            } else {
+                Some((
+                    self.type_width(&left_type).ok()?,
+                    self.type_width(&right_type).ok()?,
+                ))
+            }
+        })
     }
 
     fn const_expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
@@ -2348,6 +2370,7 @@ impl Emitter {
             return Ok(());
         }
         if is_comparison(op) {
+            self.ensure_comparison_operands_compatible(left, op, right)?;
             let width = self.expr_width(left)?.max(self.expr_width(right)?);
             if width != ValueWidth::U8 {
                 self.emit_wide_comparison(left, op, right, width)?;
@@ -3695,6 +3718,8 @@ impl Emitter {
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
                     self.ensure_expr_is_bool(left, "logical operand")?;
                     self.ensure_expr_is_bool(right, "logical operand")?;
+                } else if is_comparison(*op) {
+                    self.ensure_comparison_operands_compatible(left, *op, right)?;
                 } else if matches!(
                     op,
                     BinaryOp::Add
@@ -3747,6 +3772,26 @@ impl Emitter {
             | Expr::AddressOfField { .. } => {}
         }
         Ok(())
+    }
+
+    fn ensure_comparison_operands_compatible(
+        &self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
+        let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
+        validate_comparison_types(&left_type, op, &right_type, || {
+            if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
+                None
+            } else {
+                Some((
+                    self.symbols.type_width(&left_type).ok()?,
+                    self.symbols.type_width(&right_type).ok()?,
+                ))
+            }
+        })
     }
 
     fn ensure_expr_is_bool(&self, expr: &Expr, context: &str) -> Result<(), Diagnostic> {
@@ -3999,6 +4044,52 @@ fn type_is_signed(ty: &Type) -> bool {
 
 fn type_is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name == "bool")
+}
+
+fn validate_comparison_types<F>(
+    left_type: &Type,
+    op: BinaryOp,
+    right_type: &Type,
+    widths: F,
+) -> Result<(), Diagnostic>
+where
+    F: FnOnce() -> Option<(ValueWidth, ValueWidth)>,
+{
+    if type_is_bool(left_type) || type_is_bool(right_type) {
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && left_type == right_type {
+            return Ok(());
+        }
+        return Err(Diagnostic::new("type mismatch"));
+    }
+
+    let left_is_ptr = matches!(left_type, Type::Ptr(_));
+    let right_is_ptr = matches!(right_type, Type::Ptr(_));
+    if left_is_ptr || right_is_ptr {
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && left_type == right_type {
+            return Ok(());
+        }
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            return Err(Diagnostic::new("type mismatch"));
+        }
+        if left_is_ptr && right_is_ptr {
+            return Err(Diagnostic::new(
+                "pointer comparisons support only == and !=",
+            ));
+        }
+        return Err(Diagnostic::new("type mismatch"));
+    }
+
+    if type_is_signed(left_type) != type_is_signed(right_type) {
+        return Err(Diagnostic::new("signed/unsigned mix without cast"));
+    }
+    if let Some((left_width, right_width)) = widths() {
+        if left_width != right_width {
+            return Err(Diagnostic::new(
+                "comparison operands must have same width without cast",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn int_value_type(value: i64) -> Type {
@@ -4391,6 +4482,87 @@ mod tests {
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, "signed/unsigned mix without cast");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_comparison_operand_types() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let signed: i8 = 1
+                    let unsigned: u8 = 1
+                    let same: bool = signed == unsigned
+                    test.pass()
+                }
+                "#,
+                "signed/unsigned mix without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let byte: u8 = 1
+                    let word: u16 = 1
+                    let same: bool = byte == word
+                    test.pass()
+                }
+                "#,
+                "comparison operands must have same width without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let left: bool = false
+                    let right: bool = true
+                    let ordered: bool = left < right
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+                global byte: u8 = 0
+                global word: u16 = 0
+                fn main() {
+                    let bp: ptr<u8> = &byte
+                    let wp: ptr<u16> = &word
+                    let same: bool = bp == wp
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+                global left: u8 = 0
+                global right: u8 = 0
+                fn main() {
+                    let lp: ptr<u8> = &left
+                    let rp: ptr<u8> = &right
+                    let ordered: bool = lp < rp
+                    test.pass()
+                }
+                "#,
+                "pointer comparisons support only == and !=",
+            ),
+            (
+                r#"
+                const BYTE: u8 = 1
+                const WORD: u16 = 1
+                const SAME: bool = BYTE == WORD
+                fn main() { test.pass() }
+                "#,
+                "comparison operands must have same width without cast",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
         }
     }
 
