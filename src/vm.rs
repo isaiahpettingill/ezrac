@@ -109,6 +109,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "pop bc"
             | "pop de"
             | "pop hl"
+            | "dec sp"
+            | "inc sp"
             | "ld b, a"
             | "ld c, a"
             | "ld a, b"
@@ -124,6 +126,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "inc hl"
             | "add hl, hl"
             | "add hl, bc"
+            | "add hl, sp"
             | "add a, a"
             | "add a, b"
             | "add a, c"
@@ -269,12 +272,18 @@ fn emit_instruction(
         bytes.push(0xD1);
     } else if text == "pop hl" {
         bytes.push(0xE1);
+    } else if text == "dec sp" {
+        bytes.push(0x3B);
+    } else if text == "inc sp" {
+        bytes.push(0x33);
     } else if text == "pop ix" {
         bytes.extend([0xDD, 0xE1]);
     } else if text == "reti" {
         bytes.extend([0xED, 0x4D]);
     } else if text == "add ix, sp" {
         bytes.extend([0xDD, 0x39]);
+    } else if text == "add hl, sp" {
+        bytes.push(0x39);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
         bytes.extend([0xDD, 0x21]);
         push24(bytes, parse_addr(value.trim(), labels)?);

@@ -31,6 +31,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         return_type_stack: Vec::new(),
         return_value_stack: Vec::new(),
         function_name_stack: Vec::new(),
+        function_frame_stack: Vec::new(),
     };
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
@@ -136,6 +137,8 @@ struct FunctionSig {
     param_types: Vec<Type>,
     arg_slots: Vec<Variable>,
     uses_arg_slots: bool,
+    stack_arg_offsets: Vec<Option<u8>>,
+    stack_arg_bytes: u8,
     return_width: ValueWidth,
     return_type: Option<Type>,
 }
@@ -195,11 +198,27 @@ impl Symbols {
                 .iter()
                 .map(|param| symbols.type_width(&param.ty))
                 .collect::<Result<Vec<_>, _>>()?;
-            let uses_arg_slots = params.len() > 3
-                || param_widths.get(2).is_some_and(|third| third.bytes() != 1)
-                    && param_widths
-                        .get(1)
-                        .is_some_and(|second| second.bytes() == 1);
+            let uses_arg_slots = params.len() <= 3
+                && param_widths.get(2).is_some_and(|third| third.bytes() != 1)
+                && param_widths
+                    .get(1)
+                    .is_some_and(|second| second.bytes() == 1);
+            let mut stack_arg_offsets = vec![None; params.len()];
+            let mut stack_arg_bytes = 0u8;
+            if params.len() > 3 {
+                let mut offset = 6u8;
+                for (index, width) in param_widths.iter().enumerate().skip(3) {
+                    let bytes = width.bytes();
+                    if offset as u16 + bytes as u16 > 0x80 {
+                        return Err(Diagnostic::new(format!(
+                            "function `{name}` stack arguments exceed IX displacement range"
+                        )));
+                    }
+                    stack_arg_offsets[index] = Some(offset);
+                    offset += bytes;
+                    stack_arg_bytes += bytes;
+                }
+            }
             let arg_slots = if uses_arg_slots {
                 param_widths
                     .iter()
@@ -216,6 +235,8 @@ impl Symbols {
                     param_types: params.iter().map(|param| param.ty.clone()).collect(),
                     arg_slots,
                     uses_arg_slots,
+                    stack_arg_offsets,
+                    stack_arg_bytes,
                     return_width: return_type
                         .as_ref()
                         .map(|ty| symbols.type_width(ty))
@@ -738,6 +759,7 @@ struct Emitter {
     return_type_stack: Vec<Option<Type>>,
     return_value_stack: Vec<bool>,
     function_name_stack: Vec<String>,
+    function_frame_stack: Vec<bool>,
 }
 
 impl Emitter {
@@ -820,9 +842,15 @@ impl Emitter {
         if let Some(return_type) = &function.return_type {
             self.symbols.type_width(return_type)?;
         }
+        let uses_stack_frame = self
+            .symbols
+            .functions
+            .get(&function.name)
+            .is_some_and(|sig| sig.stack_arg_bytes > 0);
         self.return_type_stack.push(function.return_type.clone());
         self.return_value_stack.push(function.return_type.is_some());
         self.function_name_stack.push(function.name.clone());
+        self.function_frame_stack.push(uses_stack_frame);
         if !naked {
             if interrupt {
                 if !function.params.is_empty() {
@@ -833,11 +861,15 @@ impl Emitter {
                 }
                 self.emit_interrupt_prologue();
             }
+            if uses_stack_frame {
+                self.emit_frame_prologue();
+            }
             self.bind_params(function)?;
         }
         for stmt in &function.body {
             self.emit_stmt(stmt)?;
         }
+        self.function_frame_stack.pop();
         self.function_name_stack.pop();
         self.return_value_stack.pop();
         self.return_type_stack.pop();
@@ -853,9 +885,22 @@ impl Emitter {
         if function.name == "main" {
             self.line("    jp __ezra_exit");
         } else {
+            if uses_stack_frame {
+                self.emit_frame_epilogue();
+            }
             self.line("    ret");
         }
         Ok(())
+    }
+
+    fn emit_frame_prologue(&mut self) {
+        self.line("    push ix");
+        self.line("    ld ix, 000000h");
+        self.line("    add ix, sp");
+    }
+
+    fn emit_frame_epilogue(&mut self) {
+        self.line("    pop ix");
     }
 
     fn emit_interrupt_prologue(&mut self) {
@@ -898,6 +943,10 @@ impl Emitter {
                 let slot = sig.arg_slots[index];
                 self.emit_load_width(slot);
                 self.emit_store_width(variable);
+                continue;
+            }
+            if let Some(offset) = sig.stack_arg_offsets[index] {
+                self.emit_load_ix_offset_width_into(offset, variable)?;
                 continue;
             }
             match width {
@@ -1032,6 +1081,9 @@ impl Emitter {
                         self.current_function_name()
                     )));
                 }
+                if self.current_function_uses_frame() {
+                    self.emit_frame_epilogue();
+                }
                 self.line("    ret");
             }
             Stmt::Return(Some(expr)) => {
@@ -1043,6 +1095,9 @@ impl Emitter {
                 }
                 let return_type = self.current_return_type().clone();
                 self.emit_expr_to_type(expr, &return_type)?;
+                if self.current_function_uses_frame() {
+                    self.emit_frame_epilogue();
+                }
                 self.line("    ret");
             }
             Stmt::Asm {
@@ -1595,6 +1650,11 @@ impl Emitter {
             return Ok(());
         }
 
+        if sig.stack_arg_bytes > 0 {
+            for temp in temps.iter().copied().skip(3).rev() {
+                self.emit_push_stack_arg_variable(temp);
+            }
+        }
         if let Some(temp) = temps.get(2).copied() {
             if temp.size == 1 {
                 self.emit_load_a(temp);
@@ -1622,6 +1682,9 @@ impl Emitter {
             self.emit_load_width(temp);
         }
         self.line(&format!("    call _{name}"));
+        if sig.stack_arg_bytes > 0 {
+            self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
+        }
         Ok(())
     }
 
@@ -2814,6 +2877,40 @@ impl Emitter {
         }
     }
 
+    fn emit_load_ix_offset_width_into(
+        &mut self,
+        offset: u8,
+        variable: Variable,
+    ) -> Result<(), Diagnostic> {
+        for byte_offset in 0..variable.size {
+            let displacement = offset as u32 + byte_offset;
+            if displacement > 0x7F {
+                return Err(Diagnostic::new(format!(
+                    "stack argument offset {displacement} exceeds IX displacement range"
+                )));
+            }
+            self.line(&format!("    ld a, (ix+{displacement})"));
+            self.line(&format!("    ld ({:06X}h), a", variable.addr + byte_offset));
+        }
+        Ok(())
+    }
+
+    fn emit_push_stack_arg_variable(&mut self, variable: Variable) {
+        for byte_offset in (0..variable.size).rev() {
+            self.line(&format!("    ld a, ({:06X}h)", variable.addr + byte_offset));
+            self.line("    dec sp");
+            self.line("    ld hl, 000000h");
+            self.line("    add hl, sp");
+            self.line("    ld (hl), a");
+        }
+    }
+
+    fn emit_drop_stack_arg_bytes(&mut self, bytes: u8) {
+        for _ in 0..bytes {
+            self.line("    inc sp");
+        }
+    }
+
     fn emit_load_pointed_width_into(&mut self, variable: Variable) {
         for offset in 0..variable.size {
             if offset != 0 {
@@ -3457,6 +3554,13 @@ impl Emitter {
         self.function_name_stack
             .last()
             .expect("function name exists during emission")
+    }
+
+    fn current_function_uses_frame(&self) -> bool {
+        self.function_frame_stack
+            .last()
+            .copied()
+            .expect("function frame state exists during emission")
     }
 
     fn port(&self, name: &str) -> Result<u8, Diagnostic> {
