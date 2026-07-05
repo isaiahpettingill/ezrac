@@ -1393,6 +1393,7 @@ impl Emitter {
         let done_label = self.next_label("sdiv_i24_done");
         let quotient_positive_label = self.next_label("sdiv_i24_q_positive");
         let remainder_positive_label = self.next_label("sdiv_i24_r_positive");
+        let not_overflow_label = self.next_label("sdiv_i24_not_overflow");
 
         self.line(&format!("{label}:"));
         self.emit_store_width(dividend);
@@ -1403,6 +1404,26 @@ impl Emitter {
         self.emit_zero_variable(quotient_negative);
         self.emit_zero_variable(remainder_negative);
         self.emit_jump_if_memory_zero(divisor, &zero_label);
+        self.emit_jump_if_memory_not_equals(
+            dividend,
+            signed_min_bytes(ValueWidth::U24),
+            &not_overflow_label,
+        );
+        self.emit_jump_if_memory_not_equals(
+            divisor,
+            signed_negative_one_bytes(ValueWidth::U24),
+            &not_overflow_label,
+        );
+        match op {
+            BinaryOp::Div => self.emit_load_width(dividend),
+            BinaryOp::Mod => {
+                self.emit_zero_variable(dividend);
+                self.emit_load_width(dividend);
+            }
+            _ => unreachable!("not a division op"),
+        }
+        self.line("    ret");
+        self.line(&format!("{not_overflow_label}:"));
 
         self.emit_abs_signed_variable(dividend, Some(quotient_negative), Some(remainder_negative));
         self.emit_abs_signed_variable(divisor, Some(quotient_negative), None);
@@ -3714,6 +3735,8 @@ impl Emitter {
         let done_label = self.next_label("sdiv_done");
         let quotient_positive_label = self.next_label("sdiv_q_positive");
         let remainder_positive_label = self.next_label("sdiv_r_positive");
+        let not_overflow_label = self.next_label("sdiv_not_overflow");
+        let finished_label = self.next_label("sdiv_finished");
 
         self.emit_expr_to_width(left, width)?;
         self.emit_store_width(dividend);
@@ -3723,6 +3746,22 @@ impl Emitter {
         self.emit_zero_variable(quotient_negative);
         self.emit_zero_variable(remainder_negative);
         self.emit_jump_if_memory_zero(divisor, &zero_label);
+        self.emit_jump_if_memory_not_equals(dividend, signed_min_bytes(width), &not_overflow_label);
+        self.emit_jump_if_memory_not_equals(
+            divisor,
+            signed_negative_one_bytes(width),
+            &not_overflow_label,
+        );
+        match op {
+            BinaryOp::Div => self.emit_load_width(dividend),
+            BinaryOp::Mod => {
+                self.emit_zero_variable(dividend);
+                self.emit_load_width(dividend);
+            }
+            _ => unreachable!("not a division op"),
+        }
+        self.line(&format!("    jp {finished_label}"));
+        self.line(&format!("{not_overflow_label}:"));
 
         self.emit_abs_signed_variable(dividend, Some(quotient_negative), Some(remainder_negative));
         self.emit_abs_signed_variable(divisor, Some(quotient_negative), None);
@@ -3772,6 +3811,7 @@ impl Emitter {
             BinaryOp::Mod => self.emit_load_width(dividend),
             _ => unreachable!("not a division op"),
         }
+        self.line(&format!("{finished_label}:"));
         Ok(())
     }
 
@@ -3823,6 +3863,19 @@ impl Emitter {
         }
         self.line(&format!("    jp {zero_label}"));
         self.line(&format!("{nonzero_label}:"));
+    }
+
+    fn emit_jump_if_memory_not_equals(&mut self, variable: Variable, bytes: &[u8], label: &str) {
+        for (offset, byte) in bytes.iter().copied().enumerate() {
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                variable.addr + offset as u32
+            ));
+            self.line("    ld b, a");
+            self.line(&format!("    ld a, {byte:02X}h"));
+            self.line("    cp b");
+            self.line(&format!("    jp nz, {label}"));
+        }
     }
 
     fn emit_zero_variable(&mut self, variable: Variable) {
@@ -6163,6 +6216,22 @@ fn type_display(ty: &Type) -> String {
 
 fn type_is_signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24"))
+}
+
+fn signed_min_bytes(width: ValueWidth) -> &'static [u8] {
+    match width {
+        ValueWidth::U8 => &[0x80],
+        ValueWidth::U16 => &[0x00, 0x80],
+        ValueWidth::U24 => &[0x00, 0x00, 0x80],
+    }
+}
+
+fn signed_negative_one_bytes(width: ValueWidth) -> &'static [u8] {
+    match width {
+        ValueWidth::U8 => &[0xFF],
+        ValueWidth::U16 => &[0xFF, 0xFF],
+        ValueWidth::U24 => &[0xFF, 0xFF, 0xFF],
+    }
 }
 
 fn type_is_bool(ty: &Type) -> bool {
@@ -9942,6 +10011,9 @@ mod tests {
         let expected_i16_mod = ((-300i16) % 7) as u16;
         let expected_i24_div = ((-0x012345i32) / 17) & 0x00FF_FFFF;
         let expected_i24_mod = ((-0x012345i32) % 17) & 0x00FF_FFFF;
+        let expected_i8_overflow_div = i8::MIN as u8;
+        let expected_i16_overflow_div = i16::MIN as u16;
+        let expected_i24_overflow_div = 0x800000u32;
         let source = format!(
             r#"
             alias subpx = i24
@@ -9977,16 +10049,22 @@ mod tests {
                 test.assert_eq_u8(mod8(a, b), 0x{expected_i8_mod:02X}, 2)
                 test.assert_eq_u8(div8(a, 0), 0, 3)
                 test.assert_eq_u8(mod8(a, 0), 0, 4)
+                test.assert_eq_u8(div8(-128, -1), 0x{expected_i8_overflow_div:02X}, 5)
+                test.assert_eq_u8(mod8(-128, -1), 0, 6)
 
                 let c: i16 = -300
                 let d: i16 = 7
-                test.assert_eq_u16(div16(c, d), 0x{expected_i16_div:04X}, 5)
-                test.assert_eq_u16(mod16(c, d), 0x{expected_i16_mod:04X}, 6)
+                test.assert_eq_u16(div16(c, d), 0x{expected_i16_div:04X}, 7)
+                test.assert_eq_u16(mod16(c, d), 0x{expected_i16_mod:04X}, 8)
+                test.assert_eq_u16(div16(-32768, -1), 0x{expected_i16_overflow_div:04X}, 9)
+                test.assert_eq_u16(mod16(-32768, -1), 0, 10)
 
                 let e: subpx = -0x012345
                 let f: subpx = 17
-                test.assert_eq_u24(div24(e, f), 0x{expected_i24_div:06X}, 7)
-                test.assert_eq_u24(mod24(e, f), 0x{expected_i24_mod:06X}, 8)
+                test.assert_eq_u24(div24(e, f), 0x{expected_i24_div:06X}, 11)
+                test.assert_eq_u24(mod24(e, f), 0x{expected_i24_mod:06X}, 12)
+                test.assert_eq_u24(div24(-0x800000, -1), 0x{expected_i24_overflow_div:06X}, 13)
+                test.assert_eq_u24(mod24(-0x800000, -1), 0, 14)
                 test.pass()
             }}
             "#
