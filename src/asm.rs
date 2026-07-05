@@ -1876,8 +1876,15 @@ impl Emitter {
         self.line("    ret");
         self.line("__ezra_memcpy:");
         self.line(".L_memcpy_loop:");
-        self.line("    ld a, b");
-        self.line("    or c");
+        self.line("    push de");
+        self.line("    push hl");
+        self.line("    push bc");
+        self.line("    pop hl");
+        self.line("    ld de, 000000h");
+        self.line("    or a");
+        self.line("    sbc hl, de");
+        self.line("    pop hl");
+        self.line("    pop de");
         self.line("    ret z");
         self.line("    ld a, (de)");
         self.line("    ld (hl), a");
@@ -1886,12 +1893,15 @@ impl Emitter {
         self.line("    dec bc");
         self.line("    jp .L_memcpy_loop");
         self.line("__ezra_memset:");
-        self.line("    ld d, a");
         self.line(".L_memset_loop:");
-        self.line("    ld a, b");
-        self.line("    or c");
+        self.line("    push hl");
+        self.line("    push bc");
+        self.line("    pop hl");
+        self.line("    ld de, 000000h");
+        self.line("    or a");
+        self.line("    sbc hl, de");
+        self.line("    pop hl");
         self.line("    ret z");
-        self.line("    ld a, d");
         self.line("    ld (hl), a");
         self.line("    inc hl");
         self.line("    dec bc");
@@ -8930,6 +8940,12 @@ mod tests {
         let run = run_assembly_test(&asm, 3_000).unwrap();
 
         assert!(asm.contains("__ezra_memcpy:"), "{asm}");
+        assert!(
+            asm.contains(
+                "__ezra_memcpy:\n.L_memcpy_loop:\n    push de\n    push hl\n    push bc\n    pop hl\n    ld de, 000000h\n    or a\n    sbc hl, de\n    pop hl\n    pop de\n    ret z"
+            ),
+            "{asm}"
+        );
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
@@ -8955,6 +8971,12 @@ mod tests {
         let run = run_assembly_test(&asm, 3_000).unwrap();
 
         assert!(asm.contains("__ezra_memset:"), "{asm}");
+        assert!(
+            asm.contains(
+                "__ezra_memset:\n.L_memset_loop:\n    push hl\n    push bc\n    pop hl\n    ld de, 000000h\n    or a\n    sbc hl, de\n    pop hl\n    ret z"
+            ),
+            "{asm}"
+        );
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
