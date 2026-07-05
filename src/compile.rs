@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    ast::{Declaration, Expr, Function, Place, Program, Stmt},
+    ast::{Declaration, Expr, Function, Place, Program, Stmt, Type},
     diagnostic::Diagnostic,
     parser::parse_program,
 };
@@ -166,12 +166,15 @@ fn validate_declaration_private_import_access(
 ) -> Result<(), Diagnostic> {
     match declaration {
         Declaration::Const(decl) => {
+            validate_type_private_import_access(&decl.ty, private_imports)?;
             validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
         }
+        Declaration::Alias(decl) => validate_type_private_import_access(&decl.ty, private_imports),
         Declaration::Port(decl) => {
             validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
         }
         Declaration::Mmio(decl) => {
+            validate_type_private_import_access(&decl.ty, private_imports)?;
             validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
         }
         Declaration::Embed(decl) => {
@@ -181,15 +184,28 @@ fn validate_declaration_private_import_access(
             Ok(())
         }
         Declaration::Global(decl) => {
+            validate_type_private_import_access(&decl.ty, private_imports)?;
             validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
+        }
+        Declaration::Struct(decl) => {
+            for field in &decl.fields {
+                validate_type_private_import_access(&field.ty, private_imports)?;
+            }
+            Ok(())
+        }
+        Declaration::ExternAsmFunction(function) => {
+            for param in &function.params {
+                validate_type_private_import_access(&param.ty, private_imports)?;
+            }
+            if let Some(return_type) = &function.return_type {
+                validate_type_private_import_access(return_type, private_imports)?;
+            }
+            Ok(())
         }
         Declaration::Function(function) => {
             validate_function_private_import_access(function, private_imports)
         }
-        Declaration::Import(_)
-        | Declaration::Alias(_)
-        | Declaration::Struct(_)
-        | Declaration::ExternAsmFunction(_) => Ok(()),
+        Declaration::Import(_) => Ok(()),
     }
 }
 
@@ -202,6 +218,12 @@ fn validate_function_private_import_access(
         .iter()
         .map(|param| param.name.clone())
         .collect::<HashSet<_>>();
+    for param in &function.params {
+        validate_type_private_import_access(&param.ty, private_imports)?;
+    }
+    if let Some(return_type) = &function.return_type {
+        validate_type_private_import_access(return_type, private_imports)?;
+    }
     for stmt in &function.body {
         validate_stmt_private_import_access(stmt, private_imports, &mut locals)?;
     }
@@ -214,7 +236,10 @@ fn validate_stmt_private_import_access(
     locals: &mut HashSet<String>,
 ) -> Result<(), Diagnostic> {
     match stmt {
-        Stmt::Let { name, value, .. } => {
+        Stmt::Let {
+            name, ty, value, ..
+        } => {
+            validate_type_private_import_access(ty, private_imports)?;
             validate_expr_private_import_access(value, private_imports, locals)?;
             locals.insert(name.clone());
         }
@@ -294,7 +319,11 @@ fn validate_expr_private_import_access(
         Expr::Field { base, .. } | Expr::AddressOfField { base, .. } => {
             reject_private_import_name(base, private_imports, locals)
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+        Expr::Cast { expr, ty } => {
+            validate_type_private_import_access(ty, private_imports)?;
+            validate_expr_private_import_access(expr, private_imports, locals)
+        }
+        Expr::Unary { expr, .. } | Expr::Deref(expr) => {
             validate_expr_private_import_access(expr, private_imports, locals)
         }
         Expr::Binary { left, right, .. } => {
@@ -307,7 +336,8 @@ fn validate_expr_private_import_access(
             }
             Ok(())
         }
-        Expr::StructInit { fields, .. } => {
+        Expr::StructInit { ty, fields } => {
+            reject_private_import_type_name(ty, private_imports)?;
             for (_, value) in fields {
                 validate_expr_private_import_access(value, private_imports, locals)?;
             }
@@ -324,6 +354,42 @@ fn validate_expr_private_import_access(
         }
         Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::String(_) => Ok(()),
     }
+}
+
+fn validate_type_private_import_access(
+    ty: &Type,
+    private_imports: &HashMap<String, String>,
+) -> Result<(), Diagnostic> {
+    match ty {
+        Type::Named(name) => reject_private_import_type_name(name, private_imports),
+        Type::Ptr(inner) => validate_type_private_import_access(inner, private_imports),
+        Type::Array { element, len } => {
+            validate_type_private_import_access(element, private_imports)?;
+            validate_expr_private_import_access(
+                &parse_array_len_expr(len),
+                private_imports,
+                &HashSet::new(),
+            )
+        }
+    }
+}
+
+fn parse_array_len_expr(len: &str) -> Expr {
+    len.parse::<i64>()
+        .map(Expr::Int)
+        .unwrap_or_else(|_| Expr::Ident(len.to_owned()))
+}
+
+fn reject_private_import_type_name(
+    name: &str,
+    private_imports: &HashMap<String, String>,
+) -> Result<(), Diagnostic> {
+    if let Some(import) = private_imports.get(name) {
+        return Err(Diagnostic::new(format!(
+            "declaration `{name}` from import `{import}` is private"
+        )));
+    }
+    Ok(())
 }
 
 fn reject_private_import_name(
@@ -460,6 +526,71 @@ mod tests {
         assert_eq!(
             error.message,
             "declaration `hidden` from import `lib.math` is private"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_private_imported_types_in_annotations() {
+        let root = temp_root("private_types");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/types.ezra");
+        std::fs::write(
+            &lib_path,
+            "alias Hidden = u8\nstruct Secret { value: u8 }\npub alias Shown = u8\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            "import lib.types\nfn main() { let x: Hidden = 1; test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `Hidden` from import `lib.types` is private"
+        );
+
+        std::fs::write(
+            &main_path,
+            "import lib.types\nfn main() { let x: Secret = Secret { value: 1 }; test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `Secret` from import `lib.types` is private"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allows_public_imported_types_in_annotations() {
+        let root = temp_root("public_types");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/types.ezra");
+        std::fs::write(&lib_path, "pub alias Shown = u8\n").unwrap();
+        std::fs::write(
+            &main_path,
+            "import lib.types\nfn main() { let x: Shown = 1; test.pass() }\n",
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+
+        assert!(
+            program
+                .declarations
+                .iter()
+                .any(|decl| { matches!(decl, Declaration::Alias(alias) if alias.name == "Shown") })
         );
 
         let _ = std::fs::remove_dir_all(root);
