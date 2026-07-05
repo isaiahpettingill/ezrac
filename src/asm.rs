@@ -7533,6 +7533,9 @@ fn stmt_terminates_current_block(stmt: &Stmt) -> bool {
         } if !else_body.is_empty() => {
             block_terminates_current_block(then_body) && block_terminates_current_block(else_body)
         }
+        Stmt::Loop { body } => {
+            !block_can_break_current_loop(body) && block_terminates_current_block(body)
+        }
         _ => false,
     }
 }
@@ -8809,6 +8812,30 @@ section .text
         assert!(!asm.contains("; source: return 3"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn omits_unreachable_statements_after_nonbreaking_loop() {
+        let source = r#"
+            fn exit_loop() {
+                loop {
+                    return
+                }
+                test.fail(7)
+            }
+
+            fn main() {
+                exit_loop()
+                test.fail(8)
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(!asm.contains("; source: test.fail(7)"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 8, "{asm}");
     }
 
     #[test]
