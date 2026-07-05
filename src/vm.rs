@@ -315,6 +315,10 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "or a"
             | "cpl"
             | "daa"
+            | "rlca"
+            | "rla"
+            | "rrca"
+            | "rra"
             | "ex de, hl"
             | "exx"
             | "push af"
@@ -635,6 +639,14 @@ fn emit_instruction(
         bytes.push(0x2F);
     } else if text == "daa" {
         bytes.push(0x27);
+    } else if text == "rlca" {
+        bytes.push(0x07);
+    } else if text == "rla" {
+        bytes.push(0x17);
+    } else if text == "rrca" {
+        bytes.push(0x0F);
+    } else if text == "rra" {
+        bytes.push(0x1F);
     } else if text == "ex de, hl" {
         bytes.push(0xEB);
     } else if text == "exx" {
@@ -2028,6 +2040,14 @@ mod tests {
     }
 
     #[test]
+    fn assembles_accumulator_rotate_shorthands() {
+        let bytes =
+            assemble_ez80_subset_at("rlca\nrla\nrrca\nrra\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0x07, 0x17, 0x0F, 0x1F]);
+    }
+
+    #[test]
     fn runs_8_bit_accumulator_alu_immediate_forms_on_ez80_vm() {
         let asm = r#"
             ld a, 40h
@@ -2068,6 +2088,35 @@ mod tests {
             jp nz, fail
             neg
             cp 0F1h
+            jp nz, fail
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        fail:
+            ld a, 01h
+            out0 (0Dh), a
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn runs_accumulator_rotate_shorthands_on_ez80_vm() {
+        let asm = r#"
+            ld a, 81h
+            rlca
+            cp 03h
+            jp nz, fail
+            rrca
+            cp 81h
+            jp nz, fail
+            rla
+            rra
+            cp 81h
             jp nz, fail
             xor a
             out0 (0Dh), a
