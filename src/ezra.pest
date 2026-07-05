@@ -4,6 +4,17 @@ COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 program = { SOI ~ decl* ~ EOI }
 decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | extern_decl | fn_decl }
 
+layout_file = { SOI ~ layout_decl ~ EOI }
+layout_decl = { "layout" ~ ident ~ "{" ~ layout_item* ~ "}" }
+layout_item = _{ layout_load | layout_entry | layout_stack | layout_region | layout_section | layout_symbol }
+layout_load = { "load" ~ int_lit ~ semi? }
+layout_entry = { "entry" ~ int_lit ~ semi? }
+layout_stack = { "stack" ~ int_lit ~ semi? }
+layout_region = { "region" ~ ident ~ int_lit ~ ".." ~ int_lit ~ layout_flag* ~ semi? }
+layout_flag = { "read" | "write" | "execute" | "volatile" | "reserved" }
+layout_section = { "section" ~ section_name ~ "->" ~ ident ~ "align" ~ int_lit ~ semi? }
+layout_symbol = { "symbol" ~ ident ~ "=" ~ int_lit ~ semi? }
+
 visibility = { "pub" }
 volatile_kw = { "volatile" }
 attr = { "inline" | "naked" | "interrupt" }
