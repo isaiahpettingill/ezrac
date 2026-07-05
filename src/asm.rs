@@ -3254,6 +3254,7 @@ impl Emitter {
         if args.len() != 1 {
             return Err(Diagnostic::new("mem.peek8 requires one argument"));
         }
+        self.validate_expr_is_ptr_u8(&args[0])?;
         self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
         self.line("    ld a, (hl)");
         Ok(())
@@ -3263,6 +3264,8 @@ impl Emitter {
         if args.len() != 2 {
             return Err(Diagnostic::new("mem.poke8 requires two arguments"));
         }
+        self.validate_expr_is_ptr_u8(&args[0])?;
+        self.validate_expr_assignable_to_type(&args[1], &Type::Named("u8".to_owned()))?;
         let addr = self.alloc_var(ValueWidth::U24.bytes());
         let value = self.alloc_var(ValueWidth::U8.bytes());
         self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
@@ -3279,6 +3282,9 @@ impl Emitter {
         if args.len() != 3 {
             return Err(Diagnostic::new("mem.memcpy requires three arguments"));
         }
+        self.validate_expr_is_ptr_u8(&args[0])?;
+        self.validate_expr_is_ptr_u8(&args[1])?;
+        self.validate_expr_assignable_to_type(&args[2], &Type::Named("u24".to_owned()))?;
         let dst = self.alloc_var(ValueWidth::U24.bytes());
         let src = self.alloc_var(ValueWidth::U24.bytes());
         let len = self.alloc_var(ValueWidth::U24.bytes());
@@ -3304,6 +3310,9 @@ impl Emitter {
         if args.len() != 3 {
             return Err(Diagnostic::new("mem.memset requires three arguments"));
         }
+        self.validate_expr_is_ptr_u8(&args[0])?;
+        self.validate_expr_assignable_to_type(&args[1], &Type::Named("u8".to_owned()))?;
+        self.validate_expr_assignable_to_type(&args[2], &Type::Named("u24".to_owned()))?;
         let dst = self.alloc_var(ValueWidth::U24.bytes());
         let value = self.alloc_var(ValueWidth::U8.bytes());
         let len = self.alloc_var(ValueWidth::U24.bytes());
@@ -5333,6 +5342,15 @@ impl Emitter {
         self.validate_type_assignable_to_type(&source_type, target)
     }
 
+    fn validate_expr_is_ptr_u8(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        let ty = self.symbols.resolved_type(&self.expr_type(expr)?)?;
+        if ty == ptr_u8_type() {
+            Ok(())
+        } else {
+            Err(Diagnostic::new("type mismatch"))
+        }
+    }
+
     fn validate_type_assignable_to_type(
         &self,
         source: &Type,
@@ -6418,6 +6436,10 @@ fn signed_negative_one_bytes(width: ValueWidth) -> &'static [u8] {
 
 fn type_is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name == "bool")
+}
+
+fn ptr_u8_type() -> Type {
+    Type::Ptr(Box::new(Type::Named("u8".to_owned())))
 }
 
 fn is_raw_address_type(name: &str) -> bool {
@@ -8144,6 +8166,58 @@ mod tests {
                 port DEBUG: u8 = 0x0C
                 fn main() {
                     out DEBUG, true
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_mem_builtin_argument_types() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let value: u8 = mem.peek8(0x040000)
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+                fn main() {
+                    mem.poke8(cast<ptr<u8>>(0x040000), 0x0100)
+                    test.pass()
+                }
+                "#,
+                "value 256 is outside u8 range",
+            ),
+            (
+                r#"
+                global src: [u8; 1] = [1]
+                global dst: [u8; 1] = [0]
+                fn main() {
+                    mem.memcpy(&dst[0], &src[0], true)
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+                global dst: [u8; 1] = [0]
+                fn main() {
+                    mem.memset(0x040000, 0, 1)
                     test.pass()
                 }
                 "#,
