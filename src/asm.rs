@@ -418,6 +418,14 @@ impl Symbols {
                         )));
                     }
                     symbols.ensure_const_dependencies_evaluated(&decl.value, program)?;
+                    let value_type =
+                        symbols.resolved_type(&symbols.const_expr_type(&decl.value)?)?;
+                    if type_is_bool(&value_type) {
+                        return Err(Diagnostic::new(format!(
+                            "port `{}` value must be an integer constant",
+                            decl.name
+                        )));
+                    }
                     let value = symbols.eval_i64(&decl.value)?;
                     if !(0..=0xFF).contains(&value) {
                         return Err(Diagnostic::new(format!(
@@ -10251,6 +10259,28 @@ section .text
                 fn main() { test.pass() }
                 "#,
                 "port `BAD` type `word` must be u8",
+            ),
+            (
+                r#"
+                port FLAG: u8 = true
+                fn main() { test.pass() }
+                "#,
+                "port `FLAG` value must be an integer constant",
+            ),
+            (
+                r#"
+                const FLAG_VALUE: bool = true
+                port FLAG: u8 = FLAG_VALUE
+                fn main() { test.pass() }
+                "#,
+                "port `FLAG` value must be an integer constant",
+            ),
+            (
+                r#"
+                port FLAG: u8 = 1 == 1
+                fn main() { test.pass() }
+                "#,
+                "port `FLAG` value must be an integer constant",
             ),
         ];
 
