@@ -175,60 +175,73 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<Declaration> {
-    let Some(module) = import.rsplit('.').next() else {
+    let Some(short_module) = import.rsplit('.').next() else {
         return Vec::new();
     };
+    let mut prefixes = vec![short_module.to_owned()];
+    if short_module != import {
+        prefixes.push(import.to_owned());
+    }
     declarations
         .iter()
-        .filter_map(|declaration| match declaration {
-            Declaration::Alias(decl) if decl.public => {
-                let mut alias = decl.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Alias(alias))
-            }
-            Declaration::Const(decl) if decl.public => {
-                let mut alias = decl.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Const(alias))
-            }
-            Declaration::Port(decl) if decl.public => {
-                let mut alias = decl.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Port(alias))
-            }
-            Declaration::Mmio(decl) if decl.public => {
-                let mut alias = decl.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Mmio(alias))
-            }
-            Declaration::Embed(decl) if decl.public => {
-                let mut alias = decl.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Embed(alias))
-            }
-            Declaration::Global(decl) if decl.public => {
-                let mut alias = decl.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Global(alias))
-            }
-            Declaration::Struct(decl) if decl.public => {
-                let mut alias = decl.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Struct(alias))
-            }
-            Declaration::Function(function) if function.public && function.name != "main" => {
-                let mut alias = function.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::Function(alias))
-            }
-            Declaration::ExternAsmFunction(function) if function.public => {
-                let mut alias = function.clone();
-                alias.name = format!("{module}.{}", alias.name);
-                Some(Declaration::ExternAsmFunction(alias))
-            }
-            _ => None,
+        .flat_map(|declaration| {
+            prefixes
+                .iter()
+                .filter_map(|prefix| alias_declaration(declaration, prefix))
+                .collect::<Vec<_>>()
         })
         .collect()
+}
+
+fn alias_declaration(declaration: &Declaration, prefix: &str) -> Option<Declaration> {
+    match declaration {
+        Declaration::Alias(decl) if decl.public => {
+            let mut alias = decl.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Alias(alias))
+        }
+        Declaration::Const(decl) if decl.public => {
+            let mut alias = decl.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Const(alias))
+        }
+        Declaration::Port(decl) if decl.public => {
+            let mut alias = decl.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Port(alias))
+        }
+        Declaration::Mmio(decl) if decl.public => {
+            let mut alias = decl.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Mmio(alias))
+        }
+        Declaration::Embed(decl) if decl.public => {
+            let mut alias = decl.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Embed(alias))
+        }
+        Declaration::Global(decl) if decl.public => {
+            let mut alias = decl.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Global(alias))
+        }
+        Declaration::Struct(decl) if decl.public => {
+            let mut alias = decl.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Struct(alias))
+        }
+        Declaration::Function(function) if function.public && function.name != "main" => {
+            let mut alias = function.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::Function(alias))
+        }
+        Declaration::ExternAsmFunction(function) if function.public => {
+            let mut alias = function.clone();
+            alias.name = format!("{prefix}.{}", alias.name);
+            Some(Declaration::ExternAsmFunction(alias))
+        }
+        _ => None,
+    }
 }
 
 fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
@@ -275,14 +288,17 @@ fn collect_private_imports(
         ))
     })?;
     let imported = parse_program(&import_path, &source)?;
-    let module = import.rsplit('.').next().unwrap_or(import);
+    let short_module = import.rsplit('.').next().unwrap_or(import);
     for declaration in &imported.declarations {
         let Some(name) = declaration_name(declaration) else {
             continue;
         };
         if !declaration_is_public(declaration) {
             private_imports.insert(name.to_owned(), import.to_owned());
-            private_imports.insert(format!("{module}.{name}"), import.to_owned());
+            private_imports.insert(format!("{short_module}.{name}"), import.to_owned());
+            if short_module != import {
+                private_imports.insert(format!("{import}.{name}"), import.to_owned());
+            }
         }
     }
     for declaration in &imported.declarations {
@@ -720,12 +736,15 @@ mod tests {
         let program = load_program(&main_path).unwrap();
 
         assert_eq!(report.imports, 1);
-        assert_eq!(report.declarations, 3);
+        assert_eq!(report.declarations, 4);
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "add_one")
         }));
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "math.add_one")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "lib.math.add_one")
         }));
 
         let _ = std::fs::remove_dir_all(root);
@@ -912,6 +931,19 @@ mod tests {
         assert_eq!(
             error.message,
             "declaration `types.Secret` from import `lib.types` is private"
+        );
+
+        std::fs::write(
+            &main_path,
+            "import lib.types\nfn main() { let x: lib.types.Secret = lib.types.Secret { value: 1 }; test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `lib.types.Secret` from import `lib.types` is private"
         );
 
         let _ = std::fs::remove_dir_all(root);

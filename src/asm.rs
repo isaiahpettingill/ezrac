@@ -5109,6 +5109,9 @@ impl Emitter {
             Expr::Access(path) => {
                 let path = self.canonical_access_path(path);
                 if path.segments.is_empty() {
+                    if let Some(ty) = self.named_value_type(&path.root) {
+                        return Ok(ty.clone());
+                    }
                     if let Some(ty) = self.embed_property_type(&path.root) {
                         return Ok(ty);
                     }
@@ -9452,6 +9455,7 @@ mod tests {
                 let value: u8 = math.add(2, 3)
                 test.assert_eq_u8(value, 5, 1)
                 math.add(1, 2)
+                test.assert_eq_u8(lib.math.add(4, 5), 9, 2)
                 test.pass()
             }
             "#,
@@ -9496,6 +9500,8 @@ mod tests {
             fn main() {
                 mem.poke8(hw.SCRATCH, hw.VALUE)
                 test.assert_eq_u8(mem.peek8(hw.SCRATCH), 0x37, 1)
+                mem.poke8(lib.hw.SCRATCH, lib.hw.VALUE + 1)
+                test.assert_eq_u8(mem.peek8(hw.SCRATCH), 0x38, 2)
                 test.pass()
             }
             "#,
@@ -9541,8 +9547,14 @@ mod tests {
             fn main() {
                 let lo: types.Byte = 3
                 let pair: types.Pair = types.Pair { lo: lo, hi: 4 }
+                let full_pair: lib.types.Pair = lib.types.Pair {
+                    lo: cast<lib.types.Byte>(5),
+                    hi: 6,
+                }
                 test.assert_eq_u8(pair.lo, 3, 1)
                 test.assert_eq_u8(pair.hi, 4, 2)
+                test.assert_eq_u8(full_pair.lo, 5, 3)
+                test.assert_eq_u8(full_pair.hi, 6, 4)
                 test.pass()
             }
             "#,
@@ -9579,6 +9591,8 @@ mod tests {
                 state.score += 2
                 test.assert_eq_u8(state.score, 7, 1)
                 test.assert_eq_u8(score, 7, 2)
+                lib.state.score += 1
+                test.assert_eq_u8(state.score, 8, 3)
                 test.pass()
             }
             "#,
@@ -9621,6 +9635,8 @@ mod tests {
                 test.assert_eq_u8(bytes[2], 7, 2)
                 let ptr: ptr<u8> = &state.bytes[0]
                 test.assert_eq_u8(*(ptr + 2), 7, 3)
+                lib.state.bytes[0] = lib.state.bytes[2] + 1
+                test.assert_eq_u8(state.bytes[0], 8, 4)
                 test.pass()
             }
             "#,
@@ -9662,6 +9678,7 @@ mod tests {
                 test.assert_eq_u8(*(assets.sprite.ptr + 0), 0x41, 2)
                 test.assert_eq_u8(*(assets.sprite.ptr + 1), 0x42, 3)
                 test.assert_eq_u8(*(sprite.ptr + 1), 0x42, 4)
+                test.assert_eq_u8(*(lib.assets.sprite.ptr + 0), 0x41, 5)
                 test.pass()
             }
             "#,
@@ -9705,6 +9722,9 @@ mod tests {
                 let pad: u8 = in hw.PAD_LO
                 out hw.DEBUG, 'P'
                 test.assert_eq_u8(pad, 0, 1)
+                let full_pad: u8 = in lib.hw.PAD_LO
+                out lib.hw.DEBUG, 'Q'
+                test.assert_eq_u8(full_pad, 0, 2)
                 test.pass()
             }
             "#,
@@ -9720,7 +9740,7 @@ mod tests {
         assert!(asm.contains("out0 (0Ch), a"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
-        assert_eq!(run.debug_output, b"P", "{asm}");
+        assert_eq!(run.debug_output, b"PQ", "{asm}");
     }
 
     #[test]
