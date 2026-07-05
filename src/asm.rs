@@ -602,6 +602,17 @@ impl Emitter {
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
+        let naked = function.attrs.iter().any(|attr| attr == "naked");
+        if naked {
+            for stmt in &function.body {
+                if !matches!(stmt, Stmt::Asm { .. }) {
+                    return Err(Diagnostic::new(format!(
+                        "naked function `{}` may contain only asm blocks",
+                        function.name
+                    )));
+                }
+            }
+        }
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
@@ -613,13 +624,18 @@ impl Emitter {
                 .transpose()?
                 .unwrap_or(ValueWidth::U8),
         );
-        self.bind_params(function)?;
+        if !naked {
+            self.bind_params(function)?;
+        }
         for stmt in &function.body {
             self.emit_stmt(stmt)?;
         }
         self.return_stack.pop();
         self.scope_types.pop();
         self.scopes.pop();
+        if naked {
+            return Ok(());
+        }
         if function.name == "main" {
             self.line("    jp __ezra_exit");
         } else {
@@ -2931,6 +2947,54 @@ mod tests {
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"A", "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_naked_asm_functions_without_epilogue() {
+        let source = r#"
+            naked fn raw_debug() {
+                asm volatile {
+                    "ld a, 0x42"
+                    "out0 (0Ch), a"
+                    "ret"
+                }
+            }
+
+            fn main() {
+                raw_debug()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        let raw_debug = asm.split("_raw_debug:").nth(1).unwrap();
+        let raw_debug = raw_debug.split("_main:").next().unwrap();
+        assert_eq!(raw_debug.matches("    ret").count(), 1, "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"B", "{asm}");
+    }
+
+    #[test]
+    fn rejects_non_asm_statements_in_naked_functions() {
+        let source = r#"
+            naked fn invalid() {
+                let value: u8 = 1
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "naked function `invalid` may contain only asm blocks"
+        );
     }
 
     #[test]
