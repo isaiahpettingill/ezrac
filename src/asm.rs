@@ -288,6 +288,11 @@ impl Symbols {
                 continue;
             };
             let label = function_label(name);
+            if reserved_function_label(&label) {
+                return Err(Diagnostic::new(format!(
+                    "function `{name}` emits reserved assembly label `{label}`"
+                )));
+            }
             if let Some(existing) = function_labels.insert(label.clone(), name.to_owned()) {
                 return Err(Diagnostic::new(format!(
                     "function `{name}` emits assembly label `{label}` already used by function `{existing}`"
@@ -8156,6 +8161,30 @@ fn function_label(name: &str) -> String {
     label
 }
 
+fn reserved_function_label(label: &str) -> bool {
+    matches!(
+        label,
+        "__ezra_start"
+            | "__ezra_exit"
+            | "__ezra_pass"
+            | "__ezra_fail"
+            | "__ezra_memcpy"
+            | "__ezra_memset"
+            | "__ezra_mul_u8"
+            | "__ezra_mul_u16"
+            | "__ezra_mul_u24"
+            | "__ezra_mul_i24"
+            | "__ezra_div_u8"
+            | "__ezra_div_u16"
+            | "__ezra_div_u24"
+            | "__ezra_div_i24"
+            | "__ezra_mod_u8"
+            | "__ezra_mod_u16"
+            | "__ezra_mod_u24"
+            | "__ezra_mod_i24"
+    )
+}
+
 fn scalar_var(addr: u32, size: u32) -> Variable {
     Variable {
         addr,
@@ -13348,6 +13377,41 @@ section .text
             error.message,
             "function `lib_math_add` emits assembly label `_lib_math_add` already used by function `lib.math.add`"
         );
+    }
+
+    #[test]
+    fn rejects_reserved_function_assembly_labels() {
+        let cases = [
+            (
+                r#"
+                fn _ezra_pass() {
+                    test.pass()
+                }
+
+                fn main() {
+                    test.pass()
+                }
+                "#,
+                "function `_ezra_pass` emits reserved assembly label `__ezra_pass`",
+            ),
+            (
+                r#"
+                extern asm fn _ezra_memcpy(dst: ptr<u8>, src: ptr<u8>, len: u24)
+
+                fn main() {
+                    test.pass()
+                }
+                "#,
+                "function `_ezra_memcpy` emits reserved assembly label `__ezra_memcpy`",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
