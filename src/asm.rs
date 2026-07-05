@@ -908,12 +908,7 @@ impl Emitter {
                 self.emit_store_width(variable);
             }
             Place::Index { name, index } => {
-                if op != AssignOp::Set {
-                    return Err(Diagnostic::new(
-                        "compound indexed assignment is not implemented yet",
-                    ));
-                }
-                self.emit_index_assignment(name, index, value)?;
+                self.emit_index_assignment(name, index, op, value)?;
             }
             Place::Field { base, field } => {
                 let variable = self.field_variable(base, field)?;
@@ -921,12 +916,7 @@ impl Emitter {
                 self.emit_store_width(variable);
             }
             Place::Deref(ptr) => {
-                if op != AssignOp::Set {
-                    return Err(Diagnostic::new(
-                        "compound pointer dereference assignment is not implemented yet",
-                    ));
-                }
-                self.emit_deref_assignment(ptr, value)?;
+                self.emit_deref_assignment(ptr, op, value)?;
             }
         }
         Ok(())
@@ -1606,7 +1596,12 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_deref_assignment(&mut self, ptr: &Expr, value: &Expr) -> Result<(), Diagnostic> {
+    fn emit_deref_assignment(
+        &mut self,
+        ptr: &Expr,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
         let width = match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
             Type::Ptr(inner) => self.symbols.type_width(&inner)?,
             Type::Named(name) if name == "ptr24" => {
@@ -1620,33 +1615,28 @@ impl Emitter {
                 )));
             }
         };
-        if width == ValueWidth::U8 {
-            let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
-            let stored = self.symbols.alloc_var(ValueWidth::U8.bytes());
-            self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
-            self.emit_store_hl(addr);
-            self.emit_expr_to_a(value)?;
-            self.emit_store_a(stored);
+
+        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
+        self.emit_store_hl(addr);
+
+        if op != AssignOp::Set {
+            let current = self.symbols.alloc_var(width.bytes());
             self.emit_load_hl(addr);
-            self.emit_load_a(stored);
-            self.line("    ld (hl), a");
+            self.emit_load_pointed_width_into(current);
+            let stored = self.symbols.alloc_var(width.bytes());
+            self.emit_assignment_value(current, op, value)?;
+            self.emit_store_width(stored);
+            self.emit_load_hl(addr);
+            self.emit_store_var_to_pointed_width(stored);
             return Ok(());
         }
 
-        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
         let stored = self.symbols.alloc_var(width.bytes());
-        self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
-        self.emit_store_hl(addr);
-        self.emit_expr_to_hl(value, width)?;
+        self.emit_expr_to_width(value, width)?;
         self.emit_store_width(stored);
         self.emit_load_hl(addr);
-        for offset in 0..width.bytes() {
-            if offset != 0 {
-                self.line("    inc hl");
-            }
-            self.line(&format!("    ld a, ({:06X}h)", stored.addr + offset as u32));
-            self.line("    ld (hl), a");
-        }
+        self.emit_store_var_to_pointed_width(stored);
         Ok(())
     }
 
@@ -2179,6 +2169,32 @@ impl Emitter {
         }
     }
 
+    fn emit_load_pointed_width_into(&mut self, variable: Variable) {
+        for offset in 0..variable.size {
+            if offset != 0 {
+                self.line("    inc hl");
+            }
+            self.line("    ld a, (hl)");
+            self.line(&format!(
+                "    ld ({:06X}h), a",
+                variable.addr + offset as u32
+            ));
+        }
+    }
+
+    fn emit_store_var_to_pointed_width(&mut self, variable: Variable) {
+        for offset in 0..variable.size {
+            if offset != 0 {
+                self.line("    inc hl");
+            }
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                variable.addr + offset as u32
+            ));
+            self.line("    ld (hl), a");
+        }
+    }
+
     fn array_element_variable(&self, name: &str, index: &Expr) -> Result<Variable, Diagnostic> {
         let (array, element_size, len) = self.array_info(name)?;
         let index_value = self.symbols.eval_i64(index)?;
@@ -2378,29 +2394,38 @@ impl Emitter {
         &mut self,
         name: &str,
         index: &Expr,
+        op: AssignOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
         if let Ok(element) = self.array_element_variable(name, index) {
-            self.emit_expr_to_width(value, element.width()?)?;
+            self.emit_assignment_value(element, op, value)?;
             self.emit_store_width(element);
             return Ok(());
         }
 
         let (_, element_size, _) = self.array_info(name)?;
         let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
-        let stored = self.symbols.alloc_var(element_size);
         self.emit_array_element_address(name, index)?;
         self.emit_store_hl(addr);
-        self.emit_expr_to_width(value, scalar_var(0, element_size).width()?)?;
+
+        let width = scalar_var(0, element_size).width()?;
+        if op != AssignOp::Set {
+            let current = self.symbols.alloc_var(element_size);
+            self.emit_load_hl(addr);
+            self.emit_load_pointed_width_into(current);
+            let stored = self.symbols.alloc_var(element_size);
+            self.emit_assignment_value(current, op, value)?;
+            self.emit_store_width(stored);
+            self.emit_load_hl(addr);
+            self.emit_store_var_to_pointed_width(stored);
+            return Ok(());
+        }
+
+        let stored = self.symbols.alloc_var(element_size);
+        self.emit_expr_to_width(value, width)?;
         self.emit_store_width(stored);
         self.emit_load_hl(addr);
-        for offset in 0..element_size {
-            if offset != 0 {
-                self.line("    inc hl");
-            }
-            self.line(&format!("    ld a, ({:06X}h)", stored.addr + offset as u32));
-            self.line("    ld (hl), a");
-        }
+        self.emit_store_var_to_pointed_width(stored);
         Ok(())
     }
 
@@ -3525,6 +3550,43 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_compound_indexed_assignments() {
+        let source = r#"
+            global bytes: [u8; 4] = [1, 2, 3, 4]
+            global words: [u16; 3] = [0x0100, 0x0200, 0x0300]
+            global longs: [u24; 2] = [0x010000, 0x020000]
+
+            fn main() {
+                bytes[1] += 5
+                bytes[2] ^= 0x0F
+                test.assert_eq_u8(bytes[1], 7, 1)
+                test.assert_eq_u8(bytes[2], 12, 2)
+
+                let i: u8 = 3
+                bytes[i] -= 2
+                test.assert_eq_u8(bytes[3], 2, 3)
+
+                let j: u8 = 1
+                words[j] += 0x0010
+                words[j] <<= 1
+                test.assert_eq_u16(words[1], 0x0420, 4)
+
+                let k: u8 = 0
+                longs[k] += 0x000123
+                longs[k] &= 0x01FFFF
+                test.assert_eq_u24(longs[0], 0x010123, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 20_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_pointer_dereferences() {
         let source = r#"
             global bytes: [u8; 4] = [0, 0, 0, 0]
@@ -3553,6 +3615,42 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_compound_pointer_dereference_assignments() {
+        let source = r#"
+            global bytes: [u8; 4] = [10, 20, 30, 40]
+            global words: [u16; 2] = [0x0100, 0x0200]
+            global longs: [u24; 2] = [0x010000, 0x020000]
+
+            fn main() {
+                let b: ptr<u8> = &bytes[1];
+                *b += 7;
+                *(b + 1) &= 0x1F;
+                test.assert_eq_u8(bytes[1], 27, 1)
+                test.assert_eq_u8(bytes[2], 30, 2)
+
+                let w: ptr<u16> = &words[0];
+                *w += 0x0023;
+                *(w + 1) >>= 1;
+                test.assert_eq_u16(words[0], 0x0123, 3)
+                test.assert_eq_u16(words[1], 0x0100, 4)
+
+                let l: ptr<u24> = &longs[0];
+                *l += 0x000123;
+                *(l + 1) ^= 0x0000FF;
+                test.assert_eq_u24(longs[0], 0x010123, 5)
+                test.assert_eq_u24(longs[1], 0x0200FF, 6)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 20_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

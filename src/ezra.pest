@@ -41,8 +41,8 @@ stmt = _{
   | return_stmt
   | asm_stmt
   | out_stmt
-  | expr_stmt
   | assign_stmt
+  | expr_stmt
 }
 
 let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
@@ -61,7 +61,7 @@ asm_stmt = { "asm" ~ volatile_kw? ~ "{" ~ asm_line* ~ "}" }
 asm_line = { string_lit }
 out_stmt = { "out" ~ ident ~ "," ~ expr ~ semi? }
 expr_stmt = { expr ~ !(WHITESPACE* ~ assign_op) ~ semi? }
-assign_op = { "=" | "+=" | "-=" | "&=" | "|=" | "^=" | "<<=" | ">>=" }
+assign_op = { "<<=" | ">>=" | "+=" | "-=" | "&=" | "|=" | "^=" | "=" }
 
 expr = { logical_or }
 logical_or = { logical_and ~ (or_op ~ logical_and)* }

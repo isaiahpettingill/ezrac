@@ -764,6 +764,9 @@ mod tests {
     #[test]
     fn parses_pointer_dereference_expression_and_assignment() {
         EzraParser::parse(Rule::assign_stmt, "*p = 7").unwrap();
+        EzraParser::parse(Rule::assign_stmt, "*p += 7").unwrap();
+        EzraParser::parse(Rule::assign_stmt, "*(p + 1) ^= 7").unwrap();
+        EzraParser::parse(Rule::stmt, "*p += 7").unwrap();
         assert!(EzraParser::parse(Rule::expr_stmt, "*p = 7").is_err());
         let program = parse_program(
             Path::new("game.ezra"),
