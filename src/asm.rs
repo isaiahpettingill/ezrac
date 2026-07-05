@@ -7687,6 +7687,10 @@ fn stmt_guarantees_value_return(stmt: &Stmt) -> bool {
         Stmt::Loop { body } => {
             !block_can_break_current_loop(body) && block_guarantees_value_return(body)
         }
+        Stmt::While {
+            condition: Expr::Bool(true),
+            body,
+        } => !block_can_break_current_loop(body) && block_guarantees_value_return(body),
         _ => false,
     }
 }
@@ -7708,6 +7712,10 @@ fn stmt_terminates_current_block(stmt: &Stmt) -> bool {
         Stmt::Loop { body } => {
             !block_can_break_current_loop(body) && block_terminates_current_block(body)
         }
+        Stmt::While {
+            condition: Expr::Bool(true),
+            body,
+        } => !block_can_break_current_loop(body) && block_terminates_current_block(body),
         _ => false,
     }
 }
@@ -11383,6 +11391,58 @@ section .text
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_function_returning_from_true_while() {
+        let source = r#"
+            fn answer() -> u8 {
+                while true {
+                    return 42
+                }
+            }
+
+            fn choose(flag: bool) -> u8 {
+                while true {
+                    if flag {
+                        return 7
+                    } else {
+                        return 9
+                    }
+                }
+            }
+
+            fn main() {
+                test.assert_eq_u8(answer(), 42, 1)
+                test.assert_eq_u8(choose(true), 7, 2)
+                test.assert_eq_u8(choose(false), 9, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_true_while_with_break_as_missing_return() {
+        let source = r#"
+            fn answer() -> u8 {
+                while true {
+                    break
+                    return 1
+                }
+            }
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "missing return value in function `answer`");
     }
 
     #[test]
