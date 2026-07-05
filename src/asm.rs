@@ -3322,6 +3322,7 @@ impl Emitter {
     fn emit_cast_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
         self.validate_cast(expr, ty)?;
         let width = self.symbols.type_width(ty)?;
+        let source_type = self.symbols.resolved_type(&self.expr_type(expr)?)?;
         if !self.is_pointer_arithmetic_expr(expr)? {
             if let Ok(value) = self.eval_i64_with_local_constants(expr) {
                 let bits = u32::from(width.bytes()) * 8;
@@ -3351,6 +3352,7 @@ impl Emitter {
                     self.emit_expr_to_a(expr)?;
                     self.line("    ld hl, 000000h");
                     self.line("    ld l, a");
+                    self.emit_sign_extend_widened_integer(&source_type, source_width, width)?;
                 } else {
                     self.emit_expr_to_hl(expr, source_width)?;
                     self.zero_extend_hl16();
@@ -3361,11 +3363,36 @@ impl Emitter {
                     self.emit_expr_to_a(expr)?;
                     self.line("    ld hl, 000000h");
                     self.line("    ld l, a");
+                    self.emit_sign_extend_widened_integer(&source_type, source_width, width)?;
                 } else {
                     self.emit_expr_to_hl(expr, source_width)?;
+                    self.emit_sign_extend_widened_integer(&source_type, source_width, width)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    fn emit_sign_extend_widened_integer(
+        &mut self,
+        source_type: &Type,
+        source_width: ValueWidth,
+        target_width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        if source_width >= target_width || !type_is_signed(source_type) {
+            return Ok(());
+        }
+        let (sign_register, extension) = match source_width {
+            ValueWidth::U8 => ("l", 0xFFFF00),
+            ValueWidth::U16 => ("h", 0xFF0000),
+            ValueWidth::U24 => return Ok(()),
+        };
+        let done = self.next_label("cast_nonnegative");
+        self.line(&format!("    ld a, {sign_register}"));
+        self.line("    cp 80h");
+        self.line(&format!("    jp c, {done}"));
+        self.emit_add_hl_const(extension);
+        self.line(&format!("{done}:"));
         Ok(())
     }
 
@@ -12510,6 +12537,18 @@ section .text
                 return cast<u16>(v)
             }
 
+            fn widen_signed_byte(v: i8) -> i16 {
+                return cast<i16>(v)
+            }
+
+            fn widen_signed_word(v: i16) -> i24 {
+                return cast<i24>(v)
+            }
+
+            fn widen_signed_byte_to_u24(v: i8) -> u24 {
+                return cast<u24>(v)
+            }
+
             fn main() {
                 let wide: u16 = cast<u16>(0x12)
                 let narrow: u8 = cast<u8>(0x1234)
@@ -12521,6 +12560,9 @@ section .text
                 test.assert_eq_u8(low_byte(0xABCD), 0xCD, 4)
                 test.assert_eq_u16(widen(0x7A), 0x007A, 5)
                 test.assert_eq_u16(WIDE, 0x0112, 6)
+                test.assert_eq_u16(widen_signed_byte(-3), 0xFFFD, 7)
+                test.assert_eq_u24(widen_signed_word(-300), 0xFFFED4, 8)
+                test.assert_eq_u24(widen_signed_byte_to_u24(-3), 0xFFFFFD, 9)
                 test.pass()
             }
         "#;
