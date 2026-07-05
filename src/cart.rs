@@ -126,6 +126,7 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     code: &[u8],
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<u8>, Diagnostic> {
+    validate_text_section_fit(layout, code.len())?;
     let code_offset = layout
         .entry
         .get()
@@ -290,6 +291,7 @@ pub fn cartridge_map_entries(
     code_len: usize,
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<CartridgeMapEntry>, Diagnostic> {
+    validate_text_section_fit(layout, code_len)?;
     let code_offset = layout
         .entry
         .get()
@@ -468,6 +470,35 @@ fn layout_section_placement<'a>(
             ))
         })?;
     Ok((region, section.align))
+}
+
+fn validate_text_section_fit(layout: &Layout, code_len: usize) -> Result<(), Diagnostic> {
+    let (region, _) = layout_section_placement(layout, ".text")?;
+    if code_len == 0 {
+        if !region.contains_range(layout.entry, layout.entry) {
+            return Err(Diagnostic::new(format!(
+                "section `.text` does not fit in region `{}`",
+                region.name
+            )));
+        }
+        return Ok(());
+    }
+
+    let code_len = u32::try_from(code_len)
+        .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
+    let end = layout
+        .entry
+        .get()
+        .checked_add(code_len - 1)
+        .ok_or_else(|| Diagnostic::new("section `.text` exceeds 24-bit address space"))?;
+    let end = Address24::try_from(end).map_err(|error| Diagnostic::new(error.to_string()))?;
+    if !region.contains_range(layout.entry, end) {
+        return Err(Diagnostic::new(format!(
+            "section `.text` does not fit in region `{}`",
+            region.name
+        )));
+    }
+    Ok(())
 }
 
 fn section_cursor<'a>(
@@ -908,6 +939,58 @@ mod tests {
         assert_eq!(
             error.message,
             "entry 0x020020 overlaps the cartridge header at 0x020000"
+        );
+    }
+
+    #[test]
+    fn cartridge_rejects_text_section_that_exceeds_region() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let layout = parse_layout(
+            r#"
+                layout tiny_text {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xF00000;
+
+                    region code 0x020000..0x020043 read execute;
+                    section .text -> code align 1;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = build_cartridge_with_layout_code_and_symbols(&program, &layout, &[0; 5], &[])
+            .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "section `.text` does not fit in region `code`"
+        );
+    }
+
+    #[test]
+    fn cartridge_rejects_text_entry_outside_region() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let layout = parse_layout(
+            r#"
+                layout misplaced_text {
+                    load 0x020000;
+                    entry 0x020080;
+                    stack 0xF00000;
+
+                    region code 0x020000..0x02007F read execute;
+                    section .text -> code align 1;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error =
+            build_cartridge_with_layout_code_and_symbols(&program, &layout, &[], &[]).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "section `.text` does not fit in region `code`"
         );
     }
 
