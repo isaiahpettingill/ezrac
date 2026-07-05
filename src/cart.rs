@@ -608,7 +608,7 @@ fn embed_bytes(source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diag
 
 fn eval_embed_expr(expr: &Expr) -> Result<i64, Diagnostic> {
     match expr {
-        Expr::Int(value) => Ok(*value),
+        Expr::Int(value) | Expr::TypedInt(value, _) => Ok(*value),
         Expr::Char(value) => Ok(i64::from(*value)),
         Expr::Bool(value) => Ok(i64::from(*value)),
         Expr::Unary { op, expr } => {
@@ -626,8 +626,8 @@ fn eval_embed_expr(expr: &Expr) -> Result<i64, Diagnostic> {
                 BinaryOp::Add => Ok(left.wrapping_add(right)),
                 BinaryOp::Sub => Ok(left.wrapping_sub(right)),
                 BinaryOp::Mul => Ok(left.wrapping_mul(right)),
-                BinaryOp::Div => Ok(if right == 0 { 0 } else { left / right }),
-                BinaryOp::Mod => Ok(if right == 0 { 0 } else { left % right }),
+                BinaryOp::Div => Ok(trunc_div_or_zero_i64(left, right)),
+                BinaryOp::Mod => Ok(trunc_mod_or_zero_i64(left, right)),
                 BinaryOp::BitAnd => Ok(left & right),
                 BinaryOp::BitOr => Ok(left | right),
                 BinaryOp::BitXor => Ok(left ^ right),
@@ -649,6 +649,22 @@ fn eval_embed_expr(expr: &Expr) -> Result<i64, Diagnostic> {
         _ => Err(Diagnostic::new(
             "embed expressions must be integer constants",
         )),
+    }
+}
+
+fn trunc_div_or_zero_i64(left: i64, right: i64) -> i64 {
+    if right == 0 {
+        0
+    } else {
+        ((left as i128) / (right as i128)) as i64
+    }
+}
+
+fn trunc_mod_or_zero_i64(left: i64, right: i64) -> i64 {
+    if right == 0 {
+        0
+    } else {
+        ((left as i128) % (right as i128)) as i64
     }
 }
 
@@ -862,6 +878,49 @@ mod tests {
             &image[image_offset(second_addr)..image_offset(second_addr) + 3],
             &[b'O', b'K', 0]
         );
+    }
+
+    #[test]
+    fn cartridge_embed_expressions_use_defined_arithmetic() {
+        let source = r#"
+            embed values: bytes = bytes [
+                0x11u8,
+                5 / 0,
+                5 % 0,
+                ((-8) >> 2) + 256,
+            ] section .assets align 1
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let image = build_cartridge(&program).unwrap();
+        let table = image_offset(read_addr24(&image, 0x21));
+        let values_addr = read_addr24(&image, table);
+        let values = image_offset(values_addr);
+
+        assert_eq!(&image[values..values + 4], &[0x11, 0x00, 0x00, 0xFE]);
+    }
+
+    #[test]
+    fn embed_expression_division_overflow_is_defined() {
+        let min = Expr::Int(i64::MIN);
+        let minus_one = Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(Expr::Int(1)),
+        };
+        let div = Expr::Binary {
+            left: Box::new(min.clone()),
+            op: BinaryOp::Div,
+            right: Box::new(minus_one.clone()),
+        };
+        let rem = Expr::Binary {
+            left: Box::new(min),
+            op: BinaryOp::Mod,
+            right: Box::new(minus_one),
+        };
+
+        assert_eq!(eval_embed_expr(&div).unwrap(), i64::MIN);
+        assert_eq!(eval_embed_expr(&rem).unwrap(), 0);
     }
 
     #[test]
