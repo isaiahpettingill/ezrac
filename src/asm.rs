@@ -2689,6 +2689,9 @@ impl Emitter {
             self.invalidate_local_constant(&output.name);
             self.invalidate_readonly_pointer_alias(&output.name);
         }
+        if asm_clobbers_include(clobbers, "memory") {
+            self.invalidate_all_local_constants();
+        }
         Ok(())
     }
 
@@ -7109,6 +7112,12 @@ impl Emitter {
         }
     }
 
+    fn invalidate_all_local_constants(&mut self) {
+        for scope in &mut self.local_constants {
+            scope.clear();
+        }
+    }
+
     fn record_readonly_pointer_alias(&mut self, name: &str, value: &Expr) {
         let Some(addr) = self.readonly_write_addr(value) else {
             self.current_readonly_pointer_aliases_mut().remove(name);
@@ -8575,7 +8584,7 @@ fn asm_line_uses_ports(line: &str) -> bool {
 }
 
 fn asm_line_uses_memory(line: &str) -> bool {
-    asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, _)| {
+    asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, operands)| {
         matches!(
             mnemonic,
             "ldi"
@@ -8594,7 +8603,7 @@ fn asm_line_uses_memory(line: &str) -> bool {
                 | "otir"
                 | "outd"
                 | "otdr"
-        )
+        ) || (mnemonic == "ld" && operands.contains('('))
     })
 }
 
@@ -12562,6 +12571,29 @@ section .text
     }
 
     #[test]
+    fn inline_asm_memory_clobber_invalidates_local_constants() {
+        let source = r#"
+            fn main() {
+                let value: u8 = 1
+                let ptr: ptr<u8> = &value
+                asm volatile(in ptr: ptr<u8> as reg24, clobber a, clobber memory) {
+                    "ld a, 05h"
+                    "ld (hl), a"
+                }
+                test.assert_eq_u8(value, 5, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    ld (hl), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_inline_asm_reg16_and_reg24_operands() {
         let source = r#"
             fn main() {
@@ -13373,6 +13405,17 @@ section .text
                 fn main() {
                     asm volatile(clobber bc, clobber hl, clobber flags, clobber ports) {
                         "otir"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm uses memory without declaring clobber `memory`",
+            ),
+            (
+                r#"
+                fn main() {
+                    asm volatile(clobber a) {
+                        "ld (hl), a"
                     }
                     test.pass()
                 }
