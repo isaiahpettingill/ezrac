@@ -2003,16 +2003,16 @@ bytes_embed   = "bytes" "[" byte_list? "]"
 text_embed    = "text" "(" string_lit ")"
 cstr_embed    = "cstr" "(" string_lit ")"
 repeat_embed  = "repeat" "(" expr "," expr ")"
-embed_opts    = ("section" section_name)? ("align" int_lit)?
+embed_opts    = ("section" section_name)? ("align" expr)?
 
 global_decl   = visibility? "global" ident ":" ty "=" expr
 
 struct_decl   = visibility? "struct" ident "{" field* "}"
 field         = ident ":" ty
 
-extern_decl   = "extern" "asm" "fn" ident "(" params? ")" ret_ty?
+extern_decl   = visibility? "extern" "asm" "fn" ident "(" params? ")" ret_ty?
 
-fn_decl       = attrs? visibility? "fn" ident "(" params? ")" ret_ty? block
+fn_decl       = attrs visibility? "fn" ident "(" params? ")" ret_ty? block
 attrs         = ("inline" | "naked" | "interrupt")*
 
 params        = param ("," param)*
@@ -2041,14 +2041,14 @@ loop_stmt     = "loop" block
 break_stmt    = "break"
 continue_stmt = "continue"
 return_stmt   = "return" expr?
-out_stmt      = "out" ident "," expr
+out_stmt      = "out" path "," expr
 
 asm_stmt      = "asm" "volatile"? asm_operands? "{" asm_lines "}"
 
 ty            = primitive_ty
               | "ptr" "<" ty ">"
               | "[" ty ";" expr "]"
-              | ident
+              | path
 
 primitive_ty  = "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "bool" | "ptr24"
 
