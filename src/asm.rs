@@ -288,7 +288,7 @@ impl Symbols {
                 },
             );
             if let Declaration::Function(function) = declaration {
-                if has_attr(function, "inline") && inline_return_expr(function).is_some() {
+                if has_attr(function, "inline") && inline_return_body(function).is_some() {
                     symbols
                         .inline_functions
                         .insert(function.name.clone(), function.clone());
@@ -2439,7 +2439,7 @@ impl Emitter {
         function: &Function,
         temps: &[Variable],
     ) -> Result<bool, Diagnostic> {
-        let Some(expr) = inline_return_expr(function) else {
+        let Some((prefix, expr)) = inline_return_body(function) else {
             return Ok(false);
         };
         let Some(return_type) = &function.return_type else {
@@ -2453,11 +2453,38 @@ impl Emitter {
             self.current_scope_types_mut()
                 .insert(param.name.clone(), param.ty.clone());
         }
+        for stmt in prefix {
+            self.emit_inline_prefix_stmt(stmt)?;
+        }
         let result = self.emit_expr_to_type(&expr, return_type);
         self.scope_types.pop();
         self.scopes.pop();
         result?;
         Ok(true)
+    }
+
+    fn emit_inline_prefix_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
+        let Stmt::Let { name, ty, value } = stmt else {
+            return self.emit_stmt(stmt);
+        };
+        if self.current_scope_types_mut().contains_key(name) {
+            return Err(Diagnostic::new(format!(
+                "local `{name}` shadows an existing name"
+            )));
+        }
+        let variable = self.alloc_storage(ty)?;
+        self.current_scope_mut().insert(name.clone(), variable);
+        self.current_scope_types_mut()
+            .insert(name.clone(), ty.clone());
+        if variable.element_size.is_some() {
+            self.emit_array_initializer(variable, ty, value)?;
+        } else if self.is_struct_type(ty)? {
+            self.emit_struct_initializer(variable, ty, value)?;
+        } else {
+            self.emit_expr_to_type(value, ty)?;
+            self.emit_store_width(variable);
+        }
+        Ok(())
     }
 
     fn emit_expr_to_width(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
@@ -5275,10 +5302,35 @@ fn builtin_arity_error(name: &str) -> String {
     }
 }
 
-fn inline_return_expr(function: &Function) -> Option<Expr> {
-    match function.body.as_slice() {
-        [Stmt::Return(Some(expr))] => Some(expr.clone()),
+fn inline_return_body(function: &Function) -> Option<(&[Stmt], Expr)> {
+    let (last, prefix) = function.body.split_last()?;
+    if prefix.iter().any(stmt_contains_return) {
+        return None;
+    }
+    match last {
+        Stmt::Return(Some(expr)) => Some((prefix, expr.clone())),
         _ => None,
+    }
+}
+
+fn stmt_contains_return(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            then_body.iter().any(stmt_contains_return) || else_body.iter().any(stmt_contains_return)
+        }
+        Stmt::While { body, .. } | Stmt::Loop { body } => body.iter().any(stmt_contains_return),
+        Stmt::Let { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Asm { .. }
+        | Stmt::Out { .. }
+        | Stmt::Expr(_) => false,
     }
 }
 
@@ -7389,6 +7441,31 @@ mod tests {
         assert_eq!(run.result_code, 0, "{asm}");
         assert!(!asm.contains("call _pressed"), "{asm}");
         assert!(!asm.contains("_pressed:"), "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_inline_functions_with_local_prefix() {
+        let source = r#"
+            inline fn score(value: u8) -> u8 {
+                let caller: u8 = value + 1
+                let doubled: u8 = caller * 2
+                return doubled + 1
+            }
+
+            fn main() {
+                let caller: u8 = 3
+                test.assert_eq_u8(score(caller), 9, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(!asm.contains("call _score"), "{asm}");
+        assert!(!asm.contains("_score:"), "{asm}");
     }
 
     #[test]
