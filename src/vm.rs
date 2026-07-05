@@ -270,6 +270,14 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     if text.starts_with("ld sp,")
+        || text.starts_with("call nz,")
+        || text.starts_with("call z,")
+        || text.starts_with("call nc,")
+        || text.starts_with("call c,")
+        || text.starts_with("call po,")
+        || text.starts_with("call pe,")
+        || text.starts_with("call p,")
+        || text.starts_with("call m,")
         || text.starts_with("call ")
         || text.starts_with("jp z,")
         || text.starts_with("jp nz,")
@@ -436,6 +444,30 @@ fn emit_instruction(
     if let Some(value) = text.strip_prefix("ld sp,") {
         bytes.push(0x31);
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call nz,") {
+        bytes.push(0xC4);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call z,") {
+        bytes.push(0xCC);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call nc,") {
+        bytes.push(0xD4);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call c,") {
+        bytes.push(0xDC);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call po,") {
+        bytes.push(0xE4);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call pe,") {
+        bytes.push(0xEC);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call p,") {
+        bytes.push(0xF4);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("call m,") {
+        bytes.push(0xFC);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("call ") {
         bytes.push(0xCD);
         push24(bytes, parse_addr(target.trim(), labels, pc)?);
@@ -2037,6 +2069,32 @@ mod tests {
     }
 
     #[test]
+    fn assembles_all_conditional_call_instructions() {
+        let asm = r#"
+            call nz, target
+            call z, target
+            call nc, target
+            call c, target
+            call po, target
+            call pe, target
+            call p, target
+            call m, target
+        target:
+            ret
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xC4, 0x20, 0x00, 0x01, 0xCC, 0x20, 0x00, 0x01, 0xD4, 0x20, 0x00, 0x01, 0xDC, 0x20,
+                0x00, 0x01, 0xE4, 0x20, 0x00, 0x01, 0xEC, 0x20, 0x00, 0x01, 0xF4, 0x20, 0x00, 0x01,
+                0xFC, 0x20, 0x00, 0x01, 0xC9,
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_assembly_labels() {
         let asm = r#"
         again:
@@ -2280,6 +2338,32 @@ mod tests {
 
         positive:
             ld a, 00h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn runs_conditional_calls_on_ez80_vm() {
+        let asm = r#"
+            xor a
+            call z, mark_taken
+            call nz, fail
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        mark_taken:
+            ld a, 00h
+            ret
+
+        fail:
+            ld a, 20h
             out0 (0Dh), a
             ld a, 01h
             out0 (0Eh), a
