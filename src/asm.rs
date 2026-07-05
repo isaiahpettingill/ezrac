@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use crate::{
     ast::{
@@ -145,6 +149,16 @@ impl Symbols {
             functions: HashMap::new(),
             next_addr: VAR_BASE,
         };
+
+        let mut declared_names = HashSet::new();
+        for declaration in &program.declarations {
+            let Some(name) = declaration_name(declaration) else {
+                continue;
+            };
+            if !declared_names.insert(name.to_owned()) {
+                return Err(Diagnostic::new(format!("duplicate declaration `{name}`")));
+            }
+        }
 
         for declaration in &program.declarations {
             if let Declaration::Alias(decl) = declaration {
@@ -659,6 +673,12 @@ impl Emitter {
         }
 
         for (index, param) in function.params.iter().enumerate() {
+            if self.name_in_current_function(&param.name) {
+                return Err(Diagnostic::new(format!(
+                    "parameter `{}` shadows an existing name",
+                    param.name
+                )));
+            }
             let width = self.symbols.type_width(&param.ty)?;
             let variable = self.symbols.alloc_var(width.bytes());
             self.current_scope_mut()
@@ -695,6 +715,11 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match stmt {
             Stmt::Let { name, ty, value } => {
+                if self.name_in_current_function(name) {
+                    return Err(Diagnostic::new(format!(
+                        "local `{name}` shadows an existing name"
+                    )));
+                }
                 let variable = self.symbols.alloc_storage(ty)?;
                 self.current_scope_mut().insert(name.clone(), variable);
                 self.current_scope_types_mut()
@@ -2684,6 +2709,15 @@ impl Emitter {
             .or_else(|| self.symbols.constant_types.get(name))
     }
 
+    fn name_in_current_function(&self, name: &str) -> bool {
+        self.scope_types
+            .iter()
+            .any(|scope| scope.contains_key(name))
+            || self.symbols.global_types.contains_key(name)
+            || self.symbols.constant_types.contains_key(name)
+            || self.symbols.functions.contains_key(name)
+    }
+
     fn current_scope_mut(&mut self) -> &mut HashMap<String, Variable> {
         self.scopes
             .last_mut()
@@ -2771,6 +2805,21 @@ fn scalar_var(addr: u32, size: u8) -> Variable {
     }
 }
 
+fn declaration_name(declaration: &Declaration) -> Option<&str> {
+    match declaration {
+        Declaration::Import(_) => None,
+        Declaration::Const(decl) => Some(&decl.name),
+        Declaration::Alias(decl) => Some(&decl.name),
+        Declaration::Port(decl) => Some(&decl.name),
+        Declaration::Mmio(decl) => Some(&decl.name),
+        Declaration::Embed(decl) => Some(&decl.name),
+        Declaration::Global(decl) => Some(&decl.name),
+        Declaration::Struct(decl) => Some(&decl.name),
+        Declaration::ExternAsmFunction(decl) => Some(&decl.name),
+        Declaration::Function(decl) => Some(&decl.name),
+    }
+}
+
 fn is_comparison(op: BinaryOp) -> bool {
     matches!(
         op,
@@ -2826,6 +2875,54 @@ mod tests {
 
         assert!(asm.contains("out0 (0Dh), a"));
         assert!(asm.contains("out0 (0Eh), a"));
+    }
+
+    #[test]
+    fn rejects_duplicate_top_level_declarations() {
+        let source = r#"
+            const VALUE: u8 = 1
+            global VALUE: u8 = 2
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "duplicate declaration `VALUE`");
+    }
+
+    #[test]
+    fn rejects_duplicate_function_parameters() {
+        let source = r#"
+            fn add(value: u8, value: u8) -> u8 {
+                return value
+            }
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "parameter `value` shadows an existing name");
+    }
+
+    #[test]
+    fn rejects_local_shadowing() {
+        let source = r#"
+            global score: u8 = 0
+
+            fn bump(value: u8) {
+                let value: u8 = 1
+            }
+
+            fn main() {
+                let score: u8 = 1
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "local `score` shadows an existing name");
     }
 
     #[test]
