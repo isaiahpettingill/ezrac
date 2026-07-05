@@ -2312,6 +2312,16 @@ impl Emitter {
                 else_body,
             } => {
                 self.ensure_expr_is_bool(condition, "if condition")?;
+                if self.eliminate_dead_code {
+                    if let Ok(value) = self.eval_i64_with_local_constants(condition) {
+                        if value == 0 {
+                            self.emit_block(else_body)?;
+                        } else {
+                            self.emit_block(then_body)?;
+                        }
+                        return Ok(());
+                    }
+                }
                 let else_label = self.next_label("else");
                 let end_label = self.next_label("endif");
                 self.emit_expr_to_a(condition)?;
@@ -2325,6 +2335,13 @@ impl Emitter {
             }
             Stmt::While { condition, body } => {
                 self.ensure_expr_is_bool(condition, "while condition")?;
+                if self.eliminate_dead_code {
+                    if let Ok(value) = self.eval_i64_with_local_constants(condition) {
+                        if value == 0 {
+                            return Ok(());
+                        }
+                    }
+                }
                 let start_label = self.next_label("while");
                 let end_label = self.next_label("endwhile");
                 self.loop_stack.push(LoopLabels {
@@ -7281,7 +7298,7 @@ fn reachable_calls_for_body_with_inline_stack(
     inline_stack: &mut Vec<String>,
 ) -> Vec<String> {
     let mut raw_calls = Vec::new();
-    collect_stmt_calls(stmts, &mut raw_calls);
+    collect_reachable_stmt_calls(stmts, &mut raw_calls, symbols);
     let mut calls = Vec::new();
     for name in raw_calls {
         if !symbols.functions.contains_key(&name) {
@@ -7307,6 +7324,18 @@ fn reachable_calls_for_body_with_inline_stack(
 }
 
 fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
+    collect_stmt_calls_with_symbols(stmts, calls, None)
+}
+
+fn collect_reachable_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>, symbols: &Symbols) {
+    collect_stmt_calls_with_symbols(stmts, calls, Some(symbols))
+}
+
+fn collect_stmt_calls_with_symbols(
+    stmts: &[Stmt],
+    calls: &mut Vec<String>,
+    symbols: Option<&Symbols>,
+) {
     for stmt in stmts {
         match stmt {
             Stmt::Let { value, .. } => collect_expr_calls(value, calls),
@@ -7320,14 +7349,35 @@ fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
                 else_body,
             } => {
                 collect_expr_calls(condition, calls);
-                collect_stmt_calls(then_body, calls);
-                collect_stmt_calls(else_body, calls);
+                if let Some(symbols) = symbols {
+                    if let Ok(value) = symbols.eval_i64(condition) {
+                        if value == 0 {
+                            collect_stmt_calls_with_symbols(else_body, calls, Some(symbols));
+                        } else {
+                            collect_stmt_calls_with_symbols(then_body, calls, Some(symbols));
+                        }
+                        if stmt_terminates_current_block(stmt) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                collect_stmt_calls_with_symbols(then_body, calls, symbols);
+                collect_stmt_calls_with_symbols(else_body, calls, symbols);
             }
             Stmt::While { condition, body } => {
                 collect_expr_calls(condition, calls);
-                collect_stmt_calls(body, calls);
+                if let Some(symbols) = symbols {
+                    if symbols.eval_i64(condition).is_ok_and(|value| value == 0) {
+                        if stmt_terminates_current_block(stmt) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                collect_stmt_calls_with_symbols(body, calls, symbols);
             }
-            Stmt::Loop { body } => collect_stmt_calls(body, calls),
+            Stmt::Loop { body } => collect_stmt_calls_with_symbols(body, calls, symbols),
             Stmt::Return(Some(expr)) | Stmt::Expr(expr) => collect_expr_calls(expr, calls),
             Stmt::Out { value, .. } => collect_expr_calls(value, calls),
             Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => {}
@@ -9054,6 +9104,60 @@ section .text
 
             fn main() {
                 done()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "value 256 is outside u8 range");
+    }
+
+    #[test]
+    fn omits_constant_dead_if_and_while_branches() {
+        let source = r#"
+            const RUN_COLD: bool = false
+
+            fn cold() {
+                test.fail(9)
+            }
+
+            fn choose() -> u8 {
+                if RUN_COLD {
+                    cold()
+                    return 9
+                } else {
+                    return 4
+                }
+            }
+
+            fn main() {
+                while false {
+                    test.fail(7)
+                }
+                test.assert_eq_u8(choose(), 4, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(!asm.contains("_cold:"), "{asm}");
+        assert!(!asm.contains("; source: cold()"), "{asm}");
+        assert!(!asm.contains("; source: test.fail(7)"), "{asm}");
+        assert!(!asm.contains("; source: return 9"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn validates_constant_dead_branches_before_omitting_them() {
+        let source = r#"
+            fn main() {
+                if false {
+                    let value: u8 = 0x100
+                }
                 test.pass()
             }
         "#;
