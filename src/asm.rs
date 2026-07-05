@@ -851,6 +851,7 @@ impl Emitter {
             }
             Stmt::Asm {
                 volatile,
+                inputs,
                 clobbers,
                 lines,
             } => {
@@ -858,6 +859,14 @@ impl Emitter {
                     self.line("    ; asm volatile");
                 } else {
                     self.line("    ; asm");
+                }
+                for input in inputs {
+                    self.line(&format!(
+                        "    ; in {}: {} as {}",
+                        input.name,
+                        type_display(&input.ty),
+                        input.class
+                    ));
                 }
                 if !clobbers.is_empty() {
                     self.line(&format!("    ; clobber {}", clobbers.join(", ")));
@@ -2865,6 +2874,14 @@ fn has_attr(function: &Function, attr: &str) -> bool {
     function.attrs.iter().any(|candidate| candidate == attr)
 }
 
+fn type_display(ty: &Type) -> String {
+    match ty {
+        Type::Named(name) => name.clone(),
+        Type::Ptr(inner) => format!("ptr<{}>", type_display(inner)),
+        Type::Array { element, len } => format!("[{}; {len}]", type_display(element)),
+    }
+}
+
 fn is_comparison(op: BinaryOp) -> bool {
     matches!(
         op,
@@ -3118,7 +3135,7 @@ mod tests {
     fn emits_and_runs_inline_asm_statements() {
         let source = r#"
             fn main() {
-                asm volatile(clobber a, clobber ports) {
+                asm volatile(in ch: u8 as reg8, clobber a, clobber ports) {
                     "ld a, 0x41"
                     "out0 (0Ch), a"
                 }
@@ -3130,6 +3147,7 @@ mod tests {
         let run = run_assembly_test(&asm, 4_000).unwrap();
 
         assert!(asm.contains("    ; asm volatile"));
+        assert!(asm.contains("    ; in ch: u8 as reg8"));
         assert!(asm.contains("    ; clobber a, ports"));
         assert!(asm.contains("    ld a, 0x41"));
         assert!(run.halted, "{asm}");

@@ -5,9 +5,9 @@ use pest_derive::Parser;
 
 use crate::{
     ast::{
-        AliasDecl, AssignOp, BinaryOp, ConstDecl, Declaration, EmbedDecl, EmbedSource, Expr,
-        ExternFunction, Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, Stmt,
-        StructDecl, Type, UnaryOp,
+        AliasDecl, AsmInput, AssignOp, BinaryOp, ConstDecl, Declaration, EmbedDecl, EmbedSource,
+        Expr, ExternFunction, Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program,
+        Stmt, StructDecl, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -366,6 +366,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
         )),
         Rule::asm_stmt => {
             let mut volatile = false;
+            let mut inputs = Vec::new();
             let mut clobbers = Vec::new();
             let mut lines = Vec::new();
             for inner in pair.into_inner() {
@@ -374,14 +375,10 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
                     Rule::asm_operands => {
                         for operand in inner.into_inner().flat_map(|pair| pair.into_inner()) {
                             if operand.as_rule() == Rule::asm_operand {
-                                let clobber_rule = operand.into_inner().next().unwrap();
-                                let clobber = clobber_rule.into_inner().next().unwrap().as_str();
-                                if !is_allowed_asm_clobber(clobber) {
-                                    return Err(Diagnostic::new(format!(
-                                        "unknown inline asm clobber `{clobber}`"
-                                    )));
+                                match build_asm_operand(operand)? {
+                                    AsmOperand::Input(input) => inputs.push(input),
+                                    AsmOperand::Clobber(clobber) => clobbers.push(clobber),
                                 }
-                                clobbers.push(clobber.to_owned());
                             }
                         }
                     }
@@ -394,6 +391,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
             }
             Ok(Stmt::Asm {
                 volatile,
+                inputs,
                 clobbers,
                 lines,
             })
@@ -655,6 +653,61 @@ fn split_path(path: &str) -> Vec<String> {
     path.split('.').map(str::to_owned).collect()
 }
 
+enum AsmOperand {
+    Input(AsmInput),
+    Clobber(String),
+}
+
+fn build_asm_operand(pair: Pair<'_, Rule>) -> Result<AsmOperand, Diagnostic> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::asm_input => {
+            let mut parts = inner.into_inner();
+            let name = parts.next().unwrap().as_str().to_owned();
+            let ty = build_type(parts.next().unwrap())?;
+            let class = parts.next().unwrap().as_str().to_owned();
+            validate_asm_operand_class(&ty, &class)?;
+            Ok(AsmOperand::Input(AsmInput { name, ty, class }))
+        }
+        Rule::asm_clobber => {
+            let clobber = inner.into_inner().next().unwrap().as_str();
+            if !is_allowed_asm_clobber(clobber) {
+                return Err(Diagnostic::new(format!(
+                    "unknown inline asm clobber `{clobber}`"
+                )));
+            }
+            Ok(AsmOperand::Clobber(clobber.to_owned()))
+        }
+        _ => unreachable!("unexpected inline asm operand {:?}", inner.as_rule()),
+    }
+}
+
+fn validate_asm_operand_class(ty: &Type, class: &str) -> Result<(), Diagnostic> {
+    let ok = match class {
+        "reg8" => type_storage_size(ty) == Some(1),
+        "reg16" => type_storage_size(ty) == Some(2),
+        "reg24" => type_storage_size(ty) == Some(3),
+        "mem" | "imm" => true,
+        _ => false,
+    };
+    if !ok {
+        return Err(Diagnostic::new(format!(
+            "inline asm operand class `{class}` is incompatible with type `{ty:?}`"
+        )));
+    }
+    Ok(())
+}
+
+fn type_storage_size(ty: &Type) -> Option<u8> {
+    match ty {
+        Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Some(1),
+        Type::Named(name) if name == "u16" || name == "i16" => Some(2),
+        Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => Some(3),
+        Type::Ptr(_) => Some(3),
+        Type::Named(_) | Type::Array { .. } => None,
+    }
+}
+
 fn is_allowed_asm_clobber(clobber: &str) -> bool {
     matches!(
         clobber,
@@ -839,9 +892,11 @@ mod tests {
             &main.body[0],
             Stmt::Asm {
                 volatile: true,
+                inputs,
                 clobbers,
                 lines
             } if lines == &["ld a, 0x41", "out0 (0Ch), a"]
+                && inputs.is_empty()
                 && clobbers.is_empty()
         ));
     }
@@ -866,9 +921,45 @@ mod tests {
             &main.body[0],
             Stmt::Asm {
                 volatile: true,
+                inputs,
                 clobbers,
                 lines
-            } if clobbers == &["a", "ports", "memory"] && lines.len() == 2
+            } if inputs.is_empty() && clobbers == &["a", "ports", "memory"] && lines.len() == 2
+        ));
+    }
+
+    #[test]
+    fn parses_inline_asm_input_operands() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                asm volatile(in ch: u8 as reg8, in addr: ptr<u8> as reg24, clobber a) {
+                    "ld a, {ch}"
+                    "ld hl, {addr}"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Asm {
+                volatile: true,
+                inputs,
+                clobbers,
+                lines
+            } if inputs.len() == 2
+                && inputs[0].name == "ch"
+                && inputs[0].ty == Type::Named("u8".to_owned())
+                && inputs[0].class == "reg8"
+                && inputs[1].name == "addr"
+                && inputs[1].ty == Type::Ptr(Box::new(Type::Named("u8".to_owned())))
+                && inputs[1].class == "reg24"
+                && clobbers == &["a"]
+                && lines.len() == 2
         ));
     }
 
@@ -887,6 +978,26 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.message, "unknown inline asm clobber `made_up`");
+    }
+
+    #[test]
+    fn rejects_incompatible_inline_asm_input_classes() {
+        let error = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                asm(in wide: u16 as reg8) {
+                    "ld a, {wide}"
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "inline asm operand class `reg8` is incompatible with type `Named(\"u16\")`"
+        );
     }
 
     #[test]

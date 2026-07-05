@@ -143,6 +143,7 @@ pub enum Stmt {
     Return(Option<Expr>),
     Asm {
         volatile: bool,
+        inputs: Vec<AsmInput>,
         clobbers: Vec<String>,
         lines: Vec<String>,
     },
@@ -151,6 +152,13 @@ pub enum Stmt {
         value: Expr,
     },
     Expr(Expr),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AsmInput {
+    pub name: String,
+    pub ty: Type,
+    pub class: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
