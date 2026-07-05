@@ -13,7 +13,7 @@ layout_stack = { "stack" ~ int_lit ~ semi? }
 layout_region = { "region" ~ ident ~ int_lit ~ ".." ~ int_lit ~ layout_flag* ~ semi? }
 layout_flag = { "read" | "write" | "execute" | "volatile" | "reserved" }
 layout_section = { "section" ~ section_name ~ "->" ~ ident ~ "align" ~ int_lit ~ semi? }
-layout_symbol = { "symbol" ~ ident ~ "=" ~ int_lit ~ semi? }
+layout_symbol = { "symbol" ~ ident ~ "=" ~ expr ~ semi? }
 
 visibility = { "pub" }
 volatile_kw = { "volatile" }

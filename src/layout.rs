@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::diagnostic::Diagnostic;
 use crate::target::{
     Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR, EZRA_RAM_BASE,
@@ -242,6 +244,7 @@ fn build_layout(pair: Pair<'_, Rule>) -> Result<Layout, Diagnostic> {
     let mut regions = Vec::new();
     let mut sections = Vec::new();
     let mut symbols = Vec::new();
+    let mut symbol_values = HashMap::new();
 
     for item in inner {
         match item.as_rule() {
@@ -250,7 +253,11 @@ fn build_layout(pair: Pair<'_, Rule>) -> Result<Layout, Diagnostic> {
             Rule::layout_stack => stack = Some(parse_single_address(item, "stack")?),
             Rule::layout_region => regions.push(parse_region(item)?),
             Rule::layout_section => sections.push(parse_section(item)?),
-            Rule::layout_symbol => symbols.push(parse_symbol(item)?),
+            Rule::layout_symbol => {
+                let symbol = parse_symbol(item, &symbol_values)?;
+                symbol_values.insert(symbol.name.clone(), i128::from(symbol.value.get()));
+                symbols.push(symbol);
+            }
             _ => unreachable!("unexpected layout item {:?}", item.as_rule()),
         }
     }
@@ -339,23 +346,199 @@ fn parse_section(pair: Pair<'_, Rule>) -> Result<Section, Diagnostic> {
     })
 }
 
-fn parse_symbol(pair: Pair<'_, Rule>) -> Result<Symbol, Diagnostic> {
+fn parse_symbol(
+    pair: Pair<'_, Rule>,
+    symbols: &HashMap<String, i128>,
+) -> Result<Symbol, Diagnostic> {
     let mut inner = pair.into_inner();
     let name = inner
         .next()
         .ok_or_else(|| Diagnostic::new("symbol is missing a name"))?
         .as_str()
         .to_owned();
-    let value = parse_address(
+    let value = parse_symbol_address(
         inner
             .next()
             .ok_or_else(|| Diagnostic::new(format!("symbol `{name}` is missing a value")))?,
+        symbols,
     )?;
     Ok(Symbol { name, value })
 }
 
+fn parse_symbol_address(
+    pair: Pair<'_, Rule>,
+    symbols: &HashMap<String, i128>,
+) -> Result<Address24, Diagnostic> {
+    let value = eval_layout_expr(pair, symbols)?;
+    let value = u32::try_from(value).map_err(|_| {
+        Diagnostic::new(format!(
+            "address 0x{value:X} is outside the 24-bit address space"
+        ))
+    })?;
+    Address24::try_from(value).map_err(|error| Diagnostic::new(error.to_string()))
+}
+
 fn parse_address(pair: Pair<'_, Rule>) -> Result<Address24, Diagnostic> {
     Address24::try_from(parse_u32(pair)?).map_err(|error| Diagnostic::new(error.to_string()))
+}
+
+fn eval_layout_expr(
+    pair: Pair<'_, Rule>,
+    symbols: &HashMap<String, i128>,
+) -> Result<i128, Diagnostic> {
+    match pair.as_rule() {
+        Rule::expr
+        | Rule::logical_or
+        | Rule::logical_and
+        | Rule::bit_or
+        | Rule::bit_xor
+        | Rule::bit_and
+        | Rule::equality
+        | Rule::comparison
+        | Rule::shift
+        | Rule::additive
+        | Rule::multiplicative => eval_layout_binary_expr(pair, symbols),
+        Rule::unary => eval_layout_unary_expr(pair, symbols),
+        Rule::primary | Rule::literal => {
+            let inner = pair
+                .into_inner()
+                .next()
+                .ok_or_else(|| Diagnostic::new("layout expression is empty"))?;
+            eval_layout_expr(inner, symbols)
+        }
+        Rule::int_lit => parse_i128(pair),
+        Rule::bool_lit => Ok(if pair.as_str() == "true" { 1 } else { 0 }),
+        Rule::path_expr => symbols
+            .get(pair.as_str())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown layout symbol `{}`", pair.as_str()))),
+        Rule::cast_expr => {
+            let expr = pair
+                .into_inner()
+                .find(|inner| inner.as_rule() == Rule::expr)
+                .ok_or_else(|| Diagnostic::new("layout cast is missing an expression"))?;
+            eval_layout_expr(expr, symbols)
+        }
+        other => Err(Diagnostic::new(format!(
+            "unsupported layout expression `{}` ({other:?})",
+            pair.as_str()
+        ))),
+    }
+}
+
+fn eval_layout_binary_expr(
+    pair: Pair<'_, Rule>,
+    symbols: &HashMap<String, i128>,
+) -> Result<i128, Diagnostic> {
+    let mut inner = pair.into_inner();
+    let first = inner
+        .next()
+        .ok_or_else(|| Diagnostic::new("layout expression is empty"))?;
+    let mut value = eval_layout_expr(first, symbols)?;
+    while let Some(op) = inner.next() {
+        let right = inner.next().ok_or_else(|| {
+            Diagnostic::new("layout binary expression is missing a right operand")
+        })?;
+        let right = eval_layout_expr(right, symbols)?;
+        value = eval_layout_binary_op(value, op.as_str().trim(), right)?;
+    }
+    Ok(value)
+}
+
+fn eval_layout_binary_op(left: i128, op: &str, right: i128) -> Result<i128, Diagnostic> {
+    match op {
+        "||" => Ok(if left != 0 || right != 0 { 1 } else { 0 }),
+        "&&" => Ok(if left != 0 && right != 0 { 1 } else { 0 }),
+        "|" => Ok(left | right),
+        "^" => Ok(left ^ right),
+        "&" => Ok(left & right),
+        "==" => Ok(if left == right { 1 } else { 0 }),
+        "!=" => Ok(if left != right { 1 } else { 0 }),
+        "<" => Ok(if left < right { 1 } else { 0 }),
+        "<=" => Ok(if left <= right { 1 } else { 0 }),
+        ">" => Ok(if left > right { 1 } else { 0 }),
+        ">=" => Ok(if left >= right { 1 } else { 0 }),
+        "<<" => Ok(checked_layout_shift(left, right, true)),
+        ">>" => Ok(checked_layout_shift(left, right, false)),
+        "+" => left
+            .checked_add(right)
+            .ok_or_else(|| Diagnostic::new("layout expression addition overflowed")),
+        "-" => left
+            .checked_sub(right)
+            .ok_or_else(|| Diagnostic::new("layout expression subtraction overflowed")),
+        "*" => left
+            .checked_mul(right)
+            .ok_or_else(|| Diagnostic::new("layout expression multiplication overflowed")),
+        "/" => {
+            if right == 0 {
+                Ok(0)
+            } else {
+                left.checked_div(right)
+                    .ok_or_else(|| Diagnostic::new("layout expression division overflowed"))
+            }
+        }
+        "%" => {
+            if right == 0 {
+                Ok(0)
+            } else {
+                left.checked_rem(right)
+                    .ok_or_else(|| Diagnostic::new("layout expression remainder overflowed"))
+            }
+        }
+        other => Err(Diagnostic::new(format!(
+            "unsupported layout binary operator `{other}`"
+        ))),
+    }
+}
+
+fn checked_layout_shift(left: i128, right: i128, shift_left: bool) -> i128 {
+    let Ok(shift) = u32::try_from(right) else {
+        return 0;
+    };
+    if shift >= i128::BITS {
+        return 0;
+    }
+    if shift_left {
+        left.checked_shl(shift).unwrap_or(0)
+    } else {
+        left.checked_shr(shift).unwrap_or(0)
+    }
+}
+
+fn eval_layout_unary_expr(
+    pair: Pair<'_, Rule>,
+    symbols: &HashMap<String, i128>,
+) -> Result<i128, Diagnostic> {
+    let mut ops = Vec::new();
+    let mut value = None;
+    for item in pair.into_inner() {
+        match item.as_rule() {
+            Rule::unary_op => ops.push(item.as_str().to_owned()),
+            _ => value = Some(eval_layout_expr(item, symbols)?),
+        }
+    }
+    let mut value = value.ok_or_else(|| Diagnostic::new("layout unary expression is empty"))?;
+    for op in ops.iter().rev() {
+        value = match op.as_str() {
+            "-" => value
+                .checked_neg()
+                .ok_or_else(|| Diagnostic::new("layout expression negation overflowed"))?,
+            "~" => !value,
+            "!" => {
+                if value == 0 {
+                    1
+                } else {
+                    0
+                }
+            }
+            other => {
+                return Err(Diagnostic::new(format!(
+                    "unsupported layout unary operator `{other}`"
+                )));
+            }
+        };
+    }
+    Ok(value)
 }
 
 fn parse_u32(pair: Pair<'_, Rule>) -> Result<u32, Diagnostic> {
@@ -373,6 +556,25 @@ fn parse_u32(pair: Pair<'_, Rule>) -> Result<u32, Diagnostic> {
         u32::from_str_radix(bin, 2)
     } else {
         value.parse::<u32>()
+    };
+    parsed.map_err(|_| Diagnostic::new(format!("invalid integer literal `{text}`")))
+}
+
+fn parse_i128(pair: Pair<'_, Rule>) -> Result<i128, Diagnostic> {
+    let text = pair.as_str();
+    let value = text
+        .trim_end_matches("u8")
+        .trim_end_matches("i8")
+        .trim_end_matches("u16")
+        .trim_end_matches("i16")
+        .trim_end_matches("u24")
+        .trim_end_matches("i24");
+    let parsed = if let Some(hex) = value.strip_prefix("0x") {
+        i128::from_str_radix(hex, 16)
+    } else if let Some(bin) = value.strip_prefix("0b") {
+        i128::from_str_radix(bin, 2)
+    } else {
+        value.parse::<i128>()
     };
     parsed.map_err(|_| Diagnostic::new(format!("invalid integer literal `{text}`")))
 }
@@ -466,6 +668,32 @@ mod tests {
 
         assert_eq!(layout, Layout::ezra_default());
         assert_eq!(layout.validate(), Ok(()));
+    }
+
+    #[test]
+    fn parses_layout_symbol_expressions() {
+        let source = r#"
+            layout exprs {
+                load 0x010000;
+                entry 0x010040;
+                stack 0xF00000;
+
+                symbol TEXT_END = 0x010040 + 0x20 * 3;
+                symbol MIRROR = TEXT_END + (0b1000 | 0b0011);
+                symbol DIV_ZERO = 0x123456 / 0;
+                symbol MOD_ZERO = 0x123456 % 0;
+            }
+        "#;
+
+        let layout = parse_layout(source).unwrap();
+
+        assert_eq!(layout.symbols[0].value.get(), 0x010040 + 0x20 * 3);
+        assert_eq!(
+            layout.symbols[1].value.get(),
+            0x010040 + 0x20 * 3 + (0b1000 | 0b0011)
+        );
+        assert_eq!(layout.symbols[2].value.get(), 0);
+        assert_eq!(layout.symbols[3].value.get(), 0);
     }
 
     #[test]
