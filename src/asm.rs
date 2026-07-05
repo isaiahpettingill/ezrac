@@ -3285,19 +3285,26 @@ impl Emitter {
         }
     }
 
-    fn array_element_variable(&self, name: &str, index: &Expr) -> Result<Variable, Diagnostic> {
+    fn const_array_element_variable(
+        &self,
+        name: &str,
+        index: &Expr,
+    ) -> Result<Option<Variable>, Diagnostic> {
         self.validate_array_index_type(index)?;
         let (array, element_size, len) = self.array_info(name)?;
-        let index_value = self.symbols.eval_i64(index)?;
+        let index_value = match self.symbols.eval_i64(index) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
         if index_value < 0 || index_value as u32 >= len {
             return Err(Diagnostic::new(format!(
                 "array index {index_value} is out of bounds for `{name}` length {len}"
             )));
         }
-        Ok(scalar_var(
+        Ok(Some(scalar_var(
             array.addr + index_value as u32 * element_size as u32,
             element_size,
-        ))
+        )))
     }
 
     fn array_info(&self, name: &str) -> Result<(Variable, u8, u32), Diagnostic> {
@@ -3431,7 +3438,7 @@ impl Emitter {
 
     fn emit_array_element_address(&mut self, name: &str, index: &Expr) -> Result<(), Diagnostic> {
         self.validate_array_index_type(index)?;
-        if let Ok(element) = self.array_element_variable(name, index) {
+        if let Some(element) = self.const_array_element_variable(name, index)? {
             self.line(&format!("    ld hl, {:06X}h", element.addr));
             return Ok(());
         }
@@ -3478,7 +3485,7 @@ impl Emitter {
         index: &Expr,
     ) -> Result<(), Diagnostic> {
         let (_, element_size, _) = self.array_info(name)?;
-        if let Ok(element) = self.array_element_variable(name, index) {
+        if let Some(element) = self.const_array_element_variable(name, index)? {
             self.emit_load_width(element);
             return Ok(());
         }
@@ -3513,7 +3520,7 @@ impl Emitter {
         op: AssignOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
-        if let Ok(element) = self.array_element_variable(name, index) {
+        if let Some(element) = self.const_array_element_variable(name, index)? {
             if op == AssignOp::Set {
                 let ty = self.array_element_type(name)?;
                 self.validate_expr_assignable_to_type(value, &ty)?;
@@ -4850,6 +4857,47 @@ mod tests {
                 }
                 "#,
                 "array index value -1 is outside u24 range",
+            ),
+            (
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    let value: u8 = bytes[2]
+                    test.pass()
+                }
+                "#,
+                "array index 2 is out of bounds for `bytes` length 2",
+            ),
+            (
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    bytes[2] = 7
+                    test.pass()
+                }
+                "#,
+                "array index 2 is out of bounds for `bytes` length 2",
+            ),
+            (
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    let p: ptr<u8> = &bytes[2]
+                    test.pass()
+                }
+                "#,
+                "array index 2 is out of bounds for `bytes` length 2",
+            ),
+            (
+                r#"
+                const IDX: u8 = 2
+                global bytes: [u8; 2] = [1, 2]
+                fn main() {
+                    let value: u8 = bytes[IDX]
+                    test.pass()
+                }
+                "#,
+                "array index 2 is out of bounds for `bytes` length 2",
             ),
         ];
 
