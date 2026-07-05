@@ -13285,6 +13285,49 @@ section .text
     }
 
     #[test]
+    fn rejects_array_pointer_decay() {
+        let cases = [
+            r#"
+            global bytes: [u8; 2] = [1, 2]
+
+            fn main() {
+                let ptr: ptr<u8> = bytes
+                test.pass()
+            }
+            "#,
+            r#"
+            global bytes: [u8; 2] = [1, 2]
+
+            fn first(values: ptr<[u8; 2]>) -> u8 {
+                let raw: ptr<u8> = cast<ptr<u8>>(values)
+                return *raw
+            }
+
+            fn main() {
+                test.assert_eq_u8(first(bytes), 1, 1)
+                test.pass()
+            }
+            "#,
+            r#"
+            global bytes: [u8; 2] = [1, 2]
+            global dst: [u8; 2] = [0, 0]
+
+            fn main() {
+                mem.memcpy(dst, bytes, 2)
+                test.pass()
+            }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "type mismatch");
+        }
+    }
+
+    #[test]
     fn emits_and_runs_array_pointer_arithmetic_scale() {
         let source = r#"
             struct Cell {
