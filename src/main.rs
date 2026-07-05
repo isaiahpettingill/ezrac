@@ -948,11 +948,16 @@ mod tests {
 
                     region code 0x020000..0x02FFFF read execute;
                     region ram 0x030000..0x03FFFF read write;
+                    region rodata 0x040000..0x04FFFF read;
                     region bank 0x120000..0x12FFFF read;
+                    region scratch 0xE00000..0xE0FFFF read write;
                     section .header -> code align 64;
                     section .text -> code align 16;
+                    section .rodata -> rodata align 16;
                     section .data -> ram align 16;
                     section .bss -> ram align 16;
+                    section .assets -> bank align 256;
+                    section .scratch -> scratch align 16;
                     section .bank1 -> bank align 256;
                     section .bank2 -> bank align 256;
 
@@ -1001,10 +1006,16 @@ mod tests {
 
                     region code 0x020000..0x02FFFF read execute;
                     region ram 0x030000..0x03FFFF read write;
+                    region rodata 0x040000..0x04FFFF read;
+                    region assets 0x120000..0x12FFFF read;
+                    region scratch 0xE00000..0xE0FFFF read write;
                     section .header -> code align 64;
                     section .text -> code align 16;
+                    section .rodata -> rodata align 16;
                     section .data -> ram align 16;
                     section .bss -> ram align 16;
+                    section .assets -> assets align 256;
+                    section .scratch -> scratch align 16;
 
                     symbol EZRA_RAM_BASE = 0x030000;
                 }
@@ -1131,10 +1142,16 @@ mod tests {
 
                     region code 0x020000..0x02FFFF read execute;
                     region ram 0x030000..0x03FFFF read write;
+                    region rodata 0x040000..0x04FFFF read;
+                    region assets 0x120000..0x12FFFF read;
+                    region scratch 0xE00000..0xE0FFFF read write;
                     section .header -> code align 64;
                     section .text -> code align 16;
+                    section .rodata -> rodata align 16;
                     section .data -> ram align 16;
                     section .bss -> ram align 16;
+                    section .assets -> assets align 256;
+                    section .scratch -> scratch align 16;
 
                     symbol EZRA_LOAD_ADDR = 0x020000;
                     symbol EZRA_ENTRY_ADDR = 0x020040;
@@ -1195,8 +1212,17 @@ mod tests {
                     stack 0xEFFE00;
 
                     region code 0x020000..0x02FFFF read execute;
+                    region rodata 0x040000..0x04FFFF read;
+                    region ram 0x050000..0x05FFFF read write;
+                    region assets 0x120000..0x12FFFF read;
+                    region scratch 0xE00000..0xE0FFFF read write;
                     section .header -> code align 64;
                     section .text -> code align 16;
+                    section .rodata -> rodata align 16;
+                    section .data -> ram align 16;
+                    section .bss -> ram align 16;
+                    section .assets -> assets align 256;
+                    section .scratch -> scratch align 16;
                 }
             "#,
         )

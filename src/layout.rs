@@ -215,6 +215,15 @@ impl Layout {
                 ))),
             }
         }
+        for required in [
+            ".header", ".text", ".rodata", ".data", ".bss", ".assets", ".scratch",
+        ] {
+            if !section_names.contains(required) {
+                diagnostics.push(Diagnostic::new(format!(
+                    "layout is missing required section `{required}`"
+                )));
+            }
+        }
 
         let mut symbol_names = HashSet::new();
         for symbol in &self.symbols {
@@ -872,6 +881,34 @@ mod tests {
                 .any(|error| error.message == "duplicate symbol `BASE`"),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn rejects_layouts_missing_required_sections() {
+        let source = r#"
+            layout missing_sections {
+                load 0x010000;
+                entry 0x010040;
+                stack 0xF00000;
+
+                region code 0x010000..0x01FFFF read execute;
+                region ram 0x040000..0x07FFFF read write;
+                section .header -> code align 64;
+                section .text -> code align 16;
+            }
+        "#;
+
+        let layout = parse_layout(source).unwrap();
+        let errors = layout.validate().unwrap_err();
+
+        for section in [".rodata", ".data", ".bss", ".assets", ".scratch"] {
+            assert!(
+                errors.iter().any(|error| {
+                    error.message == format!("layout is missing required section `{section}`")
+                }),
+                "{errors:?}"
+            );
+        }
     }
 
     #[test]
