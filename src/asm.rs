@@ -13977,9 +13977,15 @@ section .text
         let expected_i8_overflow_div = i8::MIN as u8;
         let expected_i16_overflow_div = i16::MIN as u16;
         let expected_i24_overflow_div = 0x800000u32;
+        let expected_signed_div_zero = 0;
+        let expected_signed_mod_zero = 0;
         let source = format!(
             r#"
             alias subpx = i24
+            const CONST_I16_DIV_ZERO: i16 = -300 / 0
+            const CONST_I16_MOD_ZERO: i16 = -300 % 0
+            const CONST_I24_DIV_ZERO: subpx = -0x012345 / 0
+            const CONST_I24_MOD_ZERO: subpx = -0x012345 % 0
 
             fn div8(a: i8, b: i8) -> i8 {{
                 return a / b
@@ -14027,6 +14033,8 @@ section .text
                 test.assert_eq_u16(mod16(-32768, -1), 0, 10)
                 test.assert_eq_u16(div16(300, -7), 0x{expected_i16_neg_divisor_div:04X}, 19)
                 test.assert_eq_u16(mod16(300, -7), 0x{expected_i16_neg_divisor_mod:04X}, 20)
+                test.assert_eq_u16(div16(c, 0), {expected_signed_div_zero}, 23)
+                test.assert_eq_u16(mod16(c, 0), {expected_signed_mod_zero}, 24)
 
                 let e: subpx = -0x012345
                 let f: subpx = 17
@@ -14036,6 +14044,12 @@ section .text
                 test.assert_eq_u24(mod24(-0x800000, -1), 0, 14)
                 test.assert_eq_u24(div24(-0x012345, -17), 0x{expected_i24_both_negative_div:06X}, 21)
                 test.assert_eq_u24(mod24(-0x012345, -17), 0x{expected_i24_both_negative_mod:06X}, 22)
+                test.assert_eq_u24(div24(e, 0), {expected_signed_div_zero}, 25)
+                test.assert_eq_u24(mod24(e, 0), {expected_signed_mod_zero}, 26)
+                test.assert_eq_u16(CONST_I16_DIV_ZERO, {expected_signed_div_zero}, 27)
+                test.assert_eq_u16(CONST_I16_MOD_ZERO, {expected_signed_mod_zero}, 28)
+                test.assert_eq_u24(CONST_I24_DIV_ZERO, {expected_signed_div_zero}, 29)
+                test.assert_eq_u24(CONST_I24_MOD_ZERO, {expected_signed_mod_zero}, 30)
                 test.pass()
             }}
             "#
