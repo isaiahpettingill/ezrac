@@ -1849,6 +1849,7 @@ impl Emitter {
                     input.name
                 )));
             }
+            self.validate_inline_asm_input_type(input)?;
             let binding = self.inline_asm_input_binding(input)?;
             self.line(&format!(
                 "    ; in {}: {} as {}",
@@ -1865,6 +1866,7 @@ impl Emitter {
                     output.name
                 )));
             }
+            self.validate_inline_asm_output_type(output)?;
             let binding = self.inline_asm_output_binding(output)?;
             self.line(&format!(
                 "    ; out {}: {} as {}",
@@ -1890,6 +1892,49 @@ impl Emitter {
         }
         for output in outputs {
             self.emit_inline_asm_output_store(output)?;
+        }
+        Ok(())
+    }
+
+    fn validate_inline_asm_input_type(
+        &self,
+        input: &crate::ast::AsmInput,
+    ) -> Result<(), Diagnostic> {
+        let Some(bound) = self.named_value_type(&input.name) else {
+            return Err(Diagnostic::new(format!("unknown value `{}`", input.name)));
+        };
+        let declared = self.symbols.resolved_type(&input.ty)?;
+        let bound = self.symbols.resolved_type(bound)?;
+        if declared != bound {
+            return Err(Diagnostic::new(format!(
+                "inline asm input `{}` declared type `{}` does not match bound type `{}`",
+                input.name,
+                type_display(&declared),
+                type_display(&bound)
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_inline_asm_output_type(
+        &self,
+        output: &crate::ast::AsmOutput,
+    ) -> Result<(), Diagnostic> {
+        let Some(bound) = self.variable_type(&output.name) else {
+            return Err(Diagnostic::new(format!(
+                "unknown variable `{}`",
+                output.name
+            )));
+        };
+        let declared = self.symbols.resolved_type(&output.ty)?;
+        let bound = self.symbols.resolved_type(bound)?;
+        if declared != bound {
+            return Err(Diagnostic::new(format!(
+                "inline asm output `{}` declared type `{}` does not match bound type `{}`",
+                output.name,
+                type_display(&declared),
+                type_display(&bound)
+            )));
         }
         Ok(())
     }
@@ -8811,6 +8856,65 @@ mod tests {
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn accepts_inline_asm_operand_alias_types() {
+        let source = r#"
+            alias byte = u8
+
+            fn main() {
+                let ch: byte = 0x41
+                let result: byte = 0
+                asm volatile(in ch: byte, out result: byte, clobber a) {
+                    "ld a, {ch}"
+                    "ld {result}, a"
+                }
+                test.assert_eq_u8(result, 0x41, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_inline_asm_operand_type_mismatch() {
+        let input = r#"
+            fn main() {
+                let value: u16 = 0
+                asm volatile(in value: u8 as reg8) {
+                    "ld a, {value}"
+                }
+                test.pass()
+            }
+        "#;
+        let output = r#"
+            fn main() {
+                let result: u8 = 0
+                asm volatile(out result: u16 as reg16, clobber hl) {
+                    "ld hl, 000007h"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), input).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+        assert_eq!(
+            error.message,
+            "inline asm input `value` declared type `u8` does not match bound type `u16`"
+        );
+
+        let program = parse_program(Path::new("game.ezra"), output).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+        assert_eq!(
+            error.message,
+            "inline asm output `result` declared type `u16` does not match bound type `u8`"
+        );
     }
 
     #[test]
