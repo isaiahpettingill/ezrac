@@ -11586,6 +11586,34 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_loop_break_and_continue() {
+        let source = r#"
+            fn main() {
+                let i: u8 = 0
+                let total: u8 = 0
+                loop {
+                    i += 1
+                    if i == 2 {
+                        continue
+                    }
+                    if i == 5 {
+                        break
+                    }
+                    total += i
+                }
+                test.assert_eq_u8(total, 1 + 3 + 4, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_u8_function_with_returning_if_else() {
         let source = r#"
             fn choose(flag: bool) -> u8 {
