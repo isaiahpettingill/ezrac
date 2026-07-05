@@ -1052,6 +1052,7 @@ Rules:
 - integer widening preserves value
 - integer narrowing truncates high bits
 - signed/unsigned casts preserve bit pattern
+- casts to bool produce false for zero and true for any nonzero value
 - integer-to-pointer casts require u24 or ptr24
 - pointer-to-integer casts produce u24 or ptr24
 ```
