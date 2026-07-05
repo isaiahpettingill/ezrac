@@ -2969,11 +2969,6 @@ impl Emitter {
 
     fn emit_variable_address(&mut self, name: &str) -> Result<(), Diagnostic> {
         let variable = self.variable(name)?;
-        if variable.element_size.is_some() {
-            return Err(Diagnostic::new(format!(
-                "array `{name}` does not decay to a pointer; use `&{name}[0]`"
-            )));
-        }
         self.line(&format!("    ld hl, {:06X}h", variable.addr));
         Ok(())
     }
@@ -3260,12 +3255,7 @@ impl Emitter {
                 let Some(ty) = self.variable_type(name) else {
                     return Err(Diagnostic::new(format!("unknown variable `{name}`")));
                 };
-                match self.symbols.resolved_type(ty)? {
-                    Type::Array { .. } => Err(Diagnostic::new(format!(
-                        "array `{name}` does not decay to a pointer; use `&{name}[0]`"
-                    ))),
-                    scalar => Ok(Type::Ptr(Box::new(scalar))),
-                }
+                Ok(Type::Ptr(Box::new(self.symbols.resolved_type(ty)?)))
             }
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => Ok(*inner),
@@ -4251,6 +4241,14 @@ mod tests {
                 let flag: bool = true
                 let value: u8 = 1
                 let mixed: u8 = flag + value
+                test.pass()
+            }
+            "#,
+            r#"
+            fn takes_array(values: ptr<[u8; 2]>) {}
+            fn main() {
+                let values: [u8; 2] = [1, 2]
+                takes_array(values)
                 test.pass()
             }
             "#,
@@ -5430,6 +5428,34 @@ mod tests {
                 mem.poke8(p, 0x44)
                 test.assert_eq_u8(mem.peek8(p), 0x44, 8)
                 test.assert_eq_u8(palette[1], 0x44, 9)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_array_pointer_parameters() {
+        let source = r#"
+            global bytes: [u8; 3] = [0x11, 0x22, 0x33]
+
+            fn first(values: ptr<[u8; 3]>) -> u8 {
+                return mem.peek8(cast<ptr<u8>>(values))
+            }
+
+            fn second(values: ptr<[u8; 3]>) -> u8 {
+                let raw: ptr<u8> = cast<ptr<u8>>(values)
+                return mem.peek8(raw + 1)
+            }
+
+            fn main() {
+                test.assert_eq_u8(first(&bytes), 0x11, 1)
+                test.assert_eq_u8(second(&bytes), 0x22, 2)
                 test.pass()
             }
         "#;
