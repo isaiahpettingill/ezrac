@@ -1,11 +1,11 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 
 use crate::{
-    ast::{Declaration, Program},
+    ast::{Declaration, Expr, Function, Place, Program, Stmt},
     diagnostic::Diagnostic,
     parser::parse_program,
 };
@@ -83,6 +83,8 @@ fn resolve_program_imports(
         });
     }
 
+    validate_private_import_access(&program)?;
+
     stack.push(path);
     let mut declarations = Vec::new();
     for declaration in &program.declarations {
@@ -122,6 +124,252 @@ fn resolve_import_path(source_path: &Path, import: &str) -> PathBuf {
 
 fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
+    let mut private_imports = HashMap::new();
+    for declaration in &program.declarations {
+        let Declaration::Import(import) = declaration else {
+            continue;
+        };
+        let import_path = resolve_import_path(&program.source_path, import);
+        let source = fs::read_to_string(&import_path).map_err(|error| {
+            Diagnostic::new(format!(
+                "failed to read import `{import}` at `{}`: {error}",
+                import_path.display()
+            ))
+        })?;
+        let imported = parse_program(&import_path, &source)?;
+        for declaration in &imported.declarations {
+            let Some(name) = declaration_name(declaration) else {
+                continue;
+            };
+            if !declaration_is_public(declaration) {
+                private_imports.insert(name.to_owned(), import.clone());
+            }
+        }
+    }
+
+    if private_imports.is_empty() {
+        return Ok(());
+    }
+
+    for declaration in &program.declarations {
+        validate_declaration_private_import_access(declaration, &private_imports)?;
+    }
+    Ok(())
+}
+
+fn validate_declaration_private_import_access(
+    declaration: &Declaration,
+    private_imports: &HashMap<String, String>,
+) -> Result<(), Diagnostic> {
+    match declaration {
+        Declaration::Const(decl) => {
+            validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
+        }
+        Declaration::Port(decl) => {
+            validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
+        }
+        Declaration::Mmio(decl) => {
+            validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
+        }
+        Declaration::Embed(decl) => {
+            if let Some(align) = &decl.align {
+                validate_expr_private_import_access(align, private_imports, &HashSet::new())?;
+            }
+            Ok(())
+        }
+        Declaration::Global(decl) => {
+            validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
+        }
+        Declaration::Function(function) => {
+            validate_function_private_import_access(function, private_imports)
+        }
+        Declaration::Import(_)
+        | Declaration::Alias(_)
+        | Declaration::Struct(_)
+        | Declaration::ExternAsmFunction(_) => Ok(()),
+    }
+}
+
+fn validate_function_private_import_access(
+    function: &Function,
+    private_imports: &HashMap<String, String>,
+) -> Result<(), Diagnostic> {
+    let mut locals = function
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<HashSet<_>>();
+    for stmt in &function.body {
+        validate_stmt_private_import_access(stmt, private_imports, &mut locals)?;
+    }
+    Ok(())
+}
+
+fn validate_stmt_private_import_access(
+    stmt: &Stmt,
+    private_imports: &HashMap<String, String>,
+    locals: &mut HashSet<String>,
+) -> Result<(), Diagnostic> {
+    match stmt {
+        Stmt::Let { name, value, .. } => {
+            validate_expr_private_import_access(value, private_imports, locals)?;
+            locals.insert(name.clone());
+        }
+        Stmt::Assign { target, value, .. } => {
+            validate_place_private_import_access(target, private_imports, locals)?;
+            validate_expr_private_import_access(value, private_imports, locals)?;
+        }
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            validate_expr_private_import_access(condition, private_imports, locals)?;
+            let mut then_locals = locals.clone();
+            for stmt in then_body {
+                validate_stmt_private_import_access(stmt, private_imports, &mut then_locals)?;
+            }
+            let mut else_locals = locals.clone();
+            for stmt in else_body {
+                validate_stmt_private_import_access(stmt, private_imports, &mut else_locals)?;
+            }
+        }
+        Stmt::While { condition, body } => {
+            validate_expr_private_import_access(condition, private_imports, locals)?;
+            let mut body_locals = locals.clone();
+            for stmt in body {
+                validate_stmt_private_import_access(stmt, private_imports, &mut body_locals)?;
+            }
+        }
+        Stmt::Loop { body } => {
+            let mut body_locals = locals.clone();
+            for stmt in body {
+                validate_stmt_private_import_access(stmt, private_imports, &mut body_locals)?;
+            }
+        }
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) => {
+            validate_expr_private_import_access(expr, private_imports, locals)?;
+        }
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        Stmt::Out { port, value } => {
+            reject_private_import_name(port, private_imports, locals)?;
+            validate_expr_private_import_access(value, private_imports, locals)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_place_private_import_access(
+    place: &Place,
+    private_imports: &HashMap<String, String>,
+    locals: &HashSet<String>,
+) -> Result<(), Diagnostic> {
+    match place {
+        Place::Ident(name) => reject_private_import_name(name, private_imports, locals),
+        Place::Index { name, index } => {
+            reject_private_import_name(name, private_imports, locals)?;
+            validate_expr_private_import_access(index, private_imports, locals)
+        }
+        Place::Field { base, .. } => reject_private_import_name(base, private_imports, locals),
+        Place::Deref(expr) => validate_expr_private_import_access(expr, private_imports, locals),
+    }
+}
+
+fn validate_expr_private_import_access(
+    expr: &Expr,
+    private_imports: &HashMap<String, String>,
+    locals: &HashSet<String>,
+) -> Result<(), Diagnostic> {
+    match expr {
+        Expr::Ident(name) | Expr::AddressOf(name) | Expr::In(name) => {
+            reject_private_import_name(name, private_imports, locals)
+        }
+        Expr::Index { name, index } | Expr::AddressOfIndex { name, index } => {
+            reject_private_import_name(name, private_imports, locals)?;
+            validate_expr_private_import_access(index, private_imports, locals)
+        }
+        Expr::Field { base, .. } | Expr::AddressOfField { base, .. } => {
+            reject_private_import_name(base, private_imports, locals)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            validate_expr_private_import_access(expr, private_imports, locals)
+        }
+        Expr::Binary { left, right, .. } => {
+            validate_expr_private_import_access(left, private_imports, locals)?;
+            validate_expr_private_import_access(right, private_imports, locals)
+        }
+        Expr::Array(values) => {
+            for value in values {
+                validate_expr_private_import_access(value, private_imports, locals)?;
+            }
+            Ok(())
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                validate_expr_private_import_access(value, private_imports, locals)?;
+            }
+            Ok(())
+        }
+        Expr::Call { path, args } => {
+            if let Some(name) = path.first() {
+                reject_private_import_name(name, private_imports, locals)?;
+            }
+            for arg in args {
+                validate_expr_private_import_access(arg, private_imports, locals)?;
+            }
+            Ok(())
+        }
+        Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::String(_) => Ok(()),
+    }
+}
+
+fn reject_private_import_name(
+    name: &str,
+    private_imports: &HashMap<String, String>,
+    locals: &HashSet<String>,
+) -> Result<(), Diagnostic> {
+    if locals.contains(name) {
+        return Ok(());
+    }
+    if let Some(import) = private_imports.get(name) {
+        return Err(Diagnostic::new(format!(
+            "declaration `{name}` from import `{import}` is private"
+        )));
+    }
+    Ok(())
+}
+
+fn declaration_name(declaration: &Declaration) -> Option<&str> {
+    match declaration {
+        Declaration::Import(_) => None,
+        Declaration::Const(decl) => Some(&decl.name),
+        Declaration::Alias(decl) => Some(&decl.name),
+        Declaration::Port(decl) => Some(&decl.name),
+        Declaration::Mmio(decl) => Some(&decl.name),
+        Declaration::Embed(decl) => Some(&decl.name),
+        Declaration::Global(decl) => Some(&decl.name),
+        Declaration::Struct(decl) => Some(&decl.name),
+        Declaration::ExternAsmFunction(decl) => Some(&decl.name),
+        Declaration::Function(decl) => Some(&decl.name),
+    }
+}
+
+fn declaration_is_public(declaration: &Declaration) -> bool {
+    match declaration {
+        Declaration::Import(_) => true,
+        Declaration::Const(decl) => decl.public,
+        Declaration::Alias(decl) => decl.public,
+        Declaration::Port(decl) => decl.public,
+        Declaration::Mmio(decl) => decl.public,
+        Declaration::Embed(decl) => decl.public,
+        Declaration::Global(decl) => decl.public,
+        Declaration::Struct(decl) => decl.public,
+        Declaration::ExternAsmFunction(decl) => decl.public,
+        Declaration::Function(decl) => decl.public,
+    }
 }
 
 #[cfg(test)]
@@ -170,7 +418,7 @@ mod tests {
         std::fs::create_dir_all(root.join("lib")).unwrap();
         let main_path = root.join("game.ezra");
         let lib_path = root.join("lib/math.ezra");
-        std::fs::write(&lib_path, "fn add_one(v: u8) -> u8 { return v + 1 }\n").unwrap();
+        std::fs::write(&lib_path, "pub fn add_one(v: u8) -> u8 { return v + 1 }\n").unwrap();
         let source = "import lib.math\nfn main() { let x: u8 = add_one(4); test.pass() }\n";
         std::fs::write(&main_path, source).unwrap();
 
@@ -185,6 +433,62 @@ mod tests {
         assert_eq!(report.declarations, 2);
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "add_one")
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_access_to_private_imported_declarations() {
+        let root = temp_root("private_imports");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/math.ezra");
+        std::fs::write(
+            &lib_path,
+            "fn hidden(v: u8) -> u8 { return v + 1 }\npub fn shown(v: u8) -> u8 { return v }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            "import lib.math\nfn main() { let x: u8 = hidden(4); test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `hidden` from import `lib.math` is private"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allows_public_imported_declarations_to_use_private_helpers() {
+        let root = temp_root("private_helpers");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/math.ezra");
+        std::fs::write(
+            &lib_path,
+            "fn hidden(v: u8) -> u8 { return v + 1 }\npub fn shown(v: u8) -> u8 { return hidden(v) }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            "import lib.math\nfn main() { let x: u8 = shown(4); test.pass() }\n",
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "hidden")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "shown")
         }));
 
         let _ = std::fs::remove_dir_all(root);

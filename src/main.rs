@@ -194,7 +194,7 @@ mod tests {
         let source_path = root.join("game.ezra");
         std::fs::write(
             root.join("lib/math.ezra"),
-            "fn add_one(v: u8) -> u8 { return v + 1 }\n",
+            "pub fn add_one(v: u8) -> u8 { return v + 1 }\n",
         )
         .unwrap();
         std::fs::write(
