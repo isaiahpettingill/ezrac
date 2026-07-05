@@ -8906,6 +8906,37 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_else_if_chains() {
+        let source = r#"
+            fn choose(value: u8) -> u8 {
+                if value == 1 {
+                    return 10
+                } else if value == 2 {
+                    return 20
+                } else if value == 3 {
+                    return 30
+                } else {
+                    return 40
+                }
+            }
+
+            fn main() {
+                test.assert_eq_u8(choose(1), 10, 1)
+                test.assert_eq_u8(choose(2), 20, 2)
+                test.assert_eq_u8(choose(3), 30, 3)
+                test.assert_eq_u8(choose(4), 40, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 3_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_function_returning_from_loop() {
         let source = r#"
             fn answer() -> u8 {

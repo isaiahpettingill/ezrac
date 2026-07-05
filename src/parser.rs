@@ -346,6 +346,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
             let condition = build_expr(inner.next().unwrap())?;
             let then_body = build_block(inner.next().unwrap())?;
             let else_body = match inner.next() {
+                Some(pair) if pair.as_rule() == Rule::if_stmt => vec![build_stmt(pair)?],
                 Some(block) => build_block(block)?,
                 None => Vec::new(),
             };
@@ -1030,6 +1031,32 @@ mod tests {
         .unwrap();
 
         assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_else_if_as_nested_if() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                if false {
+                    test.fail(1)
+                } else if true {
+                    test.pass()
+                } else {
+                    test.fail(2)
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let main = program.main_function().unwrap();
+        let Stmt::If { else_body, .. } = &main.body[0] else {
+            panic!("unexpected statement shape: {:?}", main.body[0]);
+        };
+
+        assert_eq!(else_body.len(), 1);
+        assert!(matches!(else_body[0], Stmt::If { .. }));
     }
 
     #[test]
