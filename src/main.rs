@@ -175,7 +175,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>     parse and validate a source file\n  build <file.ezra>     write .asm, .map, and .ezra.cart scaffold artifacts\n  emit-asm <file.ezra>  emit readable eZ80 assembly for the supported subset\n  test <file.ezra>      emit and run the supported subset on the ez80 VM\n  layout                print the default EZRA layout summary\n  header                print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>     parse and validate a source file\n  build <file.ezra>     write .asm, .map, and .ezra.cart artifacts\n  emit-asm <file.ezra>  emit readable eZ80 assembly for the supported subset\n  test <file.ezra>      emit and run the supported subset on the ez80 VM\n  layout                print the default EZRA layout summary\n  header                print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_writes_scaffold_artifacts() {
+    fn build_writes_artifacts() {
         let root = std::env::temp_dir().join(format!(
             "ezra_build_{}_{}",
             std::process::id(),
