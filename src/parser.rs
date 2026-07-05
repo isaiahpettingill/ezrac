@@ -5,9 +5,9 @@ use pest_derive::Parser;
 
 use crate::{
     ast::{
-        AliasDecl, AsmInput, AssignOp, BinaryOp, ConstDecl, Declaration, EmbedDecl, EmbedSource,
-        Expr, ExternFunction, Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program,
-        Stmt, StructDecl, Type, UnaryOp,
+        AliasDecl, AsmInput, AsmOutput, AssignOp, BinaryOp, ConstDecl, Declaration, EmbedDecl,
+        EmbedSource, Expr, ExternFunction, Function, GlobalDecl, MmioDecl, Param, Place, PortDecl,
+        Program, Stmt, StructDecl, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -367,6 +367,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
         Rule::asm_stmt => {
             let mut volatile = false;
             let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
             let mut clobbers = Vec::new();
             let mut lines = Vec::new();
             for inner in pair.into_inner() {
@@ -377,6 +378,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
                             if operand.as_rule() == Rule::asm_operand {
                                 match build_asm_operand(operand)? {
                                     AsmOperand::Input(input) => inputs.push(input),
+                                    AsmOperand::Output(output) => outputs.push(output),
                                     AsmOperand::Clobber(clobber) => clobbers.push(clobber),
                                 }
                             }
@@ -392,6 +394,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
             Ok(Stmt::Asm {
                 volatile,
                 inputs,
+                outputs,
                 clobbers,
                 lines,
             })
@@ -655,6 +658,7 @@ fn split_path(path: &str) -> Vec<String> {
 
 enum AsmOperand {
     Input(AsmInput),
+    Output(AsmOutput),
     Clobber(String),
 }
 
@@ -668,6 +672,14 @@ fn build_asm_operand(pair: Pair<'_, Rule>) -> Result<AsmOperand, Diagnostic> {
             let class = parts.next().unwrap().as_str().to_owned();
             validate_asm_operand_class(&ty, &class)?;
             Ok(AsmOperand::Input(AsmInput { name, ty, class }))
+        }
+        Rule::asm_output => {
+            let mut parts = inner.into_inner();
+            let name = parts.next().unwrap().as_str().to_owned();
+            let ty = build_type(parts.next().unwrap())?;
+            let class = parts.next().unwrap().as_str().to_owned();
+            validate_asm_operand_class(&ty, &class)?;
+            Ok(AsmOperand::Output(AsmOutput { name, ty, class }))
         }
         Rule::asm_clobber => {
             let clobber = inner.into_inner().next().unwrap().as_str();
@@ -893,10 +905,12 @@ mod tests {
             Stmt::Asm {
                 volatile: true,
                 inputs,
+                outputs,
                 clobbers,
                 lines
             } if lines == &["ld a, 0x41", "out0 (0Ch), a"]
                 && inputs.is_empty()
+                && outputs.is_empty()
                 && clobbers.is_empty()
         ));
     }
@@ -922,20 +936,25 @@ mod tests {
             Stmt::Asm {
                 volatile: true,
                 inputs,
+                outputs,
                 clobbers,
                 lines
-            } if inputs.is_empty() && clobbers == &["a", "ports", "memory"] && lines.len() == 2
+            } if inputs.is_empty()
+                && outputs.is_empty()
+                && clobbers == &["a", "ports", "memory"]
+                && lines.len() == 2
         ));
     }
 
     #[test]
-    fn parses_inline_asm_input_operands() {
+    fn parses_inline_asm_input_and_output_operands() {
         let program = parse_program(
             Path::new("game.ezra"),
             r#"
             fn main() {
-                asm volatile(in ch: u8 as reg8, in addr: ptr<u8> as reg24, clobber a) {
+                asm volatile(in ch: u8 as reg8, out result: u8 as reg8, in addr: ptr<u8> as reg24, clobber a) {
                     "ld a, {ch}"
+                    "ld {result}, a"
                     "ld hl, {addr}"
                 }
             }
@@ -949,6 +968,7 @@ mod tests {
             Stmt::Asm {
                 volatile: true,
                 inputs,
+                outputs,
                 clobbers,
                 lines
             } if inputs.len() == 2
@@ -958,8 +978,12 @@ mod tests {
                 && inputs[1].name == "addr"
                 && inputs[1].ty == Type::Ptr(Box::new(Type::Named("u8".to_owned())))
                 && inputs[1].class == "reg24"
+                && outputs.len() == 1
+                && outputs[0].name == "result"
+                && outputs[0].ty == Type::Named("u8".to_owned())
+                && outputs[0].class == "reg8"
                 && clobbers == &["a"]
-                && lines.len() == 2
+                && lines.len() == 3
         ));
     }
 
@@ -997,6 +1021,26 @@ mod tests {
         assert_eq!(
             error.message,
             "inline asm operand class `reg8` is incompatible with type `Named(\"u16\")`"
+        );
+    }
+
+    #[test]
+    fn rejects_incompatible_inline_asm_output_classes() {
+        let error = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                asm(out wide: u24 as reg8) {
+                    "ld {wide}, a"
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "inline asm operand class `reg8` is incompatible with type `Named(\"u24\")`"
         );
     }
 

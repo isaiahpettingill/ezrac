@@ -852,6 +852,7 @@ impl Emitter {
             Stmt::Asm {
                 volatile,
                 inputs,
+                outputs,
                 clobbers,
                 lines,
             } => {
@@ -866,6 +867,14 @@ impl Emitter {
                         input.name,
                         type_display(&input.ty),
                         input.class
+                    ));
+                }
+                for output in outputs {
+                    self.line(&format!(
+                        "    ; out {}: {} as {}",
+                        output.name,
+                        type_display(&output.ty),
+                        output.class
                     ));
                 }
                 if !clobbers.is_empty() {
@@ -3135,7 +3144,7 @@ mod tests {
     fn emits_and_runs_inline_asm_statements() {
         let source = r#"
             fn main() {
-                asm volatile(in ch: u8 as reg8, clobber a, clobber ports) {
+                asm volatile(in ch: u8 as reg8, out result: u8 as reg8, clobber a, clobber ports) {
                     "ld a, 0x41"
                     "out0 (0Ch), a"
                 }
@@ -3148,6 +3157,7 @@ mod tests {
 
         assert!(asm.contains("    ; asm volatile"));
         assert!(asm.contains("    ; in ch: u8 as reg8"));
+        assert!(asm.contains("    ; out result: u8 as reg8"));
         assert!(asm.contains("    ; clobber a, ports"));
         assert!(asm.contains("    ld a, 0x41"));
         assert!(run.halted, "{asm}");
