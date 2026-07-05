@@ -2948,6 +2948,78 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_typed_assignment_value(
+        &mut self,
+        variable: Variable,
+        ty: &Type,
+        op: AssignOp,
+        value: &Expr,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
+        if op != AssignOp::Set {
+            let resolved = self.symbols.resolved_type(ty)?;
+            match &resolved {
+                Type::Ptr(pointee) => {
+                    return self.emit_pointer_compound_assignment(variable, pointee, op, value);
+                }
+                Type::Array { .. } => return Err(Diagnostic::new("type mismatch")),
+                Type::Named(name) if name == "bool" || self.symbols.structs.contains_key(name) => {
+                    return Err(Diagnostic::new("type mismatch"));
+                }
+                _ => {}
+            }
+        }
+        self.emit_assignment_value(variable, op, value, signed)
+    }
+
+    fn emit_pointer_compound_assignment(
+        &mut self,
+        variable: Variable,
+        pointee: &Type,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let binary_op = match op {
+            AssignOp::Add => BinaryOp::Add,
+            AssignOp::Sub => BinaryOp::Sub,
+            _ => return Err(Diagnostic::new("type mismatch")),
+        };
+        self.ensure_pointer_offset_expr(value)?;
+        let scale = self.symbols.type_size(pointee)?;
+        self.emit_load_width(variable);
+        self.line("    push hl");
+        self.emit_scaled_offset_to_hl(value, scale)?;
+        match binary_op {
+            BinaryOp::Add => {
+                self.line("    pop bc");
+                self.line("    add hl, bc");
+            }
+            BinaryOp::Sub => {
+                self.line("    ex de, hl");
+                self.line("    pop hl");
+                self.line("    or a");
+                self.line("    sbc hl, de");
+            }
+            _ => unreachable!("pointer compound assignment only uses add/sub"),
+        }
+        Ok(())
+    }
+
+    fn ensure_compound_assignment_target(&self, ty: &Type, op: AssignOp) -> Result<(), Diagnostic> {
+        if op == AssignOp::Set {
+            return Ok(());
+        }
+        match self.symbols.resolved_type(ty)? {
+            Type::Ptr(_) if matches!(op, AssignOp::Add | AssignOp::Sub) => Ok(()),
+            Type::Ptr(_) => Err(Diagnostic::new("type mismatch")),
+            Type::Array { .. } => Err(Diagnostic::new("type mismatch")),
+            Type::Named(name) if name == "bool" || self.symbols.structs.contains_key(&name) => {
+                Err(Diagnostic::new("type mismatch"))
+            }
+            Type::Named(_) => Ok(()),
+        }
+    }
+
     fn emit_assignment(
         &mut self,
         target: &Place,
@@ -2973,7 +3045,11 @@ impl Emitter {
                     .map(|ty| self.type_is_signed(ty))
                     .transpose()?
                     .unwrap_or(false);
-                self.emit_assignment_value(variable, op, value, signed)?;
+                if let Some(ty) = ty.as_ref() {
+                    self.emit_typed_assignment_value(variable, ty, op, value, signed)?;
+                } else {
+                    self.emit_assignment_value(variable, op, value, signed)?;
+                }
                 self.emit_store_width(variable);
             }
             Place::Index { name, index } => {
@@ -2987,9 +3063,11 @@ impl Emitter {
                     self.emit_storage_initializer(variable, &ty, value)?;
                     return Ok(());
                 }
+                let ty = self.field_type(base, field)?;
+                self.ensure_compound_assignment_target(&ty, op)?;
                 variable.width()?;
-                let signed = self.type_is_signed(&self.field_type(base, field)?)?;
-                self.emit_assignment_value(variable, op, value, signed)?;
+                let signed = self.type_is_signed(&ty)?;
+                self.emit_typed_assignment_value(variable, &ty, op, value, signed)?;
                 self.emit_store_width(variable);
             }
             Place::Access(path) => {
@@ -4391,7 +4469,7 @@ impl Emitter {
             self.emit_load_pointed_width_into(current);
             let stored = self.alloc_var(width.bytes());
             let signed = self.type_is_signed(&pointee_type)?;
-            self.emit_assignment_value(current, op, value, signed)?;
+            self.emit_typed_assignment_value(current, &pointee_type, op, value, signed)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
             self.emit_store_var_to_pointed_width(stored);
@@ -6024,9 +6102,10 @@ impl Emitter {
                 self.emit_storage_initializer(element, &ty, value)?;
                 return Ok(());
             }
+            self.ensure_compound_assignment_target(&ty, op)?;
             element.width()?;
             let signed = self.type_is_signed(&ty)?;
-            self.emit_assignment_value(element, op, value, signed)?;
+            self.emit_typed_assignment_value(element, &ty, op, value, signed)?;
             self.emit_store_width(element);
             return Ok(());
         }
@@ -6038,13 +6117,14 @@ impl Emitter {
 
         let element = self.symbols.storage_at(0, &ty)?;
         if op != AssignOp::Set {
+            self.ensure_compound_assignment_target(&ty, op)?;
             element.width()?;
             let current = self.alloc_var(element_size);
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
             let stored = self.alloc_var(element_size);
             let signed = self.type_is_signed(&ty)?;
-            self.emit_assignment_value(current, op, value, signed)?;
+            self.emit_typed_assignment_value(current, &ty, op, value, signed)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
             self.emit_store_var_to_pointed_width(stored);
@@ -6075,9 +6155,10 @@ impl Emitter {
                 self.emit_storage_initializer(variable, &ty, value)?;
                 return Ok(());
             }
+            self.ensure_compound_assignment_target(&ty, op)?;
             variable.width()?;
             let signed = self.type_is_signed(&ty)?;
-            self.emit_assignment_value(variable, op, value, signed)?;
+            self.emit_typed_assignment_value(variable, &ty, op, value, signed)?;
             self.emit_store_width(variable);
             return Ok(());
         }
@@ -6088,13 +6169,14 @@ impl Emitter {
         self.emit_store_hl(addr);
 
         if op != AssignOp::Set {
+            self.ensure_compound_assignment_target(&ty, op)?;
             let current = self.alloc_var(size);
             current.width()?;
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
             let stored = self.alloc_var(size);
             let signed = self.type_is_signed(&ty)?;
-            self.emit_assignment_value(current, op, value, signed)?;
+            self.emit_typed_assignment_value(current, &ty, op, value, signed)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
             self.emit_store_var_to_pointed_width(stored);
@@ -16521,6 +16603,52 @@ section .text
     }
 
     #[test]
+    fn rejects_compound_assignment_to_aggregate_values() {
+        let cases = [
+            r#"
+            global bytes: [u8; 2] = [1, 2]
+
+            fn main() {
+                bytes += [3, 4]
+                test.pass()
+            }
+            "#,
+            r#"
+            struct Pair {
+                left: u8
+                right: u8
+            }
+
+            global pair: Pair = Pair { left: 1, right: 2 }
+
+            fn main() {
+                pair += Pair { left: 3, right: 4 }
+                test.pass()
+            }
+            "#,
+            r#"
+            struct Packet {
+                bytes: [u8; 2]
+            }
+
+            global packet: Packet = Packet { bytes: [1, 2] }
+
+            fn main() {
+                packet.bytes += [3, 4]
+                test.pass()
+            }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "type mismatch");
+        }
+    }
+
+    #[test]
     fn emits_and_runs_casted_indirect_assignments() {
         let source = r#"
             global bytes: [u8; 2] = [0, 0]
@@ -16621,6 +16749,100 @@ section .text
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_scaled_pointer_compound_assignments() {
+        let source = r#"
+            struct Cell {
+                x: u8
+                y: u16
+            }
+
+            global bytes: [u8; 4] = [0, 0, 0, 0]
+            global words: [u16; 3] = [0, 0, 0]
+            global cells: [Cell; 2] = [
+                Cell { x: 1, y: 0x0203 },
+                Cell { x: 4, y: 0x0506 },
+            ]
+
+            fn main() {
+                let byte_ptr: ptr<u8> = &bytes[1]
+                byte_ptr += 2
+                *byte_ptr = 0x7A
+                test.assert_eq_u8(bytes[3], 0x7A, 1)
+                byte_ptr -= 3
+                *byte_ptr = 0x33
+                test.assert_eq_u8(bytes[0], 0x33, 2)
+
+                let word_ptr: ptr<u16> = &words[0]
+                word_ptr += 2
+                *word_ptr = 0x4567
+                test.assert_eq_u16(words[2], 0x4567, 3)
+                word_ptr -= 1
+                *word_ptr = 0x1234
+                test.assert_eq_u16(words[1], 0x1234, 4)
+
+                let cell_ptr: ptr<Cell> = &cells[0]
+                cell_ptr += 1
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(cell_ptr)), 4, 5)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(cell_ptr) + 1), 0x06, 6)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(cell_ptr) + 2), 0x05, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 16_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_invalid_pointer_compound_assignments() {
+        let cases = [
+            (
+                r#"
+            global byte: u8 = 0
+            fn main() {
+                let p: ptr<u8> = &byte
+                p &= 0x040000
+                test.pass()
+            }
+            "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+            global byte: u8 = 0
+            fn main() {
+                let p: ptr<u8> = &byte
+                p <<= 1
+                test.pass()
+            }
+            "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+            global byte: u8 = 0
+            fn main() {
+                let p: ptr<u8> = &byte
+                p += true
+                test.pass()
+            }
+            "#,
+                "pointer arithmetic offset must be an integer",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
