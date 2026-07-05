@@ -2,10 +2,11 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
     asm::{emit_ez80_assembly, emit_ez80_assembly_with_debug_comments},
-    cart::{CartridgeHeader, build_cartridge},
+    cart::{CartridgeHeader, build_cartridge_with_code},
     compile::{CompileOptions, check_source, load_program},
     layout::Layout,
-    vm::run_assembly_test,
+    target::EZRA_ENTRY_ADDR,
+    vm::{assemble_ez80_subset_at, run_assembly_test},
 };
 
 fn main() -> ExitCode {
@@ -110,13 +111,15 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
     let map_path = dir.join(format!("{stem}.map"));
     let cart_path = dir.join(format!("{stem}.ezra.cart"));
 
-    fs::write(&asm_path, assembly)
+    fs::write(&asm_path, &assembly)
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, layout.map_summary())
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
+    let code = assemble_ez80_subset_at(&assembly, EZRA_ENTRY_ADDR.get())
+        .map_err(|error| error.to_string())?;
     fs::write(
         &cart_path,
-        build_cartridge(&program).map_err(|error| error.to_string())?,
+        build_cartridge_with_code(&program, &code).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
 
@@ -255,7 +258,10 @@ mod tests {
         assert!(asm.contains("_add_one:"));
         assert!(map.contains(".header"));
         assert_eq!(&cart[0..4], b"EZRA");
-        assert_eq!(read_addr24(&cart, 0x1E), 0x40);
+        assert_eq!(read_addr24(&cart, 0x08), EZRA_ENTRY_ADDR.get());
+        assert_eq!(&cart[64..68], &[0x31, 0x00, 0x00, 0xF0]);
+        let layout_table = read_addr24(&cart, 0x1E);
+        assert!(layout_table > EZRA_ENTRY_ADDR.get());
         assert!(read_addr24(&cart, 0x21) > read_addr24(&cart, 0x1E));
         assert!(cart.len() > 64);
         assert!(cart.ends_with(&[0x11, 0x22]));

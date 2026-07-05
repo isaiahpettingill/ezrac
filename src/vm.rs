@@ -14,7 +14,7 @@ pub struct TestRun {
 }
 
 pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<TestRun, Diagnostic> {
-    let code = assemble_subset(assembly)?;
+    let code = assemble_ez80_subset_at(assembly, EZRA_LOAD_ADDR.get())?;
     let mut machine = TestMachine::new();
     for (address, byte) in code.into_iter().enumerate() {
         machine.poke(EZRA_LOAD_ADDR.get() + address as u32, byte);
@@ -47,10 +47,10 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
     })
 }
 
-fn assemble_subset(assembly: &str) -> Result<Vec<u8>, Diagnostic> {
+pub fn assemble_ez80_subset_at(assembly: &str, base_addr: u32) -> Result<Vec<u8>, Diagnostic> {
     let instructions = assembly.lines().filter_map(parse_line).collect::<Vec<_>>();
     let mut labels = HashMap::new();
-    let mut pc = EZRA_LOAD_ADDR.get();
+    let mut pc = base_addr & 0xFF_FFFF;
 
     for instruction in &instructions {
         match instruction {
