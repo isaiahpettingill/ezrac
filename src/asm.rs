@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fs, path::Path};
 
 use crate::{
     ast::{
@@ -231,7 +231,7 @@ impl Symbols {
                             decl.name
                         )));
                     }
-                    let bytes = symbols.embed_bytes(&decl.source)?;
+                    let bytes = symbols.embed_bytes(&decl.source, &program.source_path)?;
                     symbols.align_next_addr(align as u32);
                     let variable = symbols.alloc_array(ValueWidth::U8.bytes(), bytes.len() as u32);
                     symbols.register_embed_properties(&decl.name, variable, bytes.len() as u32);
@@ -297,11 +297,25 @@ impl Symbols {
         }
     }
 
-    fn embed_bytes(&self, source: &EmbedSource) -> Result<Vec<u8>, Diagnostic> {
+    fn embed_bytes(&self, source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
         match source {
-            EmbedSource::File(path) => Err(Diagnostic::new(format!(
-                "file embed `{path}` is parsed but not implemented in assembly codegen yet"
-            ))),
+            EmbedSource::File(path) => {
+                let path = Path::new(path);
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    source_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(path)
+                };
+                fs::read(&resolved).map_err(|error| {
+                    Diagnostic::new(format!(
+                        "failed to read embedded file `{}`: {error}",
+                        resolved.display()
+                    ))
+                })
+            }
             EmbedSource::Bytes(values) => values
                 .iter()
                 .map(|value| {
@@ -3618,6 +3632,40 @@ mod tests {
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 12_000).unwrap();
 
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_file_embedded_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_file_embed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("blob.bin"), [0xA5, 0x5A, 0xC3]).unwrap();
+        let source_path = root.join("game.ezra");
+        let source = r#"
+            embed blob: bytes = file("assets/blob.bin") align 4
+
+            fn main() {
+                test.assert_eq_u24(blob.len, 3, 1);
+                test.assert_eq_u8(*(blob.ptr + 0), 0xA5, 2);
+                test.assert_eq_u8(*(blob.ptr + 1), 0x5A, 3);
+                test.assert_eq_u8(*(blob.end - 1), 0xC3, 4);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(&source_path, source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }

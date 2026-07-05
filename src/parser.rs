@@ -27,7 +27,10 @@ pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
         .filter(|pair| pair.as_rule() != Rule::EOI)
         .map(build_decl)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Program { declarations })
+    Ok(Program {
+        source_path: file.to_path_buf(),
+        declarations,
+    })
 }
 
 fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
@@ -776,6 +779,7 @@ mod tests {
             Path::new("game.ezra"),
             r#"
             embed palette: bytes = bytes [0x11, 0x22] section .rodata align 16
+            embed blob: bytes = file("assets/blob.bin")
             embed title: bytes = cstr("OK")
             embed blank: bytes = repeat(0, 4)
             fn main() {}

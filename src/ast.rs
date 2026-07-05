@@ -1,5 +1,8 @@
+use std::path::PathBuf;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
+    pub source_path: PathBuf,
     pub declarations: Vec<Declaration>,
 }
 
