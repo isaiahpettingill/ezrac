@@ -1399,7 +1399,7 @@ Naked functions suppress compiler prologue/epilogue.
 
 ```text
 naked fn raw_entry() {
-    asm volatile {
+    asm volatile(clobber sp) {
         "ld sp, 0F00000h"
         "call _main"
         "jp $"

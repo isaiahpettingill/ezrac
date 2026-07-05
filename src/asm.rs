@@ -13210,7 +13210,8 @@ section .text
             naked fn raw_entry() {
                 asm volatile(clobber sp) {
                     "ld sp, 0F00000h"
-                    "ret"
+                    "call _main"
+                    "jp $"
                 }
             }
 
@@ -13224,7 +13225,11 @@ section .text
         let raw_entry = raw_entry.split("_main:").next().unwrap();
 
         assert!(raw_entry.contains("    ld sp, 0F00000h"), "{asm}");
-        assert!(raw_entry.contains("    ret"), "{asm}");
+        assert!(raw_entry.contains("    call _main"), "{asm}");
+        assert!(raw_entry.contains("    jp $"), "{asm}");
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
