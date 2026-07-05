@@ -602,6 +602,7 @@ impl Symbols {
     ) -> Result<(), Diagnostic> {
         if let Some(align) = &decl.align {
             self.ensure_const_dependencies_evaluated(align, program)?;
+            self.validate_embed_alignment_expr(&decl.name, align)?;
         }
         self.ensure_embed_source_const_dependencies_evaluated(&decl.source, program)?;
         let align = decl
@@ -639,6 +640,17 @@ impl Symbols {
         self.embeds
             .insert(decl.name.clone(), EmbedObject { variable, bytes });
         Ok(())
+    }
+
+    fn validate_embed_alignment_expr(&self, name: &str, expr: &Expr) -> Result<(), Diagnostic> {
+        let ty = self.resolved_type(&self.const_expr_type(expr)?)?;
+        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_)) {
+            return Err(Diagnostic::new(format!(
+                "embed `{name}` alignment must be an integer constant"
+            )));
+        }
+        self.type_width(&ty)?;
+        self.validate_const_expr_arithmetic_compatibility(expr)
     }
 
     fn allocate_global_declaration(
@@ -8936,6 +8948,35 @@ section .text
             error.message,
             "embed `sprite` alignment 4294967296 exceeds 24-bit address space"
         );
+    }
+
+    #[test]
+    fn rejects_non_integer_embed_alignment() {
+        let cases = [
+            r#"
+            embed sprite: bytes = bytes [0xAA] align true
+            fn main() { test.pass() }
+            "#,
+            r#"
+            const ALIGN: bool = true
+            embed sprite: bytes = bytes [0xAA] align ALIGN
+            fn main() { test.pass() }
+            "#,
+            r#"
+            embed sprite: bytes = bytes [0xAA] align (1 == 1)
+            fn main() { test.pass() }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(
+                error.message,
+                "embed `sprite` alignment must be an integer constant"
+            );
+        }
     }
 
     #[test]

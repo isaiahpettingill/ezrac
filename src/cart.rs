@@ -446,7 +446,10 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
         let align = decl
             .align
             .as_ref()
-            .map(|expr| eval_embed_expr_with_aliases(expr, &constants, &aliases))
+            .map(|expr| {
+                validate_embed_alignment_expr(&decl.name, expr, program, &aliases)?;
+                eval_embed_expr_with_aliases(expr, &constants, &aliases)
+            })
             .transpose()?
             .unwrap_or(1);
         if align <= 0 || (align & (align - 1)) != 0 {
@@ -478,6 +481,69 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
         });
     }
     Ok(assets)
+}
+
+fn validate_embed_alignment_expr(
+    name: &str,
+    expr: &Expr,
+    program: &Program,
+    aliases: &HashMap<String, Type>,
+) -> Result<(), Diagnostic> {
+    match expr {
+        Expr::Bool(_) | Expr::String(_) => err_embed_alignment_not_integer(name),
+        Expr::Unary {
+            op: UnaryOp::Not, ..
+        } => err_embed_alignment_not_integer(name),
+        Expr::Unary { expr, .. } => validate_embed_alignment_expr(name, expr, program, aliases),
+        Expr::Binary { op, .. } if is_bool_result_op(*op) => err_embed_alignment_not_integer(name),
+        Expr::Binary { left, right, .. } => {
+            validate_embed_alignment_expr(name, left, program, aliases)?;
+            validate_embed_alignment_expr(name, right, program, aliases)
+        }
+        Expr::Cast { ty, .. } => {
+            let ty = resolve_embed_const_type(ty, aliases)?;
+            if type_is_non_integer_alignment(&ty) {
+                err_embed_alignment_not_integer(name)
+            } else {
+                Ok(())
+            }
+        }
+        Expr::Ident(const_name) => {
+            if let Some((_, Some(ty))) = find_embed_constant_declaration(program, const_name) {
+                let ty = resolve_embed_const_type(ty, aliases)?;
+                if type_is_non_integer_alignment(&ty) {
+                    return err_embed_alignment_not_integer(name);
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn err_embed_alignment_not_integer(name: &str) -> Result<(), Diagnostic> {
+    Err(Diagnostic::new(format!(
+        "embed `{name}` alignment must be an integer constant"
+    )))
+}
+
+fn type_is_non_integer_alignment(ty: &Type) -> bool {
+    matches!(ty, Type::Ptr(_) | Type::Array { .. })
+        || matches!(ty, Type::Named(name) if name == "bool")
+}
+
+fn is_bool_result_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::And
+            | BinaryOp::Or
+    )
 }
 
 fn collect_embed_aliases(program: &Program) -> HashMap<String, Type> {
@@ -1766,6 +1832,44 @@ mod tests {
             error.message,
             "embed `sprite` alignment 4294967296 exceeds 24-bit address space"
         );
+    }
+
+    #[test]
+    fn cartridge_rejects_non_integer_embed_alignment() {
+        let cases = [
+            r#"
+            embed sprite: bytes = bytes [0xAA] align true
+            fn main() { test.pass() }
+            "#,
+            r#"
+            embed sprite: bytes = bytes [0xAA] align (1 == 1)
+            fn main() { test.pass() }
+            "#,
+            r#"
+            const ALIGN: bool = true
+            embed sprite: bytes = bytes [0xAA] align ALIGN
+            fn main() { test.pass() }
+            "#,
+            r#"
+            embed sprite: bytes = bytes [0xAA] align (true + 1)
+            fn main() { test.pass() }
+            "#,
+            r#"
+            embed sprite: bytes = bytes [0xAA] align cast<bool>(1)
+            fn main() { test.pass() }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+
+            let error = build_cartridge(&program).unwrap_err();
+
+            assert_eq!(
+                error.message,
+                "embed `sprite` alignment must be an integer constant"
+            );
+        }
     }
 
     #[test]
