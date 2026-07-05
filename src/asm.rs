@@ -1578,6 +1578,7 @@ struct Emitter {
     scopes: Vec<HashMap<String, Variable>>,
     scope_types: Vec<HashMap<String, Type>>,
     local_constants: Vec<HashMap<String, LocalConstant>>,
+    readonly_pointer_aliases: Vec<HashMap<String, u32>>,
     string_literals: HashMap<String, Variable>,
     loop_stack: Vec<LoopLabels>,
     return_type_stack: Vec<Option<Type>>,
@@ -1608,6 +1609,7 @@ impl Emitter {
             scopes: Vec::new(),
             scope_types: Vec::new(),
             local_constants: Vec::new(),
+            readonly_pointer_aliases: Vec::new(),
             string_literals,
             loop_stack: Vec::new(),
             return_type_stack: Vec::new(),
@@ -2048,6 +2050,7 @@ impl Emitter {
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
         self.local_constants.push(HashMap::new());
+        self.readonly_pointer_aliases.push(HashMap::new());
         self.assigned_names_stack
             .push(assigned_names_in_block(&function.body));
         if let Some(return_type) = &function.return_type {
@@ -2089,6 +2092,7 @@ impl Emitter {
         self.return_value_stack.pop();
         self.return_type_stack.pop();
         self.assigned_names_stack.pop();
+        self.readonly_pointer_aliases.pop();
         self.local_constants.pop();
         self.scope_types.pop();
         self.scopes.pop();
@@ -2224,6 +2228,7 @@ impl Emitter {
                     .insert(name.clone(), ty.clone());
                 self.emit_storage_initializer(variable, ty, value)?;
                 self.record_local_constant(name, ty, value);
+                self.record_readonly_pointer_alias(name, value);
             }
             Stmt::Assign { target, op, value } => {
                 self.emit_assignment(target, *op, value)?;
@@ -2408,6 +2413,7 @@ impl Emitter {
         for output in outputs {
             self.emit_inline_asm_output_store(output)?;
             self.invalidate_local_constant(&output.name);
+            self.invalidate_readonly_pointer_alias(&output.name);
         }
         Ok(())
     }
@@ -2665,6 +2671,7 @@ impl Emitter {
         match target {
             Place::Ident(name) => {
                 self.invalidate_local_constant(name);
+                self.invalidate_readonly_pointer_alias(name);
                 let variable = self.variable(name)?;
                 let ty = self.variable_type(name).cloned();
                 let signed = self
@@ -2682,6 +2689,7 @@ impl Emitter {
                 if op == AssignOp::Set {
                     if let Some(ty) = ty {
                         self.record_local_constant(name, &ty, value);
+                        self.record_readonly_pointer_alias(name, value);
                     }
                 }
             }
@@ -3232,6 +3240,7 @@ impl Emitter {
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
         self.local_constants.push(HashMap::new());
+        self.readonly_pointer_aliases.push(HashMap::new());
         self.assigned_names_stack
             .push(assigned_names_in_block(prefix));
         for (param, temp) in function.params.iter().zip(temps.iter().copied()) {
@@ -3244,6 +3253,7 @@ impl Emitter {
         }
         let result = self.emit_expr_to_type(&expr, return_type);
         self.assigned_names_stack.pop();
+        self.readonly_pointer_aliases.pop();
         self.local_constants.pop();
         self.scope_types.pop();
         self.scopes.pop();
@@ -3266,6 +3276,7 @@ impl Emitter {
             .insert(name.clone(), ty.clone());
         self.emit_storage_initializer(variable, ty, value)?;
         self.record_local_constant(name, ty, value);
+        self.record_readonly_pointer_alias(name, value);
         Ok(())
     }
 
@@ -3945,6 +3956,7 @@ impl Emitter {
                 )));
             }
         };
+        self.ensure_pointer_write_target_is_mutable(ptr, &pointee_type)?;
         let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
         self.emit_store_hl(addr);
@@ -3969,6 +3981,51 @@ impl Emitter {
         self.emit_load_hl(addr);
         self.emit_store_var_to_pointed_width(stored);
         Ok(())
+    }
+
+    fn ensure_pointer_write_target_is_mutable(
+        &self,
+        ptr: &Expr,
+        pointee_type: &Type,
+    ) -> Result<(), Diagnostic> {
+        let Some(addr) = self.readonly_write_addr(ptr) else {
+            return Ok(());
+        };
+        let size = u64::from(self.symbols.type_size(pointee_type)?);
+        let write_start = u64::from(addr);
+        let write_end = write_start.saturating_add(size);
+        for (name, embed) in &self.symbols.embeds {
+            let Some(len) = embed.variable.len else {
+                continue;
+            };
+            if len == 0 {
+                continue;
+            }
+            let embed_start = u64::from(embed.variable.addr);
+            let embed_end = embed_start + u64::from(len);
+            if write_start < embed_end && write_end > embed_start {
+                return Err(Diagnostic::new(format!(
+                    "embedded object `{name}` is read-only"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn readonly_write_addr(&self, ptr: &Expr) -> Option<u32> {
+        if let Expr::Ident(name) = ptr {
+            if let Some(addr) = self.readonly_pointer_alias(name) {
+                return Some(addr);
+            }
+        }
+        let Ok(addr) = self.symbols.eval_i64(ptr) else {
+            return None;
+        };
+        if (0..=0xFF_FFFF).contains(&addr) {
+            Some(addr as u32)
+        } else {
+            None
+        }
     }
 
     fn emit_binary_expr(
@@ -6292,10 +6349,32 @@ impl Emitter {
             .expect("function local constant scope exists during statement emission")
     }
 
+    fn current_readonly_pointer_aliases_mut(&mut self) -> &mut HashMap<String, u32> {
+        self.readonly_pointer_aliases
+            .last_mut()
+            .expect("function read-only pointer alias scope exists during statement emission")
+    }
+
     fn local_constant(&self, name: &str) -> Option<&LocalConstant> {
         for index in (0..self.local_constants.len()).rev() {
             if let Some(constant) = self.local_constants[index].get(name) {
                 return Some(constant);
+            }
+            if self
+                .scope_types
+                .get(index)
+                .is_some_and(|scope| scope.contains_key(name))
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn readonly_pointer_alias(&self, name: &str) -> Option<u32> {
+        for index in (0..self.readonly_pointer_aliases.len()).rev() {
+            if let Some(addr) = self.readonly_pointer_aliases[index].get(name) {
+                return Some(*addr);
             }
             if self
                 .scope_types
@@ -6354,6 +6433,42 @@ impl Emitter {
 
     fn invalidate_local_constant(&mut self, name: &str) {
         for scope in self.local_constants.iter_mut().rev() {
+            if scope.remove(name).is_some() {
+                return;
+            }
+        }
+    }
+
+    fn record_readonly_pointer_alias(&mut self, name: &str, value: &Expr) {
+        let Some(addr) = self.readonly_write_addr(value) else {
+            self.current_readonly_pointer_aliases_mut().remove(name);
+            return;
+        };
+        if self.readonly_embed_name_for_addr(addr).is_some() {
+            self.current_readonly_pointer_aliases_mut()
+                .insert(name.to_owned(), addr);
+        } else {
+            self.current_readonly_pointer_aliases_mut().remove(name);
+        }
+    }
+
+    fn readonly_embed_name_for_addr(&self, addr: u32) -> Option<&str> {
+        let addr = u64::from(addr);
+        for (name, embed) in &self.symbols.embeds {
+            let Some(len) = embed.variable.len else {
+                continue;
+            };
+            let start = u64::from(embed.variable.addr);
+            let end = start + u64::from(len);
+            if addr >= start && addr < end {
+                return Some(name.as_str());
+            }
+        }
+        None
+    }
+
+    fn invalidate_readonly_pointer_alias(&mut self, name: &str) {
+        for scope in self.readonly_pointer_aliases.iter_mut().rev() {
             if scope.remove(name).is_some() {
                 return;
             }
@@ -13855,6 +13970,65 @@ section .text
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_writes_to_read_only_embedded_bytes() {
+        let cases = [
+            (
+                r#"
+                embed sprite: bytes = bytes [0x11, 0x22]
+
+                fn main() {
+                    *(sprite.ptr) = 0x33
+                    test.pass()
+                }
+                "#,
+                "embedded object `sprite` is read-only",
+            ),
+            (
+                r#"
+                embed sprite: bytes = bytes [0x11, 0x22]
+
+                fn main() {
+                    *(sprite.ptr + 1) = 0x33
+                    test.pass()
+                }
+                "#,
+                "embedded object `sprite` is read-only",
+            ),
+            (
+                r#"
+                embed sprite: bytes = bytes [0x11, 0x22]
+
+                fn main() {
+                    let p: ptr<u8> = sprite.ptr;
+                    *(p) = 0x33
+                    test.pass()
+                }
+                "#,
+                "embedded object `sprite` is read-only",
+            ),
+            (
+                r#"
+                embed sprite: bytes = bytes [0x11, 0x22]
+
+                fn main() {
+                    let p: ptr<u16> = cast<ptr<u16>>(sprite.ptr + 1);
+                    *(p) = 0x3344
+                    test.pass()
+                }
+                "#,
+                "embedded object `sprite` is read-only",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
