@@ -134,6 +134,8 @@ struct FunctionSig {
     arity: usize,
     params: Vec<ValueWidth>,
     param_types: Vec<Type>,
+    arg_slots: Vec<Variable>,
+    uses_arg_slots: bool,
     return_width: ValueWidth,
     return_type: Option<Type>,
 }
@@ -189,15 +191,31 @@ impl Symbols {
             for param in params {
                 symbols.type_width(&param.ty)?;
             }
+            let param_widths = params
+                .iter()
+                .map(|param| symbols.type_width(&param.ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            let uses_arg_slots = params.len() > 3
+                || param_widths.get(2).is_some_and(|third| third.bytes() != 1)
+                    && param_widths
+                        .get(1)
+                        .is_some_and(|second| second.bytes() == 1);
+            let arg_slots = if uses_arg_slots {
+                param_widths
+                    .iter()
+                    .map(|width| symbols.alloc_var(width.bytes()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             symbols.functions.insert(
                 name.clone(),
                 FunctionSig {
                     arity: params.len(),
-                    params: params
-                        .iter()
-                        .map(|param| symbols.type_width(&param.ty))
-                        .collect::<Result<Vec<_>, _>>()?,
+                    params: param_widths,
                     param_types: params.iter().map(|param| param.ty.clone()).collect(),
+                    arg_slots,
+                    uses_arg_slots,
                     return_width: return_type
                         .as_ref()
                         .map(|ty| symbols.type_width(ty))
@@ -856,13 +874,12 @@ impl Emitter {
     }
 
     fn bind_params(&mut self, function: &Function) -> Result<(), Diagnostic> {
-        if function.params.len() > 3 {
-            return Err(Diagnostic::new(format!(
-                "function `{}` has {} parameters; current codegen supports at most 3 register parameters",
-                function.name,
-                function.params.len()
-            )));
-        }
+        let sig = self
+            .symbols
+            .functions
+            .get(&function.name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
 
         for (index, param) in function.params.iter().enumerate() {
             if self.name_in_current_function(&param.name) {
@@ -877,6 +894,12 @@ impl Emitter {
                 .insert(param.name.clone(), variable);
             self.current_scope_types_mut()
                 .insert(param.name.clone(), param.ty.clone());
+            if sig.uses_arg_slots {
+                let slot = sig.arg_slots[index];
+                self.emit_load_width(slot);
+                self.emit_store_width(variable);
+                continue;
+            }
             match width {
                 ValueWidth::U8 => {
                     match index {
@@ -1552,12 +1575,6 @@ impl Emitter {
                 args.len()
             )));
         }
-        if args.len() > 3 {
-            return Err(Diagnostic::new(format!(
-                "function `{name}` has {} arguments; current codegen supports at most 3 register arguments",
-                args.len()
-            )));
-        }
 
         let mut temps = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
@@ -1567,6 +1584,15 @@ impl Emitter {
             self.emit_expr_to_type(arg, ty)?;
             self.emit_store_width(temp);
             temps.push(temp);
+        }
+
+        if sig.uses_arg_slots {
+            for (temp, slot) in temps.iter().copied().zip(sig.arg_slots.iter().copied()) {
+                self.emit_load_width(temp);
+                self.emit_store_width(slot);
+            }
+            self.line(&format!("    call _{name}"));
+            return Ok(());
         }
 
         if let Some(temp) = temps.get(2).copied() {
@@ -4371,6 +4397,31 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_user_function_with_spilled_parameters() {
+        let source = r#"
+            fn add_four(a: u8, b: u8, c: u8, d: u8) -> u8 {
+                return a + b + c + d
+            }
+
+            fn wide_third(a: u24, b: u8, c: u24) -> u24 {
+                return a + b + c
+            }
+
+            fn main() {
+                test.assert_eq_u8(add_four(1, 2, 3, 4), 10, 1)
+                test.assert_eq_u24(wide_third(0x000100, 5, 0x000020), 0x000125, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
