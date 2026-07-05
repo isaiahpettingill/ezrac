@@ -13450,6 +13450,34 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_inline_asm_cpir_with_declared_clobbers() {
+        let source = r#"
+            global bytes: [u8; 3] = [0x11, 0x42, 0x33]
+            global remaining: u8 = 0
+
+            fn main() {
+                asm volatile(clobber a, clobber bc, clobber hl, clobber flags, clobber memory) {
+                    "ld a, 42h"
+                    "ld hl, 040000h"
+                    "ld bc, 000003h"
+                    "cpir"
+                    "ld a, c"
+                    "ld (040003h), a"
+                }
+                test.assert_eq_u8(remaining, 1, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    cpir"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_naked_asm_functions_without_epilogue() {
         let source = r#"
             naked fn raw_debug() {
