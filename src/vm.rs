@@ -3,6 +3,7 @@ use std::{cell::Cell, collections::HashMap};
 use ez80::{Cpu, Machine};
 
 use crate::diagnostic::Diagnostic;
+use crate::target::EZRA_LOAD_ADDR;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestRun {
@@ -16,12 +17,12 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
     let code = assemble_subset(assembly)?;
     let mut machine = TestMachine::new();
     for (address, byte) in code.into_iter().enumerate() {
-        machine.poke(address as u32, byte);
+        machine.poke(EZRA_LOAD_ADDR.get() + address as u32, byte);
     }
 
     let mut cpu = Cpu::new_ez80();
     cpu.state.reg.adl = true;
-    cpu.state.set_pc(0);
+    cpu.state.set_pc(EZRA_LOAD_ADDR.get());
     if std::env::var_os("EZRA_TRACE_VM").is_some() {
         cpu.set_trace(true);
     }
@@ -49,7 +50,7 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
 fn assemble_subset(assembly: &str) -> Result<Vec<u8>, Diagnostic> {
     let instructions = assembly.lines().filter_map(parse_line).collect::<Vec<_>>();
     let mut labels = HashMap::new();
-    let mut pc = 0u32;
+    let mut pc = EZRA_LOAD_ADDR.get();
 
     for instruction in &instructions {
         match instruction {
@@ -172,11 +173,11 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     } else if text.starts_with("ld hl,") || text.starts_with("ld de,") || text.starts_with("ld bc,")
     {
         Ok(4)
-    } else if text.starts_with("ld h,") || text.starts_with("ld a,") || text.starts_with("in0 ") {
+    } else if text.starts_with("ld h,") || text.starts_with("ld a,") {
         Ok(2)
     } else if text.starts_with("xor ") {
         Ok(2)
-    } else if text.starts_with("out0 ") {
+    } else if text.starts_with("in0 ") || text.starts_with("out0 ") {
         Ok(3)
     } else {
         Err(Diagnostic::new(format!(
