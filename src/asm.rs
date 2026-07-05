@@ -11606,20 +11606,48 @@ mod tests {
     #[test]
     fn emits_and_runs_array_pointer_arithmetic_scale() {
         let source = r#"
+            struct Cell {
+                x: u8
+                y: u16
+            }
+
             fn next_chunk(values: ptr<[u8; 3]>) -> ptr<[u8; 3]> {
                 return values + 1
             }
 
+            fn prev_chunk(values: ptr<[u8; 3]>) -> ptr<[u8; 3]> {
+                return values - 1
+            }
+
+            fn next_cell(values: ptr<Cell>) -> ptr<Cell> {
+                return values + 1
+            }
+
+            fn prev_cell(values: ptr<Cell>) -> ptr<Cell> {
+                return values - 1
+            }
+
             fn main() {
-                let chunk: [u8; 3] = [1, 2, 3]
-                let next: ptr<[u8; 3]> = next_chunk(&chunk)
-                test.assert_eq_u24(cast<u24>(next), cast<u24>(&chunk[0]) + 3, 1)
+                let chunks: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 6]]
+                let next: ptr<[u8; 3]> = next_chunk(&chunks[0])
+                let prev: ptr<[u8; 3]> = prev_chunk(next)
+                test.assert_eq_u24(cast<u24>(next), cast<u24>(&chunks[0]) + 3, 1)
+                test.assert_eq_u24(cast<u24>(prev), cast<u24>(&chunks[0]), 2)
+
+                let cells: [Cell; 2] = [
+                    Cell { x: 1, y: 0x0203 },
+                    Cell { x: 4, y: 0x0506 },
+                ]
+                let second: ptr<Cell> = next_cell(&cells[0])
+                let first: ptr<Cell> = prev_cell(second)
+                test.assert_eq_u24(cast<u24>(second), cast<u24>(&cells[0]) + 3, 3)
+                test.assert_eq_u24(cast<u24>(first), cast<u24>(&cells[0]), 4)
                 test.pass()
             }
         "#;
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
-        let run = run_assembly_test(&asm, 6_000).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
