@@ -683,7 +683,10 @@ impl Symbols {
                     BinaryOp::Or => i64::from(left != 0 || right != 0),
                 })
             }
-            Expr::Cast { expr, .. } => self.eval_i64(expr),
+            Expr::Cast { expr, ty } => {
+                let value = self.eval_i64(expr)?;
+                self.const_cast_value(value, ty)
+            }
             Expr::Array(_)
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
@@ -698,6 +701,17 @@ impl Symbols {
                 "expression `{expr:?}` is not a compile-time integer"
             ))),
         }
+    }
+
+    fn const_cast_value(&self, value: i64, ty: &Type) -> Result<i64, Diagnostic> {
+        let resolved = self.resolved_type(ty)?;
+        if type_is_bool(&resolved) {
+            return Ok(i64::from(value != 0));
+        }
+        let width = self.type_width(&resolved)?;
+        let bits = u32::from(width.bytes()) * 8;
+        let mask = (1_i128 << bits) - 1;
+        Ok(((value as i128) & mask) as i64)
     }
 
     fn validate_const_expr_arithmetic_compatibility(&self, expr: &Expr) -> Result<(), Diagnostic> {
@@ -6533,6 +6547,38 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_constant_cast_semantics() {
+        let source = r#"
+            alias byte = u8
+
+            const NARROW: u8 = cast<u8>(0x1234)
+            const WIDE: u16 = cast<u16>(0x12)
+            const BIT_PATTERN: u8 = cast<u8>(-1)
+            const ALIAS_NARROW: byte = cast<byte>(0x01AB)
+            const TRUE_VALUE: bool = cast<bool>(2)
+            const FALSE_VALUE: bool = cast<bool>(0)
+            const RAW: u24 = cast<u24>(cast<ptr<u8>>(0x040123))
+
+            fn main() {
+                test.assert_eq_u8(NARROW, 0x34, 1)
+                test.assert_eq_u16(WIDE, 0x0012, 2)
+                test.assert_eq_u8(BIT_PATTERN, 0xFF, 3)
+                test.assert_eq_u8(ALIAS_NARROW, 0xAB, 4)
+                test.assert_eq_u8(TRUE_VALUE, true, 5)
+                test.assert_eq_u8(FALSE_VALUE, false, 6)
+                test.assert_eq_u24(RAW, 0x040123, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
