@@ -845,7 +845,7 @@ impl Emitter {
                 function.name
             )));
         }
-        self.line(&format!("_{}:", function.name));
+        self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
         if let Some(return_type) = &function.return_type {
@@ -1617,11 +1617,6 @@ impl Emitter {
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_mem_poke8(args)?;
             }
-            path if path.contains('.') => {
-                return Err(Diagnostic::new(format!(
-                    "module-qualified call `{path}` is not implemented in assembly codegen yet"
-                )));
-            }
             path => self.emit_user_call(path, args)?,
         }
         Ok(())
@@ -1657,7 +1652,7 @@ impl Emitter {
                 self.emit_load_width(temp);
                 self.emit_store_width(slot);
             }
-            self.line(&format!("    call _{name}"));
+            self.line(&format!("    call {}", function_label(name)));
             return Ok(());
         }
 
@@ -1692,7 +1687,7 @@ impl Emitter {
         if let Some(temp) = temps.first().copied() {
             self.emit_load_width(temp);
         }
-        self.line(&format!("    call _{name}"));
+        self.line(&format!("    call {}", function_label(name)));
         if sig.stack_arg_bytes > 0 {
             self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
         }
@@ -1883,14 +1878,8 @@ impl Emitter {
                     )));
                 }
             },
-            Expr::Call { path, args } if path.len() == 1 => {
-                self.emit_user_call(&path[0], args)?;
-            }
-            Expr::Call { path, .. } => {
-                return Err(Diagnostic::new(format!(
-                    "module-qualified call `{}` is not implemented in assembly codegen yet",
-                    path_text(path)
-                )));
+            Expr::Call { path, args } => {
+                self.emit_user_call(&path_text(path), args)?;
             }
             Expr::Array(_) | Expr::StructInit { .. } | Expr::In(_) => {
                 return Err(Diagnostic::new(format!(
@@ -2066,14 +2055,8 @@ impl Emitter {
             {
                 self.emit_mem_peek8(args)?;
             }
-            Expr::Call { path, args } if path.len() == 1 => {
-                self.emit_user_call(&path[0], args)?;
-            }
-            Expr::Call { path, .. } => {
-                return Err(Diagnostic::new(format!(
-                    "module-qualified call `{}` is not implemented in assembly codegen yet",
-                    path_text(path)
-                )));
+            Expr::Call { path, args } => {
+                self.emit_user_call(&path_text(path), args)?;
             }
             Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
@@ -3290,21 +3273,17 @@ impl Emitter {
             },
             Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
             Expr::Cast { ty, .. } => Ok(ty.clone()),
-            Expr::Call { path, .. } if path.len() == 1 => self
-                .symbols
-                .functions
-                .get(&path[0])
-                .and_then(|sig| sig.return_type.clone())
-                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path[0]))),
             Expr::Call { path, .. }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
             {
                 Ok(Type::Named("u8".to_owned()))
             }
-            Expr::Call { path, .. } => Err(Diagnostic::new(format!(
-                "module-qualified call `{}` is not implemented in assembly codegen yet",
-                path_text(path)
-            ))),
+            Expr::Call { path, .. } => self
+                .symbols
+                .functions
+                .get(&path_text(path))
+                .and_then(|sig| sig.return_type.clone())
+                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path_text(path)))),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => Ok(Type::Named("bool".to_owned())),
                 UnaryOp::Neg | UnaryOp::BitNot => self.expr_type(expr),
@@ -3385,16 +3364,12 @@ impl Emitter {
             {
                 Ok(ValueWidth::U8)
             }
-            Expr::Call { path, .. } if path.len() == 1 => self
+            Expr::Call { path, .. } => self
                 .symbols
                 .functions
-                .get(&path[0])
+                .get(&path_text(path))
                 .map(|sig| sig.return_width)
-                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path[0]))),
-            Expr::Call { path, .. } => Err(Diagnostic::new(format!(
-                "module-qualified call `{}` is not implemented in assembly codegen yet",
-                path_text(path)
-            ))),
+                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path_text(path)))),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => Ok(ValueWidth::U8),
                 UnaryOp::Neg | UnaryOp::BitNot => self.expr_width(expr),
@@ -3702,6 +3677,18 @@ fn path_text(path: &[String]) -> String {
     path.join(".")
 }
 
+fn function_label(name: &str) -> String {
+    let mut label = String::from("_");
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            label.push(ch);
+        } else {
+            label.push('_');
+        }
+    }
+    label
+}
+
 fn scalar_var(addr: u32, size: u8) -> Variable {
     Variable {
         addr,
@@ -3918,7 +3905,7 @@ fn sdk_ports() -> HashMap<String, u8> {
 mod tests {
     use std::path::Path;
 
-    use crate::{parser::parse_program, vm::run_assembly_test};
+    use crate::{compile::load_program, parser::parse_program, vm::run_assembly_test};
 
     use super::*;
 
@@ -4682,31 +4669,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_module_qualified_calls() {
-        let cases = [
+    fn emits_and_runs_imported_module_qualified_calls() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_module_calls_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/math.ezra"),
+            "pub fn add(a: u8, b: u8) -> u8 { return a + b }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
             r#"
+            import lib.math
             fn main() {
+                let value: u8 = math.add(2, 3)
+                test.assert_eq_u8(value, 5, 1)
                 math.add(1, 2)
                 test.pass()
             }
             "#,
-            r#"
-            fn main() {
-                let value: u8 = math.add(1, 2)
-                test.pass()
-            }
-            "#,
-        ];
+        )
+        .unwrap();
 
-        for source in cases {
-            let program = parse_program(Path::new("game.ezra"), source).unwrap();
-            let error = emit_ez80_assembly(&program).unwrap_err();
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
 
-            assert_eq!(
-                error.message,
-                "module-qualified call `math.add` is not implemented in assembly codegen yet"
-            );
-        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(asm.contains("_math_add:"), "{asm}");
+        assert!(asm.contains("    call _math_add"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]

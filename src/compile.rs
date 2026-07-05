@@ -99,8 +99,10 @@ fn resolve_program_imports(
             ))
         })?;
         let imported = parse_program(&import_path, &source)?;
+        let module_aliases = module_alias_declarations(import, &imported.declarations);
         let imported = resolve_program_imports(imported, stack, seen)?;
         declarations.extend(imported.declarations);
+        declarations.extend(module_aliases);
     }
     stack.pop();
 
@@ -124,6 +126,28 @@ fn resolve_import_path(source_path: &Path, import: &str) -> PathBuf {
 
 fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<Declaration> {
+    let Some(module) = import.rsplit('.').next() else {
+        return Vec::new();
+    };
+    declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            Declaration::Function(function) if function.public && function.name != "main" => {
+                let mut alias = function.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Function(alias))
+            }
+            Declaration::ExternAsmFunction(function) if function.public => {
+                let mut alias = function.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::ExternAsmFunction(alias))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
@@ -533,9 +557,12 @@ mod tests {
         let program = load_program(&main_path).unwrap();
 
         assert_eq!(report.imports, 1);
-        assert_eq!(report.declarations, 2);
+        assert_eq!(report.declarations, 3);
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "add_one")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "math.add_one")
         }));
 
         let _ = std::fs::remove_dir_all(root);
