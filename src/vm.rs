@@ -4,10 +4,10 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use ez80::{Cpu, Machine};
+use ez80::{Cpu, Machine, Reg16};
 
 use crate::diagnostic::Diagnostic;
-use crate::target::EZRA_LOAD_ADDR;
+use crate::target::{EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestRun {
@@ -80,6 +80,7 @@ pub fn run_assembly_test_with_options_at(
     let mut cpu = Cpu::new_ez80();
     cpu.state.reg.adl = true;
     cpu.state.set_pc(base_addr);
+    cpu.state.reg.set24(Reg16::SP, EZRA_STACK_TOP.get());
     if std::env::var_os("EZRA_TRACE_VM").is_some() {
         cpu.set_trace(true);
     }
@@ -968,6 +969,23 @@ mod tests {
             run.failure,
             Some(TestRunFailure::ExecutionOutsideLoadedProgram { pc: 0x020000 })
         );
+    }
+
+    #[test]
+    fn initializes_stack_pointer_to_default_stack_top() {
+        let asm = r#"
+            call leaves_return_address
+            ld a, (0EFFFFDh)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        leaves_return_address:
+            ret
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0x04);
     }
 
     #[test]
