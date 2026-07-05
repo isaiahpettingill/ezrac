@@ -135,6 +135,16 @@ fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<
     declarations
         .iter()
         .filter_map(|declaration| match declaration {
+            Declaration::Const(decl) if decl.public => {
+                let mut alias = decl.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Const(alias))
+            }
+            Declaration::Mmio(decl) if decl.public => {
+                let mut alias = decl.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Mmio(alias))
+            }
             Declaration::Function(function) if function.public && function.name != "main" => {
                 let mut alias = function.clone();
                 alias.name = format!("{module}.{}", alias.name);

@@ -4711,6 +4711,48 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_imported_module_qualified_constants() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_module_constants_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/hw.ezra"),
+            r#"
+            pub const VALUE: u8 = 0x37
+            pub volatile mmio SCRATCH: ptr<u8> = 0x040120
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.hw
+            fn main() {
+                mem.poke8(hw.SCRATCH, hw.VALUE)
+                test.assert_eq_u8(mem.peek8(hw.SCRATCH), 0x37, 1)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn rejects_inline_asm_missing_required_clobbers() {
         let cases = [
             (
