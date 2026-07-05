@@ -242,6 +242,7 @@ struct FunctionSig {
     stack_arg_bytes: u8,
     return_width: ValueWidth,
     return_type: Option<Type>,
+    is_interrupt: bool,
 }
 
 impl Symbols {
@@ -301,18 +302,20 @@ impl Symbols {
         }
 
         for declaration in &program.declarations {
-            let (name, params, return_type, extern_asm) = match declaration {
+            let (name, params, return_type, extern_asm, is_interrupt) = match declaration {
                 Declaration::Function(function) => (
                     &function.name,
                     &function.params,
                     &function.return_type,
                     false,
+                    has_attr(function, "interrupt"),
                 ),
                 Declaration::ExternAsmFunction(function) => (
                     &function.name,
                     &function.params,
                     &function.return_type,
                     true,
+                    false,
                 ),
                 _ => continue,
             };
@@ -388,6 +391,7 @@ impl Symbols {
                         .transpose()?
                         .unwrap_or(ValueWidth::U8),
                     return_type: return_type.clone(),
+                    is_interrupt,
                 },
             );
             if let Declaration::Function(function) = declaration {
@@ -3389,6 +3393,12 @@ impl Emitter {
             .get(name)
             .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if self.current_function_is_interrupt() && !sig.is_interrupt {
+            return Err(Diagnostic::new(format!(
+                "interrupt function `{}` cannot call non-interrupt function `{name}`",
+                self.current_function_name()
+            )));
+        }
         if sig.arity != args.len() {
             return Err(Diagnostic::new(format!(
                 "function `{name}` expects {} arguments but got {}",
@@ -13823,6 +13833,30 @@ section .text
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"R", "{asm}");
+    }
+
+    #[test]
+    fn rejects_interrupt_calls_to_non_interrupt_functions() {
+        let source = r#"
+            fn helper() {
+                debug.char('H')
+            }
+
+            interrupt fn vblank_irq() {
+                helper()
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "interrupt function `vblank_irq` cannot call non-interrupt function `helper`"
+        );
     }
 
     #[test]
