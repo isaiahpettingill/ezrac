@@ -1112,6 +1112,22 @@ impl Emitter {
         self.line("    add hl, de");
         self.line("    dec bc");
         self.line("    jp .L_mul_u16_loop");
+        self.line("__ezra_mul_u24:");
+        self.line("    ex de, hl");
+        self.line("    ld hl, 000000h");
+        self.line(".L_mul_u24_loop:");
+        self.line("    push hl");
+        self.line("    ld hl, 000000h");
+        self.line("    or a");
+        self.line("    sbc hl, bc");
+        self.line("    jp z, .L_mul_u24_done");
+        self.line("    pop hl");
+        self.line("    add hl, de");
+        self.line("    dec bc");
+        self.line("    jp .L_mul_u24_loop");
+        self.line(".L_mul_u24_done:");
+        self.line("    pop hl");
+        self.line("    ret");
         self.line("__ezra_div_u8:");
         self.line("    ld d, a");
         self.line("    xor a");
@@ -1156,6 +1172,32 @@ impl Emitter {
         self.line(".L_div_u16_done:");
         self.line("    pop hl");
         self.line("    ret");
+        self.line("__ezra_div_u24:");
+        self.line("    push hl");
+        self.line("    ld hl, 000000h");
+        self.line("    or a");
+        self.line("    sbc hl, bc");
+        self.line("    jp z, .L_div_u24_zero");
+        self.line("    pop de");
+        self.line("    ld hl, 000000h");
+        self.line(".L_div_u24_loop:");
+        self.line("    push hl");
+        self.line("    push de");
+        self.line("    pop hl");
+        self.line("    or a");
+        self.line("    sbc hl, bc");
+        self.line("    jp c, .L_div_u24_done");
+        self.line("    ex de, hl");
+        self.line("    pop hl");
+        self.line("    inc hl");
+        self.line("    jp .L_div_u24_loop");
+        self.line(".L_div_u24_zero:");
+        self.line("    pop hl");
+        self.line("    ld hl, 000000h");
+        self.line("    ret");
+        self.line(".L_div_u24_done:");
+        self.line("    pop hl");
+        self.line("    ret");
         self.line("__ezra_mod_u8:");
         self.line("    ld d, a");
         self.line("    ld a, c");
@@ -1191,6 +1233,29 @@ impl Emitter {
         self.line("    ld hl, 000000h");
         self.line("    ret");
         self.line(".L_mod_u16_done:");
+        self.line("    push de");
+        self.line("    pop hl");
+        self.line("    ret");
+        self.line("__ezra_mod_u24:");
+        self.line("    push hl");
+        self.line("    ld hl, 000000h");
+        self.line("    or a");
+        self.line("    sbc hl, bc");
+        self.line("    jp z, .L_mod_u24_zero");
+        self.line("    pop de");
+        self.line(".L_mod_u24_loop:");
+        self.line("    push de");
+        self.line("    pop hl");
+        self.line("    or a");
+        self.line("    sbc hl, bc");
+        self.line("    jp c, .L_mod_u24_done");
+        self.line("    ex de, hl");
+        self.line("    jp .L_mod_u24_loop");
+        self.line(".L_mod_u24_zero:");
+        self.line("    pop hl");
+        self.line("    ld hl, 000000h");
+        self.line("    ret");
+        self.line(".L_mod_u24_done:");
         self.line("    push de");
         self.line("    pop hl");
         self.line("    ret");
@@ -3007,6 +3072,16 @@ impl Emitter {
             self.line("    call __ezra_mul_u16");
             return Ok(());
         }
+        if width == ValueWidth::U24 {
+            self.emit_expr_to_hl(left, width)?;
+            self.line("    push hl");
+            self.emit_expr_to_hl(right, width)?;
+            self.line("    push hl");
+            self.line("    pop bc");
+            self.line("    pop hl");
+            self.line("    call __ezra_mul_u24");
+            return Ok(());
+        }
 
         let left_var = self.symbols.alloc_var(width.bytes());
         let counter = self.symbols.alloc_var(width.bytes());
@@ -3064,6 +3139,20 @@ impl Emitter {
             match op {
                 BinaryOp::Div => self.line("    call __ezra_div_u16"),
                 BinaryOp::Mod => self.line("    call __ezra_mod_u16"),
+                _ => unreachable!("not a division op"),
+            }
+            return Ok(());
+        }
+        if width == ValueWidth::U24 {
+            self.emit_expr_to_hl(left, width)?;
+            self.line("    push hl");
+            self.emit_expr_to_hl(right, width)?;
+            self.line("    push hl");
+            self.line("    pop bc");
+            self.line("    pop hl");
+            match op {
+                BinaryOp::Div => self.line("    call __ezra_div_u24"),
+                BinaryOp::Mod => self.line("    call __ezra_mod_u24"),
                 _ => unreachable!("not a division op"),
             }
             return Ok(());
@@ -8598,6 +8687,8 @@ mod tests {
 
         assert!(asm.contains("    call __ezra_mul_u8"), "{asm}");
         assert!(asm.contains("    call __ezra_mul_u16"), "{asm}");
+        assert!(asm.contains("    call __ezra_mul_u24"), "{asm}");
+        assert!(asm.contains("__ezra_mul_u24:"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
@@ -8646,6 +8737,10 @@ mod tests {
 
         assert!(asm.contains("    call __ezra_div_u16"), "{asm}");
         assert!(asm.contains("    call __ezra_mod_u16"), "{asm}");
+        assert!(asm.contains("    call __ezra_div_u24"), "{asm}");
+        assert!(asm.contains("    call __ezra_mod_u24"), "{asm}");
+        assert!(asm.contains("__ezra_div_u24:"), "{asm}");
+        assert!(asm.contains("__ezra_mod_u24:"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
