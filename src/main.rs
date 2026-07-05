@@ -26,7 +26,10 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
-        Some("check") => check(args.get(1).ok_or_else(|| usage())?),
+        Some("check") => {
+            let options = CommandOptions::parse(&args[1..])?;
+            check(&options)
+        }
         Some("build") => {
             let options = CommandOptions::parse(&args[1..])?;
             build(&options)
@@ -53,6 +56,7 @@ fn run() -> Result<(), String> {
 struct CommandOptions {
     path: String,
     debug_comments: bool,
+    default_sdk_symbols: bool,
     layout_path: Option<String>,
 }
 
@@ -60,11 +64,13 @@ impl CommandOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut path = None;
         let mut debug_comments = false;
+        let mut default_sdk_symbols = true;
         let mut layout_path = None;
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "--debug-comments" => debug_comments = true,
+                "--no-default-sdk-symbols" => default_sdk_symbols = false,
                 "--layout" => {
                     let value = iter.next().ok_or_else(usage)?;
                     layout_path = Some(value.clone());
@@ -76,6 +82,7 @@ impl CommandOptions {
         Ok(Self {
             path: path.ok_or_else(usage)?,
             debug_comments,
+            default_sdk_symbols,
             layout_path,
         })
     }
@@ -106,6 +113,7 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
     build_source_with_command_options(&CommandOptions {
         path: path.to_owned(),
         debug_comments,
+        default_sdk_symbols: true,
         layout_path: None,
     })
 }
@@ -125,7 +133,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
-        assembly_options_from_layout(&layout, options.debug_comments),
+        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
     )
     .map_err(|error| {
         error
@@ -179,6 +187,7 @@ fn test_source(path: &str) -> Result<(), String> {
     test_source_with_command_options(&CommandOptions {
         path: path.to_owned(),
         debug_comments: false,
+        default_sdk_symbols: true,
         layout_path: None,
     })
 }
@@ -201,7 +210,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
-        assembly_options_from_layout(&layout, options.debug_comments),
+        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
     let run = run_assembly_test_with_options_at(
@@ -344,20 +353,24 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     }
     emit_ez80_assembly_with_options(
         &program,
-        assembly_options_from_layout(&layout, options.debug_comments),
+        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())
 }
 
-fn check(path: &str) -> Result<(), String> {
-    let source_path = PathBuf::from(path);
+fn check(options: &CommandOptions) -> Result<(), String> {
+    if options.layout_path.is_some() {
+        return Err("`--layout` is not supported by `check`".to_owned());
+    }
+    let source_path = PathBuf::from(&options.path);
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
-    let options = CompileOptions {
+    let compile_options = CompileOptions {
         source: source_path,
-        debug_comments: false,
+        debug_comments: options.debug_comments,
+        default_sdk_symbols: options.default_sdk_symbols,
     };
-    let report = check_source(&source, &options).map_err(|error| error.to_string())?;
+    let report = check_source(&source, &compile_options).map_err(|error| error.to_string())?;
 
     println!(
         "ok: {} imports, {} declarations, main present",
@@ -395,10 +408,14 @@ fn load_layout(path: Option<&str>) -> Result<Layout, String> {
     })
 }
 
-fn assembly_options_from_layout(layout: &Layout, debug_comments: bool) -> AssemblyOptions {
+fn assembly_options_from_layout(
+    layout: &Layout,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+) -> AssemblyOptions {
     AssemblyOptions {
         debug_comments,
-        default_sdk_symbols: true,
+        default_sdk_symbols,
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),
@@ -464,7 +481,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--debug-comments] [--no-default-sdk-symbols] <file.ezra>\n                                       parse and validate a source file\n  build [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -614,6 +631,7 @@ mod tests {
         let emit_error = emit_assembly_with_command_options(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
+            default_sdk_symbols: true,
             layout_path: None,
         })
         .unwrap_err();
@@ -665,6 +683,7 @@ mod tests {
         let parse_error = emit_assembly_with_command_options(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
+            default_sdk_symbols: true,
             layout_path: Some(parse_layout_path.to_string_lossy().into_owned()),
         })
         .unwrap_err();
@@ -677,6 +696,7 @@ mod tests {
         let invalid_error = emit_assembly_with_command_options(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
+            default_sdk_symbols: true,
             layout_path: Some(invalid_layout_path.to_string_lossy().into_owned()),
         })
         .unwrap_err();
@@ -738,6 +758,59 @@ mod tests {
         .unwrap();
 
         test_source(source_path.to_str().unwrap()).unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commands_can_disable_default_sdk_symbols() {
+        let root = temp_root("strict_sdk_symbols");
+        std::fs::create_dir_all(&root).unwrap();
+        let default_port_path = root.join("default_port.ezra");
+        std::fs::write(
+            &default_port_path,
+            r#"
+                fn main() {
+                    let pad: u8 = in PAD1_LO
+                    test.assert_eq_u8(pad, 0, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = check(&CommandOptions {
+            path: default_port_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: false,
+            layout_path: None,
+        })
+        .unwrap_err();
+        assert!(error.contains("unknown port `PAD1_LO`"), "{error}");
+
+        let explicit_port_path = root.join("explicit_port.ezra");
+        std::fs::write(
+            &explicit_port_path,
+            r#"
+                // port 0x9B = 0x42
+                port AGON_VDP: u8 = 0x9B
+
+                fn main() {
+                    let value: u8 = in AGON_VDP
+                    test.assert_eq_u8(value, 0x42, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        test_source_with_command_options(&CommandOptions {
+            path: explicit_port_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: false,
+            layout_path: None,
+        })
+        .unwrap();
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -811,6 +884,7 @@ mod tests {
         test_source_with_command_options(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
+            default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
         })
         .unwrap();
@@ -896,6 +970,7 @@ mod tests {
         let outputs = build_source_with_command_options(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
+            default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
         })
         .unwrap();
@@ -950,6 +1025,7 @@ mod tests {
         let asm = emit_assembly_with_command_options(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
+            default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
         })
         .unwrap();

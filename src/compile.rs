@@ -18,6 +18,7 @@ use crate::{
 pub struct CompileOptions {
     pub source: PathBuf,
     pub debug_comments: bool,
+    pub default_sdk_symbols: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +53,7 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
         &program,
         AssemblyOptions {
             debug_comments: options.debug_comments,
+            default_sdk_symbols: options.default_sdk_symbols,
             ..AssemblyOptions::default()
         },
     )
@@ -689,6 +691,7 @@ mod tests {
         let options = CompileOptions {
             source: PathBuf::from("game.ezra"),
             debug_comments: false,
+            default_sdk_symbols: true,
         };
 
         let report = check_source("fn main() {\n}\n", &options).unwrap();
@@ -702,6 +705,7 @@ mod tests {
         let options = CompileOptions {
             source: PathBuf::from("game.ezra"),
             debug_comments: false,
+            default_sdk_symbols: true,
         };
 
         let error = check_source("const X: u8 = 1\n", &options).unwrap_err();
@@ -715,6 +719,7 @@ mod tests {
         let options = CompileOptions {
             source: PathBuf::from("game.ezra"),
             debug_comments: false,
+            default_sdk_symbols: true,
         };
 
         let with_param = check_source("fn main(code: u8) {}\n", &options).unwrap_err();
@@ -729,6 +734,7 @@ mod tests {
         let options = CompileOptions {
             source: PathBuf::from("game.ezra"),
             debug_comments: false,
+            default_sdk_symbols: true,
         };
 
         let mismatch = check_source("fn main() { let x: u8 = 0x0100 }\n", &options).unwrap_err();
@@ -760,6 +766,7 @@ mod tests {
         let options = CompileOptions {
             source: main_path.clone(),
             debug_comments: false,
+            default_sdk_symbols: true,
         };
         let report = check_source(source, &options).unwrap();
         let program = load_program(&main_path).unwrap();
@@ -809,6 +816,7 @@ mod tests {
         let options = CompileOptions {
             source: main_path.clone(),
             debug_comments: false,
+            default_sdk_symbols: true,
         };
         let report = check_source(source, &options).unwrap();
         let program = load_program(&main_path).unwrap();
@@ -859,6 +867,7 @@ mod tests {
         let options = CompileOptions {
             source: main_path,
             debug_comments: false,
+            default_sdk_symbols: true,
         };
         let error = check_source(source, &options).unwrap_err();
 
@@ -880,6 +889,7 @@ mod tests {
         let options = CompileOptions {
             source: main_path.clone(),
             debug_comments: false,
+            default_sdk_symbols: true,
         };
         let error = check_source(source, &options).unwrap_err();
 
