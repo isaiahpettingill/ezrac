@@ -1,7 +1,7 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
-    asm::emit_ez80_assembly,
+    asm::{emit_ez80_assembly, emit_ez80_assembly_with_debug_comments},
     cart::{CartridgeHeader, build_cartridge},
     compile::{CompileOptions, check_source, load_program},
     layout::Layout,
@@ -22,8 +22,14 @@ fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("check") => check(args.get(1).ok_or_else(|| usage())?),
-        Some("build") => build(args.get(1).ok_or_else(|| usage())?),
-        Some("emit-asm") => emit_asm(args.get(1).ok_or_else(|| usage())?),
+        Some("build") => {
+            let options = CommandOptions::parse(&args[1..])?;
+            build(&options)
+        }
+        Some("emit-asm") => {
+            let options = CommandOptions::parse(&args[1..])?;
+            emit_asm(&options)
+        }
         Some("test") => test_source(args.get(1).ok_or_else(|| usage())?),
         Some("layout") => print_layout(),
         Some("header") => print_header(),
@@ -35,8 +41,32 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn build(path: &str) -> Result<(), String> {
-    let outputs = build_source(path)?;
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommandOptions {
+    path: String,
+    debug_comments: bool,
+}
+
+impl CommandOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut path = None;
+        let mut debug_comments = false;
+        for arg in args {
+            match arg.as_str() {
+                "--debug-comments" => debug_comments = true,
+                _ if path.is_none() => path = Some(arg.clone()),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(Self {
+            path: path.ok_or_else(usage)?,
+            debug_comments,
+        })
+    }
+}
+
+fn build(options: &CommandOptions) -> Result<(), String> {
+    let outputs = build_source_with_options(&options.path, options.debug_comments)?;
     println!("wrote {}", outputs.asm.display());
     println!("wrote {}", outputs.map.display());
     println!("wrote {}", outputs.cart.display());
@@ -51,9 +81,14 @@ struct BuildOutputs {
 }
 
 fn build_source(path: &str) -> Result<BuildOutputs, String> {
+    build_source_with_options(path, false)
+}
+
+fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOutputs, String> {
     let source_path = PathBuf::from(path);
     let program = load_program(&source_path).map_err(|error| error.to_string())?;
-    let assembly = emit_ez80_assembly(&program).map_err(|error| error.to_string())?;
+    let assembly = emit_ez80_assembly_with_debug_comments(&program, debug_comments)
+        .map_err(|error| error.to_string())?;
     let layout = Layout::ezra_default();
     if let Err(errors) = layout.validate() {
         let message = errors
@@ -110,10 +145,11 @@ fn test_source(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn emit_asm(path: &str) -> Result<(), String> {
-    let source_path = PathBuf::from(path);
+fn emit_asm(options: &CommandOptions) -> Result<(), String> {
+    let source_path = PathBuf::from(&options.path);
     let program = load_program(&source_path).map_err(|error| error.to_string())?;
-    let assembly = emit_ez80_assembly(&program).map_err(|error| error.to_string())?;
+    let assembly = emit_ez80_assembly_with_debug_comments(&program, options.debug_comments)
+        .map_err(|error| error.to_string())?;
     print!("{assembly}");
     Ok(())
 }
@@ -175,23 +211,27 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>     parse and validate a source file\n  build <file.ezra>     write .asm, .map, and .ezra.cart artifacts\n  emit-asm <file.ezra>  emit readable eZ80 assembly for the supported subset\n  test <file.ezra>      emit and run the supported subset on the ez80 VM\n  layout                print the default EZRA layout summary\n  header                print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] <file.ezra> write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] <file.ezra>\n                                       emit readable eZ80 assembly\n  test <file.ezra>                     emit and run on the ez80 VM\n  layout                               print the default EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn build_writes_artifacts() {
-        let root = std::env::temp_dir().join(format!(
-            "ezra_build_{}_{}",
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ezra_{name}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        ))
+    }
+
+    #[test]
+    fn build_writes_artifacts() {
+        let root = temp_root("build");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(root.join("lib")).unwrap();
         let source_path = root.join("game.ezra");
@@ -218,6 +258,29 @@ mod tests {
         assert_eq!(&cart[0x21..0x24], &[0x40, 0x00, 0x00]);
         assert!(cart.len() > 64);
         assert!(cart.ends_with(&[0x11, 0x22]));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_can_emit_debug_source_comments() {
+        let root = temp_root("debug_build");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            "fn main() { let x: u8 = 4; x += 1; test.pass() }\n",
+        )
+        .unwrap();
+
+        let plain = build_source(source_path.to_str().unwrap()).unwrap();
+        let plain_asm = std::fs::read_to_string(&plain.asm).unwrap();
+        let debug = build_source_with_options(source_path.to_str().unwrap(), true).unwrap();
+        let debug_asm = std::fs::read_to_string(&debug.asm).unwrap();
+
+        assert!(!plain_asm.contains("; source:"), "{plain_asm}");
+        assert!(debug_asm.contains("; source: let x: u8 = 4"), "{debug_asm}");
+        assert!(debug_asm.contains("; source: x += 1"), "{debug_asm}");
 
         let _ = std::fs::remove_dir_all(root);
     }
