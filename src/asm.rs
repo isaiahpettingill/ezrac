@@ -933,9 +933,7 @@ impl Symbols {
                 self.type_width(alias)
             }
             Type::Ptr(_) => Ok(ValueWidth::U24),
-            Type::Array { .. } => Err(Diagnostic::new(
-                "array storage codegen is not implemented yet",
-            )),
+            Type::Array { .. } => Err(Diagnostic::new("array value cannot be used as a scalar")),
         }
     }
 
@@ -3393,6 +3391,12 @@ impl Emitter {
             return Err(Diagnostic::new(format!(
                 "debug.hex_{suffix} requires one argument"
             )));
+        }
+        if matches!(
+            self.symbols.resolved_type(&self.expr_type(&args[0])?)?,
+            Type::Array { .. }
+        ) {
+            return Err(Diagnostic::new("array value cannot be used as a scalar"));
         }
         self.validate_expr_assignable_to_type(&args[0], &width_unsigned_type(width))?;
 
@@ -6563,6 +6567,9 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
         let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
+        if matches!(left_type, Type::Array { .. }) || matches!(right_type, Type::Array { .. }) {
+            return Err(Diagnostic::new("array value cannot be used as a scalar"));
+        }
         if type_is_bool(&left_type) || type_is_bool(&right_type) {
             return Err(Diagnostic::new("type mismatch"));
         }
@@ -8476,6 +8483,9 @@ fn validate_comparison_types<F>(
 where
     F: FnOnce() -> Option<(ValueWidth, ValueWidth)>,
 {
+    if matches!(left_type, Type::Array { .. }) || matches!(right_type, Type::Array { .. }) {
+        return Err(Diagnostic::new("array value cannot be used as a scalar"));
+    }
     if type_is_bool(left_type) || type_is_bool(right_type) {
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && left_type == right_type {
             return Ok(());
@@ -16223,6 +16233,44 @@ section .text
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, "type mismatch");
+        }
+    }
+
+    #[test]
+    fn rejects_arrays_used_as_scalar_values() {
+        let cases = [
+            r#"
+            global bytes: [u8; 2] = [1, 2]
+
+            fn main() {
+                let bad: u24 = bytes + 1
+                test.pass()
+            }
+            "#,
+            r#"
+            global bytes: [u8; 2] = [1, 2]
+
+            fn main() {
+                debug.hex_u24(bytes)
+                test.pass()
+            }
+            "#,
+            r#"
+            global left: [u8; 2] = [1, 2]
+            global right: [u8; 2] = [1, 2]
+
+            fn main() {
+                let same: bool = left == right
+                test.pass()
+            }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "array value cannot be used as a scalar");
         }
     }
 
