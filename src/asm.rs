@@ -9522,7 +9522,8 @@ section .text
             const PAIR_RIGHT: ptr<u16> = &pair.right
             const RAW_THIRD: ptr24 = cast<ptr24>(&bytes[2])
 
-            embed marker: bytes = bytes [0xAA, 0xBB]
+            const MARKER_ALIGN: u8 = 4
+            embed marker: bytes = bytes [0xAA, 0xBB] align MARKER_ALIGN
             global prefix: u8 = 0
             global bytes: [u8; 3] = [0, 0, 0]
             global pair: Pair = Pair { left: 0, right: 0 }
