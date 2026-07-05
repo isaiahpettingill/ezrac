@@ -8563,6 +8563,7 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
         "call" => vec!["af", "bc", "de", "hl"],
         "ldi" | "ldir" | "ldd" | "lddr" => vec!["bc", "de", "hl"],
         "cpi" | "cpir" | "cpd" | "cpdr" => vec!["bc", "hl"],
+        "mlt" => asm_operand_register(first).into_iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -13249,6 +13250,17 @@ section .text
                 "#,
                 "inline asm modifies `af` without declaring clobber `af`",
             ),
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "mlt bc"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `bc` without declaring clobber `bc`",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -13313,6 +13325,9 @@ section .text
             "asm volatile(clobber b, clobber c) { \"ld bc, 1234h\" }",
             "asm volatile(clobber h, clobber l) { \"ld hl, 040000h\" }",
             "asm volatile(clobber de, clobber hl) { \"ex de, hl\" }",
+            "asm volatile(clobber bc) { \"ld b, 11h\" \"ld c, 0Fh\" \"mlt bc\" }",
+            "asm volatile(clobber d, clobber e) { \"ld d, 02h\" \"ld e, 03h\" \"mlt de\" }",
+            "asm volatile(clobber h, clobber l) { \"ld h, 04h\" \"ld l, 05h\" \"mlt hl\" }",
         ];
 
         for asm_stmt in cases {
