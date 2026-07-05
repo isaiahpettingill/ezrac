@@ -260,7 +260,10 @@ impl Symbols {
             match declaration {
                 Declaration::Const(decl) => {
                     symbols.validate_const_expr_arithmetic_compatibility(&decl.value)?;
-                    let value = symbols.eval_i64(&decl.value)?;
+                    let mut value = symbols.eval_i64(&decl.value)?;
+                    if symbols.const_expr_uses_wrapping_arithmetic(&decl.value) {
+                        value = symbols.wrap_value_for_type(value, &decl.ty)?;
+                    }
                     symbols.validate_value_for_type(value, &decl.ty)?;
                     symbols.constants.insert(decl.name.clone(), value);
                     symbols
@@ -704,6 +707,10 @@ impl Symbols {
     }
 
     fn const_cast_value(&self, value: i64, ty: &Type) -> Result<i64, Diagnostic> {
+        self.wrap_value_for_type(value, ty)
+    }
+
+    fn wrap_value_for_type(&self, value: i64, ty: &Type) -> Result<i64, Diagnostic> {
         let resolved = self.resolved_type(ty)?;
         if type_is_bool(&resolved) {
             return Ok(i64::from(value != 0));
@@ -711,7 +718,51 @@ impl Symbols {
         let width = self.type_width(&resolved)?;
         let bits = u32::from(width.bytes()) * 8;
         let mask = (1_i128 << bits) - 1;
-        Ok(((value as i128) & mask) as i64)
+        let unsigned = (value as i128) & mask;
+        if type_is_signed(&resolved) {
+            let sign_bit = 1_i128 << (bits - 1);
+            if unsigned & sign_bit != 0 {
+                Ok((unsigned - (1_i128 << bits)) as i64)
+            } else {
+                Ok(unsigned as i64)
+            }
+        } else {
+            Ok(unsigned as i64)
+        }
+    }
+
+    fn const_expr_uses_wrapping_arithmetic(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Binary { .. } => true,
+            Expr::Unary {
+                op: UnaryOp::BitNot,
+                ..
+            } => true,
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+                self.const_expr_uses_wrapping_arithmetic(expr)
+            }
+            Expr::Array(values) => values
+                .iter()
+                .any(|value| self.const_expr_uses_wrapping_arithmetic(value)),
+            Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+                self.const_expr_uses_wrapping_arithmetic(index)
+            }
+            Expr::StructInit { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| self.const_expr_uses_wrapping_arithmetic(value)),
+            Expr::Call { args, .. } => args
+                .iter()
+                .any(|arg| self.const_expr_uses_wrapping_arithmetic(arg)),
+            Expr::Int(_)
+            | Expr::Char(_)
+            | Expr::Bool(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::Field { .. }
+            | Expr::AddressOf(_)
+            | Expr::AddressOfField { .. }
+            | Expr::In(_) => false,
+        }
     }
 
     fn validate_const_expr_arithmetic_compatibility(&self, expr: &Expr) -> Result<(), Diagnostic> {
@@ -6651,6 +6702,42 @@ mod tests {
             }
         "#;
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_wrapping_constant_arithmetic() {
+        let source = format!(
+            r#"
+            const U8_WRAP: u8 = 255 + 1
+            const I8_WRAP: i8 = 127 + 1
+            const U16_WRAP: u16 = 0xFFFF + 2
+            const I16_WRAP: i16 = 32767 + 1
+            const U8_NOT: u8 = ~0
+            const U8_SHIFT: u8 = 1 << 8
+
+            fn main() {{
+                test.assert_eq_u8(U8_WRAP, 0x{:02X}, 1)
+                test.assert_eq_u8(cast<u8>(I8_WRAP), 0x{:02X}, 2)
+                test.assert_eq_u16(U16_WRAP, 0x{:04X}, 3)
+                test.assert_eq_u16(cast<u16>(I16_WRAP), 0x{:04X}, 4)
+                test.assert_eq_u8(U8_NOT, 0x{:02X}, 5)
+                test.assert_eq_u8(U8_SHIFT, 0x{:02X}, 6)
+                test.pass()
+            }}
+            "#,
+            255u8.wrapping_add(1),
+            127i8.wrapping_add(1) as u8,
+            0xFFFFu16.wrapping_add(2),
+            32767i16.wrapping_add(1) as u16,
+            !0u8,
+            1u16.wrapping_shl(8) as u8,
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
 
