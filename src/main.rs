@@ -2,10 +2,9 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
     asm::{emit_ez80_assembly, emit_ez80_assembly_with_debug_comments},
-    cart::{CartridgeHeader, build_cartridge_with_code_and_symbols},
+    cart::{CartridgeHeader, build_cartridge_with_layout_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
-    layout::Layout,
-    target::{EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR},
+    layout::{Layout, parse_layout},
     vm::{assemble_ez80_subset_with_symbols_at, run_assembly_test},
 };
 
@@ -32,7 +31,7 @@ fn run() -> Result<(), String> {
             emit_asm(&options)
         }
         Some("test") => test_source(args.get(1).ok_or_else(|| usage())?),
-        Some("layout") => print_layout(),
+        Some("layout") => print_layout(args.get(1).map(String::as_str)),
         Some("header") => print_header(),
         Some("-h" | "--help") | None => {
             print_usage();
@@ -46,15 +45,22 @@ fn run() -> Result<(), String> {
 struct CommandOptions {
     path: String,
     debug_comments: bool,
+    layout_path: Option<String>,
 }
 
 impl CommandOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut path = None;
         let mut debug_comments = false;
-        for arg in args {
+        let mut layout_path = None;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "--debug-comments" => debug_comments = true,
+                "--layout" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    layout_path = Some(value.clone());
+                }
                 _ if path.is_none() => path = Some(arg.clone()),
                 _ => return Err(usage()),
             }
@@ -62,12 +68,13 @@ impl CommandOptions {
         Ok(Self {
             path: path.ok_or_else(usage)?,
             debug_comments,
+            layout_path,
         })
     }
 }
 
 fn build(options: &CommandOptions) -> Result<(), String> {
-    let outputs = build_source_with_options(&options.path, options.debug_comments)?;
+    let outputs = build_source_with_command_options(options)?;
     println!("wrote {}", outputs.asm.display());
     println!("wrote {}", outputs.map.display());
     println!("wrote {}", outputs.cart.display());
@@ -81,23 +88,33 @@ struct BuildOutputs {
     cart: PathBuf,
 }
 
+#[cfg(test)]
 fn build_source(path: &str) -> Result<BuildOutputs, String> {
     build_source_with_options(path, false)
 }
 
+#[cfg(test)]
 fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOutputs, String> {
-    let source_path = PathBuf::from(path);
+    build_source_with_command_options(&CommandOptions {
+        path: path.to_owned(),
+        debug_comments,
+        layout_path: None,
+    })
+}
+
+fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOutputs, String> {
+    let source_path = PathBuf::from(&options.path);
     let program = load_program(&source_path).map_err(|error| error.to_string())?;
-    let assembly = emit_ez80_assembly_with_debug_comments(&program, debug_comments)
+    let assembly = emit_ez80_assembly_with_debug_comments(&program, options.debug_comments)
         .map_err(|error| error.to_string())?;
-    let layout = Layout::ezra_default();
+    let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
         let message = errors
             .into_iter()
             .map(|error| error.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        return Err(format!("default layout is invalid:\n{message}"));
+        return Err(format!("layout is invalid:\n{message}"));
     }
 
     let stem = source_path
@@ -115,12 +132,17 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, layout.map_summary())
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let assembled = assemble_ez80_subset_with_symbols_at(&assembly, EZRA_ENTRY_ADDR.get())
+    let assembled = assemble_ez80_subset_with_symbols_at(&assembly, layout.entry.get())
         .map_err(|error| error.to_string())?;
     fs::write(
         &cart_path,
-        build_cartridge_with_code_and_symbols(&program, &assembled.bytes, &assembled.symbols)
-            .map_err(|error| error.to_string())?,
+        build_cartridge_with_layout_code_and_symbols(
+            &program,
+            &layout,
+            &assembled.bytes,
+            &assembled.symbols,
+        )
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
 
@@ -175,8 +197,8 @@ fn check(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn print_layout() -> Result<(), String> {
-    let layout = Layout::ezra_default();
+fn print_layout(path: Option<&str>) -> Result<(), String> {
+    let layout = load_layout(path)?;
     if let Err(errors) = layout.validate() {
         for error in errors {
             eprintln!("error: {error}");
@@ -191,6 +213,15 @@ fn print_layout() -> Result<(), String> {
     println!();
     print!("{}", layout.map_summary());
     Ok(())
+}
+
+fn load_layout(path: Option<&str>) -> Result<Layout, String> {
+    let Some(path) = path else {
+        return Ok(Layout::ezra_default());
+    };
+    let source =
+        fs::read_to_string(path).map_err(|error| format!("failed to read {path}: {error}"))?;
+    parse_layout(&source).map_err(|error| error.to_string())
 }
 
 fn print_header() -> Result<(), String> {
@@ -215,12 +246,13 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] <file.ezra> write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] <file.ezra>\n                                       emit readable eZ80 assembly\n  test <file.ezra>                     emit and run on the ez80 VM\n  layout                               print the default EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] <file.ezra>\n                                       emit readable eZ80 assembly\n  test <file.ezra>                     emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ezra::target::{EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR};
 
     fn temp_root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -298,6 +330,53 @@ mod tests {
         assert!(!plain_asm.contains("; source:"), "{plain_asm}");
         assert!(debug_asm.contains("; source: let x: u8 = 4"), "{debug_asm}");
         assert!(debug_asm.contains("; source: x += 1"), "{debug_asm}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_can_use_custom_layout_file() {
+        let root = temp_root("custom_layout_build");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        let layout_path = root.join("game.ezralayout");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout custom {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xF00000;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    section .text -> code align 16;
+
+                    symbol EZRA_LOAD_ADDR = 0x020000;
+                    symbol EZRA_ENTRY_ADDR = 0x020040;
+                    symbol EZRA_STACK_TOP = 0xF00000;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+
+        let map = std::fs::read_to_string(&outputs.map).unwrap();
+        let cart = std::fs::read(&outputs.cart).unwrap();
+
+        assert!(map.contains(".text"));
+        assert_eq!(read_addr24(&cart, 0x08), 0x020040);
+        let layout_table = read_addr24(&cart, 0x1E);
+        assert!(layout_table > 0x020040);
+        let layout_offset = usize::try_from(layout_table - 0x020000).unwrap();
+        assert!(cart[layout_offset..].starts_with(b"layout custom\n"));
+        assert_eq!(&cart[64..68], &[0x31, 0x00, 0x00, 0xF0]);
 
         let _ = std::fs::remove_dir_all(root);
     }

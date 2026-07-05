@@ -6,8 +6,8 @@ use crate::{
     layout::Layout,
     target::{
         Address24, CART_MAGIC, CPU_MODE_EZ80_ADL, EZRA_ASSET_BASE, EZRA_AUDIO_BASE,
-        EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
-        FORMAT_VERSION, HEADER_SIZE,
+        EZRA_ENTRY_ADDR, EZRA_RAM_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE, FORMAT_VERSION,
+        HEADER_SIZE,
     },
     vm::AssemblySymbol,
 };
@@ -107,7 +107,28 @@ pub fn build_cartridge_with_code_and_symbols(
     code: &[u8],
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<u8>, Diagnostic> {
-    let layout_table = serialize_layout_table(&Layout::ezra_default());
+    build_cartridge_with_layout_code_and_symbols(program, &Layout::ezra_default(), code, symbols)
+}
+
+pub fn build_cartridge_with_layout_code_and_symbols(
+    program: &Program,
+    layout: &Layout,
+    code: &[u8],
+    symbols: &[AssemblySymbol],
+) -> Result<Vec<u8>, Diagnostic> {
+    let expected_entry = layout
+        .load
+        .get()
+        .checked_add(u32::from(HEADER_SIZE))
+        .ok_or_else(|| Diagnostic::new("layout load address leaves no room for header"))?;
+    if !code.is_empty() && layout.entry.get() != expected_entry {
+        return Err(Diagnostic::new(format!(
+            "current cartridge packer requires entry {} to equal load + header_size 0x{expected_entry:06X}",
+            layout.entry
+        )));
+    }
+
+    let layout_table = serialize_layout_table(layout);
     let symbol_table = serialize_symbol_table(symbols);
     let code_len = u32::try_from(code.len())
         .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
@@ -127,23 +148,23 @@ pub fn build_cartridge_with_code_and_symbols(
         )
         .ok_or_else(|| Diagnostic::new("symbol table exceeds 24-bit address space"))?;
 
-    let layout_table_addr = checked_image_addr(layout_offset)?;
+    let layout_table_addr = checked_image_addr(layout.load, layout_offset)?;
     let symbol_table_addr = if symbol_table.is_empty() {
         None
     } else {
-        Some(checked_image_addr(symbol_offset)?)
+        Some(checked_image_addr(layout.load, symbol_offset)?)
     };
     let assets = collect_assets(program)?;
     let asset_table_addr = if assets.is_empty() {
         None
     } else {
-        Some(checked_image_addr(asset_table_offset)?)
+        Some(checked_image_addr(layout.load, asset_table_offset)?)
     };
     let mut header = CartridgeHeader {
         layout_table_addr: Some(layout_table_addr),
         asset_table_addr,
         symbol_table_addr,
-        ..CartridgeHeader::default()
+        ..header_from_layout(layout)
     };
     let mut table = Vec::with_capacity(assets.len() * ASSET_TABLE_ENTRY_SIZE);
     let mut names = Vec::new();
@@ -159,7 +180,7 @@ pub fn build_cartridge_with_code_and_symbols(
         align_payload(&mut payload, asset.align);
         let payload_offset = u32::try_from(payload.len())
             .map_err(|_| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
-        let asset_addr = checked_asset_addr(payload_offset)?;
+        let asset_addr = checked_asset_addr(header.asset_base, payload_offset)?;
         let asset_len = u32::try_from(asset.bytes.len())
             .map_err(|_| Diagnostic::new("asset length exceeds 24-bit address space"))?;
         if asset_len > Address24::MAX {
@@ -352,20 +373,40 @@ fn align_payload(payload: &mut Vec<u8>, align: u32) {
     }
 }
 
-fn checked_asset_addr(offset: u32) -> Result<Address24, Diagnostic> {
-    let addr = EZRA_ASSET_BASE
+fn checked_asset_addr(asset_base: Address24, offset: u32) -> Result<Address24, Diagnostic> {
+    let addr = asset_base
         .get()
         .checked_add(offset)
         .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
     Address24::try_from(addr).map_err(|error| Diagnostic::new(error.to_string()))
 }
 
-fn checked_image_addr(offset: u32) -> Result<Address24, Diagnostic> {
-    let addr = EZRA_LOAD_ADDR
+fn checked_image_addr(load: Address24, offset: u32) -> Result<Address24, Diagnostic> {
+    let addr = load
         .get()
         .checked_add(offset)
         .ok_or_else(|| Diagnostic::new("cartridge image exceeds 24-bit address space"))?;
     Address24::try_from(addr).map_err(|error| Diagnostic::new(error.to_string()))
+}
+
+fn header_from_layout(layout: &Layout) -> CartridgeHeader {
+    CartridgeHeader {
+        entry_addr: layout.entry,
+        stack_top: layout.stack,
+        ram_base: layout_symbol(layout, "EZRA_RAM_BASE").unwrap_or(EZRA_RAM_BASE),
+        vram_base: layout_symbol(layout, "EZRA_VRAM_BASE").unwrap_or(EZRA_VRAM_BASE),
+        audio_base: layout_symbol(layout, "EZRA_AUDIO_BASE").unwrap_or(EZRA_AUDIO_BASE),
+        asset_base: layout_symbol(layout, "EZRA_ASSET_BASE").unwrap_or(EZRA_ASSET_BASE),
+        ..CartridgeHeader::default()
+    }
+}
+
+fn layout_symbol(layout: &Layout, name: &str) -> Option<Address24> {
+    layout
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == name)
+        .map(|symbol| symbol.value)
 }
 
 fn serialize_layout_table(layout: &Layout) -> Vec<u8> {
@@ -438,6 +479,7 @@ mod tests {
     use std::path::Path;
 
     use crate::parser::parse_program;
+    use crate::target::EZRA_LOAD_ADDR;
 
     use super::*;
 
