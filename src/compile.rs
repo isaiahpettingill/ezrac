@@ -472,6 +472,7 @@ fn validate_expr_private_import_access(
             }
             Ok(())
         }
+        Expr::TypedInt(_, ty) => validate_type_private_import_access(ty, private_imports),
         Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::String(_) => Ok(()),
     }
 }

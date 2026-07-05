@@ -583,7 +583,7 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
         Rule::path_expr => Ok(Expr::Ident(pair.as_str().to_owned())),
         Rule::literal => build_expr(pair.into_inner().next().unwrap()),
         Rule::bool_lit => Ok(Expr::Bool(pair.as_str() == "true")),
-        Rule::int_lit => Ok(Expr::Int(parse_int(pair.as_str())?)),
+        Rule::int_lit => build_int_lit(pair.as_str()),
         Rule::char_lit => Ok(Expr::Char(parse_char(pair.as_str())?)),
         Rule::string_lit => Ok(Expr::String(parse_string(pair.as_str())?)),
         _ => unreachable!("unexpected expr rule {:?}", pair.as_rule()),
@@ -802,13 +802,7 @@ fn is_allowed_asm_clobber(clobber: &str) -> bool {
 }
 
 fn parse_int(text: &str) -> Result<i64, Diagnostic> {
-    let digits = text
-        .trim_end_matches("u8")
-        .trim_end_matches("i8")
-        .trim_end_matches("u16")
-        .trim_end_matches("i16")
-        .trim_end_matches("u24")
-        .trim_end_matches("i24");
+    let digits = strip_int_suffix(text).0;
     if let Some(hex) = digits.strip_prefix("0x") {
         i64::from_str_radix(hex, 16)
     } else if let Some(bin) = digits.strip_prefix("0b") {
@@ -817,6 +811,25 @@ fn parse_int(text: &str) -> Result<i64, Diagnostic> {
         digits.parse()
     }
     .map_err(|_| Diagnostic::new(format!("invalid integer literal `{text}`")))
+}
+
+fn build_int_lit(text: &str) -> Result<Expr, Diagnostic> {
+    let (digits, suffix) = strip_int_suffix(text);
+    let value = parse_int(digits)?;
+    if let Some(suffix) = suffix {
+        Ok(Expr::TypedInt(value, Type::Named(suffix.to_owned())))
+    } else {
+        Ok(Expr::Int(value))
+    }
+}
+
+fn strip_int_suffix(text: &str) -> (&str, Option<&str>) {
+    for suffix in ["u24", "i24", "u16", "i16", "u8", "i8"] {
+        if let Some(digits) = text.strip_suffix(suffix) {
+            return (digits, Some(suffix));
+        }
+    }
+    (text, None)
 }
 
 fn parse_char(text: &str) -> Result<u8, Diagnostic> {

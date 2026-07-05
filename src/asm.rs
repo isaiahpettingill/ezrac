@@ -729,7 +729,7 @@ impl Symbols {
 
     fn eval_i64(&self, expr: &Expr) -> Result<i64, Diagnostic> {
         match expr {
-            Expr::Int(value) => Ok(*value),
+            Expr::Int(value) | Expr::TypedInt(value, _) => Ok(*value),
             Expr::Char(value) => Ok(*value as i64),
             Expr::Bool(value) => Ok(i64::from(*value)),
             Expr::Ident(name) => self
@@ -845,6 +845,7 @@ impl Symbols {
                 .iter()
                 .any(|arg| self.const_expr_uses_wrapping_arithmetic(arg)),
             Expr::Int(_)
+            | Expr::TypedInt(_, _)
             | Expr::Char(_)
             | Expr::Bool(_)
             | Expr::String(_)
@@ -909,6 +910,7 @@ impl Symbols {
                 }
             }
             Expr::Int(_)
+            | Expr::TypedInt(_, _)
             | Expr::Char(_)
             | Expr::Bool(_)
             | Expr::String(_)
@@ -982,6 +984,7 @@ impl Symbols {
                 }
             }
             Expr::Int(value) => Ok(int_value_type(*value)),
+            Expr::TypedInt(_, ty) => Ok(ty.clone()),
             Expr::Char(_) => Ok(Type::Named("u8".to_owned())),
             Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
             Expr::Unary { expr, op } => match op {
@@ -2782,7 +2785,7 @@ impl Emitter {
                 self.emit_load_pointed_width_into(stored);
                 self.emit_load_width(stored);
             }
-            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => {
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) | Expr::Bool(_) => {
                 let value = self.value_for_width(expr, width)?;
                 self.line(&format!("    ld hl, {:06X}h", value));
             }
@@ -3056,7 +3059,7 @@ impl Emitter {
             Expr::Deref(ptr) => {
                 self.emit_deref_to_a(ptr)?;
             }
-            Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => {
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) | Expr::Bool(_) => {
                 let value = self.u8(expr)?;
                 self.line(&format!("    ld a, {:02X}h", value));
             }
@@ -4704,6 +4707,7 @@ impl Emitter {
                     Ok(Type::Named("u24".to_owned()))
                 }
             }
+            Expr::TypedInt(_, ty) => Ok(ty.clone()),
             Expr::Char(_) | Expr::In(_) => Ok(Type::Named("u8".to_owned())),
             Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
             Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
@@ -4802,6 +4806,7 @@ impl Emitter {
                     Ok(ValueWidth::U24)
                 }
             }
+            Expr::TypedInt(_, ty) => self.symbols.type_width(ty),
             Expr::Char(_) | Expr::Bool(_) | Expr::In(_) => Ok(ValueWidth::U8),
             Expr::String(_) => Ok(ValueWidth::U24),
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar width")),
@@ -5041,6 +5046,7 @@ impl Emitter {
                 }
             }
             Expr::Int(_)
+            | Expr::TypedInt(_, _)
             | Expr::Bool(_)
             | Expr::Char(_)
             | Expr::String(_)
@@ -5397,6 +5403,7 @@ fn validate_expr_calls(
             validate_expr_calls(right, functions)?;
         }
         Expr::Int(_)
+        | Expr::TypedInt(_, _)
         | Expr::Bool(_)
         | Expr::Char(_)
         | Expr::String(_)
@@ -5629,6 +5636,7 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<String>) {
             collect_expr_calls(right, calls);
         }
         Expr::Int(_)
+        | Expr::TypedInt(_, _)
         | Expr::Bool(_)
         | Expr::Char(_)
         | Expr::String(_)
@@ -5826,6 +5834,7 @@ fn place_summary(place: &Place) -> String {
 fn expr_summary(expr: &Expr) -> String {
     match expr {
         Expr::Int(value) => value.to_string(),
+        Expr::TypedInt(value, ty) => format!("{value}{}", type_display(ty)),
         Expr::Bool(value) => value.to_string(),
         Expr::Char(value) => format!("'{}'", char::from(*value).escape_default()),
         Expr::String(value) => format!("{value:?}"),
@@ -6824,6 +6833,13 @@ mod tests {
             ),
             (
                 r#"
+                const WIDE: i8 = 128i8
+                fn main() { test.pass() }
+                "#,
+                "value 128 is outside i8 range",
+            ),
+            (
+                r#"
                 alias tiny = i8
                 const WIDE: tiny = -129
                 fn main() { test.pass() }
@@ -6891,6 +6907,12 @@ mod tests {
             const UNSIGNED: u16 = 2
             fn main() {
                 let mixed: i16 = SIGNED + UNSIGNED
+                test.pass()
+            }
+            "#,
+            r#"
+            fn main() {
+                let mixed: i8 = 1i8 + 2u8
                 test.pass()
             }
             "#,
@@ -9543,6 +9565,47 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_typed_integer_literal_suffixes() {
+        let expected_i8 = (-3i8) as u8;
+        let expected_i16 = (-300i16) as u16;
+        let expected_i24 = (-0x012345i32) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            const BYTE: u8 = 123u8
+            const NEG8: i8 = -3i8
+            const WORD: u16 = 12345u16
+            const NEG16: i16 = -300i16
+            const LONG: u24 = 0x123456u24
+            const NEG24: i24 = -0x012345i24
+
+            fn main() {{
+                let byte: u8 = 7u8
+                let signed: i8 = -3i8
+                let word: u16 = 0x2345u16
+                let wide: u24 = 0x345678u24
+                test.assert_eq_u8(BYTE, 123, 1)
+                test.assert_eq_u8(cast<u8>(NEG8), 0x{expected_i8:02X}, 2)
+                test.assert_eq_u16(WORD, 12345, 3)
+                test.assert_eq_u16(cast<u16>(NEG16), 0x{expected_i16:04X}, 4)
+                test.assert_eq_u24(LONG, 0x123456, 5)
+                test.assert_eq_u24(cast<u24>(NEG24), 0x{expected_i24:06X}, 6)
+                test.assert_eq_u8(byte, 7, 7)
+                test.assert_eq_u8(cast<u8>(signed), 0x{expected_i8:02X}, 8)
+                test.assert_eq_u16(word, 0x2345, 9)
+                test.assert_eq_u24(wide, 0x345678, 10)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

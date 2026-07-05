@@ -193,6 +193,7 @@ pub enum AssignOp {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Int(i64),
+    TypedInt(i64, Type),
     Bool(bool),
     Char(u8),
     String(String),
