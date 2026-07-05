@@ -202,6 +202,7 @@ struct Symbols {
     functions: HashMap<String, FunctionSig>,
     inline_functions: HashMap<String, Function>,
     next_addr: u32,
+    asset_next_addr: u32,
     rodata_next_addr: u32,
 }
 
@@ -254,6 +255,7 @@ impl Symbols {
             functions: HashMap::new(),
             inline_functions: HashMap::new(),
             next_addr: options.ram_base.get(),
+            asset_next_addr: options.asset_base.get(),
             rodata_next_addr: options.rodata_base.get(),
         };
 
@@ -513,6 +515,28 @@ impl Symbols {
         Ok(variable)
     }
 
+    fn alloc_section_bytes(
+        &mut self,
+        section: &str,
+        align: u32,
+        len: u32,
+    ) -> Result<Variable, Diagnostic> {
+        match section {
+            ".assets" => {
+                let variable = alloc_from_cursor(&mut self.asset_next_addr, align, len)?;
+                Ok(variable)
+            }
+            ".rodata" => {
+                let variable = alloc_from_cursor(&mut self.rodata_next_addr, align, len)?;
+                Ok(variable)
+            }
+            _ => {
+                self.align_next_addr(align);
+                Ok(self.alloc_array(u32::from(ValueWidth::U8.bytes()), len))
+            }
+        }
+    }
+
     fn align_next_addr(&mut self, align: u32) {
         if align <= 1 {
             return;
@@ -672,9 +696,11 @@ impl Symbols {
             }
         }
         let bytes = self.embed_bytes(&decl.source, &program.source_path)?;
-        self.align_next_addr(align);
-        let variable = self.alloc_array(u32::from(ValueWidth::U8.bytes()), bytes.len() as u32);
-        self.register_embed_properties(&decl.name, variable, bytes.len() as u32);
+        let len = u32::try_from(bytes.len())
+            .map_err(|_| Diagnostic::new("embedded asset exceeds 24-bit address space"))?;
+        let section = decl.section.as_deref().unwrap_or(".assets");
+        let variable = self.alloc_section_bytes(section, align, len)?;
+        self.register_embed_properties(&decl.name, variable, len);
         self.embeds
             .insert(decl.name.clone(), EmbedObject { variable, bytes });
         Ok(())
@@ -7137,6 +7163,31 @@ fn trunc_mod_or_zero(left: i64, right: i64) -> i64 {
     }
 }
 
+fn alloc_from_cursor(cursor: &mut u32, align: u32, size: u32) -> Result<Variable, Diagnostic> {
+    if align > 1 {
+        let mask = align - 1;
+        *cursor = cursor
+            .checked_add(mask)
+            .map(|addr| addr & !mask)
+            .ok_or_else(|| Diagnostic::new("section alignment exceeds 24-bit address space"))?;
+    }
+    let variable = Variable {
+        addr: *cursor,
+        size,
+        element_size: Some(u32::from(ValueWidth::U8.bytes())),
+        len: Some(size),
+    };
+    *cursor = cursor
+        .checked_add(size)
+        .ok_or_else(|| Diagnostic::new("section allocation exceeds 24-bit address space"))?;
+    if *cursor > Address24::MAX + 1 {
+        return Err(Diagnostic::new(
+            "section allocation exceeds 24-bit address space",
+        ));
+    }
+    Ok(variable)
+}
+
 fn recursive_call_edges(
     program: &Program,
     functions: &HashMap<String, FunctionSig>,
@@ -11290,11 +11341,12 @@ section .text
                 let third: ptr<u8> = cast<ptr<u8>>(RAW_THIRD);
                 *(third) = 0x99;
 
-                test.assert_eq_u24(cast<u24>(&prefix), cast<u24>(marker.end), 1)
+                test.assert_eq_u24(cast<u24>(marker.ptr), EZRA_ASSET_BASE, 1)
                 test.assert_eq_u24(cast<u24>(&bytes[0]), cast<u24>(&prefix) + 1, 2)
                 test.assert_eq_u8(bytes[1], 0x44, 3)
                 test.assert_eq_u8(bytes[2], 0x99, 4)
                 test.assert_eq_u16(pair.right, 0x5678, 5)
+                test.assert_eq_u24(cast<u24>(marker.end), EZRA_ASSET_BASE + 2, 6)
                 test.pass()
             }
         "#;
@@ -16260,18 +16312,22 @@ section .text
                 test.assert_eq_u8(*palette_ptr, 0x11, 2);
                 test.assert_eq_u8(*(palette.ptr + 1), 0x22, 3);
                 test.assert_eq_u8(*(palette.end - 1), 0x33, 4);
+                test.assert_eq_u24(cast<ptr24>(palette.ptr), EZRA_RODATA_BASE, 14);
 
                 test.assert_eq_u24(title_text.len, 2, 5);
                 test.assert_eq_u8(*(title_text.ptr + 0), 'H', 6);
                 test.assert_eq_u8(*(title_text.ptr + 1), 'I', 7);
+                test.assert_eq_u24(cast<ptr24>(title_text.ptr), EZRA_ASSET_BASE, 15);
 
                 test.assert_eq_u24(title_cstr.len, 3, 8);
                 test.assert_eq_u8(*(title_cstr.ptr + 0), 'O', 9);
                 test.assert_eq_u8(*(title_cstr.ptr + 1), 'K', 10);
                 test.assert_eq_u8(*(title_cstr.ptr + 2), 0, 11);
+                test.assert_eq_u24(cast<ptr24>(title_cstr.ptr), EZRA_ASSET_BASE + 2, 16);
 
                 test.assert_eq_u24(blank.len, 4, 12);
                 test.assert_eq_u8(*(blank.ptr + 3), 0x7E, 13);
+                test.assert_eq_u24(cast<ptr24>(blank.ptr), EZRA_ASSET_BASE + 5, 17);
                 test.pass()
             }
         "#;
