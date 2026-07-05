@@ -315,6 +315,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         "reti" | "sra a" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix" | "push iy" | "pop iy"
     ) {
         Ok(2)
+    } else if parse_block_transfer(text).is_some() {
+        Ok(2)
     } else if parse_mlt_reg16(text).is_some() {
         Ok(2)
     } else if text == "sbc hl, bc"
@@ -544,6 +546,8 @@ fn emit_instruction(
         bytes.extend([0xFD, 0xE1]);
     } else if text == "reti" {
         bytes.extend([0xED, 0x4D]);
+    } else if let Some(opcode) = parse_block_transfer(text) {
+        bytes.extend([0xED, opcode]);
     } else if let Some(opcode) = parse_mlt_reg16(text) {
         bytes.extend([0xED, opcode]);
     } else if text == "add ix, sp" {
@@ -751,6 +755,16 @@ fn ld_direct_reg16_store_opcode(register: &str) -> u8 {
         "bc" => 0x43,
         "de" => 0x53,
         _ => unreachable!("invalid direct-store register {register}"),
+    }
+}
+
+fn parse_block_transfer(text: &str) -> Option<u8> {
+    match text {
+        "ldi" => Some(0xA0),
+        "ldir" => Some(0xB0),
+        "ldd" => Some(0xA8),
+        "lddr" => Some(0xB8),
+        _ => None,
     }
 }
 
@@ -1569,6 +1583,60 @@ mod tests {
             out0 (0Eh), a
         "#;
         let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn assembles_ez80_block_transfer_instructions() {
+        let bytes = assemble_ez80_subset_at(
+            r#"
+            ldi
+            ldir
+            ldd
+            lddr
+            "#,
+            EZRA_LOAD_ADDR.get(),
+        )
+        .unwrap();
+
+        assert_eq!(bytes, [0xED, 0xA0, 0xED, 0xB0, 0xED, 0xA8, 0xED, 0xB8]);
+    }
+
+    #[test]
+    fn runs_ez80_ldir_on_vm() {
+        let asm = r#"
+            ld a, 41h
+            ld (040300h), a
+            ld a, 42h
+            ld (040301h), a
+            ld a, 43h
+            ld (040302h), a
+            ld hl, 040300h
+            ld de, 040310h
+            ld bc, 000003h
+            ldir
+            ld a, (040310h)
+            cp 41h
+            jp nz, fail
+            ld a, (040311h)
+            cp 42h
+            jp nz, fail
+            ld a, (040312h)
+            cp 43h
+            jp nz, fail
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        fail:
+            ld a, 02h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 200).unwrap();
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);

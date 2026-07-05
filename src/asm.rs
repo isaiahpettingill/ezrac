@@ -8619,6 +8619,14 @@ fn asm_line_clobbers_flags(line: &str) -> bool {
             | "srl"
             | "sub"
             | "xor"
+            | "ldi"
+            | "ldir"
+            | "ldd"
+            | "lddr"
+            | "cpi"
+            | "cpir"
+            | "cpd"
+            | "cpdr"
     )
 }
 
@@ -13293,6 +13301,17 @@ section .text
                 "#,
                 "inline asm modifies `bc` without declaring clobber `bc`",
             ),
+            (
+                r#"
+                fn main() {
+                    asm volatile(clobber bc, clobber de, clobber hl) {
+                        "ldir"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm changes flags without declaring clobber `flags`",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -13398,6 +13417,34 @@ section .text
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 1_000).unwrap();
 
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_inline_asm_ldir_with_declared_clobbers() {
+        let source = r#"
+            global src: [u8; 3] = [0x41, 0x42, 0x43]
+            global dst: [u8; 3] = [0, 0, 0]
+
+            fn main() {
+                asm volatile(clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+                    "ld hl, 040000h"
+                    "ld de, 040003h"
+                    "ld bc, 000003h"
+                    "ldir"
+                }
+                test.assert_eq_u8(dst[0], 0x41, 1)
+                test.assert_eq_u8(dst[1], 0x42, 2)
+                test.assert_eq_u8(dst[2], 0x43, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    ldir"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
