@@ -133,6 +133,7 @@ struct StructField {
 struct FunctionSig {
     arity: usize,
     params: Vec<ValueWidth>,
+    param_types: Vec<Type>,
     return_width: ValueWidth,
     return_type: Option<Type>,
 }
@@ -196,6 +197,7 @@ impl Symbols {
                         .iter()
                         .map(|param| symbols.type_width(&param.ty))
                         .collect::<Result<Vec<_>, _>>()?,
+                    param_types: params.iter().map(|param| param.ty.clone()).collect(),
                     return_width: return_type
                         .as_ref()
                         .map(|ty| symbols.type_width(ty))
@@ -1451,8 +1453,9 @@ impl Emitter {
         let mut temps = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let width = sig.params[index];
+            let ty = &sig.param_types[index];
             let temp = self.symbols.alloc_var(width.bytes());
-            self.emit_expr_to_width(arg, width)?;
+            self.emit_expr_to_type(arg, ty)?;
             self.emit_store_width(temp);
             temps.push(temp);
         }
@@ -3791,6 +3794,52 @@ mod tests {
     }
 
     #[test]
+    fn rejects_call_argument_type_changes_without_cast() {
+        let cases = [
+            (
+                r#"
+                fn takes_wide(value: u16) {}
+                fn main() {
+                    let small: u8 = 1
+                    takes_wide(small)
+                    test.pass()
+                }
+                "#,
+                "widening without cast",
+            ),
+            (
+                r#"
+                fn takes_small(value: u8) {}
+                fn main() {
+                    let wide: u16 = 0x1234
+                    takes_small(wide)
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                fn takes_unsigned(value: u8) {}
+                fn main() {
+                    let signed: i8 = 1
+                    takes_unsigned(signed)
+                    test.pass()
+                }
+                "#,
+                "signed/unsigned mix without cast",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
     fn rejects_bool_integer_mismatch() {
         let cases = [
             r#"
@@ -3984,6 +4033,33 @@ mod tests {
                 let y: u8 = add(x, 6)
                 let z: u8 = mix(y, 2, 3)
                 test.assert_eq_u8(z, 16, 8)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_user_function_calls_with_explicit_casts() {
+        let source = r#"
+            fn low(value: u8) -> u8 {
+                return value
+            }
+
+            fn wide(value: u16) -> u16 {
+                return value
+            }
+
+            fn main() {
+                let small: u8 = 0x12
+                let big: u16 = 0x1234
+                test.assert_eq_u16(wide(cast<u16>(small)), 0x0012, 1)
+                test.assert_eq_u8(low(cast<u8>(big)), 0x34, 2)
                 test.pass()
             }
         "#;
