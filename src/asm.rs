@@ -2430,6 +2430,7 @@ impl Emitter {
                 let expr = args
                     .first()
                     .ok_or_else(|| Diagnostic::new("debug.char requires one argument"))?;
+                self.validate_expr_assignable_to_type(expr, &Type::Named("u8".to_owned()))?;
                 self.emit_expr_to_a(expr)?;
                 self.emit_out_a(0x0C);
             }
@@ -2467,6 +2468,7 @@ impl Emitter {
         if args.len() != 1 {
             return Err(Diagnostic::new("debug.str requires one argument"));
         }
+        self.validate_expr_is_ptr_u8(&args[0])?;
 
         let cursor = self.alloc_var(ValueWidth::U24.bytes());
         let loop_label = self.next_label("debug_str");
@@ -2498,6 +2500,7 @@ impl Emitter {
                 "debug.hex_{suffix} requires one argument"
             )));
         }
+        self.validate_expr_assignable_to_type(&args[0], &width_unsigned_type(width))?;
 
         match width {
             ValueWidth::U8 => {
@@ -6442,6 +6445,15 @@ fn ptr_u8_type() -> Type {
     Type::Ptr(Box::new(Type::Named("u8".to_owned())))
 }
 
+fn width_unsigned_type(width: ValueWidth) -> Type {
+    let name = match width {
+        ValueWidth::U8 => "u8",
+        ValueWidth::U16 => "u16",
+        ValueWidth::U24 => "u24",
+    };
+    Type::Named(name.to_owned())
+}
+
 fn is_raw_address_type(name: &str) -> bool {
     matches!(name, "u24" | "ptr24")
 }
@@ -8222,6 +8234,58 @@ mod tests {
                 }
                 "#,
                 "type mismatch",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_debug_builtin_argument_types() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let wide: u16 = 0x1234
+                    debug.char(wide)
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    debug.str(0x040000)
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+                fn main() {
+                    let byte: u8 = 0x12
+                    debug.hex_u16(byte)
+                    test.pass()
+                }
+                "#,
+                "widening without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let signed: i8 = -1
+                    debug.hex_u8(signed)
+                    test.pass()
+                }
+                "#,
+                "signed/unsigned mix without cast",
             ),
         ];
 
