@@ -8484,6 +8484,11 @@ fn validate_inline_asm_clobbers(
                 "inline asm changes flags without declaring clobber `flags`",
             ));
         }
+        if asm_line_uses_memory(&lower) && !asm_clobbers_include(clobbers, "memory") {
+            return Err(Diagnostic::new(
+                "inline asm uses memory without declaring clobber `memory`",
+            ));
+        }
         for register in asm_line_modified_registers(&lower) {
             if !asm_clobbers_include_register(clobbers, register) {
                 return Err(Diagnostic::new(format!(
@@ -8549,10 +8554,41 @@ fn asm_clobbers_include_register(clobbers: &[String], register: &str) -> bool {
 }
 
 fn asm_line_uses_ports(line: &str) -> bool {
-    asm_line_mentions_word(line, "out")
+    let mnemonic_uses_ports = asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, _)| {
+        matches!(
+            mnemonic,
+            "ini" | "inir" | "ind" | "indr" | "outi" | "otir" | "outd" | "otdr"
+        )
+    });
+    mnemonic_uses_ports
+        || asm_line_mentions_word(line, "out")
         || asm_line_mentions_word(line, "out0")
         || asm_line_mentions_word(line, "in")
         || asm_line_mentions_word(line, "in0")
+}
+
+fn asm_line_uses_memory(line: &str) -> bool {
+    asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, _)| {
+        matches!(
+            mnemonic,
+            "ldi"
+                | "ldir"
+                | "ldd"
+                | "lddr"
+                | "cpi"
+                | "cpir"
+                | "cpd"
+                | "cpdr"
+                | "ini"
+                | "inir"
+                | "ind"
+                | "indr"
+                | "outi"
+                | "otir"
+                | "outd"
+                | "otdr"
+        )
+    })
 }
 
 fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
@@ -8583,6 +8619,9 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
         "call" => vec!["af", "bc", "de", "hl"],
         "ldi" | "ldir" | "ldd" | "lddr" => vec!["bc", "de", "hl"],
         "cpi" | "cpir" | "cpd" | "cpdr" => vec!["bc", "hl"],
+        "ini" | "inir" | "ind" | "indr" | "outi" | "otir" | "outd" | "otdr" => {
+            vec!["bc", "hl"]
+        }
         "mlt" => asm_operand_register(first).into_iter().collect(),
         _ => Vec::new(),
     }
@@ -8627,6 +8666,14 @@ fn asm_line_clobbers_flags(line: &str) -> bool {
             | "cpir"
             | "cpd"
             | "cpdr"
+            | "ini"
+            | "inir"
+            | "ind"
+            | "indr"
+            | "outi"
+            | "otir"
+            | "outd"
+            | "otdr"
     )
 }
 
@@ -13312,6 +13359,17 @@ section .text
                 "#,
                 "inline asm changes flags without declaring clobber `flags`",
             ),
+            (
+                r#"
+                fn main() {
+                    asm volatile(clobber bc, clobber hl, clobber flags, clobber ports) {
+                        "otir"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm uses memory without declaring clobber `memory`",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -13475,6 +13533,30 @@ section .text
         assert!(asm.contains("    cpir"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_inline_asm_otir_with_declared_clobbers() {
+        let source = r#"
+            global bytes: [u8; 2] = [0x11, 0x42]
+
+            fn main() {
+                asm volatile(clobber bc, clobber hl, clobber flags, clobber memory, clobber ports) {
+                    "ld hl, 040000h"
+                    "ld bc, 000220h"
+                    "otir"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    otir"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.ports[0x20], 0x42, "{asm}");
     }
 
     #[test]

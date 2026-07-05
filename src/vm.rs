@@ -768,6 +768,14 @@ fn parse_block_operation(text: &str) -> Option<u8> {
         "cpir" => Some(0xB1),
         "cpd" => Some(0xA9),
         "cpdr" => Some(0xB9),
+        "ini" => Some(0xA2),
+        "inir" => Some(0xB2),
+        "ind" => Some(0xAA),
+        "indr" => Some(0xBA),
+        "outi" => Some(0xA3),
+        "otir" => Some(0xB3),
+        "outd" => Some(0xAB),
+        "otdr" => Some(0xBB),
         _ => None,
     }
 }
@@ -1703,6 +1711,75 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn assembles_ez80_block_io_instructions() {
+        let bytes = assemble_ez80_subset_at(
+            r#"
+            ini
+            inir
+            ind
+            indr
+            outi
+            otir
+            outd
+            otdr
+            "#,
+            EZRA_LOAD_ADDR.get(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xED, 0xA2, 0xED, 0xB2, 0xED, 0xAA, 0xED, 0xBA, 0xED, 0xA3, 0xED, 0xB3, 0xED, 0xAB,
+                0xED, 0xBB,
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_ez80_otir_on_vm() {
+        let asm = r#"
+            ld a, 11h
+            ld (040320h), a
+            ld a, 42h
+            ld (040321h), a
+            ld hl, 040320h
+            ld bc, 000220h
+            otir
+            ld a, c
+            cp 20h
+            jp nz, fail
+            ld a, b
+            cp 00h
+            jp nz, fail
+            ld (040330h), hl
+            ld a, (040330h)
+            cp 22h
+            jp nz, fail
+            ld a, (040331h)
+            cp 03h
+            jp nz, fail
+            ld a, (040332h)
+            cp 04h
+            jp nz, fail
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        fail:
+            ld a, 02h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 400).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.ports[0x20], 0x42);
     }
 
     #[test]
