@@ -3322,12 +3322,17 @@ impl Emitter {
     fn emit_cast_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
         self.validate_cast(expr, ty)?;
         let width = self.symbols.type_width(ty)?;
+        let target_type = self.symbols.resolved_type(ty)?;
         let source_type = self.symbols.resolved_type(&self.expr_type(expr)?)?;
         if !self.is_pointer_arithmetic_expr(expr)? {
             if let Ok(value) = self.eval_i64_with_local_constants(expr) {
                 let bits = u32::from(width.bytes()) * 8;
                 let mask = (1_i128 << bits) - 1;
-                let value = ((value as i128) & mask) as u32;
+                let value = if type_is_bool(&target_type) {
+                    u32::from(value != 0)
+                } else {
+                    ((value as i128) & mask) as u32
+                };
                 match width {
                     ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
                     ValueWidth::U16 | ValueWidth::U24 => {
@@ -3345,6 +3350,9 @@ impl Emitter {
                 } else {
                     self.emit_expr_to_hl(expr, source_width)?;
                     self.line("    ld a, l");
+                }
+                if type_is_bool(&target_type) {
+                    self.emit_normalize_a_to_bool();
                 }
             }
             ValueWidth::U16 => {
@@ -3371,6 +3379,18 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn emit_normalize_a_to_bool(&mut self) {
+        let true_label = self.next_label("cast_bool_true");
+        let end_label = self.next_label("cast_bool_end");
+        self.line("    or a");
+        self.line(&format!("    jp nz, {true_label}"));
+        self.line("    ld a, 00h");
+        self.line(&format!("    jp {end_label}"));
+        self.line(&format!("{true_label}:"));
+        self.line("    ld a, 01h");
+        self.line(&format!("{end_label}:"));
     }
 
     fn emit_sign_extend_widened_integer(
@@ -12549,9 +12569,19 @@ section .text
                 return cast<u24>(v)
             }
 
+            fn bool_from_u8(v: u8) -> bool {
+                return cast<bool>(v)
+            }
+
+            fn bool_from_i8(v: i8) -> bool {
+                return cast<bool>(v)
+            }
+
             fn main() {
                 let wide: u16 = cast<u16>(0x12)
                 let narrow: u8 = cast<u8>(0x1234)
+                let local_true: bool = cast<bool>(2)
+                let local_false: bool = cast<bool>(0)
                 let assigned: u8 = 0
                 assigned = cast<u8>(0x01FE)
                 test.assert_eq_u16(wide, 0x0012, 1)
@@ -12563,6 +12593,11 @@ section .text
                 test.assert_eq_u16(widen_signed_byte(-3), 0xFFFD, 7)
                 test.assert_eq_u24(widen_signed_word(-300), 0xFFFED4, 8)
                 test.assert_eq_u24(widen_signed_byte_to_u24(-3), 0xFFFFFD, 9)
+                test.assert_eq_u8(local_true, true, 10)
+                test.assert_eq_u8(local_false, false, 11)
+                test.assert_eq_u8(bool_from_u8(2), true, 12)
+                test.assert_eq_u8(bool_from_u8(0), false, 13)
+                test.assert_eq_u8(bool_from_i8(-3), true, 14)
                 test.pass()
             }
         "#;
