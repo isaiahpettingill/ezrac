@@ -819,9 +819,18 @@ impl Emitter {
         let interrupt = has_attr(function, "interrupt");
         if naked {
             for stmt in &function.body {
-                if !matches!(stmt, Stmt::Asm { .. }) {
+                let Stmt::Asm {
+                    inputs, outputs, ..
+                } = stmt
+                else {
                     return Err(Diagnostic::new(format!(
                         "naked function `{}` may contain only asm blocks",
+                        function.name
+                    )));
+                };
+                if !inputs.is_empty() || !outputs.is_empty() {
+                    return Err(Diagnostic::new(format!(
+                        "naked function `{}` asm blocks cannot use operands",
                         function.name
                     )));
                 }
@@ -4826,6 +4835,28 @@ mod tests {
         assert_eq!(
             error.message,
             "naked function `invalid` may contain only asm blocks"
+        );
+    }
+
+    #[test]
+    fn rejects_operand_asm_in_naked_functions() {
+        let source = r#"
+            naked fn invalid() {
+                asm volatile(in value: u8 as reg8) {
+                    "ret"
+                }
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "naked function `invalid` asm blocks cannot use operands"
         );
     }
 
