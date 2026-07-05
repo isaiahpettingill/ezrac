@@ -7732,7 +7732,13 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
     };
     let first = asm_first_operand(operands);
     match mnemonic {
-        "ld" | "lea" | "pop" | "in" | "in0" => asm_operand_register(first).into_iter().collect(),
+        "ld" | "lea" | "in" | "in0" => asm_operand_register(first).into_iter().collect(),
+        "push" => vec!["sp"],
+        "pop" => {
+            let mut registers: Vec<_> = asm_operand_register(first).into_iter().collect();
+            registers.push("sp");
+            registers
+        }
         "inc" | "dec" | "rl" | "rlc" | "rr" | "rrc" | "sla" | "sra" | "srl" => {
             asm_operand_register(first).into_iter().collect()
         }
@@ -11511,6 +11517,28 @@ section .text
                 }
                 "#,
                 "inline asm modifies `hl` without declaring clobber `hl`",
+            ),
+            (
+                r#"
+                fn main() {
+                    asm volatile(clobber hl) {
+                        "push hl"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `sp` without declaring clobber `sp`",
+            ),
+            (
+                r#"
+                fn main() {
+                    asm volatile(clobber hl) {
+                        "pop hl"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `sp` without declaring clobber `sp`",
             ),
         ];
 
