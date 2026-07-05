@@ -251,6 +251,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ret z"
             | "ret nc"
             | "ret c"
+            | "nop"
             | "di"
             | "ei"
             | "or a"
@@ -501,6 +502,8 @@ fn emit_instruction(
         bytes.push(0xD0);
     } else if text == "ret c" {
         bytes.push(0xD8);
+    } else if text == "nop" {
+        bytes.push(0x00);
     } else if text == "di" {
         bytes.push(0xF3);
     } else if text == "ei" {
@@ -1186,6 +1189,32 @@ mod tests {
         let bytes = assemble_ez80_subset_at("di\nei\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0xF3, 0xFB, 0xC9]);
+    }
+
+    #[test]
+    fn assembles_nop_instruction() {
+        let bytes = assemble_ez80_subset_at("nop\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0x00, 0xC9]);
+    }
+
+    #[test]
+    fn runs_inline_asm_nop_on_ez80_vm() {
+        let source = r#"
+            fn main() {
+                asm volatile {
+                    "nop"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(asm.contains("    nop"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
