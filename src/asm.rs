@@ -9815,6 +9815,39 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_inline_asm_reg16_and_reg24_operands() {
+        let source = r#"
+            fn main() {
+                let word: u16 = 0x1234
+                let word_result: u16 = 0
+                asm volatile(in word: u16 as reg16, out word_result: u16 as reg16, clobber hl, clobber flags) {
+                    "inc hl"
+                }
+
+                let long: u24 = 0x040123
+                let long_result: u24 = 0
+                asm volatile(in long: u24 as reg24, out long_result: u24 as reg24, clobber hl, clobber flags) {
+                    "inc hl"
+                }
+
+                test.assert_eq_u16(word_result, 0x1235, 1)
+                test.assert_eq_u24(long_result, 0x040124, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    ; in word: u16 as reg16"), "{asm}");
+        assert!(asm.contains("    ; out word_result: u16 as reg16"), "{asm}");
+        assert!(asm.contains("    ; in long: u24 as reg24"), "{asm}");
+        assert!(asm.contains("    ; out long_result: u24 as reg24"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn accepts_inline_asm_operand_alias_types() {
         let source = r#"
             alias byte = u8
