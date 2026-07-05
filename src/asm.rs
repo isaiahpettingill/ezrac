@@ -354,7 +354,7 @@ impl Symbols {
                 },
             );
             if let Declaration::Function(function) = declaration {
-                if has_attr(function, "inline") && inline_return_body(function).is_some() {
+                if is_inlinable_function(function) {
                     symbols
                         .inline_functions
                         .insert(function.name.clone(), function.clone());
@@ -3150,6 +3150,9 @@ impl Emitter {
             if self.emit_inline_return_call(&function, &temps)? {
                 return Ok(());
             }
+            if self.emit_inline_void_call(&function, &temps)? {
+                return Ok(());
+            }
         }
 
         let saved_variables = self.recursive_call_saved_variables(name);
@@ -3295,6 +3298,36 @@ impl Emitter {
             self.emit_inline_prefix_stmt(stmt)?;
         }
         let result = self.emit_expr_to_type(&expr, return_type);
+        self.assigned_names_stack.pop();
+        self.readonly_pointer_aliases.pop();
+        self.local_constants.pop();
+        self.scope_types.pop();
+        self.scopes.pop();
+        result?;
+        Ok(true)
+    }
+
+    fn emit_inline_void_call(
+        &mut self,
+        function: &Function,
+        temps: &[Variable],
+    ) -> Result<bool, Diagnostic> {
+        let Some(body) = inline_void_body(function) else {
+            return Ok(false);
+        };
+
+        self.scopes.push(HashMap::new());
+        self.scope_types.push(HashMap::new());
+        self.local_constants.push(HashMap::new());
+        self.readonly_pointer_aliases.push(HashMap::new());
+        self.assigned_names_stack
+            .push(assigned_names_in_block(body));
+        for (param, temp) in function.params.iter().zip(temps.iter().copied()) {
+            self.current_scope_mut().insert(param.name.clone(), temp);
+            self.current_scope_types_mut()
+                .insert(param.name.clone(), param.ty.clone());
+        }
+        let result = self.emit_block(body);
         self.assigned_names_stack.pop();
         self.readonly_pointer_aliases.pop();
         self.local_constants.pop();
@@ -7047,6 +7080,18 @@ fn inline_return_body(function: &Function) -> Option<(&[Stmt], Expr)> {
         Stmt::Return(Some(expr)) => Some((prefix, expr.clone())),
         _ => None,
     }
+}
+
+fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
+    if function.return_type.is_some() || function.body.iter().any(stmt_contains_return) {
+        return None;
+    }
+    Some(&function.body)
+}
+
+fn is_inlinable_function(function: &Function) -> bool {
+    has_attr(function, "inline")
+        && (inline_return_body(function).is_some() || inline_void_body(function).is_some())
 }
 
 fn stmt_contains_return(stmt: &Stmt) -> bool {
@@ -10946,6 +10991,61 @@ section .text
         assert_eq!(run.result_code, 0, "{asm}");
         assert!(!asm.contains("call _score"), "{asm}");
         assert!(!asm.contains("_score:"), "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_void_inline_functions() {
+        let source = r#"
+            port DEBUG: u8 = 0x0C
+
+            inline fn send(value: u8) {
+                out DEBUG, value
+            }
+
+            fn main() {
+                send('A')
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(!asm.contains("call _send"), "{asm}");
+        assert!(!asm.contains("_send:"), "{asm}");
+    }
+
+    #[test]
+    fn void_inline_functions_keep_helper_calls_reachable() {
+        let source = r#"
+            port DEBUG: u8 = 0x0C
+
+            fn add_one(value: u8) -> u8 {
+                return value + 1
+            }
+
+            inline fn send_next(value: u8) {
+                let next: u8 = add_one(value)
+                out DEBUG, next
+            }
+
+            fn main() {
+                send_next(4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(asm.contains("_add_one:"), "{asm}");
+        assert!(asm.contains("call _add_one"), "{asm}");
+        assert!(!asm.contains("_send_next:"), "{asm}");
+        assert!(!asm.contains("call _send_next"), "{asm}");
     }
 
     #[test]
