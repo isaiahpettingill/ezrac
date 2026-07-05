@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 use crate::{
     ast::{BinaryOp, Declaration, EmbedSource, Expr, Program, UnaryOp},
@@ -15,6 +15,7 @@ use crate::{
 const ASSET_TABLE_ENTRY_SIZE: usize = 10;
 const SECTION_ASSETS: u8 = 1;
 const SECTION_RODATA: u8 = 2;
+const SECTION_CUSTOM_BASE: u8 = 0x10;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CartridgeHeader {
@@ -406,6 +407,8 @@ pub fn cartridge_map_entries(
 
 fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
     let mut assets = Vec::new();
+    let mut custom_section_ids = HashMap::<String, u8>::new();
+    let mut next_custom_section_id = SECTION_CUSTOM_BASE;
     for declaration in &program.declarations {
         let Declaration::Embed(decl) = declaration else {
             continue;
@@ -426,7 +429,11 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
             )));
         }
         let section = decl.section.clone().unwrap_or_else(|| ".assets".to_owned());
-        let section_id = section_id(&section)?;
+        let section_id = section_id(
+            &section,
+            &mut custom_section_ids,
+            &mut next_custom_section_id,
+        )?;
         let bytes = embed_bytes(&decl.source, &program.source_path)?;
         assets.push(AssetEntry {
             name: decl.name.clone(),
@@ -440,13 +447,25 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
     Ok(assets)
 }
 
-fn section_id(section: &str) -> Result<u8, Diagnostic> {
+fn section_id(
+    section: &str,
+    custom_section_ids: &mut HashMap<String, u8>,
+    next_custom_section_id: &mut u8,
+) -> Result<u8, Diagnostic> {
     match section {
         ".assets" => Ok(SECTION_ASSETS),
         ".rodata" => Ok(SECTION_RODATA),
-        section => Err(Diagnostic::new(format!(
-            "embed section `{section}` is not supported by the current cartridge packer"
-        ))),
+        section => {
+            if let Some(id) = custom_section_ids.get(section) {
+                return Ok(*id);
+            }
+            let id = *next_custom_section_id;
+            *next_custom_section_id = next_custom_section_id.checked_add(1).ok_or_else(|| {
+                Diagnostic::new("too many custom embed sections for u8 section ids")
+            })?;
+            custom_section_ids.insert(section.to_owned(), id);
+            Ok(id)
+        }
     }
 }
 
@@ -823,6 +842,65 @@ mod tests {
         assert_eq!(
             &image[image_offset(second_addr)..image_offset(second_addr) + 3],
             &[b'O', b'K', 0]
+        );
+    }
+
+    #[test]
+    fn cartridge_places_embeds_in_custom_layout_sections() {
+        let source = r#"
+            embed sprite_a: bytes = bytes [0xA1, 0xA2] section .sprites align 1
+            embed font: bytes = bytes [0xF0] section .fonts align 1
+            embed sprite_b: bytes = bytes [0xB1] section .sprites align 1
+            fn main() { test.pass() }
+        "#;
+        let layout = parse_layout(
+            r#"
+                layout custom_embeds {
+                    load 0x010000;
+                    entry 0x010040;
+                    stack 0xF00000;
+
+                    region code 0x010000..0x01FFFF read execute;
+                    region sprites 0x120000..0x1200FF read;
+                    region fonts 0x130000..0x1300FF read;
+
+                    section .text -> code align 16;
+                    section .sprites -> sprites align 1;
+                    section .fonts -> fonts align 1;
+                }
+            "#,
+        )
+        .unwrap();
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let image =
+            build_cartridge_with_layout_code_and_symbols(&program, &layout, &[], &[]).unwrap();
+
+        let table = image_offset(read_addr24(&image, 0x21));
+        let sprite_a_addr = read_addr24(&image, table);
+        assert_eq!(sprite_a_addr, 0x120000);
+        assert_eq!(image[table + 8], SECTION_CUSTOM_BASE);
+
+        let font = table + ASSET_TABLE_ENTRY_SIZE;
+        let font_addr = read_addr24(&image, font);
+        assert_eq!(font_addr, 0x130000);
+        assert_eq!(image[font + 8], SECTION_CUSTOM_BASE + 1);
+
+        let sprite_b = font + ASSET_TABLE_ENTRY_SIZE;
+        let sprite_b_addr = read_addr24(&image, sprite_b);
+        assert_eq!(sprite_b_addr, 0x120002);
+        assert_eq!(image[sprite_b + 8], SECTION_CUSTOM_BASE);
+
+        assert_eq!(
+            &image[image_offset(sprite_a_addr)..image_offset(sprite_a_addr) + 2],
+            &[0xA1, 0xA2]
+        );
+        assert_eq!(
+            &image[image_offset(font_addr)..image_offset(font_addr) + 1],
+            &[0xF0]
+        );
+        assert_eq!(
+            &image[image_offset(sprite_b_addr)..image_offset(sprite_b_addr) + 1],
+            &[0xB1]
         );
     }
 
