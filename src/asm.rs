@@ -10,7 +10,10 @@ use crate::{
         Function, Place, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::Diagnostic,
-    target::{Address24, EZRA_RAM_BASE, EZRA_STACK_TOP},
+    target::{
+        Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR,
+        EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
+    },
 };
 
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
@@ -33,16 +36,28 @@ pub fn emit_ez80_assembly_with_debug_comments(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AssemblyOptions {
     pub debug_comments: bool,
+    pub load_addr: Address24,
+    pub entry_addr: Address24,
     pub stack_top: Address24,
     pub ram_base: Address24,
+    pub vram_base: Address24,
+    pub audio_base: Address24,
+    pub asset_base: Address24,
+    pub rodata_base: Address24,
 }
 
 impl Default for AssemblyOptions {
     fn default() -> Self {
         Self {
             debug_comments: false,
+            load_addr: EZRA_LOAD_ADDR,
+            entry_addr: EZRA_ENTRY_ADDR,
             stack_top: EZRA_STACK_TOP,
             ram_base: EZRA_RAM_BASE,
+            vram_base: EZRA_VRAM_BASE,
+            audio_base: EZRA_AUDIO_BASE,
+            asset_base: EZRA_ASSET_BASE,
+            rodata_base: EZRA_RODATA_BASE,
         }
     }
 }
@@ -51,7 +66,7 @@ pub fn emit_ez80_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
-    let symbols = Symbols::from_program(program, options.ram_base)?;
+    let symbols = Symbols::from_program(program, options)?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
@@ -217,10 +232,10 @@ struct FunctionSig {
 }
 
 impl Symbols {
-    fn from_program(program: &Program, ram_base: Address24) -> Result<Self, Diagnostic> {
+    fn from_program(program: &Program, options: AssemblyOptions) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
-            constants: sdk_constants(),
-            constant_types: HashMap::new(),
+            constants: sdk_constants(options),
+            constant_types: sdk_constant_types(),
             evaluating_constants: HashSet::new(),
             aliases: HashMap::new(),
             structs: HashMap::new(),
@@ -231,7 +246,7 @@ impl Symbols {
             global_types: HashMap::new(),
             functions: HashMap::new(),
             inline_functions: HashMap::new(),
-            next_addr: ram_base.get(),
+            next_addr: options.ram_base.get(),
         };
 
         let mut declared_names = HashSet::new();
@@ -8324,8 +8339,28 @@ fn is_comparison(op: BinaryOp) -> bool {
     )
 }
 
-fn sdk_constants() -> HashMap<String, i64> {
+fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
     HashMap::from([
+        ("EZRA_LOAD_ADDR".to_owned(), options.load_addr.get() as i64),
+        (
+            "EZRA_ENTRY_ADDR".to_owned(),
+            options.entry_addr.get() as i64,
+        ),
+        ("EZRA_STACK_TOP".to_owned(), options.stack_top.get() as i64),
+        ("EZRA_RAM_BASE".to_owned(), options.ram_base.get() as i64),
+        ("EZRA_VRAM_BASE".to_owned(), options.vram_base.get() as i64),
+        (
+            "EZRA_AUDIO_BASE".to_owned(),
+            options.audio_base.get() as i64,
+        ),
+        (
+            "EZRA_ASSET_BASE".to_owned(),
+            options.asset_base.get() as i64,
+        ),
+        (
+            "EZRA_RODATA_BASE".to_owned(),
+            options.rodata_base.get() as i64,
+        ),
         ("BTN_B".to_owned(), 0x0001),
         ("BTN_Y".to_owned(), 0x0002),
         ("BTN_SELECT".to_owned(), 0x0004),
@@ -8343,6 +8378,47 @@ fn sdk_constants() -> HashMap<String, i64> {
         ("AUDIO_SUBMIT_BUFFER".to_owned(), 1),
         ("AUDIO_STOP".to_owned(), 2),
     ])
+}
+
+fn sdk_constant_types() -> HashMap<String, Type> {
+    let mut types = HashMap::new();
+    for name in [
+        "EZRA_LOAD_ADDR",
+        "EZRA_ENTRY_ADDR",
+        "EZRA_STACK_TOP",
+        "EZRA_RAM_BASE",
+        "EZRA_VRAM_BASE",
+        "EZRA_AUDIO_BASE",
+        "EZRA_ASSET_BASE",
+        "EZRA_RODATA_BASE",
+    ] {
+        types.insert(name.to_owned(), Type::Named("u24".to_owned()));
+    }
+    for name in [
+        "BTN_B",
+        "BTN_Y",
+        "BTN_SELECT",
+        "BTN_START",
+        "BTN_UP",
+        "BTN_DOWN",
+        "BTN_LEFT",
+        "BTN_RIGHT",
+        "BTN_A",
+        "BTN_X",
+        "BTN_L",
+        "BTN_R",
+    ] {
+        types.insert(name.to_owned(), Type::Named("u16".to_owned()));
+    }
+    for name in [
+        "VIDEO_PRESENT",
+        "VIDEO_CLEAR",
+        "AUDIO_SUBMIT_BUFFER",
+        "AUDIO_STOP",
+    ] {
+        types.insert(name.to_owned(), Type::Named("u8".to_owned()));
+    }
+    types
 }
 
 fn sdk_ports() -> HashMap<String, u8> {

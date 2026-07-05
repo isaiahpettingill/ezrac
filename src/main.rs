@@ -6,7 +6,10 @@ use ezra::{
     compile::{CompileOptions, check_source, load_program},
     diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
-    target::{Address24, EZRA_RAM_BASE},
+    target::{
+        Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
+        EZRA_VRAM_BASE,
+    },
     vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
 };
 
@@ -122,11 +125,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
-        AssemblyOptions {
-            debug_comments: options.debug_comments,
-            stack_top: layout.stack,
-            ram_base: layout_ram_base(&layout),
-        },
+        assembly_options_from_layout(&layout, options.debug_comments),
     )
     .map_err(|error| {
         error
@@ -202,11 +201,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
-        AssemblyOptions {
-            debug_comments: options.debug_comments,
-            stack_top: layout.stack,
-            ram_base: layout_ram_base(&layout),
-        },
+        assembly_options_from_layout(&layout, options.debug_comments),
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
     let run = run_assembly_test_with_options_at(
@@ -349,11 +344,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     }
     emit_ez80_assembly_with_options(
         &program,
-        AssemblyOptions {
-            debug_comments: options.debug_comments,
-            stack_top: layout.stack,
-            ram_base: layout_ram_base(&layout),
-        },
+        assembly_options_from_layout(&layout, options.debug_comments),
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())
 }
@@ -404,13 +395,26 @@ fn load_layout(path: Option<&str>) -> Result<Layout, String> {
     })
 }
 
-fn layout_ram_base(layout: &Layout) -> Address24 {
+fn assembly_options_from_layout(layout: &Layout, debug_comments: bool) -> AssemblyOptions {
+    AssemblyOptions {
+        debug_comments,
+        load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
+        entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
+        stack_top: layout_symbol(layout, "EZRA_STACK_TOP").unwrap_or(layout.stack),
+        ram_base: layout_symbol(layout, "EZRA_RAM_BASE").unwrap_or(EZRA_RAM_BASE),
+        vram_base: layout_symbol(layout, "EZRA_VRAM_BASE").unwrap_or(EZRA_VRAM_BASE),
+        audio_base: layout_symbol(layout, "EZRA_AUDIO_BASE").unwrap_or(EZRA_AUDIO_BASE),
+        asset_base: layout_symbol(layout, "EZRA_ASSET_BASE").unwrap_or(EZRA_ASSET_BASE),
+        rodata_base: layout_symbol(layout, "EZRA_RODATA_BASE").unwrap_or(EZRA_RODATA_BASE),
+    }
+}
+
+fn layout_symbol(layout: &Layout, name: &str) -> Option<Address24> {
     layout
         .symbols
         .iter()
-        .find(|symbol| symbol.name == "EZRA_RAM_BASE")
+        .find(|symbol| symbol.name == name)
         .map(|symbol| symbol.value)
-        .unwrap_or(EZRA_RAM_BASE)
 }
 
 fn format_layout_errors(path: Option<&str>, errors: Vec<ezra::diagnostic::Diagnostic>) -> String {
@@ -772,6 +776,8 @@ mod tests {
 
                 fn main() {
                     test.assert_eq_u8(marker, 0x42, 1)
+                    test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 2)
+                    test.assert_eq_u24(EZRA_VRAM_BASE, 0x090000, 3)
                     test.pass()
                 }
             "#,
@@ -793,6 +799,7 @@ mod tests {
                     section .bss -> ram align 16;
 
                     symbol EZRA_RAM_BASE = 0x030000;
+                    symbol EZRA_VRAM_BASE = 0x090000;
                 }
             "#,
         )
@@ -849,6 +856,8 @@ mod tests {
                 global marker: u8 = 0x5A
                 fn main() {
                     test.assert_eq_u8(marker, 0x5A, 1)
+                    test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 2)
+                    test.assert_eq_u24(EZRA_AUDIO_BASE, 0x0D0000, 3)
                     test.pass()
                 }
             "#,
@@ -873,6 +882,7 @@ mod tests {
                     symbol EZRA_ENTRY_ADDR = 0x020040;
                     symbol EZRA_STACK_TOP = 0xEFFF00;
                     symbol EZRA_RAM_BASE = 0x030000;
+                    symbol EZRA_AUDIO_BASE = 0x0D0000;
                 }
             "#,
         )
