@@ -1050,8 +1050,8 @@ Rules:
 - integer widening preserves value
 - integer narrowing truncates high bits
 - signed/unsigned casts preserve bit pattern
-- integer-to-pointer casts require u24
-- pointer-to-integer casts produce u24
+- integer-to-pointer casts require u24 or ptr24
+- pointer-to-integer casts produce u24 or ptr24
 ```
 
 Example:
@@ -1059,6 +1059,7 @@ Example:
 ```text
 let addr: u24 = 0x080000
 let fb: ptr<u8> = cast<ptr<u8>>(addr)
+let raw: ptr24 = cast<ptr24>(fb)
 ```
 
 ---
