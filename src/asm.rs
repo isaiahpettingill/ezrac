@@ -1128,6 +1128,8 @@ impl Emitter {
         self.line(".L_mul_u24_done:");
         self.line("    pop hl");
         self.line("    ret");
+        self.line("__ezra_mul_i24:");
+        self.line("    jp __ezra_mul_u24");
         self.line("__ezra_div_u8:");
         self.line("    ld d, a");
         self.line("    xor a");
@@ -2528,7 +2530,12 @@ impl Emitter {
                 | BinaryOp::BitXor => {
                     self.ensure_binary_arithmetic_operands_compatible(left, right)?;
                     if *op == BinaryOp::Mul {
-                        self.emit_mul_to_width(left, right, width)?;
+                        self.emit_mul_to_width(
+                            left,
+                            right,
+                            width,
+                            self.binary_operands_are_signed(left, right)?,
+                        )?;
                         return Ok(());
                     }
                     self.emit_expr_to_hl(left, width)?;
@@ -2993,7 +3000,12 @@ impl Emitter {
         }
         if op == BinaryOp::Mul {
             self.ensure_binary_arithmetic_operands_compatible(left, right)?;
-            self.emit_mul_to_width(left, right, ValueWidth::U8)?;
+            self.emit_mul_to_width(
+                left,
+                right,
+                ValueWidth::U8,
+                self.binary_operands_are_signed(left, right)?,
+            )?;
             return Ok(());
         }
 
@@ -3114,6 +3126,7 @@ impl Emitter {
         left: &Expr,
         right: &Expr,
         width: ValueWidth,
+        signed: bool,
     ) -> Result<(), Diagnostic> {
         if width == ValueWidth::U8 {
             let left_var = self.symbols.alloc_var(1);
@@ -3142,7 +3155,11 @@ impl Emitter {
             self.line("    push hl");
             self.line("    pop bc");
             self.line("    pop hl");
-            self.line("    call __ezra_mul_u24");
+            if signed {
+                self.line("    call __ezra_mul_i24");
+            } else {
+                self.line("    call __ezra_mul_u24");
+            }
             return Ok(());
         }
 
@@ -8554,6 +8571,35 @@ mod tests {
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
 
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_signed_i24_multiply_runtime_helper() {
+        let expected = ((-0x123i32) * 0x45) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            alias subpx = i24
+
+            fn mul24(a: subpx, b: subpx) -> subpx {{
+                return a * b
+            }}
+
+            fn main() {{
+                let a: subpx = -0x123
+                let b: subpx = 0x45
+                test.assert_eq_u24(mul24(a, b), 0x{expected:06X}, 1)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 80_000).unwrap();
+
+        assert!(asm.contains("    call __ezra_mul_i24"), "{asm}");
+        assert!(asm.contains("__ezra_mul_i24:"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
