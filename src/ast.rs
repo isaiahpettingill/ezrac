@@ -11,6 +11,7 @@ pub enum Declaration {
     Port(PortDecl),
     Mmio(MmioDecl),
     Global(GlobalDecl),
+    Struct(StructDecl),
     Function(Function),
 }
 
@@ -51,6 +52,19 @@ pub struct GlobalDecl {
     pub name: String,
     pub ty: Type,
     pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructDecl {
+    pub public: bool,
+    pub name: String,
+    pub fields: Vec<FieldDecl>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldDecl {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -107,6 +121,7 @@ pub enum Stmt {
 pub enum Place {
     Ident(String),
     Index { name: String, index: Box<Expr> },
+    Field { base: String, field: String },
     Deref(Box<Expr>),
 }
 
@@ -135,11 +150,19 @@ pub enum Expr {
         name: String,
         index: Box<Expr>,
     },
+    Field {
+        base: String,
+        field: String,
+    },
     AddressOfIndex {
         name: String,
         index: Box<Expr>,
     },
     AddressOf(String),
+    StructInit {
+        ty: String,
+        fields: Vec<(String, Expr)>,
+    },
     Deref(Box<Expr>),
     Call {
         path: Vec<String>,

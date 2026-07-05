@@ -6,7 +6,7 @@ use pest_derive::Parser;
 use crate::{
     ast::{
         AliasDecl, AssignOp, BinaryOp, ConstDecl, Declaration, Expr, Function, GlobalDecl,
-        MmioDecl, Param, Place, PortDecl, Program, Stmt, Type, UnaryOp,
+        MmioDecl, Param, Place, PortDecl, Program, Stmt, StructDecl, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -39,9 +39,35 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
         Rule::port_decl => build_port(pair).map(Declaration::Port),
         Rule::mmio_decl => build_mmio(pair).map(Declaration::Mmio),
         Rule::global_decl => build_global(pair).map(Declaration::Global),
+        Rule::struct_decl => build_struct(pair).map(Declaration::Struct),
         Rule::fn_decl => build_fn(pair).map(Declaration::Function),
         _ => unreachable!("unexpected decl rule {:?}", pair.as_rule()),
     }
+}
+
+fn build_struct(pair: Pair<'_, Rule>) -> Result<StructDecl, Diagnostic> {
+    let mut public = false;
+    let mut name = None;
+    let mut fields = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::visibility => public = true,
+            Rule::ident => name = Some(inner.as_str().to_owned()),
+            Rule::field_decl => {
+                let mut field = inner.into_inner();
+                fields.push(crate::ast::FieldDecl {
+                    name: field.next().unwrap().as_str().to_owned(),
+                    ty: build_type(field.next().unwrap())?,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(StructDecl {
+        public,
+        name: name.unwrap(),
+        fields,
+    })
 }
 
 fn build_global(pair: Pair<'_, Rule>) -> Result<GlobalDecl, Diagnostic> {
@@ -269,6 +295,13 @@ fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {
         Rule::deref_place => Ok(Place::Deref(Box::new(build_deref_operand(
             inner.into_inner().next().unwrap(),
         )?))),
+        Rule::field_place => {
+            let mut parts = inner.into_inner();
+            Ok(Place::Field {
+                base: parts.next().unwrap().as_str().to_owned(),
+                field: parts.next().unwrap().as_str().to_owned(),
+            })
+        }
         Rule::index_place => {
             let mut parts = inner.into_inner();
             Ok(Place::Index {
@@ -357,11 +390,38 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
         Rule::deref_expr => Ok(Expr::Deref(Box::new(build_deref_operand(
             pair.into_inner().next().unwrap(),
         )?))),
+        Rule::struct_lit => {
+            let mut inner = pair.into_inner();
+            let ty = inner.next().unwrap().as_str().to_owned();
+            let fields = inner
+                .next()
+                .map(|fields| {
+                    fields
+                        .into_inner()
+                        .map(|field| {
+                            let mut parts = field.into_inner();
+                            Ok((
+                                parts.next().unwrap().as_str().to_owned(),
+                                build_expr(parts.next().unwrap())?,
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|| Ok(Vec::new()))?;
+            Ok(Expr::StructInit { ty, fields })
+        }
         Rule::index_expr => {
             let mut inner = pair.into_inner();
             Ok(Expr::Index {
                 name: inner.next().unwrap().as_str().to_owned(),
                 index: Box::new(build_expr(inner.next().unwrap())?),
+            })
+        }
+        Rule::field_expr => {
+            let mut inner = pair.into_inner();
+            Ok(Expr::Field {
+                base: inner.next().unwrap().as_str().to_owned(),
+                field: inner.next().unwrap().as_str().to_owned(),
             })
         }
         Rule::array_lit => {
@@ -618,6 +678,22 @@ mod tests {
         )
         .unwrap();
 
+        assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_struct_declaration_literals_and_fields() {
+        EzraParser::parse(Rule::field_expr, "player.x").unwrap();
+        EzraParser::parse(Rule::expr, "player.x").unwrap();
+        EzraParser::parse(Rule::expr, "test.assert_eq_u24(player.x, 0x010000, 1)").unwrap();
+        EzraParser::parse(Rule::stmt, "test.assert_eq_u24(player.x, 0x010000, 1);").unwrap();
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "struct Entity { x: u24 y: u24 sprite: u8 }\nglobal player: Entity = Entity { x: 1, sprite: 2 }\nfn main() { player.y = player.x + 3 }",
+        )
+        .unwrap();
+
+        assert!(matches!(program.declarations[0], Declaration::Struct(_)));
         assert!(program.main_function().is_some());
     }
 }

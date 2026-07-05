@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, Type, UnaryOp},
+    ast::{
+        AssignOp, BinaryOp, Declaration, Expr, FieldDecl, Function, Place, Program, Stmt, Type,
+        UnaryOp,
+    },
     diagnostic::Diagnostic,
 };
 
@@ -91,11 +94,25 @@ struct Symbols {
     constants: HashMap<String, i64>,
     constant_types: HashMap<String, Type>,
     aliases: HashMap<String, Type>,
+    structs: HashMap<String, StructLayout>,
     ports: HashMap<String, u8>,
     globals: HashMap<String, Variable>,
     global_types: HashMap<String, Type>,
     functions: HashMap<String, FunctionSig>,
     next_addr: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StructLayout {
+    size: u32,
+    fields: HashMap<String, StructField>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StructField {
+    offset: u32,
+    ty: Type,
+    size: u8,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,6 +129,7 @@ impl Symbols {
             constants: sdk_constants(),
             constant_types: HashMap::new(),
             aliases: HashMap::new(),
+            structs: HashMap::new(),
             ports: sdk_ports(),
             globals: HashMap::new(),
             global_types: HashMap::new(),
@@ -122,6 +140,13 @@ impl Symbols {
         for declaration in &program.declarations {
             if let Declaration::Alias(decl) = declaration {
                 symbols.aliases.insert(decl.name.clone(), decl.ty.clone());
+            }
+        }
+
+        for declaration in &program.declarations {
+            if let Declaration::Struct(decl) = declaration {
+                let layout = symbols.build_struct_layout(&decl.fields)?;
+                symbols.structs.insert(decl.name.clone(), layout);
             }
         }
 
@@ -191,6 +216,7 @@ impl Symbols {
                         .global_types
                         .insert(decl.name.clone(), decl.ty.clone());
                 }
+                Declaration::Struct(_) => {}
                 _ => {}
             }
         }
@@ -221,6 +247,35 @@ impl Symbols {
         variable
     }
 
+    fn build_struct_layout(&self, fields: &[FieldDecl]) -> Result<StructLayout, Diagnostic> {
+        let mut offset = 0u32;
+        let mut layout_fields = HashMap::new();
+        for field in fields {
+            let size = self.type_size(&field.ty)?;
+            if layout_fields
+                .insert(
+                    field.name.clone(),
+                    StructField {
+                        offset,
+                        ty: field.ty.clone(),
+                        size,
+                    },
+                )
+                .is_some()
+            {
+                return Err(Diagnostic::new(format!(
+                    "duplicate struct field `{}`",
+                    field.name
+                )));
+            }
+            offset += u32::from(size);
+        }
+        Ok(StructLayout {
+            size: offset,
+            fields: layout_fields,
+        })
+    }
+
     fn type_width(&self, ty: &Type) -> Result<ValueWidth, Diagnostic> {
         match ty {
             Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => {
@@ -231,6 +286,11 @@ impl Symbols {
                 Ok(ValueWidth::U24)
             }
             Type::Named(name) => {
+                if self.structs.contains_key(name) {
+                    return Err(Diagnostic::new(format!(
+                        "struct `{name}` cannot be used as a scalar value"
+                    )));
+                }
                 let Some(alias) = self.aliases.get(name) else {
                     return Err(Diagnostic::new(format!(
                         "type `{name}` is parsed but not implemented in assembly codegen yet"
@@ -267,18 +327,31 @@ impl Symbols {
             Type::Array { .. } => Err(Diagnostic::new(
                 "array value cannot be used where scalar storage size is required",
             )),
+            Type::Named(name) if self.structs.contains_key(&name) => {
+                let size = self.structs[&name].size;
+                if size > u8::MAX as u32 {
+                    return Err(Diagnostic::new(format!(
+                        "struct `{name}` size {size} exceeds current storage limit"
+                    )));
+                }
+                Ok(size as u8)
+            }
             scalar => Ok(self.type_width(&scalar)?.bytes()),
         }
     }
 
     fn alloc_storage(&mut self, ty: &Type) -> Result<Variable, Diagnostic> {
-        match ty {
+        match self.resolved_type(ty)? {
             Type::Array { element, len } => {
-                let element_size = self.type_width(element)?.bytes();
-                let len = self.array_len(len)?;
+                let element_size = self.type_width(&element)?.bytes();
+                let len = self.array_len(&len)?;
                 Ok(self.alloc_array(element_size, len))
             }
-            _ => Ok(self.alloc_var(self.type_width(ty)?.bytes())),
+            Type::Named(name) if self.structs.contains_key(&name) => {
+                let size = self.type_size(&Type::Named(name))?;
+                Ok(self.alloc_var(size))
+            }
+            scalar => Ok(self.alloc_var(self.type_width(&scalar)?.bytes())),
         }
     }
 
@@ -341,6 +414,8 @@ impl Symbols {
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
             | Expr::AddressOf(_)
+            | Expr::Field { .. }
+            | Expr::StructInit { .. }
             | Expr::Deref(_)
             | Expr::In(_)
             | Expr::Call { .. }
@@ -397,6 +472,8 @@ impl Emitter {
                 .expect("global allocation exists");
             if variable.element_size.is_some() {
                 self.emit_array_initializer(variable, &decl.value)?;
+            } else if self.is_struct_type(&decl.ty)? {
+                self.emit_struct_initializer(variable, &decl.ty, &decl.value)?;
             } else {
                 self.emit_expr_to_width(&decl.value, variable.width()?)?;
                 self.emit_store_width(variable);
@@ -484,6 +561,8 @@ impl Emitter {
                     .insert(name.clone(), ty.clone());
                 if variable.element_size.is_some() {
                     self.emit_array_initializer(variable, value)?;
+                } else if self.is_struct_type(ty)? {
+                    self.emit_struct_initializer(variable, ty, value)?;
                 } else {
                     self.emit_expr_to_width(value, variable.width()?)?;
                     self.emit_store_width(variable);
@@ -686,6 +765,11 @@ impl Emitter {
                 }
                 self.emit_index_assignment(name, index, value)?;
             }
+            Place::Field { base, field } => {
+                let variable = self.field_variable(base, field)?;
+                self.emit_assignment_value(variable, op, value)?;
+                self.emit_store_width(variable);
+            }
             Place::Deref(ptr) => {
                 if op != AssignOp::Set {
                     return Err(Diagnostic::new(
@@ -732,6 +816,62 @@ impl Emitter {
                 });
             }
             self.emit_store_width(element);
+        }
+        Ok(())
+    }
+
+    fn emit_struct_initializer(
+        &mut self,
+        variable: Variable,
+        ty: &Type,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let struct_name = self.struct_type_name(ty)?;
+        let Expr::StructInit { ty, fields } = value else {
+            return Err(Diagnostic::new(format!(
+                "struct `{struct_name}` initializer must use `{struct_name} {{ ... }}`"
+            )));
+        };
+        if ty != &struct_name {
+            return Err(Diagnostic::new(format!(
+                "initializer type `{ty}` does not match `{struct_name}`"
+            )));
+        }
+
+        let layout = self
+            .symbols
+            .structs
+            .get(&struct_name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown struct `{struct_name}`")))?;
+        let mut initialized = HashMap::new();
+        for (field_name, field_value) in fields {
+            let Some(field) = layout.fields.get(field_name) else {
+                return Err(Diagnostic::new(format!(
+                    "struct `{struct_name}` has no field `{field_name}`"
+                )));
+            };
+            if initialized.insert(field_name.clone(), ()).is_some() {
+                return Err(Diagnostic::new(format!(
+                    "duplicate initializer for field `{field_name}`"
+                )));
+            }
+            let field_var = scalar_var(variable.addr + field.offset, field.size);
+            self.emit_expr_to_width(field_value, field_var.width()?)?;
+            self.emit_store_width(field_var);
+        }
+
+        for (field_name, field) in &layout.fields {
+            if initialized.contains_key(field_name) {
+                continue;
+            }
+            let field_var = scalar_var(variable.addr + field.offset, field.size);
+            match field.size {
+                1 => self.line("    ld a, 00h"),
+                2 | 3 => self.line("    ld hl, 000000h"),
+                _ => unreachable!("unsupported struct field size"),
+            }
+            self.emit_store_width(field_var);
         }
         Ok(())
     }
@@ -949,6 +1089,10 @@ impl Emitter {
             Expr::Deref(ptr) => {
                 self.emit_deref_to_hl(ptr, width)?;
             }
+            Expr::Field { base, field } => {
+                let variable = self.field_variable(base, field)?;
+                self.emit_load_width(variable);
+            }
             Expr::Index { name, index } => {
                 self.emit_load_indexed_element_to_hl(name, index)?;
             }
@@ -995,7 +1139,7 @@ impl Emitter {
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
-            Expr::Array(_) | Expr::In(_) | Expr::Call { .. } => {
+            Expr::Array(_) | Expr::StructInit { .. } | Expr::In(_) | Expr::Call { .. } => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u16 codegen"
                 )));
@@ -1143,6 +1287,15 @@ impl Emitter {
             Expr::Index { name, index } => {
                 self.emit_load_indexed_element_to_a(name, index)?;
             }
+            Expr::Field { base, field } => {
+                let variable = self.field_variable(base, field)?;
+                if variable.size != 1 {
+                    return Err(Diagnostic::new(format!(
+                        "field `{base}.{field}` is not u8-sized"
+                    )));
+                }
+                self.emit_load_a(variable);
+            }
             Expr::Deref(ptr) => {
                 self.emit_deref_to_a(ptr)?;
             }
@@ -1167,6 +1320,7 @@ impl Emitter {
             Expr::AddressOfIndex { .. }
             | Expr::AddressOf(_)
             | Expr::Array(_)
+            | Expr::StructInit { .. }
             | Expr::Call { .. }
             | Expr::String(_) => {
                 return Err(Diagnostic::new(format!(
@@ -1723,6 +1877,58 @@ impl Emitter {
         Ok(())
     }
 
+    fn struct_type_name(&self, ty: &Type) -> Result<String, Diagnostic> {
+        match self.symbols.resolved_type(ty)? {
+            Type::Named(name) if self.symbols.structs.contains_key(&name) => Ok(name),
+            other => Err(Diagnostic::new(format!(
+                "type `{other:?}` is not a struct type"
+            ))),
+        }
+    }
+
+    fn is_struct_type(&self, ty: &Type) -> Result<bool, Diagnostic> {
+        match self.symbols.resolved_type(ty)? {
+            Type::Named(name) => Ok(self.symbols.structs.contains_key(&name)),
+            _ => Ok(false),
+        }
+    }
+
+    fn field_variable(&self, base: &str, field: &str) -> Result<Variable, Diagnostic> {
+        let base_variable = self.variable(base)?;
+        let base_type = self
+            .variable_type(base)
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{base}`")))?;
+        let struct_name = self.struct_type_name(base_type)?;
+        let layout = self
+            .symbols
+            .structs
+            .get(&struct_name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown struct `{struct_name}`")))?;
+        let field = layout.fields.get(field).ok_or_else(|| {
+            Diagnostic::new(format!("struct `{struct_name}` has no field `{field}`"))
+        })?;
+        Ok(scalar_var(base_variable.addr + field.offset, field.size))
+    }
+
+    fn field_type(&self, base: &str, field: &str) -> Result<Type, Diagnostic> {
+        let base_type = self
+            .variable_type(base)
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{base}`")))?;
+        let struct_name = self.struct_type_name(base_type)?;
+        let layout = self
+            .symbols
+            .structs
+            .get(&struct_name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown struct `{struct_name}`")))?;
+        layout
+            .fields
+            .get(field)
+            .map(|field| field.ty.clone())
+            .ok_or_else(|| {
+                Diagnostic::new(format!("struct `{struct_name}` has no field `{field}`"))
+            })
+    }
+
     fn array_element_type(&self, name: &str) -> Result<Type, Diagnostic> {
         let Some(ty) = self.variable_type(name) else {
             return Err(Diagnostic::new(format!("unknown array `{name}`")));
@@ -1907,6 +2113,7 @@ impl Emitter {
             Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar type")),
             Expr::Index { name, .. } => self.array_element_type(name),
+            Expr::Field { base, field } => self.field_type(base, field),
             Expr::AddressOfIndex { name, .. } => {
                 Ok(Type::Ptr(Box::new(self.array_element_type(name)?)))
             }
@@ -1930,6 +2137,7 @@ impl Emitter {
                     "cannot dereference non-pointer expression of type `{other:?}`"
                 ))),
             },
+            Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
             Expr::Cast { ty, .. } => Ok(ty.clone()),
             Expr::Call { path, .. } if path.len() == 1 => self
                 .symbols
@@ -1993,7 +2201,11 @@ impl Emitter {
             Expr::Char(_) | Expr::Bool(_) | Expr::In(_) => Ok(ValueWidth::U8),
             Expr::String(_) => Ok(ValueWidth::U24),
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar width")),
+            Expr::StructInit { ty, .. } => Err(Diagnostic::new(format!(
+                "struct `{ty}` literal does not have scalar width"
+            ))),
             Expr::Index { name, .. } => self.array_element_width(name),
+            Expr::Field { base, field } => self.field_variable(base, field)?.width(),
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
             Expr::AddressOf(_) => Ok(ValueWidth::U24),
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
@@ -2855,6 +3067,55 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_basic_struct_fields() {
+        let source = r#"
+            struct Entity {
+                x: u24
+                y: u24
+                sprite: u8
+                flags: u8
+            }
+
+            global player: Entity = Entity {
+                x: 0x010000,
+                sprite: 3,
+            }
+
+            fn main() {
+                test.assert_eq_u24(player.x, 0x010000, 1);
+                test.assert_eq_u24(player.y, 0, 2);
+                test.assert_eq_u8(player.sprite, 3, 3);
+                test.assert_eq_u8(player.flags, 0, 4);
+
+                player.y = player.x + 0x000123;
+                player.sprite += 4;
+                player.flags = 0x80;
+
+                let local: Entity = Entity {
+                    x: player.y,
+                    y: 0x020000,
+                    sprite: player.sprite,
+                    flags: player.flags,
+                };
+
+                test.assert_eq_u24(player.y, 0x010123, 5);
+                test.assert_eq_u8(player.sprite, 7, 6);
+                test.assert_eq_u24(local.x, 0x010123, 7);
+                test.assert_eq_u24(local.y, 0x020000, 8);
+                test.assert_eq_u8(local.sprite, 7, 9);
+                test.assert_eq_u8(local.flags, 0x80, 10);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

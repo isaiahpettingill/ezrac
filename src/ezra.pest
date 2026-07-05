@@ -2,7 +2,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 program = { SOI ~ decl* ~ EOI }
-decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | global_decl | fn_decl }
+decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | global_decl | struct_decl | fn_decl }
 
 visibility = { "pub" }
 volatile_kw = { "volatile" }
@@ -13,6 +13,8 @@ alias_decl = { visibility? ~ "alias" ~ ident ~ "=" ~ ty ~ semi? }
 port_decl = { visibility? ~ "port" ~ ident ~ ":" ~ "u8" ~ "=" ~ expr ~ semi? }
 mmio_decl = { visibility? ~ volatile_kw? ~ "mmio" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 global_decl = { visibility? ~ "global" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
+struct_decl = { visibility? ~ "struct" ~ ident ~ "{" ~ field_decl* ~ "}" }
+field_decl = { ident ~ ":" ~ ty ~ semi? }
 fn_decl = { attr* ~ visibility? ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ block }
 params = { param ~ ("," ~ param)* ~ ","? }
 param = { ident ~ ":" ~ ty }
@@ -21,7 +23,6 @@ ret_ty = { "->" ~ ty }
 block = { "{" ~ stmt* ~ "}" }
 stmt = _{
     let_stmt
-  | assign_stmt
   | if_stmt
   | while_stmt
   | loop_stmt
@@ -30,13 +31,15 @@ stmt = _{
   | return_stmt
   | out_stmt
   | expr_stmt
+  | assign_stmt
 }
 
 let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 assign_stmt = { place ~ assign_op ~ expr ~ semi? }
-place = { deref_place | index_place | ident }
+place = { deref_place | index_place | field_place | ident }
 deref_place = { "*" ~ (ident | "(" ~ expr ~ ")") }
 index_place = { ident ~ "[" ~ expr ~ "]" }
+field_place = { ident ~ "." ~ ident ~ !("(") }
 if_stmt = { "if" ~ expr ~ block ~ ("else" ~ block)? }
 while_stmt = { "while" ~ expr ~ block }
 loop_stmt = { "loop" ~ block }
@@ -59,13 +62,17 @@ shift = { additive ~ (shift_op ~ additive)* }
 additive = { multiplicative ~ (add_op ~ multiplicative)* }
 multiplicative = { unary ~ (mul_op ~ unary)* }
 unary = { unary_op* ~ primary }
-primary = { cast_expr | in_expr | addr_index_expr | addr_expr | deref_expr | array_lit | index_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
+primary = { cast_expr | in_expr | addr_index_expr | addr_expr | deref_expr | struct_lit | array_lit | field_expr | index_expr | call_expr | literal | path_expr | "(" ~ expr ~ ")" }
 cast_expr = { "cast" ~ "<" ~ ty ~ ">" ~ "(" ~ expr ~ ")" }
 in_expr = ${ "in" ~ (" " | "\t" | "\r" | "\n")+ ~ ident }
 addr_index_expr = { "&" ~ ident ~ "[" ~ expr ~ "]" }
 addr_expr = { "&" ~ ident }
 deref_expr = { "*" ~ (ident | "(" ~ expr ~ ")") }
+struct_lit = { ident ~ "{" ~ field_inits? ~ "}" }
+field_inits = { field_init ~ ("," ~ field_init)* ~ ","? }
+field_init = { ident ~ ":" ~ expr }
 index_expr = { ident ~ "[" ~ expr ~ "]" }
+field_expr = { ident ~ "." ~ ident ~ !("(") }
 array_lit = { "[" ~ args? ~ "]" }
 call_expr = { path ~ "(" ~ args? ~ ")" }
 args = { expr ~ ("," ~ expr)* ~ ","? }
