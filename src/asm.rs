@@ -2298,7 +2298,8 @@ impl Emitter {
             }
             Stmt::Expr(Expr::Call { path, args }) => self.emit_call(path, args)?,
             Stmt::Expr(expr) => {
-                self.emit_expr_to_a(expr)?;
+                let width = self.expr_width(expr)?;
+                self.emit_expr_to_width(expr, width)?;
             }
             Stmt::If {
                 condition,
@@ -15609,6 +15610,38 @@ section .text
 
         assert!(asm.contains("ld a, (hl)"), "{asm}");
         assert!(asm.contains("ld (hl), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_full_width_discarded_volatile_mmio_loads() {
+        let source = r#"
+            volatile mmio STATUS16: ptr<u16> = 0x040180
+            volatile mmio STATUS24: ptr<u24> = 0x040190
+
+            fn main() {
+                *STATUS16;
+                *STATUS24;
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+        let status16 = asm
+            .split("; source: *STATUS16")
+            .nth(1)
+            .and_then(|tail| tail.split("; source: *STATUS24").next())
+            .unwrap();
+        let status24 = asm
+            .split("; source: *STATUS24")
+            .nth(1)
+            .and_then(|tail| tail.split("; source: test.pass()").next())
+            .unwrap();
+
+        assert!(status16.contains("    inc hl"), "{asm}");
+        assert_eq!(status24.matches("    inc hl").count(), 2, "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
