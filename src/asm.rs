@@ -210,6 +210,7 @@ impl Symbols {
             match declaration {
                 Declaration::Const(decl) => {
                     let value = symbols.eval_i64(&decl.value)?;
+                    symbols.validate_value_for_type(value, &decl.ty)?;
                     symbols.constants.insert(decl.name.clone(), value);
                     symbols
                         .constant_types
@@ -434,6 +435,40 @@ impl Symbols {
                 "array storage codegen is not implemented yet",
             )),
         }
+    }
+
+    fn validate_value_for_type(&self, value: i64, ty: &Type) -> Result<(), Diagnostic> {
+        let resolved = self.resolved_type(ty)?;
+        if matches!(&resolved, Type::Named(name) if name == "bool") {
+            if !(0..=1).contains(&value) {
+                return Err(Diagnostic::new(format!(
+                    "value {value} is outside bool range"
+                )));
+            }
+            return Ok(());
+        }
+
+        let width = self.type_width(&resolved)?;
+        let bits = u32::from(width.bytes()) * 8;
+        if type_is_signed(&resolved) {
+            let min = -(1_i64 << (bits - 1));
+            let max = (1_i64 << (bits - 1)) - 1;
+            if !(min..=max).contains(&value) {
+                return Err(Diagnostic::new(format!(
+                    "value {value} is outside {} range",
+                    type_display(&resolved)
+                )));
+            }
+        } else {
+            let max = (1_i64 << bits) - 1;
+            if !(0..=max).contains(&value) {
+                return Err(Diagnostic::new(format!(
+                    "value {value} is outside {} range",
+                    type_display(&resolved)
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn resolved_type(&self, ty: &Type) -> Result<Type, Diagnostic> {
@@ -2858,28 +2893,10 @@ impl Emitter {
 
     fn value_for_type(&self, value: i64, ty: &Type, width: ValueWidth) -> Result<u32, Diagnostic> {
         let resolved = self.symbols.resolved_type(ty)?;
-        let signed = type_is_signed(&resolved);
+        self.symbols.validate_value_for_type(value, &resolved)?;
         let bits = u32::from(width.bytes()) * 8;
         let mask = (1_i128 << bits) - 1;
-        if signed {
-            let min = -(1_i64 << (bits - 1));
-            let max = (1_i64 << (bits - 1)) - 1;
-            if !(min..=max).contains(&value) {
-                return Err(Diagnostic::new(format!(
-                    "value {value} is outside {} range",
-                    type_display(&resolved)
-                )));
-            }
-            Ok(((value as i128) & mask) as u32)
-        } else {
-            if !(0..=mask as i64).contains(&value) {
-                return Err(Diagnostic::new(format!(
-                    "value {value} is outside {} range",
-                    type_display(&resolved)
-                )));
-            }
-            Ok(value as u32)
-        }
+        Ok(((value as i128) & mask) as u32)
     }
 
     fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
@@ -3422,6 +3439,48 @@ mod tests {
             error.message,
             "type `u32` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
         );
+    }
+
+    #[test]
+    fn rejects_constant_values_outside_declared_type_range() {
+        let cases = [
+            (
+                r#"
+                const NEG: u8 = -1
+                fn main() { test.pass() }
+                "#,
+                "value -1 is outside u8 range",
+            ),
+            (
+                r#"
+                const WIDE: i8 = 128
+                fn main() { test.pass() }
+                "#,
+                "value 128 is outside i8 range",
+            ),
+            (
+                r#"
+                alias tiny = i8
+                const WIDE: tiny = -129
+                fn main() { test.pass() }
+                "#,
+                "value -129 is outside i8 range",
+            ),
+            (
+                r#"
+                const BAD: bool = 2
+                fn main() { test.pass() }
+                "#,
+                "value 2 is outside bool range",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
