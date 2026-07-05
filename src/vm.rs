@@ -184,7 +184,11 @@ pub fn assemble_ez80_subset_with_symbols_at(
     for instruction in &instructions {
         match instruction {
             AsmLine::Label(name) => {
-                labels.insert(name.clone(), pc);
+                if labels.insert(name.clone(), pc).is_some() {
+                    return Err(Diagnostic::new(format!(
+                        "duplicate assembly label `{name}`"
+                    )));
+                }
             }
             AsmLine::Instruction(text) => pc += instruction_len(text)? as u32,
         }
@@ -1903,6 +1907,19 @@ mod tests {
         let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0xC3, 0x00, 0x00, 0x01, 0x18, 0xFE]);
+    }
+
+    #[test]
+    fn rejects_duplicate_assembly_labels() {
+        let asm = r#"
+        again:
+            jp again
+        again:
+            ret
+        "#;
+        let error = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap_err();
+
+        assert_eq!(error.message, "duplicate assembly label `again`");
     }
 
     #[test]
