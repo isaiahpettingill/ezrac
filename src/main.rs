@@ -173,6 +173,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     })
 }
 
+#[cfg(test)]
 fn test_source(path: &str) -> Result<(), String> {
     test_source_with_command_options(&CommandOptions {
         path: path.to_owned(),
