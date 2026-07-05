@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -1005,6 +1005,67 @@ fn section_id(
     }
 }
 
+fn read_embed_file(path: &str, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return read_embed_file_candidate(path);
+    }
+
+    let candidates = embed_file_candidates(path, source_path);
+    let missing_path = candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| path.to_path_buf());
+    for candidate in candidates {
+        match fs::read(&candidate) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Diagnostic::new(format!(
+                    "failed to read embedded file `{}`: {error}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    Err(Diagnostic::new(format!(
+        "embedded file `{}` not found",
+        missing_path.display()
+    )))
+}
+
+fn read_embed_file_candidate(path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Diagnostic::new(format!("embedded file `{}` not found", path.display()))
+        } else {
+            Diagnostic::new(format!(
+                "failed to read embedded file `{}`: {error}",
+                path.display()
+            ))
+        }
+    })
+}
+
+fn embed_file_candidates(path: &Path, source_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        source_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path),
+    ];
+    if let Ok(project_root) = std::env::current_dir() {
+        let project_relative = project_root.join(path);
+        if !candidates
+            .iter()
+            .any(|candidate| candidate == &project_relative)
+        {
+            candidates.push(project_relative);
+        }
+    }
+    candidates
+}
+
 fn layout_section_placement<'a>(
     layout: &'a Layout,
     section_name: &str,
@@ -1285,27 +1346,7 @@ fn embed_bytes(
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<u8>, Diagnostic> {
     match source {
-        EmbedSource::File(path) => {
-            let path = Path::new(path);
-            let resolved = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                source_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path)
-            };
-            fs::read(&resolved).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Diagnostic::new(format!("embedded file `{}` not found", resolved.display()))
-                } else {
-                    Diagnostic::new(format!(
-                        "failed to read embedded file `{}`: {error}",
-                        resolved.display()
-                    ))
-                }
-            })
-        }
+        EmbedSource::File(path) => read_embed_file(path, source_path),
         EmbedSource::Bytes(values) => values
             .iter()
             .map(|value| {
@@ -1775,6 +1816,45 @@ mod tests {
                 root.join("assets/missing.bin").display()
             )
         );
+    }
+
+    #[test]
+    fn cartridge_file_embeds_fall_back_to_project_root() {
+        let relative_dir = Path::new("target").join(format!(
+            "ezra_project_root_cart_embed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&relative_dir).unwrap();
+        std::fs::write(relative_dir.join("blob.bin"), [0xCA, 0xFE]).unwrap();
+        let source_root = std::env::temp_dir().join(format!(
+            "ezra_project_root_cart_source_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = source_root.join("nested/game.ezra");
+        let embed_path = format!("{}/blob.bin", relative_dir.display());
+        let source = format!(
+            r#"
+            embed blob: bytes = file("{embed_path}") section .assets align 1
+            fn main() {{ test.pass() }}
+            "#
+        );
+        let program = parse_program(&source_path, &source).unwrap();
+        let image = build_cartridge(&program).unwrap();
+        let table = image_offset(read_addr24(&image, 0x21));
+        let blob_addr = read_addr24(&image, table);
+        let blob = image_offset(blob_addr);
+
+        let _ = std::fs::remove_dir_all(&relative_dir);
+        let _ = std::fs::remove_dir_all(&source_root);
+        assert_eq!(&image[blob..blob + 2], &[0xCA, 0xFE]);
     }
 
     #[test]

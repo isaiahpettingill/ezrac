@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -836,27 +836,7 @@ impl Symbols {
 
     fn embed_bytes(&self, source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
         match source {
-            EmbedSource::File(path) => {
-                let path = Path::new(path);
-                let resolved = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    source_path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .join(path)
-                };
-                fs::read(&resolved).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        Diagnostic::new(format!("embedded file `{}` not found", resolved.display()))
-                    } else {
-                        Diagnostic::new(format!(
-                            "failed to read embedded file `{}`: {error}",
-                            resolved.display()
-                        ))
-                    }
-                })
-            }
+            EmbedSource::File(path) => read_embed_file(path, source_path),
             EmbedSource::Bytes(values) => values
                 .iter()
                 .map(|value| {
@@ -8977,6 +8957,67 @@ fn sdk_ports(options: &AssemblyOptions) -> HashMap<String, u8> {
     ])
 }
 
+fn read_embed_file(path: &str, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return read_embed_file_candidate(path);
+    }
+
+    let candidates = embed_file_candidates(path, source_path);
+    let missing_path = candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| path.to_path_buf());
+    for candidate in candidates {
+        match fs::read(&candidate) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Diagnostic::new(format!(
+                    "failed to read embedded file `{}`: {error}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    Err(Diagnostic::new(format!(
+        "embedded file `{}` not found",
+        missing_path.display()
+    )))
+}
+
+fn read_embed_file_candidate(path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Diagnostic::new(format!("embedded file `{}` not found", path.display()))
+        } else {
+            Diagnostic::new(format!(
+                "failed to read embedded file `{}`: {error}",
+                path.display()
+            ))
+        }
+    })
+}
+
+fn embed_file_candidates(path: &Path, source_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        source_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path),
+    ];
+    if let Ok(project_root) = std::env::current_dir() {
+        let project_relative = project_root.join(path);
+        if !candidates
+            .iter()
+            .any(|candidate| candidate == &project_relative)
+        {
+            candidates.push(project_relative);
+        }
+    }
+    candidates
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -16966,6 +17007,50 @@ section .text
         let run = run_assembly_test(&asm, 12_000).unwrap();
 
         let _ = std::fs::remove_dir_all(&root);
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn file_embeds_fall_back_to_project_root() {
+        let relative_dir = Path::new("target").join(format!(
+            "ezra_project_root_file_embed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&relative_dir).unwrap();
+        std::fs::write(relative_dir.join("blob.bin"), [0xDE, 0xAD]).unwrap();
+        let source_root = std::env::temp_dir().join(format!(
+            "ezra_project_root_source_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = source_root.join("nested/game.ezra");
+        let embed_path = format!("{}/blob.bin", relative_dir.display());
+        let source = format!(
+            r#"
+            embed blob: bytes = file("{embed_path}")
+
+            fn main() {{
+                test.assert_eq_u24(blob.len, 2, 1)
+                test.assert_eq_u8(*(blob.ptr + 0), 0xDE, 2)
+                test.assert_eq_u8(*(blob.ptr + 1), 0xAD, 3)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(&source_path, &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&relative_dir);
+        let _ = std::fs::remove_dir_all(&source_root);
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
