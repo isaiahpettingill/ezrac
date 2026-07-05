@@ -498,17 +498,19 @@ fn eval_layout_binary_op(left: i128, op: &str, right: i128) -> Result<i128, Diag
         "/" => {
             if right == 0 {
                 Ok(0)
+            } else if left == i128::MIN && right == -1 {
+                Ok(i128::MIN)
             } else {
-                left.checked_div(right)
-                    .ok_or_else(|| Diagnostic::new("layout expression division overflowed"))
+                Ok(left / right)
             }
         }
         "%" => {
             if right == 0 {
                 Ok(0)
+            } else if left == i128::MIN && right == -1 {
+                Ok(0)
             } else {
-                left.checked_rem(right)
-                    .ok_or_else(|| Diagnostic::new("layout expression remainder overflowed"))
+                Ok(left % right)
             }
         }
         other => Err(Diagnostic::new(format!(
@@ -545,26 +547,20 @@ fn eval_layout_unary_expr(
     }
     let mut value = value.ok_or_else(|| Diagnostic::new("layout unary expression is empty"))?;
     for op in ops.iter().rev() {
-        value = match op.as_str() {
-            "-" => value
-                .checked_neg()
-                .ok_or_else(|| Diagnostic::new("layout expression negation overflowed"))?,
-            "~" => !value,
-            "!" => {
-                if value == 0 {
-                    1
-                } else {
-                    0
-                }
-            }
-            other => {
-                return Err(Diagnostic::new(format!(
-                    "unsupported layout unary operator `{other}`"
-                )));
-            }
-        };
+        value = eval_layout_unary_op(op, value)?;
     }
     Ok(value)
+}
+
+fn eval_layout_unary_op(op: &str, value: i128) -> Result<i128, Diagnostic> {
+    match op {
+        "-" => Ok(value.wrapping_neg()),
+        "~" => Ok(!value),
+        "!" => Ok(if value == 0 { 1 } else { 0 }),
+        other => Err(Diagnostic::new(format!(
+            "unsupported layout unary operator `{other}`"
+        ))),
+    }
 }
 
 fn parse_u32(pair: Pair<'_, Rule>) -> Result<u32, Diagnostic> {
@@ -720,6 +716,16 @@ mod tests {
         );
         assert_eq!(layout.symbols[2].value.get(), 0);
         assert_eq!(layout.symbols[3].value.get(), 0);
+    }
+
+    #[test]
+    fn layout_arithmetic_overflow_is_defined() {
+        assert_eq!(
+            eval_layout_binary_op(i128::MIN, "/", -1).unwrap(),
+            i128::MIN
+        );
+        assert_eq!(eval_layout_binary_op(i128::MIN, "%", -1).unwrap(), 0);
+        assert_eq!(eval_layout_unary_op("-", i128::MIN).unwrap(), i128::MIN);
     }
 
     #[test]
