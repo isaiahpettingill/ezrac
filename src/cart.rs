@@ -128,7 +128,6 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<u8>, Diagnostic> {
     validate_header_section_fit(layout)?;
-    validate_text_section_fit(layout, code.len())?;
     let code_offset = layout
         .entry
         .get()
@@ -148,6 +147,15 @@ pub fn build_cartridge_with_layout_code_and_symbols(
 
     let layout_table = serialize_layout_table(layout);
     let symbol_table = serialize_symbol_table(symbols);
+    let assets = collect_assets(program)?;
+    let asset_table_len = asset_table_len(&assets)?;
+    let loaded_text_len = loaded_text_len(
+        code.len(),
+        layout_table.len(),
+        symbol_table.len(),
+        asset_table_len,
+    )?;
+    validate_text_section_fit(layout, loaded_text_len)?;
     let code_len = u32::try_from(code.len())
         .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
     let layout_offset = code_offset
@@ -294,7 +302,6 @@ pub fn cartridge_map_entries(
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<CartridgeMapEntry>, Diagnostic> {
     validate_header_section_fit(layout)?;
-    validate_text_section_fit(layout, code_len)?;
     let code_offset = layout
         .entry
         .get()
@@ -316,6 +323,17 @@ pub fn cartridge_map_entries(
         .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
     let layout_table = serialize_layout_table(layout);
     let symbol_table = serialize_symbol_table(symbols);
+    let assets = collect_assets(program)?;
+    let asset_table_len = asset_table_len(&assets)?;
+    let code_len_usize = usize::try_from(code_len)
+        .map_err(|_| Diagnostic::new("program code exceeds addressable image size"))?;
+    let loaded_text_len = loaded_text_len(
+        code_len_usize,
+        layout_table.len(),
+        symbol_table.len(),
+        asset_table_len,
+    )?;
+    validate_text_section_fit(layout, loaded_text_len)?;
     let layout_len = u32::try_from(layout_table.len())
         .map_err(|_| Diagnostic::new("layout table exceeds 24-bit address space"))?;
     let symbol_len = u32::try_from(symbol_table.len())
@@ -350,7 +368,6 @@ pub fn cartridge_map_entries(
         )?);
     }
 
-    let assets = collect_assets(program)?;
     if assets.is_empty() {
         return Ok(entries);
     }
@@ -543,6 +560,34 @@ fn validate_header_section_fit(layout: &Layout) -> Result<(), Diagnostic> {
         )));
     }
     Ok(())
+}
+
+fn loaded_text_len(
+    code_len: usize,
+    layout_table_len: usize,
+    symbol_table_len: usize,
+    asset_table_len: usize,
+) -> Result<usize, Diagnostic> {
+    code_len
+        .checked_add(layout_table_len)
+        .and_then(|len| len.checked_add(symbol_table_len))
+        .and_then(|len| len.checked_add(asset_table_len))
+        .ok_or_else(|| Diagnostic::new("loaded text metadata exceeds addressable image size"))
+}
+
+fn asset_table_len(assets: &[AssetEntry]) -> Result<usize, Diagnostic> {
+    let entries_len = assets
+        .len()
+        .checked_mul(ASSET_TABLE_ENTRY_SIZE)
+        .ok_or_else(|| Diagnostic::new("asset table exceeds addressable image size"))?;
+    let names_len = assets.iter().try_fold(0usize, |len, asset| {
+        len.checked_add(asset.name.len())
+            .and_then(|len| len.checked_add(1))
+            .ok_or_else(|| Diagnostic::new("asset name table exceeds addressable image size"))
+    })?;
+    entries_len
+        .checked_add(names_len)
+        .ok_or_else(|| Diagnostic::new("asset table exceeds addressable image size"))
 }
 
 fn section_cursor<'a>(
@@ -1161,6 +1206,38 @@ mod tests {
 
         assert_eq!(
             error.message,
+            "section `.text` does not fit in region `code`"
+        );
+    }
+
+    #[test]
+    fn cartridge_rejects_text_metadata_that_exceeds_region() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let layout = parse_layout(
+            r#"
+                layout tiny_metadata {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xF00000;
+
+                    region code 0x020000..0x020040 read execute;
+                    section .header -> code align 64;
+                    section .text -> code align 1;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let build_error =
+            build_cartridge_with_layout_code_and_symbols(&program, &layout, &[], &[]).unwrap_err();
+        let map_error = build_cartridge_map(&program, &layout, 0, &[]).unwrap_err();
+
+        assert_eq!(
+            build_error.message,
+            "section `.text` does not fit in region `code`"
+        );
+        assert_eq!(
+            map_error.message,
             "section `.text` does not fit in region `code`"
         );
     }
