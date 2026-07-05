@@ -9080,6 +9080,7 @@ fn asm_line_clobbers_flags(line: &str) -> bool {
             | "add"
             | "and"
             | "bit"
+            | "ccf"
             | "cp"
             | "cpl"
             | "daa"
@@ -9096,6 +9097,7 @@ fn asm_line_clobbers_flags(line: &str) -> bool {
             | "rrc"
             | "rrca"
             | "sbc"
+            | "scf"
             | "sla"
             | "sra"
             | "srl"
@@ -13965,6 +13967,17 @@ section .text
                 fn main() {
                     asm volatile(clobber a) {
                         "xor a"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm changes flags without declaring clobber `flags`",
+            ),
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "scf"
                     }
                     test.pass()
                 }

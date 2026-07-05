@@ -313,6 +313,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "di"
             | "ei"
             | "or a"
+            | "scf"
+            | "ccf"
             | "cpl"
             | "daa"
             | "rlca"
@@ -635,6 +637,10 @@ fn emit_instruction(
         bytes.push(0xFB);
     } else if text == "or a" {
         bytes.push(0xB7);
+    } else if text == "scf" {
+        bytes.push(0x37);
+    } else if text == "ccf" {
+        bytes.push(0x3F);
     } else if text == "cpl" {
         bytes.push(0x2F);
     } else if text == "daa" {
@@ -2034,9 +2040,10 @@ mod tests {
 
     #[test]
     fn assembles_misc_accumulator_alu_instructions() {
-        let bytes = assemble_ez80_subset_at("cpl\ndaa\nneg\n", EZRA_LOAD_ADDR.get()).unwrap();
+        let bytes =
+            assemble_ez80_subset_at("scf\nccf\ncpl\ndaa\nneg\n", EZRA_LOAD_ADDR.get()).unwrap();
 
-        assert_eq!(bytes, [0x2F, 0x27, 0xED, 0x44]);
+        assert_eq!(bytes, [0x37, 0x3F, 0x2F, 0x27, 0xED, 0x44]);
     }
 
     #[test]
@@ -2082,6 +2089,9 @@ mod tests {
     #[test]
     fn runs_misc_accumulator_alu_instructions_on_ez80_vm() {
         let asm = r#"
+            scf
+            ccf
+            jp c, fail
             ld a, 0F0h
             cpl
             cp 0Fh
