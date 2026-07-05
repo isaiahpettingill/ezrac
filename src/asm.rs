@@ -78,7 +78,43 @@ pub fn emit_ez80_assembly_with_options(
         }
     }
     emitter.emit_required_sections();
-    Ok(emitter.out)
+    Ok(peephole_cleanup(&emitter.out))
+}
+
+fn peephole_cleanup(assembly: &str) -> String {
+    let mut out = String::new();
+    let mut previous_redundant_load = None;
+
+    for line in assembly.lines() {
+        let redundant_load = redundant_load_key(line);
+        if redundant_load.is_some() && redundant_load == previous_redundant_load {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        previous_redundant_load = redundant_load;
+    }
+
+    out
+}
+
+fn redundant_load_key(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("ld ") || trimmed.contains('(') {
+        return None;
+    }
+    let (target, value) = trimmed.strip_prefix("ld ")?.split_once(',')?;
+    let target = target.trim();
+    if !matches!(
+        target,
+        "a" | "b" | "c" | "d" | "h" | "l" | "hl" | "de" | "bc" | "ix" | "sp"
+    ) {
+        return None;
+    }
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(trimmed)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7157,6 +7193,46 @@ mod tests {
         );
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn peephole_removes_adjacent_duplicate_register_loads() {
+        let asm = peephole_cleanup(
+            r#"
+section .text
+    ld a, 01h
+    ld a, 01h
+    ld hl, 040000h
+    ld hl, 040000h
+    ld b, a
+"#,
+        );
+
+        assert_eq!(asm.matches("    ld a, 01h").count(), 1, "{asm}");
+        assert_eq!(asm.matches("    ld hl, 040000h").count(), 1, "{asm}");
+        assert!(asm.contains("    ld b, a"), "{asm}");
+    }
+
+    #[test]
+    fn peephole_preserves_volatile_sensitive_operations() {
+        let asm = peephole_cleanup(
+            r#"
+section .text
+    ld a, (040000h)
+    ld a, (040000h)
+    ld (040000h), a
+    ld (040000h), a
+    in0 a, (01h)
+    in0 a, (01h)
+    out0 (0Ch), a
+    out0 (0Ch), a
+"#,
+        );
+
+        assert_eq!(asm.matches("    ld a, (040000h)").count(), 2, "{asm}");
+        assert_eq!(asm.matches("    ld (040000h), a").count(), 2, "{asm}");
+        assert_eq!(asm.matches("    in0 a, (01h)").count(), 2, "{asm}");
+        assert_eq!(asm.matches("    out0 (0Ch), a").count(), 2, "{asm}");
     }
 
     #[test]
