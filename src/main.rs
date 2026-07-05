@@ -434,8 +434,28 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
+            root.join("lib/assets.ezra"),
+            r#"
+            pub const BASE: u8 = 2
+            pub const LEN: u8 = BASE + 1
+            pub const BYTE: u8 = 0x5A
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
             &source_path,
-            "import lib.math\nembed palette: bytes = bytes [0x11, 0x22]\nfn main() { let x: u8 = add_one(4); test.pass() }\n",
+            r#"
+            import lib.math
+            import lib.assets
+
+            embed palette: bytes = bytes [0x11, 0x22]
+            embed blob: bytes = repeat(assets.BYTE, assets.LEN)
+
+            fn main() {
+                let x: u8 = add_one(4)
+                test.pass()
+            }
+            "#,
         )
         .unwrap();
 
@@ -459,6 +479,10 @@ mod tests {
             map.contains(".assets:palette 0x100000 0x100001 0x000002"),
             "{map}"
         );
+        assert!(
+            map.contains(".assets:blob 0x100100 0x100102 0x000003"),
+            "{map}"
+        );
         assert_eq!(&cart[0..4], b"EZRA");
         assert_eq!(read_addr24(&cart, 0x08), EZRA_ENTRY_ADDR.get());
         assert_eq!(&cart[64..69], &[0xF3, 0x31, 0x00, 0x00, 0xF0]);
@@ -475,7 +499,13 @@ mod tests {
         assert!(symbols.contains("symbol _main"), "{symbols}");
         assert!(read_addr24(&cart, 0x21) > read_addr24(&cart, 0x1E));
         assert!(cart.len() > 64);
-        assert!(cart.ends_with(&[0x11, 0x22]));
+        let asset_table = usize::try_from(read_addr24(&cart, 0x21) - EZRA_LOAD_ADDR.get()).unwrap();
+        let palette =
+            usize::try_from(read_addr24(&cart, asset_table) - EZRA_LOAD_ADDR.get()).unwrap();
+        let blob =
+            usize::try_from(read_addr24(&cart, asset_table + 10) - EZRA_LOAD_ADDR.get()).unwrap();
+        assert_eq!(&cart[palette..palette + 2], &[0x11, 0x22]);
+        assert_eq!(&cart[blob..blob + 3], &[0x5A, 0x5A, 0x5A]);
 
         let _ = std::fs::remove_dir_all(root);
     }
