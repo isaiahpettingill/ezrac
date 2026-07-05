@@ -233,28 +233,17 @@ fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<
 
 fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
     let mut private_imports = HashMap::new();
+    let mut seen_imports = HashSet::new();
     for declaration in &program.declarations {
         let Declaration::Import(import) = declaration else {
             continue;
         };
-        let import_path = resolve_import_path(&program.source_path, import);
-        let source = fs::read_to_string(&import_path).map_err(|error| {
-            Diagnostic::new(format!(
-                "failed to read import `{import}` at `{}`: {error}",
-                import_path.display()
-            ))
-        })?;
-        let imported = parse_program(&import_path, &source)?;
-        let module = import.rsplit('.').next().unwrap_or(import);
-        for declaration in &imported.declarations {
-            let Some(name) = declaration_name(declaration) else {
-                continue;
-            };
-            if !declaration_is_public(declaration) {
-                private_imports.insert(name.to_owned(), import.clone());
-                private_imports.insert(format!("{module}.{name}"), import.clone());
-            }
-        }
+        collect_private_imports(
+            &program.source_path,
+            import,
+            &mut private_imports,
+            &mut seen_imports,
+        )?;
     }
 
     if private_imports.is_empty() {
@@ -264,6 +253,45 @@ fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
     for declaration in &program.declarations {
         validate_declaration_private_import_access(declaration, &private_imports)?;
     }
+    Ok(())
+}
+
+fn collect_private_imports(
+    source_path: &Path,
+    import: &str,
+    private_imports: &mut HashMap<String, String>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), Diagnostic> {
+    let import_path = resolve_import_path(source_path, import);
+    let normalized = normalize_path(&import_path);
+    if !seen.insert(normalized) {
+        return Ok(());
+    }
+
+    let source = fs::read_to_string(&import_path).map_err(|error| {
+        Diagnostic::new(format!(
+            "failed to read import `{import}` at `{}`: {error}",
+            import_path.display()
+        ))
+    })?;
+    let imported = parse_program(&import_path, &source)?;
+    let module = import.rsplit('.').next().unwrap_or(import);
+    for declaration in &imported.declarations {
+        let Some(name) = declaration_name(declaration) else {
+            continue;
+        };
+        if !declaration_is_public(declaration) {
+            private_imports.insert(name.to_owned(), import.to_owned());
+            private_imports.insert(format!("{module}.{name}"), import.to_owned());
+        }
+    }
+    for declaration in &imported.declarations {
+        let Declaration::Import(nested) = declaration else {
+            continue;
+        };
+        collect_private_imports(&import_path, nested, private_imports, seen)?;
+    }
+
     Ok(())
 }
 
@@ -795,6 +823,52 @@ mod tests {
         assert_eq!(
             error.message,
             "declaration `math.secret` from import `lib.math` is private"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_access_to_transitive_private_imported_declarations() {
+        let root = temp_root("transitive_private_imports");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let api_path = root.join("lib/api.ezra");
+        let secret_path = root.join("lib/secret.ezra");
+        std::fs::write(
+            &api_path,
+            "import secret\npub fn shown(v: u8) -> u8 { return v }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &secret_path,
+            "fn hidden(v: u8) -> u8 { return v + 1 }\nglobal secret: u8 = 7\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            "import lib.api\nfn main() { let x: u8 = hidden(4); test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `hidden` from import `secret` is private"
+        );
+
+        std::fs::write(
+            &main_path,
+            "import lib.api\nfn main() { let x: u8 = secret.secret; test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `secret.secret` from import `secret` is private"
         );
 
         let _ = std::fs::remove_dir_all(root);
