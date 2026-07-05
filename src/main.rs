@@ -229,6 +229,10 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
                 "test hit an illegal instruction at 0x{pc:06X} after {} instructions",
                 run.instructions
             ),
+            Some(ezra::vm::TestRunFailure::StackOverflow { sp }) => format!(
+                "test stack overflowed into non-stack memory at SP=0x{sp:06X} after {} instructions",
+                run.instructions
+            ),
         });
     }
     if run.result_code != 0 {

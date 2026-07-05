@@ -24,6 +24,7 @@ pub enum TestRunFailure {
     Timeout,
     ExecutionOutsideLoadedProgram { pc: u32 },
     IllegalInstruction { pc: u32 },
+    StackOverflow { sp: u32 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,6 +46,8 @@ pub struct TestRunOptions {
     pub initial_memory: Vec<(u32, u8)>,
     pub stack_top: u32,
 }
+
+const TEST_STACK_BYTES: u32 = 0x010000;
 
 pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<TestRun, Diagnostic> {
     run_assembly_test_with_options(
@@ -128,6 +131,17 @@ pub fn run_assembly_test_with_options_at(
                 failure: Some(TestRunFailure::IllegalInstruction { pc }),
             });
         }
+        let sp = cpu.state.reg.get24(Reg16::SP);
+        if !stack_pointer_in_bounds(sp, options.stack_top) {
+            return Ok(TestRun {
+                halted: false,
+                result_code: machine.result_code,
+                instructions: instruction + 1,
+                debug_output: machine.debug_output,
+                ports: machine.ports,
+                failure: Some(TestRunFailure::StackOverflow { sp }),
+            });
+        }
         if machine.halted {
             return Ok(TestRun {
                 halted: true,
@@ -148,6 +162,11 @@ pub fn run_assembly_test_with_options_at(
         ports: machine.ports,
         failure: Some(TestRunFailure::Timeout),
     })
+}
+
+fn stack_pointer_in_bounds(sp: u32, stack_top: u32) -> bool {
+    let floor = stack_top.saturating_sub(TEST_STACK_BYTES);
+    (floor..=stack_top).contains(&sp)
 }
 
 pub fn assemble_ez80_subset_at(assembly: &str, base_addr: u32) -> Result<Vec<u8>, Diagnostic> {
@@ -1136,6 +1155,33 @@ mod tests {
     }
 
     #[test]
+    fn reports_stack_overflow_into_non_stack_memory() {
+        let asm = r#"
+            ld sp, 030400h
+            ld hl, 012345h
+            push hl
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test_with_options(
+            asm,
+            &TestRunOptions {
+                instruction_budget: 100,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x040400,
+            },
+        )
+        .unwrap();
+
+        assert!(!run.halted);
+        assert_eq!(
+            run.failure,
+            Some(TestRunFailure::StackOverflow { sp: 0x0303FD })
+        );
+    }
+
+    #[test]
     fn assembles_interrupt_enable_and_disable_instructions() {
         let bytes = assemble_ez80_subset_at("di\nei\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
@@ -1839,7 +1885,16 @@ mod tests {
             ld a, 01h
             out0 (0Eh), a
         "#;
-        let run = run_assembly_test(asm, 200).unwrap();
+        let run = run_assembly_test_with_options(
+            asm,
+            &TestRunOptions {
+                instruction_budget: 200,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x040400,
+            },
+        )
+        .unwrap();
 
         assert!(run.halted);
         assert_eq!(run.result_code, 7);
@@ -1879,7 +1934,16 @@ mod tests {
         assert!(bytes.windows(2).any(|window| window == [0xFD, 0xE5]));
         assert!(bytes.windows(2).any(|window| window == [0xFD, 0xE1]));
 
-        let run = run_assembly_test(asm, 200).unwrap();
+        let run = run_assembly_test_with_options(
+            asm,
+            &TestRunOptions {
+                instruction_budget: 200,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x040400,
+            },
+        )
+        .unwrap();
 
         assert!(run.halted);
         assert_eq!(run.result_code, 9);
