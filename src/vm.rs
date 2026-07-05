@@ -293,6 +293,10 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ret z"
             | "ret nc"
             | "ret c"
+            | "ret po"
+            | "ret pe"
+            | "ret p"
+            | "ret m"
             | "nop"
             | "di"
             | "ei"
@@ -557,6 +561,14 @@ fn emit_instruction(
         bytes.push(0xD0);
     } else if text == "ret c" {
         bytes.push(0xD8);
+    } else if text == "ret po" {
+        bytes.push(0xE0);
+    } else if text == "ret pe" {
+        bytes.push(0xE8);
+    } else if text == "ret p" {
+        bytes.push(0xF0);
+    } else if text == "ret m" {
+        bytes.push(0xF8);
     } else if text == "nop" {
         bytes.push(0x00);
     } else if text == "di" {
@@ -2149,6 +2161,14 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn assembles_all_conditional_return_instructions() {
+        let asm = "ret nz\nret z\nret nc\nret c\nret po\nret pe\nret p\nret m\n";
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8]);
     }
 
     #[test]
