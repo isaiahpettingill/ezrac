@@ -10,7 +10,7 @@ use crate::{
         AccessPath, AccessSegment, Declaration, EmbedSource, Expr, Function, Place, Program, Stmt,
         Type,
     },
-    diagnostic::Diagnostic,
+    diagnostic::{Diagnostic, SourceLocation},
     parser::parse_program,
 };
 
@@ -34,27 +34,42 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
         .iter()
         .filter(|decl| matches!(decl, crate::ast::Declaration::Import(_)))
         .count();
-    let program = resolve_program_imports(root, &mut Vec::new(), &mut HashSet::new())?;
+    let fallback_location = source_start_location(&options.source);
+    let program = resolve_program_imports(root, &mut Vec::new(), &mut HashSet::new())
+        .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
     let declarations = program.declarations.len();
     let has_main = program.main_function().is_some();
 
     if !has_main {
-        return Err(Diagnostic::new("missing required `fn main()`"));
+        return Err(Diagnostic::at(
+            fallback_location,
+            "missing required `fn main()`",
+        ));
     }
-    validate_main_signature(program.main_function().expect("main presence checked"))?;
+    validate_main_signature(program.main_function().expect("main presence checked"))
+        .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
     emit_ez80_assembly_with_options(
         &program,
         AssemblyOptions {
             debug_comments: options.debug_comments,
             ..AssemblyOptions::default()
         },
-    )?;
+    )
+    .map_err(|error| error.with_location_if_missing(fallback_location))?;
 
     Ok(CompileReport {
         imports,
         declarations,
         has_main,
     })
+}
+
+fn source_start_location(path: &Path) -> SourceLocation {
+    SourceLocation {
+        file: path.to_path_buf(),
+        line: 1,
+        column: 1,
+    }
 }
 
 pub fn load_program(path: &Path) -> Result<Program, Diagnostic> {
@@ -620,6 +635,7 @@ mod tests {
         let error = check_source("const X: u8 = 1\n", &options).unwrap_err();
 
         assert_eq!(error.message, "missing required `fn main()`");
+        assert_eq!(error.location, Some(source_start_location(&options.source)));
     }
 
     #[test]
@@ -648,7 +664,15 @@ mod tests {
             check_source("fn helper() { missing() }\nfn main() {}\n", &options).unwrap_err();
 
         assert_eq!(mismatch.message, "value 256 is outside u8 range");
+        assert_eq!(
+            mismatch.location,
+            Some(source_start_location(&options.source))
+        );
         assert_eq!(bad_call.message, "unknown function `missing`");
+        assert_eq!(
+            bad_call.location,
+            Some(source_start_location(&options.source))
+        );
     }
 
     #[test]
