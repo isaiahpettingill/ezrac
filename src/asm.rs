@@ -11928,6 +11928,7 @@ section .text
             &TestRunOptions {
                 instruction_budget: 8_000,
                 initial_ports: vec![(0x01, 0x05), (0x02, 0x12)],
+                initial_memory: Vec::new(),
             },
         )
         .unwrap();
@@ -12004,6 +12005,7 @@ section .text
             &TestRunOptions {
                 instruction_budget: 6_000,
                 initial_ports: vec![(0x17, 0xA0)],
+                initial_memory: Vec::new(),
             },
         )
         .unwrap();

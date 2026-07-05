@@ -210,6 +210,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
         &TestRunOptions {
             instruction_budget: 1_000_000,
             initial_ports: metadata.initial_ports,
+            initial_memory: Vec::new(),
         },
         layout.entry.get(),
     )

@@ -42,6 +42,7 @@ pub struct AssemblySymbol {
 pub struct TestRunOptions {
     pub instruction_budget: u64,
     pub initial_ports: Vec<(u8, u8)>,
+    pub initial_memory: Vec<(u32, u8)>,
 }
 
 pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<TestRun, Diagnostic> {
@@ -50,6 +51,7 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
         &TestRunOptions {
             instruction_budget,
             initial_ports: Vec::new(),
+            initial_memory: Vec::new(),
         },
     )
 }
@@ -72,6 +74,9 @@ pub fn run_assembly_test_with_options_at(
     let mut machine = TestMachine::new();
     for (port, value) in &options.initial_ports {
         machine.ports[*port as usize] = *value;
+    }
+    for (address, value) in &options.initial_memory {
+        machine.poke(*address, *value);
     }
     for (address, byte) in code.into_iter().enumerate() {
         machine.poke(base_addr + address as u32, byte);
@@ -1513,12 +1518,35 @@ mod tests {
             &TestRunOptions {
                 instruction_budget: 100,
                 initial_ports: vec![(0x01, 0x2A)],
+                initial_memory: Vec::new(),
             },
         )
         .unwrap();
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0x2A);
+    }
+
+    #[test]
+    fn run_options_seed_memory() {
+        let asm = r#"
+            ld a, (040123h)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test_with_options(
+            asm,
+            &TestRunOptions {
+                instruction_budget: 100,
+                initial_ports: Vec::new(),
+                initial_memory: vec![(0x040123, 0x6C)],
+            },
+        )
+        .unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0x6C);
     }
 
     #[test]
