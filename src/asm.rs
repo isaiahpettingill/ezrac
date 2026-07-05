@@ -451,6 +451,14 @@ impl Symbols {
                         )));
                     }
                     symbols.ensure_const_dependencies_evaluated(&decl.value, program)?;
+                    let value_type =
+                        symbols.resolved_type(&symbols.const_expr_type(&decl.value)?)?;
+                    if type_is_bool(&value_type) || matches!(value_type, Type::Ptr(_)) {
+                        return Err(Diagnostic::new(format!(
+                            "mmio `{}` address must be an integer constant",
+                            decl.name
+                        )));
+                    }
                     let value = symbols.eval_i64(&decl.value)?;
                     if !(0..=0xFF_FFFF).contains(&value) {
                         return Err(Diagnostic::new(format!(
@@ -10223,6 +10231,35 @@ section .text
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_non_integer_mmio_addresses() {
+        let cases = [
+            r#"
+            volatile mmio STATUS: ptr<u8> = true
+            fn main() { test.pass() }
+            "#,
+            r#"
+            const STATUS_ADDR: bool = true
+            volatile mmio STATUS: ptr<u8> = STATUS_ADDR
+            fn main() { test.pass() }
+            "#,
+            r#"
+            volatile mmio STATUS: ptr<u8> = 1 == 1
+            fn main() { test.pass() }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(
+                error.message,
+                "mmio `STATUS` address must be an integer constant"
+            );
         }
     }
 
