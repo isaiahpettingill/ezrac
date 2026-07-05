@@ -4201,7 +4201,7 @@ impl Emitter {
     }
 
     fn ensure_pointer_write_target_is_mutable(
-        &self,
+        &mut self,
         ptr: &Expr,
         pointee_type: &Type,
     ) -> Result<(), Diagnostic> {
@@ -4226,10 +4226,16 @@ impl Emitter {
                 )));
             }
         }
+        if self
+            .readonly_string_literal_for_range(write_start, write_end)
+            .is_some()
+        {
+            return Err(Diagnostic::new("string literal is read-only"));
+        }
         Ok(())
     }
 
-    fn readonly_write_addr(&self, ptr: &Expr) -> Option<u32> {
+    fn readonly_write_addr(&mut self, ptr: &Expr) -> Option<u32> {
         if let Some(addr) = self.readonly_expr_addr(ptr) {
             return Some(addr);
         }
@@ -4239,9 +4245,21 @@ impl Emitter {
         Self::addr24(addr)
     }
 
-    fn readonly_expr_addr(&self, expr: &Expr) -> Option<u32> {
+    fn readonly_expr_addr(&mut self, expr: &Expr) -> Option<u32> {
         match expr {
             Expr::Ident(name) => self.readonly_pointer_alias(name),
+            Expr::String(value) => {
+                if let Some(variable) = self
+                    .string_literals
+                    .get(value)
+                    .or_else(|| self.symbols.string_literals.get(value))
+                {
+                    return Some(variable.addr);
+                }
+                let variable = self.symbols.intern_string_literal(value).ok()?;
+                self.string_literals.insert(value.clone(), variable);
+                Some(variable.addr)
+            }
             Expr::Cast { expr, .. } => self.readonly_expr_addr(expr),
             Expr::Binary {
                 left,
@@ -6904,6 +6922,9 @@ impl Emitter {
         if self.readonly_embed_name_for_addr(addr).is_some() {
             self.current_readonly_pointer_aliases_mut()
                 .insert(name.to_owned(), addr);
+        } else if self.readonly_string_literal_for_addr(addr).is_some() {
+            self.current_readonly_pointer_aliases_mut()
+                .insert(name.to_owned(), addr);
         } else {
             self.current_readonly_pointer_aliases_mut().remove(name);
         }
@@ -6919,6 +6940,31 @@ impl Emitter {
             let end = start + u64::from(len);
             if addr >= start && addr < end {
                 return Some(name.as_str());
+            }
+        }
+        None
+    }
+
+    fn readonly_string_literal_for_addr(&self, addr: u32) -> Option<&str> {
+        self.readonly_string_literal_for_range(u64::from(addr), u64::from(addr) + 1)
+    }
+
+    fn readonly_string_literal_for_range(&self, start: u64, end: u64) -> Option<&str> {
+        for (value, variable) in self
+            .string_literals
+            .iter()
+            .chain(self.symbols.string_literals.iter())
+        {
+            let Some(len) = variable.len else {
+                continue;
+            };
+            if len == 0 {
+                continue;
+            }
+            let literal_start = u64::from(variable.addr);
+            let literal_end = literal_start + u64::from(len);
+            if start < literal_end && end > literal_start {
+                return Some(value.as_str());
             }
         }
         None
@@ -16021,6 +16067,40 @@ section .text
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_writes_to_read_only_string_literals() {
+        let cases = [
+            r#"
+                fn main() {
+                    *("OK") = 'N'
+                    test.pass()
+                }
+            "#,
+            r#"
+                fn main() {
+                    let text: ptr<u8> = "OK";
+                    *(text + 1) = 'X'
+                    test.pass()
+                }
+            "#,
+            r#"
+                const TITLE: ptr<u8> = "EZ";
+
+                fn main() {
+                    *(TITLE) = 'N'
+                    test.pass()
+                }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "string literal is read-only");
+        }
     }
 
     #[test]
