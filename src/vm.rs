@@ -15,6 +15,7 @@ pub struct TestRun {
     pub result_code: u8,
     pub instructions: u64,
     pub debug_output: Vec<u8>,
+    pub ports: [u8; 256],
     pub failure: Option<TestRunFailure>,
 }
 
@@ -91,6 +92,7 @@ pub fn run_assembly_test_with_options_at(
                 result_code: machine.result_code,
                 instructions: instruction,
                 debug_output: machine.debug_output,
+                ports: machine.ports,
                 failure: Some(TestRunFailure::ExecutionOutsideLoadedProgram { pc }),
             });
         }
@@ -100,6 +102,7 @@ pub fn run_assembly_test_with_options_at(
                 result_code: machine.result_code,
                 instructions: instruction,
                 debug_output: machine.debug_output,
+                ports: machine.ports,
                 failure: Some(TestRunFailure::IllegalInstruction { pc }),
             });
         }
@@ -109,6 +112,7 @@ pub fn run_assembly_test_with_options_at(
                 result_code: machine.result_code,
                 instructions: instruction + 1,
                 debug_output: machine.debug_output,
+                ports: machine.ports,
                 failure: None,
             });
         }
@@ -119,6 +123,7 @@ pub fn run_assembly_test_with_options_at(
         result_code: machine.result_code,
         instructions: options.instruction_budget,
         debug_output: machine.debug_output,
+        ports: machine.ports,
         failure: Some(TestRunFailure::Timeout),
     })
 }

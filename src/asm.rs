@@ -10336,6 +10336,79 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_audio_sdk_style_port_sequence() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_audio_sdk_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("sdk")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("sdk/audio.ezra"),
+            r#"
+            pub const AUDIO_SUBMIT_BUFFER: u8 = 1
+            pub const AUDIO_STOP: u8 = 2
+            pub volatile mmio AUDIO_BASE: ptr<u8> = 0x0C1234
+            pub port AUDIO_CMD: u8 = 0x0A
+            pub port EXT_ADDR0: u8 = 0x10
+            pub port EXT_ADDR1: u8 = 0x11
+            pub port EXT_ADDR2: u8 = 0x12
+            pub port EXT_LEN0: u8 = 0x13
+            pub port EXT_LEN1: u8 = 0x14
+
+            pub fn submit(addr: ptr<u8>, len: u16) {
+                let raw: u24 = cast<u24>(addr)
+                out EXT_ADDR0, cast<u8>(raw)
+                out EXT_ADDR1, cast<u8>(raw >> 8)
+                out EXT_ADDR2, cast<u8>(raw >> 16)
+                out EXT_LEN0, cast<u8>(len)
+                out EXT_LEN1, cast<u8>(len >> 8)
+                out AUDIO_CMD, AUDIO_SUBMIT_BUFFER
+            }
+
+            pub fn stop() {
+                out AUDIO_CMD, AUDIO_STOP
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import sdk.audio
+
+            fn main() {
+                audio.submit(audio.AUDIO_BASE + 0x56, 0x2345)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(asm.contains("_audio_submit:"), "{asm}");
+        assert!(asm.contains("out0 (0Ah), a"), "{asm}");
+        assert!(asm.contains("out0 (10h), a"), "{asm}");
+        assert!(asm.contains("out0 (14h), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.ports[0x10], 0x8A, "{asm}");
+        assert_eq!(run.ports[0x11], 0x12, "{asm}");
+        assert_eq!(run.ports[0x12], 0x0C, "{asm}");
+        assert_eq!(run.ports[0x13], 0x45, "{asm}");
+        assert_eq!(run.ports[0x14], 0x23, "{asm}");
+        assert_eq!(run.ports[0x0A], 1, "{asm}");
+    }
+
+    #[test]
     fn rejects_inline_asm_missing_required_clobbers() {
         let cases = [
             (
