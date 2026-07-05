@@ -1190,6 +1190,11 @@ impl Emitter {
         match target {
             Place::Ident(name) => {
                 let variable = self.variable(name)?;
+                if op == AssignOp::Set {
+                    if let Some(ty) = self.variable_type(name) {
+                        self.validate_expr_assignable_to_type(value, ty)?;
+                    }
+                }
                 self.emit_assignment_value(variable, op, value)?;
                 self.emit_store_width(variable);
             }
@@ -1198,6 +1203,10 @@ impl Emitter {
             }
             Place::Field { base, field } => {
                 let variable = self.field_variable(base, field)?;
+                if op == AssignOp::Set {
+                    let ty = self.field_type(base, field)?;
+                    self.validate_expr_assignable_to_type(value, &ty)?;
+                }
                 self.emit_assignment_value(variable, op, value)?;
                 self.emit_store_width(variable);
             }
@@ -1488,6 +1497,11 @@ impl Emitter {
     fn emit_expr_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
         let width = self.symbols.type_width(ty)?;
         self.validate_expr_arithmetic_compatibility(expr)?;
+        self.validate_expr_assignable_to_type(expr, ty)?;
+        if let Expr::Cast { expr, ty } = expr {
+            self.emit_cast_to_type(expr, ty)?;
+            return Ok(());
+        }
         if let Ok(value) = self.symbols.eval_i64(expr) {
             let value = self.value_for_type(value, ty, width)?;
             match width {
@@ -1497,6 +1511,51 @@ impl Emitter {
             return Ok(());
         }
         self.emit_expr_to_width(expr, width)
+    }
+
+    fn emit_cast_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+        let width = self.symbols.type_width(ty)?;
+        if let Ok(value) = self.symbols.eval_i64(expr) {
+            let bits = u32::from(width.bytes()) * 8;
+            let mask = (1_i128 << bits) - 1;
+            let value = ((value as i128) & mask) as u32;
+            match width {
+                ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
+                ValueWidth::U16 | ValueWidth::U24 => self.line(&format!("    ld hl, {value:06X}h")),
+            }
+            return Ok(());
+        }
+        let source_width = self.expr_width(expr)?;
+        match width {
+            ValueWidth::U8 => {
+                if source_width == ValueWidth::U8 {
+                    self.emit_expr_to_a(expr)?;
+                } else {
+                    self.emit_expr_to_hl(expr, source_width)?;
+                    self.line("    ld a, l");
+                }
+            }
+            ValueWidth::U16 => {
+                if source_width == ValueWidth::U8 {
+                    self.emit_expr_to_a(expr)?;
+                    self.line("    ld hl, 000000h");
+                    self.line("    ld l, a");
+                } else {
+                    self.emit_expr_to_hl(expr, source_width)?;
+                    self.zero_extend_hl16();
+                }
+            }
+            ValueWidth::U24 => {
+                if source_width == ValueWidth::U8 {
+                    self.emit_expr_to_a(expr)?;
+                    self.line("    ld hl, 000000h");
+                    self.line("    ld l, a");
+                } else {
+                    self.emit_expr_to_hl(expr, source_width)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn emit_expr_to_hl(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
@@ -1546,10 +1605,7 @@ impl Emitter {
                 let value = self.value_for_width(expr, width)?;
                 self.line(&format!("    ld hl, {:06X}h", value));
             }
-            Expr::Cast { expr, .. } => match self.value_for_width(expr, width) {
-                Ok(value) => self.line(&format!("    ld hl, {:06X}h", value)),
-                Err(_) => self.emit_expr_to_width(expr, width)?,
-            },
+            Expr::Cast { expr, ty } => self.emit_cast_to_type(expr, ty)?,
             Expr::Unary { op, expr } => self.emit_unary_to_hl(*op, expr, width)?,
             Expr::Binary { left, op, right } => match op {
                 BinaryOp::Add | BinaryOp::Sub
@@ -1767,10 +1823,7 @@ impl Emitter {
                 let value = self.u8(expr)?;
                 self.line(&format!("    ld a, {:02X}h", value));
             }
-            Expr::Cast { expr, .. } => match self.u8(expr) {
-                Ok(value) => self.line(&format!("    ld a, {:02X}h", value)),
-                Err(_) => self.emit_expr_to_a(expr)?,
-            },
+            Expr::Cast { expr, ty } => self.emit_cast_to_type(expr, ty)?,
             Expr::Unary { op, expr } => self.emit_unary_to_a(*op, expr)?,
             Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right)?,
             Expr::Call { path, args }
@@ -3098,12 +3151,15 @@ impl Emitter {
         left: &Expr,
         right: &Expr,
     ) -> Result<(), Diagnostic> {
+        let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
+        let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
+        if type_is_bool(&left_type) || type_is_bool(&right_type) {
+            return Err(Diagnostic::new("type mismatch"));
+        }
         if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
             return Ok(());
         }
 
-        let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
-        let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
         if matches!(left_type, Type::Ptr(_)) || matches!(right_type, Type::Ptr(_)) {
             return Ok(());
         }
@@ -3112,6 +3168,57 @@ impl Emitter {
             return Err(Diagnostic::new("signed/unsigned mix without cast"));
         }
         Ok(())
+    }
+
+    fn validate_expr_assignable_to_type(
+        &self,
+        expr: &Expr,
+        target: &Type,
+    ) -> Result<(), Diagnostic> {
+        if let Expr::Cast { ty, .. } = expr {
+            self.symbols.type_width(ty)?;
+            return self.validate_type_assignable_to_type(ty, target);
+        }
+        if expr_is_untyped_literal(expr) {
+            if let Ok(value) = self.symbols.eval_i64(expr) {
+                self.symbols.validate_value_for_type(value, target)?;
+            }
+            return Ok(());
+        }
+
+        let source_type = self.expr_type(expr)?;
+        self.validate_type_assignable_to_type(&source_type, target)
+    }
+
+    fn validate_type_assignable_to_type(
+        &self,
+        source: &Type,
+        target: &Type,
+    ) -> Result<(), Diagnostic> {
+        let source_type = self.symbols.resolved_type(source)?;
+        let target_type = self.symbols.resolved_type(target)?;
+        if source_type == target_type {
+            return Ok(());
+        }
+        if type_is_bool(&source_type) || type_is_bool(&target_type) {
+            return Err(Diagnostic::new("type mismatch"));
+        }
+        if matches!(source_type, Type::Ptr(_)) || matches!(target_type, Type::Ptr(_)) {
+            return Err(Diagnostic::new("type mismatch"));
+        }
+
+        let source_width = self.symbols.type_width(&source_type)?;
+        let target_width = self.symbols.type_width(&target_type)?;
+        if source_width < target_width {
+            return Err(Diagnostic::new("widening without cast"));
+        }
+        if source_width > target_width {
+            return Err(Diagnostic::new("narrowing without cast"));
+        }
+        if type_is_signed(&source_type) != type_is_signed(&target_type) {
+            return Err(Diagnostic::new("signed/unsigned mix without cast"));
+        }
+        Err(Diagnostic::new("type mismatch"))
     }
 
     fn validate_expr_arithmetic_compatibility(&self, expr: &Expr) -> Result<(), Diagnostic> {
@@ -3366,9 +3473,13 @@ fn type_is_signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24"))
 }
 
+fn type_is_bool(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name) if name == "bool")
+}
+
 fn expr_is_untyped_literal(expr: &Expr) -> bool {
     match expr {
-        Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => true,
+        Expr::Int(_) | Expr::Char(_) => true,
         Expr::Unary {
             op: UnaryOp::Neg,
             expr,
@@ -3605,6 +3716,87 @@ mod tests {
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, "signed/unsigned mix without cast");
+        }
+    }
+
+    #[test]
+    fn rejects_assignment_width_changes_without_cast() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let small: u8 = 1
+                    let wide: u16 = small
+                    test.pass()
+                }
+                "#,
+                "widening without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let wide: u16 = 0x1234
+                    let small: u8 = wide
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                fn value() -> u8 {
+                    let wide: u16 = 1
+                    return wide
+                }
+                fn main() { test.pass() }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let wide: u16 = 1
+                    let small: u8 = 0
+                    small = wide
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_bool_integer_mismatch() {
+        let cases = [
+            r#"
+            fn main() {
+                let value: u8 = true
+                test.pass()
+            }
+            "#,
+            r#"
+            fn main() {
+                let flag: bool = true
+                let value: u8 = 1
+                let mixed: u8 = flag + value
+                test.pass()
+            }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "type mismatch");
         }
     }
 
@@ -4368,6 +4560,38 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_explicit_integer_casts() {
+        let source = r#"
+            fn low_byte(v: u16) -> u8 {
+                return cast<u8>(v)
+            }
+
+            fn widen(v: u8) -> u16 {
+                return cast<u16>(v)
+            }
+
+            fn main() {
+                let wide: u16 = cast<u16>(0x12)
+                let narrow: u8 = cast<u8>(0x1234)
+                let assigned: u8 = 0
+                assigned = cast<u8>(0x01FE)
+                test.assert_eq_u16(wide, 0x0012, 1)
+                test.assert_eq_u8(narrow, 0x34, 2)
+                test.assert_eq_u8(assigned, 0xFE, 3)
+                test.assert_eq_u8(low_byte(0xABCD), 0xCD, 4)
+                test.assert_eq_u16(widen(0x7A), 0x007A, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
