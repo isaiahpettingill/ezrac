@@ -57,20 +57,28 @@ pub fn run_assembly_test_with_options(
     assembly: &str,
     options: &TestRunOptions,
 ) -> Result<TestRun, Diagnostic> {
-    let code = assemble_ez80_subset_at(assembly, EZRA_LOAD_ADDR.get())?;
-    let code_start = EZRA_LOAD_ADDR.get();
+    run_assembly_test_with_options_at(assembly, options, EZRA_LOAD_ADDR.get())
+}
+
+pub fn run_assembly_test_with_options_at(
+    assembly: &str,
+    options: &TestRunOptions,
+    base_addr: u32,
+) -> Result<TestRun, Diagnostic> {
+    let code = assemble_ez80_subset_at(assembly, base_addr)?;
+    let code_start = base_addr;
     let code_end = code_start + code.len() as u32;
     let mut machine = TestMachine::new();
     for (port, value) in &options.initial_ports {
         machine.ports[*port as usize] = *value;
     }
     for (address, byte) in code.into_iter().enumerate() {
-        machine.poke(EZRA_LOAD_ADDR.get() + address as u32, byte);
+        machine.poke(base_addr + address as u32, byte);
     }
 
     let mut cpu = Cpu::new_ez80();
     cpu.state.reg.adl = true;
-    cpu.state.set_pc(EZRA_LOAD_ADDR.get());
+    cpu.state.set_pc(base_addr);
     if std::env::var_os("EZRA_TRACE_VM").is_some() {
         cpu.set_trace(true);
     }

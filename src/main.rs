@@ -1,11 +1,11 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
-    asm::{AssemblyOptions, emit_ez80_assembly, emit_ez80_assembly_with_options},
+    asm::{AssemblyOptions, emit_ez80_assembly_with_options},
     cart::{CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
     layout::{Layout, parse_layout},
-    vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options},
+    vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
 };
 
 fn main() -> ExitCode {
@@ -30,7 +30,10 @@ fn run() -> Result<(), String> {
             let options = CommandOptions::parse(&args[1..])?;
             emit_asm(&options)
         }
-        Some("test") => test_source(args.get(1).ok_or_else(|| usage())?),
+        Some("test") => {
+            let options = CommandOptions::parse(&args[1..])?;
+            test_source_with_command_options(&options)
+        }
         Some("layout") => print_layout(args.get(1).map(String::as_str)),
         Some("header") => print_header(),
         Some("-h" | "--help") | None => {
@@ -161,18 +164,43 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
 }
 
 fn test_source(path: &str) -> Result<(), String> {
-    let source_path = PathBuf::from(path);
+    test_source_with_command_options(&CommandOptions {
+        path: path.to_owned(),
+        debug_comments: false,
+        layout_path: None,
+    })
+}
+
+fn test_source_with_command_options(options: &CommandOptions) -> Result<(), String> {
+    let source_path = PathBuf::from(&options.path);
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let metadata = parse_test_metadata(&source)?;
     let program = load_program(&source_path).map_err(|error| error.to_string())?;
-    let assembly = emit_ez80_assembly(&program).map_err(|error| error.to_string())?;
-    let run = run_assembly_test_with_options(
+    let layout = load_layout(options.layout_path.as_deref())?;
+    if let Err(errors) = layout.validate() {
+        let message = errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("layout is invalid:\n{message}"));
+    }
+    let assembly = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            debug_comments: options.debug_comments,
+            stack_top: layout.stack,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let run = run_assembly_test_with_options_at(
         &assembly,
         &TestRunOptions {
             instruction_budget: 1_000_000,
             initial_ports: metadata.initial_ports,
         },
+        layout.entry.get(),
     )
     .map_err(|error| error.to_string())?;
     if !run.halted {
@@ -338,7 +366,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test <file.ezra>                     emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -475,6 +503,47 @@ mod tests {
         .unwrap();
 
         test_source(source_path.to_str().unwrap()).unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_command_can_use_custom_layout_file() {
+        let root = temp_root("custom_layout_test");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        let layout_path = root.join("game.ezralayout");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout custom_test {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xEFFE80;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    section .header -> code align 64;
+                    section .text -> code align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        test_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        })
+        .unwrap();
 
         let _ = std::fs::remove_dir_all(root);
     }
