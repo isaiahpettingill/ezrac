@@ -236,8 +236,11 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld a, d"
             | "ld a, h"
             | "ld a, l"
+            | "ld a, (bc)"
             | "ld a, (hl)"
             | "ld a, (de)"
+            | "ld (bc), a"
+            | "ld (de), a"
             | "ld h, b"
             | "ld h, a"
             | "ld l, c"
@@ -374,6 +377,12 @@ fn emit_instruction(
         bytes.push(value);
     } else if text == "ld a, (de)" {
         bytes.push(0x1A);
+    } else if text == "ld a, (bc)" {
+        bytes.push(0x0A);
+    } else if text == "ld (de), a" {
+        bytes.push(0x12);
+    } else if text == "ld (bc), a" {
+        bytes.push(0x02);
     } else if let Some(rest) = text.strip_prefix("ld hl, (") {
         let addr = rest
             .strip_suffix(')')
@@ -1045,6 +1054,44 @@ mod tests {
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
         assert_eq!(run.debug_output, b"C");
+    }
+
+    #[test]
+    fn assembles_bc_de_indirect_accumulator_loads_and_stores() {
+        let asm = r#"
+            ld a, (bc)
+            ld (bc), a
+            ld a, (de)
+            ld (de), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0x0A, 0x02, 0x1A, 0x12]);
+    }
+
+    #[test]
+    fn runs_bc_de_indirect_accumulator_loads_and_stores_on_ez80_vm() {
+        let asm = r#"
+            ld bc, 040100h
+            ld de, 040101h
+            ld a, 42h
+            ld (bc), a
+            ld a, 44h
+            ld (de), a
+            ld a, (bc)
+            out0 (0Ch), a
+            ld a, (de)
+            out0 (0Ch), a
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"BD");
     }
 
     #[test]
