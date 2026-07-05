@@ -1629,6 +1629,7 @@ struct Emitter {
     function_storage_stack: Vec<Vec<Variable>>,
     assigned_names_stack: Vec<HashSet<String>>,
     recursive_call_edges: HashSet<(String, String)>,
+    inline_expansion_stack: Vec<String>,
     debug_comments: bool,
     stack_top: Address24,
     eliminate_dead_code: bool,
@@ -1660,6 +1661,7 @@ impl Emitter {
             function_storage_stack: Vec::new(),
             assigned_names_stack: Vec::new(),
             recursive_call_edges,
+            inline_expansion_stack: Vec::new(),
             debug_comments: options.debug_comments,
             stack_top: options.stack_top,
             eliminate_dead_code: true,
@@ -3147,14 +3149,24 @@ impl Emitter {
         }
 
         if let Some(function) = self.symbols.inline_functions.get(name).cloned() {
-            if self.emit_inline_return_call(&function, &temps)? {
-                return Ok(());
-            }
-            if self.emit_inline_void_call(&function, &temps)? {
-                return Ok(());
+            if !self
+                .inline_expansion_stack
+                .iter()
+                .any(|inline| inline == name)
+            {
+                self.inline_expansion_stack.push(name.to_owned());
+                let inlined = (|| {
+                    if self.emit_inline_return_call(&function, &temps)? {
+                        return Ok(true);
+                    }
+                    self.emit_inline_void_call(&function, &temps)
+                })();
+                self.inline_expansion_stack.pop();
+                if inlined? {
+                    return Ok(());
+                }
             }
         }
-
         let saved_variables = self.recursive_call_saved_variables(name);
         let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
             None
@@ -7147,6 +7159,14 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
 }
 
 fn reachable_calls_for_body(stmts: &[Stmt], symbols: &Symbols) -> Vec<String> {
+    reachable_calls_for_body_with_inline_stack(stmts, symbols, &mut Vec::new())
+}
+
+fn reachable_calls_for_body_with_inline_stack(
+    stmts: &[Stmt],
+    symbols: &Symbols,
+    inline_stack: &mut Vec<String>,
+) -> Vec<String> {
     let mut raw_calls = Vec::new();
     collect_stmt_calls(stmts, &mut raw_calls);
     let mut calls = Vec::new();
@@ -7155,7 +7175,17 @@ fn reachable_calls_for_body(stmts: &[Stmt], symbols: &Symbols) -> Vec<String> {
             continue;
         }
         if let Some(inline) = symbols.inline_functions.get(&name) {
-            calls.extend(reachable_calls_for_body(&inline.body, symbols));
+            if inline_stack.iter().any(|inline_name| inline_name == &name) {
+                calls.push(name);
+            } else {
+                inline_stack.push(name);
+                calls.extend(reachable_calls_for_body_with_inline_stack(
+                    &inline.body,
+                    symbols,
+                    inline_stack,
+                ));
+                inline_stack.pop();
+            }
         } else {
             calls.push(name);
         }
@@ -11046,6 +11076,62 @@ section .text
         assert!(asm.contains("call _add_one"), "{asm}");
         assert!(!asm.contains("_send_next:"), "{asm}");
         assert!(!asm.contains("call _send_next"), "{asm}");
+    }
+
+    #[test]
+    fn recursive_inline_functions_fall_back_to_calls() {
+        let source = r#"
+            pub inline fn self_call(value: u8) -> u8 {
+                return self_call(value)
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(asm.contains("_self_call:"), "{asm}");
+        assert!(asm.contains("call _self_call"), "{asm}");
+    }
+
+    #[test]
+    fn recursive_inline_wrappers_run_with_normal_call_fallback() {
+        let source = r#"
+            inline fn count_down(value: u8) -> u8 {
+                return count_down_impl(value)
+            }
+
+            fn count_down_impl(value: u8) -> u8 {
+                if value == 0 {
+                    return 0
+                }
+                return count_down(value - 1) + 1
+            }
+
+            fn main() {
+                test.assert_eq_u8(count_down(4), 4, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 20_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(asm.contains("_count_down_impl:"), "{asm}");
+        assert!(asm.contains("call _count_down_impl"), "{asm}");
+        assert!(!asm.contains("_count_down:"), "{asm}");
+        assert!(
+            !asm.lines()
+                .any(|line| line.trim_start() == "call _count_down"),
+            "{asm}"
+        );
     }
 
     #[test]
