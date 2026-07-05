@@ -118,7 +118,7 @@ fn line_contains_assignment_op(line: &str) -> bool {
             '\'' => in_char = true,
             '/' if chars.peek() == Some(&'/') => return false,
             '=' => return true,
-            '+' | '-' | '&' | '|' | '^' => {
+            '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' => {
                 if chars.peek() == Some(&'=') {
                     return true;
                 }
@@ -567,6 +567,9 @@ fn build_assign_op(op: &str) -> AssignOp {
         "=" => AssignOp::Set,
         "+=" => AssignOp::Add,
         "-=" => AssignOp::Sub,
+        "*=" => AssignOp::Mul,
+        "/=" => AssignOp::Div,
+        "%=" => AssignOp::Mod,
         "&=" => AssignOp::BitAnd,
         "|=" => AssignOp::BitOr,
         "^=" => AssignOp::BitXor,

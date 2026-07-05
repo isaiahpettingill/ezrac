@@ -84,7 +84,7 @@ asm_operand_class = { "reg8" | "reg16" | "reg24" | "mem" | "imm" }
 asm_line = { string_lit }
 out_stmt = { "out" ~ path ~ "," ~ expr ~ semi? }
 expr_stmt = { expr ~ !(WHITESPACE* ~ assign_op) ~ semi? }
-assign_op = { "<<=" | ">>=" | "+=" | "-=" | "&=" | "|=" | "^=" | "=" }
+assign_op = { "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "=" }
 
 expr = { logical_or }
 logical_or = { logical_and ~ (or_op ~ logical_and)* }

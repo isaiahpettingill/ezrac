@@ -2872,6 +2872,15 @@ impl Emitter {
                 AssignOp::Set => self.emit_expr_to_hl(value, variable.width()?)?,
                 AssignOp::Add => self.emit_wide_assignment_op(variable, BinaryOp::Add, value)?,
                 AssignOp::Sub => self.emit_wide_assignment_op(variable, BinaryOp::Sub, value)?,
+                AssignOp::Mul => {
+                    self.emit_arithmetic_assignment_op(variable, BinaryOp::Mul, value, signed)?
+                }
+                AssignOp::Div => {
+                    self.emit_arithmetic_assignment_op(variable, BinaryOp::Div, value, signed)?
+                }
+                AssignOp::Mod => {
+                    self.emit_arithmetic_assignment_op(variable, BinaryOp::Mod, value, signed)?
+                }
                 AssignOp::BitAnd => {
                     self.emit_wide_assignment_op(variable, BinaryOp::BitAnd, value)?
                 }
@@ -2895,6 +2904,15 @@ impl Emitter {
                 AssignOp::Set => self.emit_expr_to_hl(value, ValueWidth::U24)?,
                 AssignOp::Add => self.emit_wide_assignment_op(variable, BinaryOp::Add, value)?,
                 AssignOp::Sub => self.emit_wide_assignment_op(variable, BinaryOp::Sub, value)?,
+                AssignOp::Mul => {
+                    self.emit_arithmetic_assignment_op(variable, BinaryOp::Mul, value, signed)?
+                }
+                AssignOp::Div => {
+                    self.emit_arithmetic_assignment_op(variable, BinaryOp::Div, value, signed)?
+                }
+                AssignOp::Mod => {
+                    self.emit_arithmetic_assignment_op(variable, BinaryOp::Mod, value, signed)?
+                }
                 AssignOp::BitAnd => {
                     self.emit_wide_assignment_op(variable, BinaryOp::BitAnd, value)?
                 }
@@ -2930,6 +2948,15 @@ impl Emitter {
                 self.line("    ld a, b");
                 self.line("    sub c");
             }
+            AssignOp::Mul => {
+                self.emit_arithmetic_assignment_op(variable, BinaryOp::Mul, value, signed)?
+            }
+            AssignOp::Div => {
+                self.emit_arithmetic_assignment_op(variable, BinaryOp::Div, value, signed)?
+            }
+            AssignOp::Mod => {
+                self.emit_arithmetic_assignment_op(variable, BinaryOp::Mod, value, signed)?
+            }
             AssignOp::BitAnd => {
                 self.emit_load_a(variable);
                 self.line("    ld b, a");
@@ -2959,6 +2986,210 @@ impl Emitter {
                 self.emit_shift_a_by_expr(BinaryOp::Shr, value, signed)?;
             }
         }
+        Ok(())
+    }
+
+    fn emit_arithmetic_assignment_op(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        value: &Expr,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
+        let width = variable.width()?;
+        match op {
+            BinaryOp::Mul => self.emit_assignment_mul(variable, value, width, signed),
+            BinaryOp::Div | BinaryOp::Mod => {
+                if signed {
+                    self.emit_signed_assignment_div_mod(variable, value, op, width)
+                } else {
+                    self.emit_unsigned_assignment_div_mod(variable, value, op, width)
+                }
+            }
+            _ => unreachable!("not an arithmetic compound assignment op"),
+        }
+    }
+
+    fn emit_assignment_mul(
+        &mut self,
+        variable: Variable,
+        value: &Expr,
+        width: ValueWidth,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
+        if width == ValueWidth::U8 {
+            let left = self.alloc_var(width.bytes());
+            self.emit_load_a(variable);
+            self.emit_store_a(left);
+            self.emit_expr_to_a(value)?;
+            self.line("    ld c, a");
+            self.emit_load_a(left);
+            self.line("    call __ezra_mul_u8");
+            return Ok(());
+        }
+
+        self.emit_load_width(variable);
+        self.line("    push hl");
+        self.emit_expr_to_hl(value, width)?;
+        self.line("    push hl");
+        self.line("    pop bc");
+        self.line("    pop hl");
+        match width {
+            ValueWidth::U16 => self.line("    call __ezra_mul_u16"),
+            ValueWidth::U24 if signed => self.line("    call __ezra_mul_i24"),
+            ValueWidth::U24 => self.line("    call __ezra_mul_u24"),
+            ValueWidth::U8 => unreachable!("u8 handled above"),
+        }
+        Ok(())
+    }
+
+    fn emit_unsigned_assignment_div_mod(
+        &mut self,
+        variable: Variable,
+        value: &Expr,
+        op: BinaryOp,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        if width == ValueWidth::U8 {
+            let left = self.alloc_var(width.bytes());
+            self.emit_load_a(variable);
+            self.emit_store_a(left);
+            self.emit_expr_to_a(value)?;
+            self.line("    ld c, a");
+            self.emit_load_a(left);
+            match op {
+                BinaryOp::Div => self.line("    call __ezra_div_u8"),
+                BinaryOp::Mod => self.line("    call __ezra_mod_u8"),
+                _ => unreachable!("not a division op"),
+            }
+            return Ok(());
+        }
+
+        self.emit_load_width(variable);
+        self.line("    push hl");
+        self.emit_expr_to_hl(value, width)?;
+        self.line("    push hl");
+        self.line("    pop bc");
+        self.line("    pop hl");
+        match (op, width) {
+            (BinaryOp::Div, ValueWidth::U16) => self.line("    call __ezra_div_u16"),
+            (BinaryOp::Mod, ValueWidth::U16) => self.line("    call __ezra_mod_u16"),
+            (BinaryOp::Div, ValueWidth::U24) => self.line("    call __ezra_div_u24"),
+            (BinaryOp::Mod, ValueWidth::U24) => self.line("    call __ezra_mod_u24"),
+            _ => unreachable!("unsupported unsigned assignment division width"),
+        }
+        Ok(())
+    }
+
+    fn emit_signed_assignment_div_mod(
+        &mut self,
+        variable: Variable,
+        value: &Expr,
+        op: BinaryOp,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        if width == ValueWidth::U24 {
+            self.emit_load_width(variable);
+            self.line("    push hl");
+            self.emit_expr_to_hl(value, width)?;
+            self.line("    push hl");
+            self.line("    pop bc");
+            self.line("    pop hl");
+            match op {
+                BinaryOp::Div => self.line("    call __ezra_div_i24"),
+                BinaryOp::Mod => self.line("    call __ezra_mod_i24"),
+                _ => unreachable!("not a division op"),
+            }
+            return Ok(());
+        }
+
+        let dividend = self.alloc_var(width.bytes());
+        let divisor = self.alloc_var(width.bytes());
+        let quotient = self.alloc_var(width.bytes());
+        let quotient_negative = self.alloc_var(ValueWidth::U8.bytes());
+        let remainder_negative = self.alloc_var(ValueWidth::U8.bytes());
+        let loop_label = self.next_label("sdiv_loop");
+        let zero_label = self.next_label("sdiv_zero");
+        let done_label = self.next_label("sdiv_done");
+        let quotient_positive_label = self.next_label("sdiv_q_positive");
+        let remainder_positive_label = self.next_label("sdiv_r_positive");
+        let not_overflow_label = self.next_label("sdiv_not_overflow");
+        let finished_label = self.next_label("sdiv_finished");
+
+        self.emit_load_width(variable);
+        self.emit_store_width(dividend);
+        self.emit_expr_to_width(value, width)?;
+        self.emit_store_width(divisor);
+        self.emit_zero_variable(quotient);
+        self.emit_zero_variable(quotient_negative);
+        self.emit_zero_variable(remainder_negative);
+        self.emit_jump_if_memory_zero(divisor, &zero_label);
+        self.emit_jump_if_memory_not_equals(dividend, signed_min_bytes(width), &not_overflow_label);
+        self.emit_jump_if_memory_not_equals(
+            divisor,
+            signed_negative_one_bytes(width),
+            &not_overflow_label,
+        );
+        match op {
+            BinaryOp::Div => self.emit_load_width(dividend),
+            BinaryOp::Mod => {
+                self.emit_zero_variable(dividend);
+                self.emit_load_width(dividend);
+            }
+            _ => unreachable!("not a division op"),
+        }
+        self.line(&format!("    jp {finished_label}"));
+        self.line(&format!("{not_overflow_label}:"));
+
+        self.emit_abs_signed_variable(dividend, Some(quotient_negative), Some(remainder_negative));
+        self.emit_abs_signed_variable(divisor, Some(quotient_negative), None);
+
+        self.line(&format!("{loop_label}:"));
+        if width == ValueWidth::U8 {
+            self.emit_load_a(dividend);
+            self.line("    ld b, a");
+            self.emit_load_a(divisor);
+            self.line("    ld c, a");
+            self.line("    ld a, b");
+            self.line("    cp c");
+            self.line(&format!("    jp c, {done_label}"));
+            self.line("    sub c");
+            self.emit_store_a(dividend);
+        } else {
+            self.emit_load_width(dividend);
+            self.line("    push hl");
+            self.emit_load_width(divisor);
+            self.line("    ex de, hl");
+            self.line("    pop hl");
+            self.line("    or a");
+            self.line("    sbc hl, de");
+            self.line(&format!("    jp c, {done_label}"));
+            self.emit_store_width(dividend);
+        }
+        self.emit_increment_memory(quotient);
+        self.line(&format!("    jp {loop_label}"));
+
+        self.line(&format!("{zero_label}:"));
+        self.emit_zero_variable(dividend);
+        self.emit_zero_variable(quotient);
+        self.line(&format!("{done_label}:"));
+        self.emit_load_a(quotient_negative);
+        self.line("    or a");
+        self.line(&format!("    jp z, {quotient_positive_label}"));
+        self.emit_negate_memory(quotient);
+        self.line(&format!("{quotient_positive_label}:"));
+        self.emit_load_a(remainder_negative);
+        self.line("    or a");
+        self.line(&format!("    jp z, {remainder_positive_label}"));
+        self.emit_negate_memory(dividend);
+        self.line(&format!("{remainder_positive_label}:"));
+
+        match op {
+            BinaryOp::Div => self.emit_load_width(quotient),
+            BinaryOp::Mod => self.emit_load_width(dividend),
+            _ => unreachable!("not a division op"),
+        }
+        self.line(&format!("{finished_label}:"));
         Ok(())
     }
 
@@ -8331,6 +8562,9 @@ fn assign_op_summary(op: AssignOp) -> &'static str {
         AssignOp::Set => "=",
         AssignOp::Add => "+=",
         AssignOp::Sub => "-=",
+        AssignOp::Mul => "*=",
+        AssignOp::Div => "/=",
+        AssignOp::Mod => "%=",
         AssignOp::BitAnd => "&=",
         AssignOp::BitOr => "|=",
         AssignOp::BitXor => "^=",
@@ -16565,6 +16799,83 @@ section .text
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
 
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_arithmetic_compound_assignments() {
+        let expected_i8_mul = (-9i8).wrapping_mul(3) as u8;
+        let expected_i8_div = ((-27i8) / 4) as u8;
+        let expected_i8_mod = ((-6i8) % 4) as u8;
+        let expected_i16_div = ((-300i16) / 7) as u16;
+        let expected_i16_mod = ((-42i16) % 5) as u16;
+        let expected_i24_div = ((-0x012345i32) / 17) & 0x00FF_FFFF;
+        let expected_i24_mod = ((-0x012345i32) % 17) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            global bytes: [u8; 2] = [9, 10]
+            global words: [u16; 1] = [300]
+
+            fn main() {{
+                let a: u8 = 7
+                a *= 3
+                test.assert_eq_u8(a, 21, 1)
+                a /= 2
+                test.assert_eq_u8(a, 10, 2)
+                a %= 4
+                test.assert_eq_u8(a, 2, 3)
+                a /= 0
+                test.assert_eq_u8(a, 0, 4)
+
+                let w: u16 = 300
+                w *= 3
+                test.assert_eq_u16(w, 900, 5)
+                w /= 7
+                test.assert_eq_u16(w, 128, 6)
+                w %= 5
+                test.assert_eq_u16(w, 3, 7)
+
+                let s8: i8 = -9
+                s8 *= 3
+                test.assert_eq_u8(s8, 0x{expected_i8_mul:02X}, 8)
+                s8 /= 4
+                test.assert_eq_u8(s8, 0x{expected_i8_div:02X}, 9)
+                s8 %= 4
+                test.assert_eq_u8(s8, 0x{expected_i8_mod:02X}, 10)
+                s8 %= 0
+                test.assert_eq_u8(s8, 0, 11)
+
+                let s16: i16 = -300
+                s16 /= 7
+                test.assert_eq_u16(s16, 0x{expected_i16_div:04X}, 12)
+                s16 %= 5
+                test.assert_eq_u16(s16, 0x{expected_i16_mod:04X}, 13)
+
+                let s24: i24 = -0x012345
+                s24 /= 17
+                test.assert_eq_u24(s24, 0x{expected_i24_div:06X}, 14)
+                let r24: i24 = -0x012345
+                r24 %= 17
+                test.assert_eq_u24(r24, 0x{expected_i24_mod:06X}, 15)
+
+                bytes[0] *= 2
+                bytes[1] %= 6
+                test.assert_eq_u8(bytes[0], 18, 16)
+                test.assert_eq_u8(bytes[1], 4, 17)
+                words[0] /= 0
+                test.assert_eq_u16(words[0], 0, 18)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 1_000_000).unwrap();
+
+        assert!(asm.contains("    call __ezra_mul_u8"), "{asm}");
+        assert!(asm.contains("    call __ezra_div_u8"), "{asm}");
+        assert!(asm.contains("    call __ezra_mod_u8"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
