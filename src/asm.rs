@@ -6073,6 +6073,7 @@ impl Emitter {
         expr: &Expr,
         target: &Type,
     ) -> Result<(), Diagnostic> {
+        self.validate_typed_literal_ranges(expr)?;
         if let Expr::Array(values) = expr {
             let Type::Array { element, len } = self.symbols.resolved_type(target)? else {
                 return Err(Diagnostic::new("type mismatch"));
@@ -6175,7 +6176,72 @@ impl Emitter {
         Err(Diagnostic::new("type mismatch"))
     }
 
+    fn validate_typed_literal_ranges(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        match expr {
+            Expr::TypedInt(value, ty) => self.symbols.validate_value_for_type(*value, ty),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => {
+                if let Expr::TypedInt(value, ty) = expr.as_ref() {
+                    let value = value.checked_neg().ok_or_else(|| {
+                        Diagnostic::new(format!("value -{value} is outside i24 range"))
+                    })?;
+                    self.symbols.validate_value_for_type(value, ty)
+                } else {
+                    self.validate_typed_literal_ranges(expr)
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+                self.validate_typed_literal_ranges(expr)
+            }
+            Expr::Binary { left, right, .. } => {
+                self.validate_typed_literal_ranges(left)?;
+                self.validate_typed_literal_ranges(right)
+            }
+            Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+                self.validate_typed_literal_ranges(index)
+            }
+            Expr::Access(path) | Expr::AddressOfAccess(path) => {
+                for segment in &path.segments {
+                    if let AccessSegment::Index(index) = segment {
+                        self.validate_typed_literal_ranges(index)?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Array(values) => {
+                for value in values {
+                    self.validate_typed_literal_ranges(value)?;
+                }
+                Ok(())
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, value) in fields {
+                    self.validate_typed_literal_ranges(value)?;
+                }
+                Ok(())
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    self.validate_typed_literal_ranges(arg)?;
+                }
+                Ok(())
+            }
+            Expr::Int(_)
+            | Expr::Bool(_)
+            | Expr::Char(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::In(_)
+            | Expr::Field { .. }
+            | Expr::AddressOf(_)
+            | Expr::AddressOfField { .. } => Ok(()),
+        }
+    }
+
     fn validate_expr_arithmetic_compatibility(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        self.validate_typed_literal_ranges(expr)?;
         match expr {
             Expr::Binary { left, op, right } => {
                 self.validate_expr_arithmetic_compatibility(left)?;
@@ -8653,6 +8719,32 @@ section .text
                 fn main() { test.pass() }
                 "#,
                 "value 2 is outside bool range",
+            ),
+            (
+                r#"
+                global WIDE: u16 = cast<u16>(300u8)
+                fn main() { test.pass() }
+                "#,
+                "value 300 is outside u8 range",
+            ),
+            (
+                r#"
+                fn takes_word(value: u16) {}
+                fn main() {
+                    takes_word(cast<u16>(300u8))
+                    test.pass()
+                }
+                "#,
+                "value 300 is outside u8 range",
+            ),
+            (
+                r#"
+                fn bad() -> u16 {
+                    return cast<u16>(300u8)
+                }
+                fn main() { test.pass() }
+                "#,
+                "value 300 is outside u8 range",
             ),
         ];
 
