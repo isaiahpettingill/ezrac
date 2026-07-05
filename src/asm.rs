@@ -3709,7 +3709,16 @@ impl Emitter {
                 self.line("    pop bc");
                 self.line("    add hl, bc");
             }
-            _ => unreachable!("unsupported array element size"),
+            _ => {
+                let index_value = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                self.emit_store_hl(index_value);
+                for _ in 1..element_size {
+                    self.line("    push hl");
+                    self.emit_load_hl(index_value);
+                    self.line("    pop bc");
+                    self.line("    add hl, bc");
+                }
+            }
         }
         self.line("    push hl");
         self.line(&format!("    ld hl, {:06X}h", array.addr));
@@ -8417,6 +8426,13 @@ mod tests {
                 test.assert_eq_u8(mem.peek8(local_raw + 3), 0, 13)
                 test.assert_eq_u8(mem.peek8(local_raw + 4), 0, 14)
                 test.assert_eq_u8(mem.peek8(local_raw + 5), 0, 15)
+
+                let i: u8 = 1
+                let second: ptr<u8> = cast<ptr<u8>>(&points[i])
+                test.assert_eq_u24(cast<u24>(second), cast<u24>(raw) + 3, 16)
+                test.assert_eq_u8(mem.peek8(second + 0), 4, 17)
+                test.assert_eq_u8(mem.peek8(second + 1), 0x06, 18)
+                test.assert_eq_u8(mem.peek8(second + 2), 0x05, 19)
                 test.pass()
             }
         "#;
