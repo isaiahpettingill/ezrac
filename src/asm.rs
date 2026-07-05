@@ -2290,6 +2290,15 @@ impl Emitter {
             "debug.str" | "ezra.debug.str" => {
                 self.emit_debug_str(args)?;
             }
+            "debug.hex_u8" | "ezra.debug.hex_u8" => {
+                self.emit_debug_hex(args, ValueWidth::U8)?;
+            }
+            "debug.hex_u16" | "ezra.debug.hex_u16" => {
+                self.emit_debug_hex(args, ValueWidth::U16)?;
+            }
+            "debug.hex_u24" | "ezra.debug.hex_u24" => {
+                self.emit_debug_hex(args, ValueWidth::U24)?;
+            }
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_mem_poke8(args)?;
             }
@@ -2330,6 +2339,66 @@ impl Emitter {
         self.line(&format!("    jp {loop_label}"));
         self.line(&format!("{done_label}:"));
         Ok(())
+    }
+
+    fn emit_debug_hex(&mut self, args: &[Expr], width: ValueWidth) -> Result<(), Diagnostic> {
+        if args.len() != 1 {
+            let suffix = match width {
+                ValueWidth::U8 => "u8",
+                ValueWidth::U16 => "u16",
+                ValueWidth::U24 => "u24",
+            };
+            return Err(Diagnostic::new(format!(
+                "debug.hex_{suffix} requires one argument"
+            )));
+        }
+
+        match width {
+            ValueWidth::U8 => {
+                self.emit_expr_to_a(&args[0])?;
+                self.emit_debug_hex_byte_from_a();
+            }
+            ValueWidth::U16 | ValueWidth::U24 => {
+                let value = self.alloc_var(width.bytes());
+                self.emit_expr_to_hl(&args[0], width)?;
+                self.emit_store_width(value);
+                for offset in (0..width.bytes()).rev() {
+                    self.line(&format!("    ld a, ({:06X}h)", value.addr + offset as u32));
+                    self.emit_debug_hex_byte_from_a();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_debug_hex_byte_from_a(&mut self) {
+        let byte = self.alloc_var(ValueWidth::U8.bytes());
+        self.emit_store_a(byte);
+        self.emit_load_a(byte);
+        for _ in 0..4 {
+            self.line("    srl a");
+        }
+        self.emit_debug_hex_nibble_from_a();
+        self.emit_load_a(byte);
+        self.line("    ld bc, 00000Fh");
+        self.line("    and c");
+        self.emit_debug_hex_nibble_from_a();
+    }
+
+    fn emit_debug_hex_nibble_from_a(&mut self) {
+        let digit_label = self.next_label("debug_hex_digit");
+        let end_label = self.next_label("debug_hex_end");
+        self.line("    ld bc, 00000Ah");
+        self.line("    cp c");
+        self.line(&format!("    jp c, {digit_label}"));
+        self.line("    ld bc, 000037h");
+        self.line("    add a, c");
+        self.line(&format!("    jp {end_label}"));
+        self.line(&format!("{digit_label}:"));
+        self.line("    ld bc, 000030h");
+        self.line("    add a, c");
+        self.line(&format!("{end_label}:"));
+        self.emit_out_a(0x0C);
     }
 
     fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
@@ -5377,6 +5446,9 @@ fn builtin_function_arity(name: &str) -> Option<usize> {
         "test.assert_eq_u24" | "ezra.test.assert_eq_u24" => Some(3),
         "debug.char" | "ezra.debug.char" => Some(1),
         "debug.str" | "ezra.debug.str" => Some(1),
+        "debug.hex_u8" | "ezra.debug.hex_u8" => Some(1),
+        "debug.hex_u16" | "ezra.debug.hex_u16" => Some(1),
+        "debug.hex_u24" | "ezra.debug.hex_u24" => Some(1),
         "mem.poke8" | "ezra.mem.poke8" => Some(2),
         "mem.peek8" | "ezra.mem.peek8" => Some(1),
         "mem.memcpy" | "ezra.mem.memcpy" => Some(3),
@@ -5394,6 +5466,9 @@ fn builtin_arity_error(name: &str) -> String {
         "test.assert_eq_u24" => "test.assert_eq_u24 requires three arguments".to_owned(),
         "debug.char" => "debug.char requires one argument".to_owned(),
         "debug.str" => "debug.str requires one argument".to_owned(),
+        "debug.hex_u8" => "debug.hex_u8 requires one argument".to_owned(),
+        "debug.hex_u16" => "debug.hex_u16 requires one argument".to_owned(),
+        "debug.hex_u24" => "debug.hex_u24 requires one argument".to_owned(),
         "mem.poke8" => "mem.poke8 requires two arguments".to_owned(),
         "mem.peek8" => "mem.peek8 requires one argument".to_owned(),
         "mem.memcpy" => "mem.memcpy requires three arguments".to_owned(),
@@ -10582,6 +10657,31 @@ mod tests {
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"OK EZ", "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_debug_hex_builtins() {
+        let source = r#"
+            fn main() {
+                let byte: u8 = 0xAF;
+                let word: u16 = 0x1234;
+                let addr: u24 = 0x00BEEF;
+                debug.hex_u8(byte)
+                debug.char(' ')
+                ezra.debug.hex_u16(word)
+                debug.char(' ')
+                debug.hex_u24(addr)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(asm.contains("srl a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"AF 1234 00BEEF", "{asm}");
     }
 
     #[test]
