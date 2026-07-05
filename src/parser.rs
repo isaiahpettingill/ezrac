@@ -5,9 +5,9 @@ use pest_derive::Parser;
 
 use crate::{
     ast::{
-        AliasDecl, AsmInput, AsmOutput, AssignOp, BinaryOp, ConstDecl, Declaration, EmbedDecl,
-        EmbedSource, Expr, ExternFunction, Function, GlobalDecl, MmioDecl, Param, Place, PortDecl,
-        Program, Stmt, StructDecl, Type, UnaryOp,
+        AccessPath, AccessSegment, AliasDecl, AsmInput, AsmOutput, AssignOp, BinaryOp, ConstDecl,
+        Declaration, EmbedDecl, EmbedSource, Expr, ExternFunction, Function, GlobalDecl, MmioDecl,
+        Param, Place, PortDecl, Program, Stmt, StructDecl, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -423,6 +423,7 @@ fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {
         Rule::deref_place => Ok(Place::Deref(Box::new(build_deref_operand(
             inner.into_inner().next().unwrap(),
         )?))),
+        Rule::access_place => Ok(Place::Access(build_access_path(inner)?)),
         Rule::field_place => {
             let mut parts = inner.into_inner();
             Ok(Place::Field {
@@ -503,6 +504,7 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
             })
         }
         Rule::in_expr => Ok(Expr::In(parse_in_port(pair.as_str())?)),
+        Rule::addr_access_expr => Ok(Expr::AddressOfAccess(build_access_path(pair)?)),
         Rule::addr_index_expr => {
             let mut inner = pair.into_inner();
             Ok(Expr::AddressOfIndex {
@@ -543,6 +545,7 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
                 .unwrap_or_else(|| Ok(Vec::new()))?;
             Ok(Expr::StructInit { ty, fields })
         }
+        Rule::access_expr => Ok(Expr::Access(build_access_path(pair)?)),
         Rule::index_expr => {
             let mut inner = pair.into_inner();
             Ok(Expr::Index {
@@ -582,6 +585,35 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
         Rule::string_lit => Ok(Expr::String(parse_string(pair.as_str())?)),
         _ => unreachable!("unexpected expr rule {:?}", pair.as_rule()),
     }
+}
+
+fn build_access_path(pair: Pair<'_, Rule>) -> Result<AccessPath, Diagnostic> {
+    let mut inner = pair.into_inner();
+    let root = inner
+        .next()
+        .ok_or_else(|| Diagnostic::new("access path is missing a root"))?
+        .as_str()
+        .to_owned();
+    let mut segments = Vec::new();
+    for suffix in inner {
+        let segment = if suffix.as_rule() == Rule::access_suffix {
+            suffix.into_inner().next().unwrap()
+        } else {
+            suffix
+        };
+        match segment.as_rule() {
+            Rule::field_suffix => {
+                let field = segment.into_inner().next().unwrap().as_str().to_owned();
+                segments.push(AccessSegment::Field(field));
+            }
+            Rule::index_suffix => {
+                let index = segment.into_inner().next().unwrap();
+                segments.push(AccessSegment::Index(Box::new(build_expr(index)?)));
+            }
+            _ => unreachable!("unexpected access suffix {:?}", segment.as_rule()),
+        }
+    }
+    Ok(AccessPath { root, segments })
 }
 
 fn build_binary_chain(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
@@ -1234,6 +1266,22 @@ mod tests {
         .unwrap();
 
         assert!(matches!(program.declarations[0], Declaration::Struct(_)));
+        assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_chained_access_paths() {
+        EzraParser::parse(Rule::expr, "matrix[row][col]").unwrap();
+        EzraParser::parse(Rule::expr, "points[i].x").unwrap();
+        EzraParser::parse(Rule::expr, "&packets[i].bytes[j]").unwrap();
+        EzraParser::parse(Rule::stmt, "points[i].x += 1;").unwrap();
+
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "struct Point { x: u8 }\nglobal points: [Point; 2] = []\nfn main() { let i: u8 = 1; points[i].x = 3 }",
+        )
+        .unwrap();
+
         assert!(program.main_function().is_some());
     }
 

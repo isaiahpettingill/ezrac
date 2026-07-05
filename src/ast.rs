@@ -174,6 +174,7 @@ pub enum Place {
     Ident(String),
     Index { name: String, index: Box<Expr> },
     Field { base: String, field: String },
+    Access(AccessPath),
     Deref(Box<Expr>),
 }
 
@@ -214,6 +215,8 @@ pub enum Expr {
         base: String,
         field: String,
     },
+    Access(AccessPath),
+    AddressOfAccess(AccessPath),
     AddressOf(String),
     StructInit {
         ty: String,
@@ -237,6 +240,18 @@ pub enum Expr {
         ty: Type,
         expr: Box<Expr>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessPath {
+    pub root: String,
+    pub segments: Vec<AccessSegment>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccessSegment {
+    Field(String),
+    Index(Box<Expr>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

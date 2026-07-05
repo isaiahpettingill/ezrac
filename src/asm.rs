@@ -6,8 +6,8 @@ use std::{
 
 use crate::{
     ast::{
-        AssignOp, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl, Function, Place, Program,
-        Stmt, Type, UnaryOp,
+        AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl,
+        Function, Place, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::Diagnostic,
 };
@@ -729,6 +729,8 @@ impl Symbols {
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
+            | Expr::Access(_)
+            | Expr::AddressOfAccess(_)
             | Expr::AddressOf(_)
             | Expr::Field { .. }
             | Expr::StructInit { .. }
@@ -782,6 +784,12 @@ impl Symbols {
             Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
                 self.const_expr_uses_wrapping_arithmetic(index)
             }
+            Expr::Access(path) | Expr::AddressOfAccess(path) => {
+                path.segments.iter().any(|segment| match segment {
+                    AccessSegment::Field(_) => false,
+                    AccessSegment::Index(index) => self.const_expr_uses_wrapping_arithmetic(index),
+                })
+            }
             Expr::StructInit { fields, .. } => fields
                 .iter()
                 .any(|(_, value)| self.const_expr_uses_wrapping_arithmetic(value)),
@@ -834,6 +842,13 @@ impl Symbols {
             }
             Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
                 self.validate_const_expr_arithmetic_compatibility(index)?;
+            }
+            Expr::Access(path) | Expr::AddressOfAccess(path) => {
+                for segment in &path.segments {
+                    if let AccessSegment::Index(index) = segment {
+                        self.validate_const_expr_arithmetic_compatibility(index)?;
+                    }
+                }
             }
             Expr::StructInit { fields, .. } => {
                 for (_, value) in fields {
@@ -945,6 +960,8 @@ impl Symbols {
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
+            | Expr::Access(_)
+            | Expr::AddressOfAccess(_)
             | Expr::AddressOf(_)
             | Expr::Field { .. }
             | Expr::StructInit { .. }
@@ -1831,6 +1848,9 @@ impl Emitter {
                 self.emit_assignment_value(variable, op, value)?;
                 self.emit_store_width(variable);
             }
+            Place::Access(path) => {
+                self.emit_access_assignment(path, op, value)?;
+            }
             Place::Deref(ptr) => {
                 self.emit_deref_assignment(ptr, op, value)?;
             }
@@ -2311,6 +2331,9 @@ impl Emitter {
             Expr::AddressOfField { base, field } => {
                 self.emit_field_address(base, field)?;
             }
+            Expr::AddressOfAccess(path) => {
+                self.emit_access_address(path)?;
+            }
             Expr::AddressOf(name) => {
                 self.emit_variable_address(name)?;
             }
@@ -2333,6 +2356,24 @@ impl Emitter {
             }
             Expr::Index { name, index } => {
                 self.emit_load_indexed_element_to_hl(name, index)?;
+            }
+            Expr::Access(path) => {
+                let ty = self.access_type(path)?;
+                let size = self.symbols.type_size(&ty)?;
+                if size > 3 {
+                    return Err(Diagnostic::new(format!(
+                        "value `{}` is not scalar-sized",
+                        access_path_summary(path)
+                    )));
+                }
+                if let Some(variable) = self.const_access_variable(path)? {
+                    self.emit_load_width(variable);
+                    return Ok(());
+                }
+                self.emit_access_address(path)?;
+                let stored = self.symbols.alloc_var(size);
+                self.emit_load_pointed_width_into(stored);
+                self.emit_load_width(stored);
             }
             Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => {
                 let value = self.value_for_width(expr, width)?;
@@ -2584,6 +2625,22 @@ impl Emitter {
                 }
                 self.emit_load_a(variable);
             }
+            Expr::Access(path) => {
+                let ty = self.access_type(path)?;
+                let size = self.symbols.type_size(&ty)?;
+                if size != 1 {
+                    return Err(Diagnostic::new(format!(
+                        "value `{}` is not u8-sized",
+                        access_path_summary(path)
+                    )));
+                }
+                if let Some(variable) = self.const_access_variable(path)? {
+                    self.emit_load_a(variable);
+                    return Ok(());
+                }
+                self.emit_access_address(path)?;
+                self.line("    ld a, (hl)");
+            }
             Expr::Deref(ptr) => {
                 self.emit_deref_to_a(ptr)?;
             }
@@ -2609,6 +2666,7 @@ impl Emitter {
             }
             Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_)
             | Expr::AddressOf(_)
             | Expr::Array(_)
             | Expr::StructInit { .. }
@@ -3673,6 +3731,185 @@ impl Emitter {
             })
     }
 
+    fn access_type(&self, path: &AccessPath) -> Result<Type, Diagnostic> {
+        let mut ty = self
+            .variable_type(&path.root)
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{}`", path.root)))?
+            .clone();
+        for segment in &path.segments {
+            ty = match segment {
+                AccessSegment::Field(field) => {
+                    let struct_name = self.struct_type_name(&ty)?;
+                    let layout = self.symbols.structs.get(&struct_name).ok_or_else(|| {
+                        Diagnostic::new(format!("unknown struct `{struct_name}`"))
+                    })?;
+                    layout
+                        .fields
+                        .get(field)
+                        .map(|field| field.ty.clone())
+                        .ok_or_else(|| {
+                            Diagnostic::new(format!(
+                                "struct `{struct_name}` has no field `{field}`"
+                            ))
+                        })?
+                }
+                AccessSegment::Index(index) => {
+                    self.validate_array_index_type(index)?;
+                    match self.symbols.resolved_type(&ty)? {
+                        Type::Array { element, .. } => *element,
+                        _ => {
+                            return Err(Diagnostic::new(format!(
+                                "value `{}` is not an array",
+                                access_path_summary(path)
+                            )));
+                        }
+                    }
+                }
+            };
+        }
+        Ok(ty)
+    }
+
+    fn const_access_variable(&self, path: &AccessPath) -> Result<Option<Variable>, Diagnostic> {
+        let mut variable = self.variable(&path.root)?;
+        let mut ty = self
+            .variable_type(&path.root)
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{}`", path.root)))?
+            .clone();
+
+        for segment in &path.segments {
+            match segment {
+                AccessSegment::Field(field) => {
+                    let struct_name = self.struct_type_name(&ty)?;
+                    let layout = self.symbols.structs.get(&struct_name).ok_or_else(|| {
+                        Diagnostic::new(format!("unknown struct `{struct_name}`"))
+                    })?;
+                    let field_info = layout.fields.get(field).ok_or_else(|| {
+                        Diagnostic::new(format!("struct `{struct_name}` has no field `{field}`"))
+                    })?;
+                    variable = self
+                        .symbols
+                        .storage_at(variable.addr + field_info.offset, &field_info.ty)?;
+                    ty = field_info.ty.clone();
+                }
+                AccessSegment::Index(index) => {
+                    self.validate_array_index_type(index)?;
+                    let index_value = match self.symbols.eval_i64(index) {
+                        Ok(value) => value,
+                        Err(_) => return Ok(None),
+                    };
+                    let Type::Array { element, len } = self.symbols.resolved_type(&ty)? else {
+                        return Err(Diagnostic::new(format!(
+                            "value `{}` is not an array",
+                            access_path_summary(path)
+                        )));
+                    };
+                    let len = self.symbols.array_len(&len)?;
+                    if index_value < 0 || index_value as u32 >= len {
+                        return Err(Diagnostic::new(format!(
+                            "array index {index_value} is out of bounds for `{}` length {len}",
+                            access_path_summary(path)
+                        )));
+                    }
+                    let element_size = self.symbols.type_size(&element)?;
+                    variable = self.symbols.storage_at(
+                        variable.addr + index_value as u32 * element_size as u32,
+                        &element,
+                    )?;
+                    ty = *element;
+                }
+            }
+        }
+
+        Ok(Some(variable))
+    }
+
+    fn emit_access_address(&mut self, path: &AccessPath) -> Result<(), Diagnostic> {
+        if let Some(variable) = self.const_access_variable(path)? {
+            self.line(&format!("    ld hl, {:06X}h", variable.addr));
+            return Ok(());
+        }
+
+        let root = self.variable(&path.root)?;
+        let mut ty = self
+            .variable_type(&path.root)
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{}`", path.root)))?
+            .clone();
+        self.line(&format!("    ld hl, {:06X}h", root.addr));
+
+        for segment in &path.segments {
+            match segment {
+                AccessSegment::Field(field) => {
+                    let struct_name = self.struct_type_name(&ty)?;
+                    let layout = self.symbols.structs.get(&struct_name).ok_or_else(|| {
+                        Diagnostic::new(format!("unknown struct `{struct_name}`"))
+                    })?;
+                    let field_info = layout.fields.get(field).ok_or_else(|| {
+                        Diagnostic::new(format!("struct `{struct_name}` has no field `{field}`"))
+                    })?;
+                    let offset = field_info.offset;
+                    let field_ty = field_info.ty.clone();
+                    self.emit_add_hl_const(offset);
+                    ty = field_ty;
+                }
+                AccessSegment::Index(index) => {
+                    self.validate_array_index_type(index)?;
+                    let Type::Array { element, len } = self.symbols.resolved_type(&ty)? else {
+                        return Err(Diagnostic::new(format!(
+                            "value `{}` is not an array",
+                            access_path_summary(path)
+                        )));
+                    };
+                    let _ = self.symbols.array_len(&len)?;
+                    let element_size = self.symbols.type_size(&element)?;
+                    let base_addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                    self.emit_store_hl(base_addr);
+                    self.emit_expr_to_hl(index, ValueWidth::U24)?;
+                    self.emit_scale_hl_by(element_size);
+                    self.line("    push hl");
+                    self.emit_load_hl(base_addr);
+                    self.line("    pop bc");
+                    self.line("    add hl, bc");
+                    ty = *element;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_add_hl_const(&mut self, value: u32) {
+        if value == 0 {
+            return;
+        }
+        self.line("    push hl");
+        self.line(&format!("    ld bc, {:06X}h", value & 0xFF_FFFF));
+        self.line("    pop hl");
+        self.line("    add hl, bc");
+    }
+
+    fn emit_scale_hl_by(&mut self, factor: u8) {
+        match factor {
+            0 | 1 => {}
+            2 => self.line("    add hl, hl"),
+            3 => {
+                self.line("    push hl");
+                self.line("    add hl, hl");
+                self.line("    pop bc");
+                self.line("    add hl, bc");
+            }
+            _ => {
+                let index_value = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                self.emit_store_hl(index_value);
+                for _ in 1..factor {
+                    self.line("    push hl");
+                    self.emit_load_hl(index_value);
+                    self.line("    pop bc");
+                    self.line("    add hl, bc");
+                }
+            }
+        }
+    }
+
     fn array_element_type(&self, name: &str) -> Result<Type, Diagnostic> {
         let Some(ty) = self.variable_type(name) else {
             return Err(Diagnostic::new(format!("unknown array `{name}`")));
@@ -3850,6 +4087,51 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_access_assignment(
+        &mut self,
+        path: &AccessPath,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let ty = self.access_type(path)?;
+        if let Some(variable) = self.const_access_variable(path)? {
+            if op == AssignOp::Set {
+                self.validate_expr_assignable_to_type(value, &ty)?;
+                self.emit_storage_initializer(variable, &ty, value)?;
+                return Ok(());
+            }
+            variable.width()?;
+            self.emit_assignment_value(variable, op, value)?;
+            self.emit_store_width(variable);
+            return Ok(());
+        }
+
+        let size = self.symbols.type_size(&ty)?;
+        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        self.emit_access_address(path)?;
+        self.emit_store_hl(addr);
+
+        if op != AssignOp::Set {
+            let current = self.symbols.alloc_var(size);
+            current.width()?;
+            self.emit_load_hl(addr);
+            self.emit_load_pointed_width_into(current);
+            let stored = self.symbols.alloc_var(size);
+            self.emit_assignment_value(current, op, value)?;
+            self.emit_store_width(stored);
+            self.emit_load_hl(addr);
+            self.emit_store_var_to_pointed_width(stored);
+            return Ok(());
+        }
+
+        self.validate_expr_assignable_to_type(value, &ty)?;
+        let stored = self.symbols.alloc_storage(&ty)?;
+        self.emit_storage_initializer(stored, &ty, value)?;
+        self.emit_load_hl(addr);
+        self.emit_store_var_to_pointed_width(stored);
+        Ok(())
+    }
+
     fn u8(&self, expr: &Expr) -> Result<u8, Diagnostic> {
         let value = self.symbols.eval_i64(expr)?;
         if !(0..=0xFF).contains(&value) {
@@ -3921,12 +4203,14 @@ impl Emitter {
                 .cloned()
                 .map(Ok)
                 .unwrap_or_else(|| self.field_type(base, field)),
+            Expr::Access(path) => self.access_type(path),
             Expr::AddressOfIndex { name, .. } => {
                 Ok(Type::Ptr(Box::new(self.array_element_type(name)?)))
             }
             Expr::AddressOfField { base, field } => {
                 Ok(Type::Ptr(Box::new(self.field_type(base, field)?)))
             }
+            Expr::AddressOfAccess(path) => Ok(Type::Ptr(Box::new(self.access_type(path)?))),
             Expr::AddressOf(name) => {
                 let Some(ty) = self.variable_type(name) else {
                     return Err(Diagnostic::new(format!("unknown variable `{name}`")));
@@ -4022,8 +4306,16 @@ impl Emitter {
                     self.field_variable(base, field)?.width()
                 }
             }
+            Expr::Access(path) => {
+                if let Some(variable) = self.const_access_variable(path)? {
+                    variable.width()
+                } else {
+                    self.symbols.type_width(&self.access_type(path)?)
+                }
+            }
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
             Expr::AddressOfField { .. } => Ok(ValueWidth::U24),
+            Expr::AddressOfAccess(_) => Ok(ValueWidth::U24),
             Expr::AddressOf(_) => Ok(ValueWidth::U24),
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => self.symbols.type_width(&inner),
@@ -4214,6 +4506,13 @@ impl Emitter {
             }
             Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
                 self.validate_expr_arithmetic_compatibility(index)?;
+            }
+            Expr::Access(path) | Expr::AddressOfAccess(path) => {
+                for segment in &path.segments {
+                    if let AccessSegment::Index(index) = segment {
+                        self.validate_expr_arithmetic_compatibility(index)?;
+                    }
+                }
             }
             Expr::Array(values) => {
                 for value in values {
@@ -4519,6 +4818,7 @@ fn validate_place_calls(
 ) -> Result<(), Diagnostic> {
     match place {
         Place::Index { index, .. } | Place::Deref(index) => validate_expr_calls(index, functions),
+        Place::Access(path) => validate_access_calls(path, functions),
         Place::Ident(_) | Place::Field { .. } => Ok(()),
     }
 }
@@ -4535,6 +4835,9 @@ fn validate_expr_calls(
         }
         Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } | Expr::Deref(index) => {
             validate_expr_calls(index, functions)?;
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            validate_access_calls(path, functions)?;
         }
         Expr::StructInit { fields, .. } => {
             for (_, value) in fields {
@@ -4562,6 +4865,18 @@ fn validate_expr_calls(
         | Expr::Field { .. }
         | Expr::AddressOfField { .. }
         | Expr::AddressOf(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_access_calls(
+    path: &AccessPath,
+    functions: &HashMap<String, FunctionSig>,
+) -> Result<(), Diagnostic> {
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            validate_expr_calls(index, functions)?;
+        }
     }
     Ok(())
 }
@@ -4735,6 +5050,7 @@ fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
 fn collect_place_calls(place: &Place, calls: &mut Vec<String>) {
     match place {
         Place::Index { index, .. } | Place::Deref(index) => collect_expr_calls(index, calls),
+        Place::Access(path) => collect_access_calls(path, calls),
         Place::Ident(_) | Place::Field { .. } => {}
     }
 }
@@ -4749,6 +5065,7 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<String>) {
         Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } | Expr::Deref(index) => {
             collect_expr_calls(index, calls);
         }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => collect_access_calls(path, calls),
         Expr::StructInit { fields, .. } => {
             for (_, value) in fields {
                 collect_expr_calls(value, calls);
@@ -4774,6 +5091,14 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<String>) {
         | Expr::Field { .. }
         | Expr::AddressOfField { .. }
         | Expr::AddressOf(_) => {}
+    }
+}
+
+fn collect_access_calls(path: &AccessPath, calls: &mut Vec<String>) {
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            collect_expr_calls(index, calls);
+        }
     }
 }
 
@@ -4947,6 +5272,7 @@ fn place_summary(place: &Place) -> String {
         Place::Ident(name) => name.clone(),
         Place::Index { name, index } => format!("{name}[{}]", expr_summary(index)),
         Place::Field { base, field } => format!("{base}.{field}"),
+        Place::Access(path) => access_path_summary(path),
         Place::Deref(expr) => format!("*{}", expr_summary(expr)),
     }
 }
@@ -4971,6 +5297,8 @@ fn expr_summary(expr: &Expr) -> String {
         Expr::Field { base, field } => format!("{base}.{field}"),
         Expr::AddressOfIndex { name, index } => format!("&{name}[{}]", expr_summary(index)),
         Expr::AddressOfField { base, field } => format!("&{base}.{field}"),
+        Expr::Access(path) => access_path_summary(path),
+        Expr::AddressOfAccess(path) => format!("&{}", access_path_summary(path)),
         Expr::AddressOf(name) => format!("&{name}"),
         Expr::StructInit { ty, fields } => format!(
             "{ty} {{ {} }}",
@@ -4995,6 +5323,24 @@ fn expr_summary(expr: &Expr) -> String {
         ),
         Expr::Cast { ty, expr } => format!("cast<{}>({})", type_display(ty), expr_summary(expr)),
     }
+}
+
+fn access_path_summary(path: &AccessPath) -> String {
+    let mut out = path.root.clone();
+    for segment in &path.segments {
+        match segment {
+            AccessSegment::Field(field) => {
+                out.push('.');
+                out.push_str(field);
+            }
+            AccessSegment::Index(index) => {
+                out.push('[');
+                out.push_str(&expr_summary(index));
+                out.push(']');
+            }
+        }
+    }
+    out
 }
 
 fn assign_op_summary(op: AssignOp) -> &'static str {
@@ -8546,6 +8892,63 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_chained_array_and_struct_accesses() {
+        let source = r#"
+            struct Point {
+                x: u8
+                y: u16
+            }
+
+            struct Packet {
+                points: [Point; 2]
+            }
+
+            global grid: [[u8; 3]; 2] = [
+                [1, 2, 3],
+                [4, 5, 6]
+            ]
+
+            global packets: [Packet; 2] = [
+                Packet {
+                    points: [
+                        Point { x: 7, y: 0x0809 },
+                        Point { x: 10, y: 0x0B0C }
+                    ]
+                }
+            ]
+
+            fn main() {
+                let row: u8 = 1
+                let col: u8 = 2
+                test.assert_eq_u8(grid[row][col], 6, 1)
+                grid[row][col] = 0x44
+                test.assert_eq_u8(grid[1][2], 0x44, 2)
+                grid[row][col] += 1
+                test.assert_eq_u8(grid[1][2], 0x45, 3)
+
+                let packet_index: u8 = 0
+                let point_index: u8 = 1
+                test.assert_eq_u8(packets[packet_index].points[point_index].x, 10, 4)
+                test.assert_eq_u16(packets[packet_index].points[point_index].y, 0x0B0C, 5)
+                packets[packet_index].points[point_index].x = grid[row][col]
+                test.assert_eq_u8(packets[0].points[1].x, 0x45, 6)
+                packets[packet_index].points[point_index].y += 1
+                test.assert_eq_u16(packets[0].points[1].y, 0x0B0D, 7)
+
+                let x_ptr: ptr<u8> = &packets[packet_index].points[point_index].x
+                test.assert_eq_u8(*x_ptr, 0x45, 8)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 30_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

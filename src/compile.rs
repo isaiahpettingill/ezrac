@@ -5,7 +5,10 @@ use std::{
 };
 
 use crate::{
-    ast::{Declaration, EmbedSource, Expr, Function, Place, Program, Stmt, Type},
+    ast::{
+        AccessPath, AccessSegment, Declaration, EmbedSource, Expr, Function, Place, Program, Stmt,
+        Type,
+    },
     diagnostic::Diagnostic,
     parser::parse_program,
 };
@@ -400,6 +403,7 @@ fn validate_place_private_import_access(
             reject_private_import_name(&format!("{base}.{field}"), private_imports, locals)?;
             reject_private_import_name(base, private_imports, locals)
         }
+        Place::Access(path) => validate_access_private_import_access(path, private_imports, locals),
         Place::Deref(expr) => validate_expr_private_import_access(expr, private_imports, locals),
     }
 }
@@ -420,6 +424,9 @@ fn validate_expr_private_import_access(
         Expr::Field { base, field } | Expr::AddressOfField { base, field } => {
             reject_private_import_name(&format!("{base}.{field}"), private_imports, locals)?;
             reject_private_import_name(base, private_imports, locals)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            validate_access_private_import_access(path, private_imports, locals)
         }
         Expr::Cast { expr, ty } => {
             validate_type_private_import_access(ty, private_imports)?;
@@ -456,6 +463,20 @@ fn validate_expr_private_import_access(
         }
         Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) | Expr::String(_) => Ok(()),
     }
+}
+
+fn validate_access_private_import_access(
+    path: &AccessPath,
+    private_imports: &HashMap<String, String>,
+    locals: &HashSet<String>,
+) -> Result<(), Diagnostic> {
+    reject_private_import_name(&path.root, private_imports, locals)?;
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            validate_expr_private_import_access(index, private_imports, locals)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_type_private_import_access(
