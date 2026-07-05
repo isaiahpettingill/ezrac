@@ -749,7 +749,7 @@ impl Symbols {
             Expr::Unary { op, expr } => {
                 let value = self.eval_i64(expr)?;
                 Ok(match op {
-                    UnaryOp::Neg => -value,
+                    UnaryOp::Neg => value.wrapping_neg(),
                     UnaryOp::BitNot => !value,
                     UnaryOp::Not => i64::from(value == 0),
                 })
@@ -758,11 +758,11 @@ impl Symbols {
                 let left = self.eval_i64(left)?;
                 let right = self.eval_i64(right)?;
                 Ok(match op {
-                    BinaryOp::Mul => left * right,
+                    BinaryOp::Mul => left.wrapping_mul(right),
                     BinaryOp::Div => trunc_div_or_zero(left, right),
                     BinaryOp::Mod => trunc_mod_or_zero(left, right),
-                    BinaryOp::Add => left + right,
-                    BinaryOp::Sub => left - right,
+                    BinaryOp::Add => left.wrapping_add(right),
+                    BinaryOp::Sub => left.wrapping_sub(right),
                     BinaryOp::Shl => const_shl_or_zero(left, right),
                     BinaryOp::Shr => const_shr_or_zero(left, right),
                     BinaryOp::Lt => i64::from(left < right),
@@ -10837,6 +10837,10 @@ mod tests {
             const I16_WRAP: i16 = 32767 + 1
             const U8_NOT: u8 = ~0
             const U8_SHIFT: u8 = 1 << 8
+            const HOST_ADD_WRAP: u24 = 9223372036854775807 + 1
+            const HOST_SUB_WRAP: u24 = (-9223372036854775807 - 1) - 1
+            const HOST_MUL_WRAP: u24 = 9223372036854775807 * 3
+            const HOST_NEG_WRAP: u24 = -(-9223372036854775807 - 1)
 
             fn main() {{
                 test.assert_eq_u8(U8_WRAP, 0x{:02X}, 1)
@@ -10845,6 +10849,10 @@ mod tests {
                 test.assert_eq_u16(cast<u16>(I16_WRAP), 0x{:04X}, 4)
                 test.assert_eq_u8(U8_NOT, 0x{:02X}, 5)
                 test.assert_eq_u8(U8_SHIFT, 0x{:02X}, 6)
+                test.assert_eq_u24(HOST_ADD_WRAP, 0x{:06X}, 7)
+                test.assert_eq_u24(HOST_SUB_WRAP, 0x{:06X}, 8)
+                test.assert_eq_u24(HOST_MUL_WRAP, 0x{:06X}, 9)
+                test.assert_eq_u24(HOST_NEG_WRAP, 0x{:06X}, 10)
                 test.pass()
             }}
             "#,
@@ -10854,6 +10862,10 @@ mod tests {
             32767i16.wrapping_add(1) as u16,
             !0u8,
             1u16.wrapping_shl(8) as u8,
+            (i64::MAX.wrapping_add(1) as u64 & 0x00FF_FFFF) as u32,
+            (i64::MIN.wrapping_sub(1) as u64 & 0x00FF_FFFF) as u32,
+            (i64::MAX.wrapping_mul(3) as u64 & 0x00FF_FFFF) as u32,
+            (i64::MIN.wrapping_neg() as u64 & 0x00FF_FFFF) as u32,
         );
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
