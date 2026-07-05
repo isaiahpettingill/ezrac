@@ -9059,7 +9059,7 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
         }
         "ex" => asm_line_exchange_registers(operands),
         "exx" => vec!["bc", "de", "hl"],
-        "call" => vec!["af", "bc", "de", "hl"],
+        "call" | "rst" => vec!["af", "bc", "de", "hl"],
         "ldi" | "ldir" | "ldd" | "lddr" => vec!["bc", "de", "hl"],
         "cpi" | "cpir" | "cpd" | "cpdr" => vec!["bc", "hl"],
         "ini" | "inir" | "ind" | "indr" | "outi" | "otir" | "outd" | "otdr" => {
@@ -14024,6 +14024,17 @@ section .text
                         ".L_inline_sub:"
                         "ret"
                         ".L_inline_after:"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `af` without declaring clobber `af`",
+            ),
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "rst 10h"
                     }
                     test.pass()
                 }
