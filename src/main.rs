@@ -116,11 +116,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     })?;
     let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
-        let message = errors
-            .into_iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let message = format_layout_errors(options.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
     let assembly = emit_ez80_assembly_with_options(
@@ -198,11 +194,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
     })?;
     let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
-        let message = errors
-            .into_iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let message = format_layout_errors(options.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
     let assembly = emit_ez80_assembly_with_options(
@@ -307,11 +299,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     })?;
     let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
-        let message = errors
-            .into_iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let message = format_layout_errors(options.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
     emit_ez80_assembly_with_options(
@@ -344,10 +332,8 @@ fn check(path: &str) -> Result<(), String> {
 fn print_layout(path: Option<&str>) -> Result<(), String> {
     let layout = load_layout(path)?;
     if let Err(errors) = layout.validate() {
-        for error in errors {
-            eprintln!("error: {error}");
-        }
-        return Err("default layout is invalid".to_owned());
+        eprintln!("error: {}", format_layout_errors(path, errors));
+        return Err("layout is invalid".to_owned());
     }
 
     println!("layout {}", layout.name);
@@ -365,7 +351,26 @@ fn load_layout(path: Option<&str>) -> Result<Layout, String> {
     };
     let source =
         fs::read_to_string(path).map_err(|error| format!("failed to read {path}: {error}"))?;
-    parse_layout(&source).map_err(|error| error.to_string())
+    parse_layout(&source).map_err(|error| {
+        error
+            .with_location_if_missing(command_source_start_location(std::path::Path::new(path)))
+            .to_string()
+    })
+}
+
+fn format_layout_errors(path: Option<&str>, errors: Vec<ezra::diagnostic::Diagnostic>) -> String {
+    let location = path.map(|path| command_source_start_location(std::path::Path::new(path)));
+    errors
+        .into_iter()
+        .map(|error| {
+            if let Some(location) = location.clone() {
+                error.with_location_if_missing(location).to_string()
+            } else {
+                error.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn command_source_start_location(path: &std::path::Path) -> SourceLocation {
@@ -529,6 +534,68 @@ mod tests {
         assert!(
             test_error.starts_with(&prefix),
             "expected `{test_error}` to start with `{prefix}`"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commands_report_source_locations_for_layout_errors() {
+        let root = temp_root("layout_diagnostics");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        let parse_layout_path = root.join("parse.ezralayout");
+        let invalid_layout_path = root.join("invalid.ezralayout");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            &parse_layout_path,
+            r#"
+                layout broken {
+                    load 0x010000;
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &invalid_layout_path,
+            r#"
+                layout invalid {
+                    load 0x010000;
+                    entry 0x010040;
+                    stack 0xF00000;
+
+                    region code 0x010000..0x01FFFF read execute;
+                    section .text -> code align 24;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let parse_prefix = format!("{}:1:1:", parse_layout_path.display());
+        let parse_error = emit_assembly_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            layout_path: Some(parse_layout_path.to_string_lossy().into_owned()),
+        })
+        .unwrap_err();
+        assert!(
+            parse_error.starts_with(&parse_prefix),
+            "expected `{parse_error}` to start with `{parse_prefix}`"
+        );
+
+        let invalid_prefix = format!("{}:1:1:", invalid_layout_path.display());
+        let invalid_error = emit_assembly_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            layout_path: Some(invalid_layout_path.to_string_lossy().into_owned()),
+        })
+        .unwrap_err();
+        assert!(
+            invalid_error.contains(&invalid_prefix),
+            "expected `{invalid_error}` to contain `{invalid_prefix}`"
+        );
+        assert!(
+            invalid_error.contains("section `.text` alignment must be a power of two"),
+            "{invalid_error}"
         );
 
         let _ = std::fs::remove_dir_all(root);
