@@ -1889,7 +1889,6 @@ impl Emitter {
         self.line("    ldir");
         self.line("    ret");
         self.line("__ezra_memset:");
-        self.line(".L_memset_loop:");
         self.line("    push hl");
         self.line("    push bc");
         self.line("    pop hl");
@@ -1899,9 +1898,21 @@ impl Emitter {
         self.line("    pop hl");
         self.line("    ret z");
         self.line("    ld (hl), a");
-        self.line("    inc hl");
         self.line("    dec bc");
-        self.line("    jp .L_memset_loop");
+        self.line("    push hl");
+        self.line("    push bc");
+        self.line("    pop hl");
+        self.line("    ld de, 000000h");
+        self.line("    or a");
+        self.line("    sbc hl, de");
+        self.line("    pop hl");
+        self.line("    ret z");
+        self.line("    push hl");
+        self.line("    inc hl");
+        self.line("    ex de, hl");
+        self.line("    pop hl");
+        self.line("    ldir");
+        self.line("    ret");
         self.line("__ezra_mul_u8:");
         self.line("    ld b, a");
         self.line("    mlt bc");
@@ -9024,7 +9035,7 @@ mod tests {
         assert!(asm.contains("__ezra_memset:"), "{asm}");
         assert!(
             asm.contains(
-                "__ezra_memset:\n.L_memset_loop:\n    push hl\n    push bc\n    pop hl\n    ld de, 000000h\n    or a\n    sbc hl, de\n    pop hl\n    ret z"
+                "__ezra_memset:\n    push hl\n    push bc\n    pop hl\n    ld de, 000000h\n    or a\n    sbc hl, de\n    pop hl\n    ret z\n    ld (hl), a\n    dec bc\n    push hl\n    push bc\n    pop hl\n    ld de, 000000h\n    or a\n    sbc hl, de\n    pop hl\n    ret z\n    push hl\n    inc hl\n    ex de, hl\n    pop hl\n    ldir\n    ret"
             ),
             "{asm}"
         );
@@ -9055,6 +9066,8 @@ mod tests {
                 mem.memcpy(&dst[4], &src[4], 0)
                 mem.memset(&dst[4], 0xEE, 0)
                 test.assert_eq_u8(dst[4], 0, 10)
+                mem.memset(&dst[4], 0xCC, 1)
+                test.assert_eq_u8(dst[4], 0xCC, 11)
                 test.pass()
             }
         "#;
