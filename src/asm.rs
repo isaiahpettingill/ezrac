@@ -1898,18 +1898,8 @@ impl Emitter {
         self.line("    jp .L_memset_loop");
         self.line("__ezra_mul_u8:");
         self.line("    ld b, a");
-        self.line("    xor a");
-        self.line(".L_mul_u8_loop:");
-        self.line("    ld d, a");
+        self.line("    mlt bc");
         self.line("    ld a, c");
-        self.line("    or a");
-        self.line("    jp z, .L_mul_u8_done");
-        self.line("    ld a, d");
-        self.line("    add a, b");
-        self.line("    dec c");
-        self.line("    jp .L_mul_u8_loop");
-        self.line(".L_mul_u8_done:");
-        self.line("    ld a, d");
         self.line("    ret");
         self.line("__ezra_mul_u16:");
         self.line("    ex de, hl");
@@ -14773,6 +14763,10 @@ section .text
         let run = run_assembly_test(&asm, 120_000).unwrap();
 
         assert!(asm.contains("    call __ezra_mul_u8"), "{asm}");
+        assert!(
+            asm.contains("__ezra_mul_u8:\n    ld b, a\n    mlt bc\n    ld a, c\n    ret"),
+            "{asm}"
+        );
         assert!(asm.contains("    call __ezra_mul_u16"), "{asm}");
         assert!(asm.contains("    call __ezra_mul_u24"), "{asm}");
         assert!(asm.contains("__ezra_mul_u24:"), "{asm}");

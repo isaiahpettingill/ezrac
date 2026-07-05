@@ -315,6 +315,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         "reti" | "sra a" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix" | "push iy" | "pop iy"
     ) {
         Ok(2)
+    } else if parse_mlt_reg16(text).is_some() {
+        Ok(2)
     } else if text == "sbc hl, bc"
         || text == "sbc hl, de"
         || text == "add ix, sp"
@@ -542,6 +544,8 @@ fn emit_instruction(
         bytes.extend([0xFD, 0xE1]);
     } else if text == "reti" {
         bytes.extend([0xED, 0x4D]);
+    } else if let Some(opcode) = parse_mlt_reg16(text) {
+        bytes.extend([0xED, opcode]);
     } else if text == "add ix, sp" {
         bytes.extend([0xDD, 0x39]);
     } else if text == "add iy, sp" {
@@ -747,6 +751,17 @@ fn ld_direct_reg16_store_opcode(register: &str) -> u8 {
         "bc" => 0x43,
         "de" => 0x53,
         _ => unreachable!("invalid direct-store register {register}"),
+    }
+}
+
+fn parse_mlt_reg16(text: &str) -> Option<u8> {
+    let register = text.strip_prefix("mlt ")?;
+    match register.trim() {
+        "bc" => Some(0x4C),
+        "de" => Some(0x5C),
+        "hl" => Some(0x6C),
+        "sp" => Some(0x7C),
+        _ => None,
     }
 }
 
@@ -1513,6 +1528,50 @@ mod tests {
                 0x80, 0x83, 0x89, 0x8C, 0x92, 0x95, 0x98, 0x9B, 0xA4, 0xB3, 0xAD, 0xBA, 0xBF,
             ]
         );
+    }
+
+    #[test]
+    fn assembles_ez80_mlt_register_forms() {
+        let bytes = assemble_ez80_subset_at(
+            r#"
+            mlt bc
+            mlt de
+            mlt hl
+            mlt sp
+            "#,
+            EZRA_LOAD_ADDR.get(),
+        )
+        .unwrap();
+
+        assert_eq!(bytes, [0xED, 0x4C, 0xED, 0x5C, 0xED, 0x6C, 0xED, 0x7C]);
+    }
+
+    #[test]
+    fn runs_ez80_mlt_register_form_on_vm() {
+        let asm = r#"
+            ld b, 11h
+            ld c, 0Fh
+            mlt bc
+            ld a, c
+            cp 0FFh
+            jp nz, fail
+            ld a, b
+            cp 00h
+            jp nz, fail
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        fail:
+            ld a, 02h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
     }
 
     #[test]
