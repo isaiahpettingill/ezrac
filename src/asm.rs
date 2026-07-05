@@ -33,7 +33,7 @@ pub fn emit_ez80_assembly_with_debug_comments(
     )
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssemblyOptions {
     pub debug_comments: bool,
     pub default_sdk_symbols: bool,
@@ -46,6 +46,7 @@ pub struct AssemblyOptions {
     pub audio_base: Address24,
     pub asset_base: Address24,
     pub rodata_base: Address24,
+    pub section_bases: Vec<(String, Address24)>,
 }
 
 impl Default for AssemblyOptions {
@@ -62,6 +63,10 @@ impl Default for AssemblyOptions {
             audio_base: EZRA_AUDIO_BASE,
             asset_base: EZRA_ASSET_BASE,
             rodata_base: EZRA_RODATA_BASE,
+            section_bases: vec![
+                (".rodata".to_owned(), EZRA_RODATA_BASE),
+                (".assets".to_owned(), EZRA_ASSET_BASE),
+            ],
         }
     }
 }
@@ -70,7 +75,7 @@ pub fn emit_ez80_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
-    let symbols = Symbols::from_program(program, options)?;
+    let symbols = Symbols::from_program(program, options.clone())?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
@@ -204,6 +209,7 @@ struct Symbols {
     next_addr: u32,
     asset_next_addr: u32,
     rodata_next_addr: u32,
+    section_next_addrs: Vec<(String, u32)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,14 +247,14 @@ struct FunctionSig {
 impl Symbols {
     fn from_program(program: &Program, options: AssemblyOptions) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
-            constants: sdk_constants(options),
-            constant_types: sdk_constant_types(options),
+            constants: sdk_constants(&options),
+            constant_types: sdk_constant_types(&options),
             evaluating_constants: HashSet::new(),
             aliases: HashMap::new(),
             structs: HashMap::new(),
             embeds: HashMap::new(),
             string_literals: HashMap::new(),
-            ports: sdk_ports(options),
+            ports: sdk_ports(&options),
             globals: HashMap::new(),
             global_types: HashMap::new(),
             readonly_global_pointer_aliases: HashMap::new(),
@@ -257,6 +263,12 @@ impl Symbols {
             next_addr: options.ram_base.get(),
             asset_next_addr: options.asset_base.get(),
             rodata_next_addr: options.rodata_base.get(),
+            section_next_addrs: options
+                .section_bases
+                .iter()
+                .filter(|(name, _)| !matches!(name.as_str(), ".assets" | ".rodata"))
+                .map(|(name, base)| (name.clone(), base.get()))
+                .collect(),
         };
 
         let mut declared_names = HashSet::new();
@@ -528,6 +540,15 @@ impl Symbols {
             }
             ".rodata" => {
                 let variable = alloc_from_cursor(&mut self.rodata_next_addr, align, len)?;
+                Ok(variable)
+            }
+            _ if self
+                .section_next_addrs
+                .iter()
+                .any(|(name, _)| name == section) =>
+            {
+                let cursor = section_cursor(&mut self.section_next_addrs, section);
+                let variable = alloc_from_cursor(cursor, align, len)?;
                 Ok(variable)
             }
             _ => {
@@ -7188,6 +7209,14 @@ fn alloc_from_cursor(cursor: &mut u32, align: u32, size: u32) -> Result<Variable
     Ok(variable)
 }
 
+fn section_cursor<'a>(cursors: &'a mut Vec<(String, u32)>, section: &str) -> &'a mut u32 {
+    let index = cursors
+        .iter()
+        .position(|(name, _)| name == section)
+        .expect("section cursor exists");
+    &mut cursors[index].1
+}
+
 fn recursive_call_edges(
     program: &Program,
     functions: &HashMap<String, FunctionSig>,
@@ -8700,7 +8729,7 @@ fn is_comparison(op: BinaryOp) -> bool {
     )
 }
 
-fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
+fn sdk_constants(options: &AssemblyOptions) -> HashMap<String, i64> {
     let mut constants = HashMap::from([
         ("EZRA_LOAD_ADDR".to_owned(), options.load_addr.get() as i64),
         (
@@ -8750,7 +8779,7 @@ fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
     constants
 }
 
-fn sdk_constant_types(options: AssemblyOptions) -> HashMap<String, Type> {
+fn sdk_constant_types(options: &AssemblyOptions) -> HashMap<String, Type> {
     let mut types = HashMap::new();
     for name in [
         "EZRA_LOAD_ADDR",
@@ -8802,7 +8831,7 @@ fn sdk_constant_types(options: AssemblyOptions) -> HashMap<String, Type> {
     types
 }
 
-fn sdk_ports(options: AssemblyOptions) -> HashMap<String, u8> {
+fn sdk_ports(options: &AssemblyOptions) -> HashMap<String, u8> {
     if !options.default_sdk_symbols {
         return HashMap::new();
     }
@@ -16333,6 +16362,33 @@ section .text
         "#;
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_custom_section_embedded_bytes_at_section_base() {
+        let source = r#"
+            embed banked: bytes = bytes [0xA1, 0xA2] section .bank1 align 256
+
+            fn main() {
+                test.assert_eq_u24(cast<ptr24>(banked.ptr), 0x120000, 1)
+                test.assert_eq_u8(*(banked.ptr + 0), 0xA1, 2)
+                test.assert_eq_u8(*(banked.ptr + 1), 0xA2, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                section_bases: vec![(".bank1".to_owned(), Address24::new(0x12_0000))],
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
         let run = run_assembly_test(&asm, 12_000).unwrap();
 
         assert!(run.halted, "{asm}");

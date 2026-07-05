@@ -462,7 +462,22 @@ fn assembly_options_from_layout(
         audio_base: layout_symbol(layout, "EZRA_AUDIO_BASE").unwrap_or(EZRA_AUDIO_BASE),
         asset_base: layout_symbol(layout, "EZRA_ASSET_BASE").unwrap_or(EZRA_ASSET_BASE),
         rodata_base: layout_symbol(layout, "EZRA_RODATA_BASE").unwrap_or(EZRA_RODATA_BASE),
+        section_bases: section_bases_from_layout(layout),
     }
+}
+
+fn section_bases_from_layout(layout: &Layout) -> Vec<(String, Address24)> {
+    layout
+        .sections
+        .iter()
+        .filter_map(|section| {
+            layout
+                .regions
+                .iter()
+                .find(|region| region.name == section.region)
+                .map(|region| (section.name.clone(), region.start))
+        })
+        .collect()
 }
 
 fn layout_symbol(layout: &Layout, name: &str) -> Option<Address24> {
