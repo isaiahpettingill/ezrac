@@ -6901,7 +6901,11 @@ fn sdk_ports() -> HashMap<String, u8> {
 mod tests {
     use std::path::Path;
 
-    use crate::{compile::load_program, parser::parse_program, vm::run_assembly_test};
+    use crate::{
+        compile::load_program,
+        parser::parse_program,
+        vm::{TestRunOptions, run_assembly_test, run_assembly_test_with_options},
+    };
 
     use super::*;
 
@@ -11273,6 +11277,165 @@ mod tests {
         assert!(asm.contains("in0 a, (02h)"), "{asm}");
         assert!(asm.contains("out0 (10h), a"), "{asm}");
         assert!(asm.contains("out0 (11h), a"), "{asm}");
+        assert!(asm.contains("out0 (9Bh), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_ti84_plus_ce_style_sdk_modules() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_ti84_sdk_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("ti84")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("ti84/keys.ezra"),
+            r#"
+            pub port KEY_LO: u8 = 0x01
+            pub port KEY_HI: u8 = 0x02
+
+            pub fn scan() -> u16 {
+                let lo: u8 = in KEY_LO
+                let hi: u8 = in KEY_HI
+                return cast<u16>(lo) | (cast<u16>(hi) << 8)
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ti84/lcd.ezra"),
+            r#"
+            pub port LCD_CMD: u8 = 0x10
+            pub port LCD_DATA: u8 = 0x11
+            pub volatile mmio LCD_SHADOW: ptr<u8> = 0x040240
+
+            pub fn command(value: u8) {
+                out LCD_CMD, value
+            }
+
+            pub fn write(value: u8) {
+                *(LCD_SHADOW) = value
+                out LCD_DATA, value
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import ti84.keys
+            import ti84.lcd
+
+            fn main() {
+                let keys: u16 = keys.scan()
+                lcd.command(0x2A)
+                lcd.write(cast<u8>(keys))
+
+                test.assert_eq_u16(keys, 0x1205, 1)
+                test.assert_eq_u8(*(lcd.LCD_SHADOW), 0x05, 2)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test_with_options(
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 8_000,
+                initial_ports: vec![(0x01, 0x05), (0x02, 0x12)],
+            },
+        )
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(asm.contains("_keys_scan:"), "{asm}");
+        assert!(asm.contains("_lcd_write:"), "{asm}");
+        assert!(asm.contains("in0 a, (01h)"), "{asm}");
+        assert!(asm.contains("in0 a, (02h)"), "{asm}");
+        assert!(asm.contains("out0 (10h), a"), "{asm}");
+        assert!(asm.contains("out0 (11h), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_agon_light_style_sdk_modules() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_agon_sdk_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("agon")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("agon/vdp.ezra"),
+            r#"
+            pub port VDP_DATA: u8 = 0x9B
+            pub volatile mmio VDP_SHADOW: ptr<u8> = 0x040260
+
+            pub fn byte(value: u8) {
+                *(VDP_SHADOW) = value
+                out VDP_DATA, value
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("agon/system.ezra"),
+            r#"
+            pub port STATUS: u8 = 0x17
+
+            pub fn status() -> u8 {
+                return in STATUS
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import agon.vdp
+            import agon.system
+
+            fn main() {
+                let sys_status: u8 = system.status()
+                vdp.byte(sys_status ^ 0xFF)
+
+                test.assert_eq_u8(sys_status, 0xA0, 1)
+                test.assert_eq_u8(*(vdp.VDP_SHADOW), 0x5F, 2)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test_with_options(
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 6_000,
+                initial_ports: vec![(0x17, 0xA0)],
+            },
+        )
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(asm.contains("_vdp_byte:"), "{asm}");
+        assert!(asm.contains("_system_status:"), "{asm}");
+        assert!(asm.contains("in0 a, (17h)"), "{asm}");
         assert!(asm.contains("out0 (9Bh), a"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
