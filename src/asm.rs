@@ -2673,6 +2673,15 @@ impl Emitter {
         if !clobbers.is_empty() {
             self.line(&format!("    ; clobber {}", clobbers.join(", ")));
         }
+        if inputs.iter().any(|input| input.class == "mem")
+            || outputs.iter().any(|output| output.class == "mem")
+        {
+            if !asm_clobbers_include(clobbers, "memory") {
+                return Err(Diagnostic::new(
+                    "inline asm uses memory without declaring clobber `memory`",
+                ));
+            }
+        }
         validate_inline_asm_clobbers(clobbers, lines, self.current_function_is_naked())?;
 
         for input in inputs {
@@ -12634,7 +12643,7 @@ section .text
             fn main() {
                 let ch: byte = 0x41
                 let result: byte = 0
-                asm volatile(in ch: byte, out result: byte, clobber a) {
+                asm volatile(in ch: byte, out result: byte, clobber a, clobber memory) {
                     "ld a, {ch}"
                     "ld {result}, a"
                 }
@@ -13416,6 +13425,18 @@ section .text
                 fn main() {
                     asm volatile(clobber a) {
                         "ld (hl), a"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm uses memory without declaring clobber `memory`",
+            ),
+            (
+                r#"
+                fn main() {
+                    let value: u8 = 1
+                    asm volatile(in value: u8 as mem) {
+                        "nop"
                     }
                     test.pass()
                 }
