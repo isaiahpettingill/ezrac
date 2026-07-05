@@ -4013,14 +4013,46 @@ impl Emitter {
     }
 
     fn readonly_write_addr(&self, ptr: &Expr) -> Option<u32> {
-        if let Expr::Ident(name) = ptr {
-            if let Some(addr) = self.readonly_pointer_alias(name) {
-                return Some(addr);
-            }
+        if let Some(addr) = self.readonly_expr_addr(ptr) {
+            return Some(addr);
         }
         let Ok(addr) = self.symbols.eval_i64(ptr) else {
             return None;
         };
+        Self::addr24(addr)
+    }
+
+    fn readonly_expr_addr(&self, expr: &Expr) -> Option<u32> {
+        match expr {
+            Expr::Ident(name) => self.readonly_pointer_alias(name),
+            Expr::Cast { expr, .. } => self.readonly_expr_addr(expr),
+            Expr::Binary {
+                left,
+                op: op @ (BinaryOp::Add | BinaryOp::Sub),
+                right,
+            } => {
+                let base = self.readonly_expr_addr(left)?;
+                let Type::Ptr(inner) = self
+                    .expr_type(left)
+                    .ok()
+                    .and_then(|ty| self.symbols.resolved_type(&ty).ok())?
+                else {
+                    return None;
+                };
+                let offset = self.eval_i64_with_local_constants(right).ok()?;
+                let offset = if *op == BinaryOp::Sub {
+                    offset.wrapping_neg()
+                } else {
+                    offset
+                };
+                let scale = i64::from(self.symbols.type_size(&inner).ok()?);
+                Self::addr24(i64::from(base).wrapping_add(offset.wrapping_mul(scale)))
+            }
+            _ => None,
+        }
+    }
+
+    fn addr24(addr: i64) -> Option<u32> {
         if (0..=0xFF_FFFF).contains(&addr) {
             Some(addr as u32)
         } else {
@@ -14021,6 +14053,33 @@ section .text
                 "#,
                 "embedded object `sprite` is read-only",
             ),
+            (
+                r#"
+                embed sprite: bytes = bytes [0x11, 0x22, 0x33, 0x44]
+
+                fn main() {
+                    let p: ptr<u16> = cast<ptr<u16>>(sprite.ptr);
+                    let q: ptr<u16> = p + 1;
+                    *(q) = 0x5566
+                    test.pass()
+                }
+                "#,
+                "embedded object `sprite` is read-only",
+            ),
+            (
+                r#"
+                embed sprite: bytes = bytes [0x11, 0x22]
+
+                fn main() {
+                    let offset: u8 = 1
+                    let p: ptr<u8> = sprite.ptr;
+                    let q: ptr<u8> = p + offset;
+                    *(q) = 0x33
+                    test.pass()
+                }
+                "#,
+                "embedded object `sprite` is read-only",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -14029,6 +14088,27 @@ section .text
 
             assert_eq!(error.message, expected);
         }
+    }
+
+    #[test]
+    fn allows_reassigned_embedded_pointer_alias_to_mutable_memory() {
+        let source = r#"
+            embed sprite: bytes = bytes [0x11, 0x22]
+
+            fn main() {
+                let p: ptr<u8> = sprite.ptr;
+                p = cast<ptr<u8>>(0x040120);
+                *(p) = 0x33
+                test.assert_eq_u8(*(cast<ptr<u8>>(0x040120)), 0x33, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 2_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
