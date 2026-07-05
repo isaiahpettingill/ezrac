@@ -102,9 +102,9 @@ literal = { bool_lit | char_lit | string_lit | int_lit }
 
 or_op = { "||" }
 and_op = { "&&" }
-bit_or_op = { "|" }
+bit_or_op = { "|" ~ !"|" }
 bit_xor_op = { "^" }
-bit_and_op = { "&" }
+bit_and_op = { "&" ~ !"&" }
 eq_op = { "==" | "!=" }
 cmp_op = { "<=" | ">=" | "<" | ">" }
 shift_op = { "<<" | ">>" }

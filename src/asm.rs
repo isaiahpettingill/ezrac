@@ -2308,6 +2308,10 @@ impl Emitter {
         op: BinaryOp,
         right: &Expr,
     ) -> Result<(), Diagnostic> {
+        if matches!(op, BinaryOp::And | BinaryOp::Or) {
+            self.emit_short_circuit_logical(left, op, right)?;
+            return Ok(());
+        }
         if is_comparison(op) {
             let width = self.expr_width(left)?.max(self.expr_width(right)?);
             if width != ValueWidth::U8 {
@@ -2358,7 +2362,7 @@ impl Emitter {
             | BinaryOp::Le
             | BinaryOp::Gt
             | BinaryOp::Ge => self.emit_comparison(op),
-            BinaryOp::And | BinaryOp::Or => self.emit_logical(op),
+            BinaryOp::And | BinaryOp::Or => unreachable!("logical ops handled before binary load"),
             BinaryOp::Div | BinaryOp::Mod | BinaryOp::Shl | BinaryOp::Shr => {
                 return Err(Diagnostic::new(format!(
                     "binary operator `{op:?}` is not implemented in u8 codegen yet"
@@ -2366,6 +2370,44 @@ impl Emitter {
             }
             BinaryOp::Mul => unreachable!("multiplication handled before u8 binary dispatch"),
         }
+        Ok(())
+    }
+
+    fn emit_short_circuit_logical(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let short_label = self.next_label("logical_short");
+        let end_label = self.next_label("logical_end");
+
+        self.emit_expr_to_a(left)?;
+        self.line("    or a");
+        match op {
+            BinaryOp::And => {
+                self.line(&format!("    jp z, {short_label}"));
+                self.emit_expr_to_a(right)?;
+                self.line("    or a");
+                self.line(&format!("    jp z, {short_label}"));
+                self.line("    ld a, 01h");
+                self.line(&format!("    jp {end_label}"));
+                self.line(&format!("{short_label}:"));
+                self.line("    ld a, 00h");
+            }
+            BinaryOp::Or => {
+                self.line(&format!("    jp nz, {short_label}"));
+                self.emit_expr_to_a(right)?;
+                self.line("    or a");
+                self.line(&format!("    jp nz, {short_label}"));
+                self.line("    ld a, 00h");
+                self.line(&format!("    jp {end_label}"));
+                self.line(&format!("{short_label}:"));
+                self.line("    ld a, 01h");
+            }
+            _ => unreachable!("not a logical op"),
+        }
+        self.line(&format!("{end_label}:"));
         Ok(())
     }
 
@@ -2908,40 +2950,6 @@ impl Emitter {
         self.line(&format!("{true_label}:"));
         self.line("    ld a, 01h");
         self.line(&format!("{end_label}:"));
-    }
-
-    fn emit_logical(&mut self, op: BinaryOp) {
-        match op {
-            BinaryOp::And => {
-                let false_label = self.next_label("and_false");
-                let end_label = self.next_label("and_end");
-                self.line("    or a");
-                self.line(&format!("    jp z, {false_label}"));
-                self.line("    ld a, c");
-                self.line("    or a");
-                self.line(&format!("    jp z, {false_label}"));
-                self.line("    ld a, 01h");
-                self.line(&format!("    jp {end_label}"));
-                self.line(&format!("{false_label}:"));
-                self.line("    ld a, 00h");
-                self.line(&format!("{end_label}:"));
-            }
-            BinaryOp::Or => {
-                let true_label = self.next_label("or_true");
-                let end_label = self.next_label("or_end");
-                self.line("    or a");
-                self.line(&format!("    jp nz, {true_label}"));
-                self.line("    ld a, c");
-                self.line("    or a");
-                self.line(&format!("    jp nz, {true_label}"));
-                self.line("    ld a, 00h");
-                self.line(&format!("    jp {end_label}"));
-                self.line(&format!("{true_label}:"));
-                self.line("    ld a, 01h");
-                self.line(&format!("{end_label}:"));
-            }
-            _ => unreachable!("not logical"),
-        }
     }
 
     fn emit_out(&mut self, port: u8, value: u8) {
@@ -5663,6 +5671,45 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_short_circuit_logical_ops() {
+        let source = r#"
+            global calls: u8 = 0
+
+            fn bump(value: bool) -> bool {
+                calls += 1
+                return value
+            }
+
+            fn main() {
+                calls = 0
+                let and_skip: bool = false && bump(true)
+                test.assert_eq_u8(and_skip, false, 1)
+                test.assert_eq_u8(calls, 0, 2)
+
+                let or_skip: bool = true || bump(false)
+                test.assert_eq_u8(or_skip, true, 3)
+                test.assert_eq_u8(calls, 0, 4)
+
+                let and_run: bool = true && bump(true)
+                test.assert_eq_u8(and_run, true, 5)
+                test.assert_eq_u8(calls, 1, 6)
+
+                let or_run: bool = false || bump(true)
+                test.assert_eq_u8(or_run, true, 7)
+                test.assert_eq_u8(calls, 2, 8)
+
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

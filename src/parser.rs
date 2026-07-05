@@ -937,6 +937,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_logical_function_call_operands() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "fn bump(value: bool) -> bool { return value }\nfn main() { let value: bool = false && bump(true); }",
+        )
+        .unwrap();
+        let main = program.main_function().unwrap();
+        let Stmt::Let {
+            value:
+                Expr::Binary {
+                    left,
+                    op: BinaryOp::And,
+                    right,
+                },
+            ..
+        } = &main.body[0]
+        else {
+            panic!("unexpected statement shape: {:?}", main.body[0]);
+        };
+
+        assert_eq!(**left, Expr::Bool(false));
+        assert!(matches!(**right, Expr::Call { ref path, .. } if path == &["bump"]));
+    }
+
+    #[test]
     fn parses_inline_asm_statements() {
         let program = parse_program(
             Path::new("game.ezra"),
