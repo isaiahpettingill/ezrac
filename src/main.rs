@@ -5,7 +5,7 @@ use ezra::{
     cart::{CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
     layout::{Layout, parse_layout},
-    vm::{assemble_ez80_subset_with_symbols_at, run_assembly_test},
+    vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options},
 };
 
 fn main() -> ExitCode {
@@ -162,9 +162,19 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
 
 fn test_source(path: &str) -> Result<(), String> {
     let source_path = PathBuf::from(path);
+    let source = fs::read_to_string(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+    let metadata = parse_test_metadata(&source)?;
     let program = load_program(&source_path).map_err(|error| error.to_string())?;
     let assembly = emit_ez80_assembly(&program).map_err(|error| error.to_string())?;
-    let run = run_assembly_test(&assembly, 1_000_000).map_err(|error| error.to_string())?;
+    let run = run_assembly_test_with_options(
+        &assembly,
+        &TestRunOptions {
+            instruction_budget: 1_000_000,
+            initial_ports: metadata.initial_ports,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     if !run.halted {
         return Err(format!(
             "test timed out after {} instructions",
@@ -176,6 +186,53 @@ fn test_source(path: &str) -> Result<(), String> {
     }
     println!("ok: test passed in {} instructions", run.instructions);
     Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TestMetadata {
+    initial_ports: Vec<(u8, u8)>,
+}
+
+fn parse_test_metadata(source: &str) -> Result<TestMetadata, String> {
+    let mut initial_ports = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let Some(comment) = line.trim_start().strip_prefix("//") else {
+            continue;
+        };
+        let comment = comment.trim_start();
+        let rest = if let Some(rest) = comment.strip_prefix("test:") {
+            rest.trim()
+        } else if comment.starts_with("port") {
+            comment
+        } else {
+            continue;
+        };
+        let Some(rest) = rest.strip_prefix("port") else {
+            return Err(format!("invalid test metadata on line {}", index + 1));
+        };
+        let (port, value) = rest
+            .trim()
+            .split_once('=')
+            .ok_or_else(|| format!("invalid test port metadata on line {}", index + 1))?;
+        let port = parse_metadata_u8(port.trim())
+            .map_err(|error| format!("invalid test port on line {}: {error}", index + 1))?;
+        let value = parse_metadata_u8(value.trim())
+            .map_err(|error| format!("invalid test port value on line {}: {error}", index + 1))?;
+        initial_ports.push((port, value));
+    }
+    Ok(TestMetadata { initial_ports })
+}
+
+fn parse_metadata_u8(text: &str) -> Result<u8, String> {
+    let value = if let Some(hex) = text.strip_prefix("0x") {
+        u16::from_str_radix(hex, 16)
+    } else if let Some(bin) = text.strip_prefix("0b") {
+        u16::from_str_radix(bin, 2)
+    } else {
+        text.parse::<u16>()
+    }
+    .map_err(|_| format!("invalid u8 literal `{text}`"))?;
+    u8::try_from(value).map_err(|_| format!("value {text} is outside u8 range"))
 }
 
 fn emit_asm(options: &CommandOptions) -> Result<(), String> {
@@ -368,6 +425,47 @@ mod tests {
         assert!(!plain_asm.contains("; source:"), "{plain_asm}");
         assert!(debug_asm.contains("; source: let x: u8 = 4"), "{debug_asm}");
         assert!(debug_asm.contains("; source: x += 1"), "{debug_asm}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parses_test_port_metadata() {
+        let metadata = parse_test_metadata(
+            r#"
+                // port 0x01 = 0x10
+                // test: port 2 = 0b00100000
+                fn main() { test.pass() }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.initial_ports, vec![(0x01, 0x10), (0x02, 0x20)]);
+
+        let error = parse_test_metadata("// port 0x100 = 0").unwrap_err();
+        assert!(error.contains("outside u8 range"), "{error}");
+    }
+
+    #[test]
+    fn test_command_uses_port_metadata() {
+        let root = temp_root("test_metadata");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                // port 0x01 = 0x10
+                port PAD: u8 = 0x01
+                fn main() {
+                    let pad: u8 = in PAD
+                    test.assert_eq_u8(pad, 0x10, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        test_source(source_path.to_str().unwrap()).unwrap();
 
         let _ = std::fs::remove_dir_all(root);
     }

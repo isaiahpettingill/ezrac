@@ -28,9 +28,31 @@ pub struct AssemblySymbol {
     pub addr: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestRunOptions {
+    pub instruction_budget: u64,
+    pub initial_ports: Vec<(u8, u8)>,
+}
+
 pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<TestRun, Diagnostic> {
+    run_assembly_test_with_options(
+        assembly,
+        &TestRunOptions {
+            instruction_budget,
+            initial_ports: Vec::new(),
+        },
+    )
+}
+
+pub fn run_assembly_test_with_options(
+    assembly: &str,
+    options: &TestRunOptions,
+) -> Result<TestRun, Diagnostic> {
     let code = assemble_ez80_subset_at(assembly, EZRA_LOAD_ADDR.get())?;
     let mut machine = TestMachine::new();
+    for (port, value) in &options.initial_ports {
+        machine.ports[*port as usize] = *value;
+    }
     for (address, byte) in code.into_iter().enumerate() {
         machine.poke(EZRA_LOAD_ADDR.get() + address as u32, byte);
     }
@@ -42,7 +64,7 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
         cpu.set_trace(true);
     }
 
-    for instruction in 0..instruction_budget {
+    for instruction in 0..options.instruction_budget {
         cpu.execute_instruction(&mut machine);
         if machine.halted {
             return Ok(TestRun {
@@ -57,7 +79,7 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
     Ok(TestRun {
         halted: false,
         result_code: machine.result_code,
-        instructions: instruction_budget,
+        instructions: options.instruction_budget,
         debug_output: machine.debug_output,
     })
 }
@@ -626,6 +648,27 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn run_options_seed_input_ports() {
+        let asm = r#"
+            in0 a, (01h)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test_with_options(
+            asm,
+            &TestRunOptions {
+                instruction_budget: 100,
+                initial_ports: vec![(0x01, 0x2A)],
+            },
+        )
+        .unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0x2A);
     }
 
     #[test]
