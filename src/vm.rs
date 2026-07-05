@@ -76,6 +76,13 @@ pub fn run_assembly_test_with_options_at(
             options.stack_top
         )));
     }
+    for (address, _) in &options.initial_memory {
+        if *address > Address24::MAX {
+            return Err(Diagnostic::new(format!(
+                "test memory address 0x{address:X} is outside the 24-bit address space"
+            )));
+        }
+    }
 
     let code = assemble_ez80_subset_at(assembly, base_addr)?;
     let code_start = base_addr;
@@ -1603,6 +1610,25 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0x6C);
+    }
+
+    #[test]
+    fn rejects_initial_memory_outside_address_space() {
+        let error = run_assembly_test_with_options(
+            "ret\n",
+            &TestRunOptions {
+                instruction_budget: 100,
+                initial_ports: Vec::new(),
+                initial_memory: vec![(0x01_000000, 0x6C)],
+                stack_top: EZRA_STACK_TOP.get(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "test memory address 0x1000000 is outside the 24-bit address space"
+        );
     }
 
     #[test]
