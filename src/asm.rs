@@ -609,7 +609,7 @@ impl Emitter {
             } else if self.is_struct_type(&decl.ty)? {
                 self.emit_struct_initializer(variable, &decl.ty, &decl.value)?;
             } else {
-                self.emit_expr_to_width(&decl.value, variable.width()?)?;
+                self.emit_expr_to_type(&decl.value, &decl.ty)?;
                 self.emit_store_width(variable);
             }
         }
@@ -780,7 +780,7 @@ impl Emitter {
                 } else if self.is_struct_type(ty)? {
                     self.emit_struct_initializer(variable, ty, value)?;
                 } else {
-                    self.emit_expr_to_width(value, variable.width()?)?;
+                    self.emit_expr_to_type(value, ty)?;
                     self.emit_store_width(variable);
                 }
             }
@@ -1453,6 +1453,19 @@ impl Emitter {
         }
     }
 
+    fn emit_expr_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+        let width = self.symbols.type_width(ty)?;
+        if let Ok(value) = self.symbols.eval_i64(expr) {
+            let value = self.value_for_type(value, ty, width)?;
+            match width {
+                ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
+                ValueWidth::U16 | ValueWidth::U24 => self.line(&format!("    ld hl, {value:06X}h")),
+            }
+            return Ok(());
+        }
+        self.emit_expr_to_width(expr, width)
+    }
+
     fn emit_expr_to_hl(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
         match expr {
             Expr::Ident(name) => {
@@ -1536,7 +1549,11 @@ impl Emitter {
                     self.emit_load_width(temp);
                 }
                 BinaryOp::Div | BinaryOp::Mod => {
-                    self.emit_div_mod_to_width(left, right, *op, width)?;
+                    if self.binary_operands_are_signed(left, right)? {
+                        self.emit_signed_div_mod_to_width(left, right, *op, width)?;
+                    } else {
+                        self.emit_div_mod_to_width(left, right, *op, width)?;
+                    }
                     return Ok(());
                 }
                 _ => {
@@ -1914,7 +1931,11 @@ impl Emitter {
             return Ok(());
         }
         if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
-            self.emit_u8_div_mod(left, right, op)?;
+            if self.binary_operands_are_signed(left, right)? {
+                self.emit_signed_div_mod_to_width(left, right, op, ValueWidth::U8)?;
+            } else {
+                self.emit_u8_div_mod(left, right, op)?;
+            }
             return Ok(());
         }
         if op == BinaryOp::Mul {
@@ -2110,6 +2131,123 @@ impl Emitter {
             _ => unreachable!("not a division op"),
         }
         Ok(())
+    }
+
+    fn emit_signed_div_mod_to_width(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        op: BinaryOp,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        let dividend = self.symbols.alloc_var(width.bytes());
+        let divisor = self.symbols.alloc_var(width.bytes());
+        let quotient = self.symbols.alloc_var(width.bytes());
+        let quotient_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let remainder_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let loop_label = self.next_label("sdiv_loop");
+        let zero_label = self.next_label("sdiv_zero");
+        let done_label = self.next_label("sdiv_done");
+        let quotient_positive_label = self.next_label("sdiv_q_positive");
+        let remainder_positive_label = self.next_label("sdiv_r_positive");
+
+        self.emit_expr_to_width(left, width)?;
+        self.emit_store_width(dividend);
+        self.emit_expr_to_width(right, width)?;
+        self.emit_store_width(divisor);
+        self.emit_jump_if_memory_zero(divisor, &zero_label);
+        self.emit_zero_variable(quotient);
+        self.emit_zero_variable(quotient_negative);
+        self.emit_zero_variable(remainder_negative);
+
+        self.emit_abs_signed_variable(dividend, Some(quotient_negative), Some(remainder_negative));
+        self.emit_abs_signed_variable(divisor, Some(quotient_negative), None);
+
+        self.line(&format!("{loop_label}:"));
+        if width == ValueWidth::U8 {
+            self.emit_load_a(dividend);
+            self.line("    ld b, a");
+            self.emit_load_a(divisor);
+            self.line("    ld c, a");
+            self.line("    ld a, b");
+            self.line("    cp c");
+            self.line(&format!("    jp c, {done_label}"));
+            self.line("    sub c");
+            self.emit_store_a(dividend);
+        } else {
+            self.emit_load_width(dividend);
+            self.line("    push hl");
+            self.emit_load_width(divisor);
+            self.line("    ex de, hl");
+            self.line("    pop hl");
+            self.line("    or a");
+            self.line("    sbc hl, de");
+            self.line(&format!("    jp c, {done_label}"));
+            self.emit_store_width(dividend);
+        }
+        self.emit_increment_memory(quotient);
+        self.line(&format!("    jp {loop_label}"));
+
+        self.line(&format!("{zero_label}:"));
+        self.emit_zero_variable(dividend);
+        self.emit_zero_variable(quotient);
+        self.line(&format!("{done_label}:"));
+        self.emit_load_a(quotient_negative);
+        self.line("    or a");
+        self.line(&format!("    jp z, {quotient_positive_label}"));
+        self.emit_negate_memory(quotient);
+        self.line(&format!("{quotient_positive_label}:"));
+        self.emit_load_a(remainder_negative);
+        self.line("    or a");
+        self.line(&format!("    jp z, {remainder_positive_label}"));
+        self.emit_negate_memory(dividend);
+        self.line(&format!("{remainder_positive_label}:"));
+
+        match op {
+            BinaryOp::Div => self.emit_load_width(quotient),
+            BinaryOp::Mod => self.emit_load_width(dividend),
+            _ => unreachable!("not a division op"),
+        }
+        Ok(())
+    }
+
+    fn emit_abs_signed_variable(
+        &mut self,
+        variable: Variable,
+        quotient_negative: Option<Variable>,
+        remainder_negative: Option<Variable>,
+    ) {
+        let nonnegative_label = self.next_label("signed_nonnegative");
+        let sign_addr = variable.addr + variable.size - 1;
+        self.line(&format!("    ld a, ({sign_addr:06X}h)"));
+        self.line("    ld b, a");
+        self.line("    ld a, 7Fh");
+        self.line("    cp b");
+        self.line(&format!("    jp nc, {nonnegative_label}"));
+        self.emit_negate_memory(variable);
+        if let Some(flag) = quotient_negative {
+            self.emit_toggle_u8(flag);
+        }
+        if let Some(flag) = remainder_negative {
+            self.emit_toggle_u8(flag);
+        }
+        self.line(&format!("{nonnegative_label}:"));
+    }
+
+    fn emit_negate_memory(&mut self, variable: Variable) {
+        for offset in 0..variable.size {
+            let addr = variable.addr + offset;
+            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.line("    xor FFh");
+            self.line(&format!("    ld ({addr:06X}h), a"));
+        }
+        self.emit_increment_memory(variable);
+    }
+
+    fn emit_toggle_u8(&mut self, variable: Variable) {
+        self.emit_load_a(variable);
+        self.line("    xor 01h");
+        self.emit_store_a(variable);
     }
 
     fn emit_jump_if_memory_zero(&mut self, variable: Variable, zero_label: &str) {
@@ -2721,6 +2859,32 @@ impl Emitter {
         }
     }
 
+    fn value_for_type(&self, value: i64, ty: &Type, width: ValueWidth) -> Result<u32, Diagnostic> {
+        let resolved = self.symbols.resolved_type(ty)?;
+        let signed = type_is_signed(&resolved);
+        let bits = u32::from(width.bytes()) * 8;
+        let mask = (1_i128 << bits) - 1;
+        if signed {
+            let min = -(1_i64 << (bits - 1));
+            let max = (1_i64 << (bits - 1)) - 1;
+            if !(min..=max).contains(&value) {
+                return Err(Diagnostic::new(format!(
+                    "value {value} is outside {} range",
+                    type_display(&resolved)
+                )));
+            }
+            Ok(((value as i128) & mask) as u32)
+        } else {
+            if !(0..=mask as i64).contains(&value) {
+                return Err(Diagnostic::new(format!(
+                    "value {value} is outside {} range",
+                    type_display(&resolved)
+                )));
+            }
+            Ok(value as u32)
+        }
+    }
+
     fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
         match expr {
             Expr::Ident(name) => self
@@ -2895,6 +3059,13 @@ impl Emitter {
             )));
         }
         Ok(value as u8)
+    }
+
+    fn binary_operands_are_signed(&self, left: &Expr, right: &Expr) -> Result<bool, Diagnostic> {
+        Ok(
+            type_is_signed(&self.symbols.resolved_type(&self.expr_type(left)?)?)
+                || type_is_signed(&self.symbols.resolved_type(&self.expr_type(right)?)?),
+        )
     }
 
     fn current_return_width(&self) -> ValueWidth {
@@ -3090,6 +3261,10 @@ fn type_display(ty: &Type) -> String {
         Type::Ptr(inner) => format!("ptr<{}>", type_display(inner)),
         Type::Array { element, len } => format!("[{}; {len}]", type_display(element)),
     }
+}
+
+fn type_is_signed(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24"))
 }
 
 fn format_immediate(value: i64, width: ValueWidth) -> String {
@@ -3890,6 +4065,71 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_signed_runtime_division_and_modulo() {
+        let expected_i8_div = ((-3i8) / 2) as u8;
+        let expected_i8_mod = ((-3i8) % 2) as u8;
+        let expected_i16_div = ((-300i16) / 7) as u16;
+        let expected_i16_mod = ((-300i16) % 7) as u16;
+        let expected_i24_div = ((-0x012345i32) / 17) & 0x00FF_FFFF;
+        let expected_i24_mod = ((-0x012345i32) % 17) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            alias subpx = i24
+
+            fn div8(a: i8, b: i8) -> i8 {{
+                return a / b
+            }}
+
+            fn mod8(a: i8, b: i8) -> i8 {{
+                return a % b
+            }}
+
+            fn div16(a: i16, b: i16) -> i16 {{
+                return a / b
+            }}
+
+            fn mod16(a: i16, b: i16) -> i16 {{
+                return a % b
+            }}
+
+            fn div24(a: subpx, b: subpx) -> subpx {{
+                return a / b
+            }}
+
+            fn mod24(a: subpx, b: subpx) -> subpx {{
+                return a % b
+            }}
+
+            fn main() {{
+                let a: i8 = -3
+                let b: i8 = 2
+                test.assert_eq_u8(div8(a, b), 0x{expected_i8_div:02X}, 1)
+                test.assert_eq_u8(mod8(a, b), 0x{expected_i8_mod:02X}, 2)
+                test.assert_eq_u8(div8(a, 0), 0, 3)
+                test.assert_eq_u8(mod8(a, 0), 0, 4)
+
+                let c: i16 = -300
+                let d: i16 = 7
+                test.assert_eq_u16(div16(c, d), 0x{expected_i16_div:04X}, 5)
+                test.assert_eq_u16(mod16(c, d), 0x{expected_i16_mod:04X}, 6)
+
+                let e: subpx = -0x012345
+                let f: subpx = 17
+                test.assert_eq_u24(div24(e, f), 0x{expected_i24_div:06X}, 7)
+                test.assert_eq_u24(mod24(e, f), 0x{expected_i24_mod:06X}, 8)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 300_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
