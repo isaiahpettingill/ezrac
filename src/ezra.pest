@@ -61,7 +61,8 @@ let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 assign_stmt = { place ~ assign_op ~ expr ~ semi? }
 place = { deref_place | access_place | index_place | field_place | ident }
 deref_place = { "*" ~ deref_operand }
-deref_operand = _{ deref_access_operand | ident | "(" ~ expr ~ ")" }
+deref_operand = _{ deref_call_operand | deref_access_operand | ident | "(" ~ expr ~ ")" }
+deref_call_operand = { path ~ "(" ~ args? ~ ")" }
 deref_access_operand = { ident ~ access_suffix+ }
 access_place = { ident ~ &(access_suffix ~ access_suffix) ~ access_suffix+ }
 index_place = { path ~ "[" ~ expr ~ "]" }

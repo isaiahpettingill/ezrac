@@ -14902,12 +14902,18 @@ section .text
             global words: [u16; 2] = [0, 0]
             global longs: [u24; 2] = [0, 0]
 
+            fn second_byte() -> ptr<u8> {
+                return &bytes[2]
+            }
+
             fn main() {
                 let p: ptr<u8> = &bytes[0];
                 *p = 0x12;
                 *(p + 1) = 0x34;
                 test.assert_eq_u8(*p, 0x12, 1);
                 test.assert_eq_u8(*(p + 1), 0x34, 2);
+                *second_byte() = 0x56;
+                test.assert_eq_u8(*second_byte(), 0x56, 7);
 
                 let w: ptr<u16> = &words[1];
                 *w = 0x5678;

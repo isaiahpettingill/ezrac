@@ -458,6 +458,7 @@ fn build_deref_operand(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
     match pair.as_rule() {
         Rule::ident => Ok(Expr::Ident(pair.as_str().to_owned())),
         Rule::deref_access_operand => Ok(Expr::Access(build_access_path(pair)?)),
+        Rule::deref_call_operand => build_call_expr(pair),
         _ => build_expr(pair),
     }
 }
@@ -581,15 +582,7 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
                 .unwrap_or_else(|| Ok(Vec::new()))?;
             Ok(Expr::Array(values))
         }
-        Rule::call_expr => {
-            let mut inner = pair.into_inner();
-            let path = split_path(inner.next().unwrap().as_str());
-            let args = inner
-                .next()
-                .map(|args| args.into_inner().map(build_expr).collect())
-                .unwrap_or_else(|| Ok(Vec::new()))?;
-            Ok(Expr::Call { path, args })
-        }
+        Rule::call_expr => build_call_expr(pair),
         Rule::path_expr => Ok(Expr::Ident(pair.as_str().to_owned())),
         Rule::literal => build_expr(pair.into_inner().next().unwrap()),
         Rule::bool_lit => Ok(Expr::Bool(pair.as_str() == "true")),
@@ -627,6 +620,16 @@ fn build_access_path(pair: Pair<'_, Rule>) -> Result<AccessPath, Diagnostic> {
         }
     }
     Ok(AccessPath { root, segments })
+}
+
+fn build_call_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
+    let mut inner = pair.into_inner();
+    let path = split_path(inner.next().unwrap().as_str());
+    let args = inner
+        .next()
+        .map(|args| args.into_inner().map(build_expr).collect())
+        .unwrap_or_else(|| Ok(Vec::new()))?;
+    Ok(Expr::Call { path, args })
 }
 
 fn build_binary_chain(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
@@ -1028,9 +1031,11 @@ mod tests {
         EzraParser::parse(Rule::assign_stmt, "*(SCRATCH) = 7").unwrap();
         EzraParser::parse(Rule::assign_stmt, "*module.PTR = 7").unwrap();
         EzraParser::parse(Rule::assign_stmt, "*pointers[0] = 7").unwrap();
+        EzraParser::parse(Rule::assign_stmt, "*next_ptr() = 7").unwrap();
         EzraParser::parse(Rule::assign_stmt, "*(byte_ptr) = [4, 5, 6]").unwrap();
         EzraParser::parse(Rule::stmt, "*p += 7").unwrap();
         EzraParser::parse(Rule::stmt, "*module.PTR += 7").unwrap();
+        EzraParser::parse(Rule::stmt, "*next_ptr() += 7").unwrap();
         EzraParser::parse(Rule::stmt, "*(byte_ptr) = [4, 5, 6]").unwrap();
         assert!(EzraParser::parse(Rule::expr_stmt, "*p = 7").is_err());
         let program = parse_program(
