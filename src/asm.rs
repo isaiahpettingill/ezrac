@@ -738,6 +738,11 @@ impl Symbols {
         if value < 0 {
             return Err(Diagnostic::new(format!("array length {value} is negative")));
         }
+        if value > 0xFF_FFFF {
+            return Err(Diagnostic::new(format!(
+                "array length {value} exceeds 24-bit address space"
+            )));
+        }
         Ok(value as u32)
     }
 
@@ -7823,6 +7828,35 @@ mod tests {
                 }
                 "#,
                 "array index 2 is out of bounds for `bytes` length 2",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_array_lengths_outside_address_space() {
+        let cases = [
+            (
+                r#"
+                global bytes: [u8; 0x1000000] = []
+                fn main() { test.pass() }
+                "#,
+                "array length 16777216 exceeds 24-bit address space",
+            ),
+            (
+                r#"
+                fn main() {
+                    let bytes: [u8; 0x1000000] = []
+                    test.pass()
+                }
+                "#,
+                "array length 16777216 exceeds 24-bit address space",
             ),
         ];
 
