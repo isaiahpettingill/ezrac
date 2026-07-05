@@ -899,6 +899,7 @@ mod tests {
         std::fs::write(
             &source_path,
             r#"
+                embed banked: bytes = bytes [0xA1, 0xA2] section .bank1 align 256
                 global marker: u8 = 0x42
 
                 fn main() {
@@ -906,6 +907,8 @@ mod tests {
                     test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 2)
                     test.assert_eq_u24(EZRA_VRAM_BASE, 0x090000, 3)
                     test.assert_eq_u24(EZRA_CODE_BASE, 0x020040, 4)
+                    test.assert_eq_u24(cast<ptr24>(banked.ptr), 0x120000, 5)
+                    test.assert_eq_u8(*(banked.ptr + 1), 0xA2, 6)
                     test.pass()
                 }
             "#,
@@ -921,10 +924,12 @@ mod tests {
 
                     region code 0x020000..0x02FFFF read execute;
                     region ram 0x030000..0x03FFFF read write;
+                    region bank 0x120000..0x12FFFF read;
                     section .header -> code align 64;
                     section .text -> code align 16;
                     section .data -> ram align 16;
                     section .bss -> ram align 16;
+                    section .bank1 -> bank align 256;
 
                     symbol EZRA_RAM_BASE = 0x030000;
                     symbol EZRA_VRAM_BASE = 0x090000;
