@@ -264,12 +264,16 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if matches!(
         text,
-        "reti" | "sra a" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix"
+        "reti" | "sra a" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix" | "push iy" | "pop iy"
     ) {
         Ok(2)
-    } else if text == "sbc hl, bc" || text == "sbc hl, de" || text == "add ix, sp" {
+    } else if text == "sbc hl, bc"
+        || text == "sbc hl, de"
+        || text == "add ix, sp"
+        || text == "add iy, sp"
+    {
         Ok(2)
-    } else if is_ix_byte_load_or_store(text) {
+    } else if is_index_byte_load_or_store(text) {
         Ok(3)
     } else if parse_ld_reg8_from_hl(text).is_some() || parse_ld_hl_from_reg8(text).is_some() {
         Ok(1)
@@ -290,7 +294,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         || text.starts_with("ld (")
     {
         Ok(4)
-    } else if text.starts_with("ld ix,") {
+    } else if text.starts_with("ld ix,") || text.starts_with("ld iy,") {
         Ok(5)
     } else if text.starts_with("ld hl,") || text.starts_with("ld de,") || text.starts_with("ld bc,")
     {
@@ -353,10 +357,10 @@ fn emit_instruction(
     } else if let Some(target) = text.strip_prefix("djnz ") {
         bytes.push(0x10);
         bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
-    } else if let Some(offset) = parse_ix_byte_load(text)? {
-        bytes.extend([0xDD, 0x7E, offset]);
-    } else if let Some(offset) = parse_ix_byte_store(text)? {
-        bytes.extend([0xDD, 0x77, offset]);
+    } else if let Some((index, offset)) = parse_index_byte_load(text)? {
+        bytes.extend([index.prefix(), 0x7E, offset]);
+    } else if let Some((index, offset)) = parse_index_byte_store(text)? {
+        bytes.extend([index.prefix(), 0x77, offset]);
     } else if let Some(register) = parse_ld_reg8_from_hl(text) {
         bytes.push(0x46 + register * 8);
     } else if let Some(register) = parse_ld_hl_from_reg8(text) {
@@ -446,6 +450,8 @@ fn emit_instruction(
         bytes.push(0xE5);
     } else if text == "push ix" {
         bytes.extend([0xDD, 0xE5]);
+    } else if text == "push iy" {
+        bytes.extend([0xFD, 0xE5]);
     } else if text == "pop af" {
         bytes.push(0xF1);
     } else if text == "pop bc" {
@@ -460,10 +466,14 @@ fn emit_instruction(
         bytes.push(0x33);
     } else if text == "pop ix" {
         bytes.extend([0xDD, 0xE1]);
+    } else if text == "pop iy" {
+        bytes.extend([0xFD, 0xE1]);
     } else if text == "reti" {
         bytes.extend([0xED, 0x4D]);
     } else if text == "add ix, sp" {
         bytes.extend([0xDD, 0x39]);
+    } else if text == "add iy, sp" {
+        bytes.extend([0xFD, 0x39]);
     } else if text == "add hl, sp" {
         bytes.push(0x39);
     } else if text == "inc b" {
@@ -474,6 +484,9 @@ fn emit_instruction(
         bytes.push(0x0D);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
         bytes.extend([0xDD, 0x21]);
+        push24(bytes, parse_addr(value.trim(), labels)?);
+    } else if let Some(value) = text.strip_prefix("ld iy,") {
+        bytes.extend([0xFD, 0x21]);
         push24(bytes, parse_addr(value.trim(), labels)?);
     } else if text == "ld b, a" {
         bytes.push(0x47);
@@ -747,29 +760,53 @@ fn accumulator_alu_imm_opcode(op: AccumulatorAluOp) -> u8 {
     }
 }
 
-fn is_ix_byte_load_or_store(text: &str) -> bool {
-    parse_ix_byte_load(text).is_ok_and(|offset| offset.is_some())
-        || parse_ix_byte_store(text).is_ok_and(|offset| offset.is_some())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexRegister {
+    Ix,
+    Iy,
 }
 
-fn parse_ix_byte_load(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let Some(rest) = text.strip_prefix("ld a, (ix") else {
-        return Ok(None);
-    };
-    parse_ix_offset(rest).map(Some)
+impl IndexRegister {
+    fn prefix(self) -> u8 {
+        match self {
+            IndexRegister::Ix => 0xDD,
+            IndexRegister::Iy => 0xFD,
+        }
+    }
 }
 
-fn parse_ix_byte_store(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let Some(rest) = text.strip_prefix("ld (ix") else {
-        return Ok(None);
-    };
-    let Some(rest) = rest.strip_suffix("), a") else {
-        return Ok(None);
-    };
-    parse_ix_offset(rest).map(Some)
+fn is_index_byte_load_or_store(text: &str) -> bool {
+    parse_index_byte_load(text).is_ok_and(|offset| offset.is_some())
+        || parse_index_byte_store(text).is_ok_and(|offset| offset.is_some())
 }
 
-fn parse_ix_offset(text: &str) -> Result<u8, Diagnostic> {
+fn parse_index_byte_load(text: &str) -> Result<Option<(IndexRegister, u8)>, Diagnostic> {
+    for (prefix, register) in [
+        ("ld a, (ix", IndexRegister::Ix),
+        ("ld a, (iy", IndexRegister::Iy),
+    ] {
+        let Some(rest) = text.strip_prefix(prefix) else {
+            continue;
+        };
+        return parse_index_offset(rest).map(|offset| Some((register, offset)));
+    }
+    Ok(None)
+}
+
+fn parse_index_byte_store(text: &str) -> Result<Option<(IndexRegister, u8)>, Diagnostic> {
+    for (prefix, register) in [("ld (ix", IndexRegister::Ix), ("ld (iy", IndexRegister::Iy)] {
+        let Some(rest) = text.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(rest) = rest.strip_suffix("), a") else {
+            return Ok(None);
+        };
+        return parse_index_offset(rest).map(|offset| Some((register, offset)));
+    }
+    Ok(None)
+}
+
+fn parse_index_offset(text: &str) -> Result<u8, Diagnostic> {
     let text = text.trim();
     let text = text.strip_suffix(')').unwrap_or(text);
     if text.is_empty() {
@@ -779,7 +816,7 @@ fn parse_ix_offset(text: &str) -> Result<u8, Diagnostic> {
     let magnitude = parse_number(digits.trim())?;
     if magnitude > 0x7F {
         return Err(Diagnostic::new(format!(
-            "ix displacement `{text}` is outside signed 8-bit range"
+            "index displacement `{text}` is outside signed 8-bit range"
         )));
     }
     let value = match sign {
@@ -1364,6 +1401,35 @@ mod tests {
     }
 
     #[test]
+    fn runs_iy_displacement_loads_and_stores() {
+        let asm = r#"
+            ld sp, 0F00000h
+            ld iy, 040200h
+            ld a, 35h
+            ld (iy+3), a
+            ld a, 00h
+            ld a, (iy+3)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert!(
+            bytes
+                .windows(5)
+                .any(|window| window == [0xFD, 0x21, 0x00, 0x02, 0x04])
+        );
+        assert!(bytes.windows(3).any(|window| window == [0xFD, 0x77, 0x03]));
+        assert!(bytes.windows(3).any(|window| window == [0xFD, 0x7E, 0x03]));
+
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0x35);
+    }
+
+    #[test]
     fn runs_ix_push_pop_and_sp_add() {
         let asm = r#"
             ld sp, 040400h
@@ -1395,5 +1461,45 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 7);
+    }
+
+    #[test]
+    fn runs_iy_push_pop_and_sp_add() {
+        let asm = r#"
+            ld sp, 040400h
+            ld iy, 000000h
+            add iy, sp
+            ld a, 12h
+            ld (iy+1), a
+            ld b, a
+            ld a, (040401h)
+            cp b
+            jp z, sp_ok
+            ld a, 0EEh
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        sp_ok:
+            ld iy, 040220h
+            push iy
+            ld iy, 040240h
+            pop iy
+            ld a, 09h
+            ld (iy+0), a
+            ld a, (040220h)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert!(bytes.windows(2).any(|window| window == [0xFD, 0x39]));
+        assert!(bytes.windows(2).any(|window| window == [0xFD, 0xE5]));
+        assert!(bytes.windows(2).any(|window| window == [0xFD, 0xE1]));
+
+        let run = run_assembly_test(asm, 200).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 9);
     }
 }
