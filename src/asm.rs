@@ -16,6 +16,7 @@ const VAR_BASE: u32 = 0x04_0000;
 
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
     let symbols = Symbols::from_program(program)?;
+    validate_no_recursive_calls(program, &symbols.functions)?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
@@ -4130,6 +4131,136 @@ fn trunc_mod_or_zero(left: i64, right: i64) -> i64 {
     }
 }
 
+fn validate_no_recursive_calls(
+    program: &Program,
+    functions: &HashMap<String, FunctionSig>,
+) -> Result<(), Diagnostic> {
+    let mut graph = HashMap::new();
+    let mut function_names = Vec::new();
+    for declaration in &program.declarations {
+        let Declaration::Function(function) = declaration else {
+            continue;
+        };
+        function_names.push(function.name.clone());
+        let mut calls = Vec::new();
+        collect_stmt_calls(&function.body, &mut calls);
+        calls.retain(|name| functions.contains_key(name));
+        graph.insert(function.name.clone(), calls);
+    }
+
+    let mut visiting = Vec::new();
+    let mut visited = HashSet::new();
+    for function in &function_names {
+        detect_recursive_call(function, &graph, &mut visiting, &mut visited)?;
+    }
+    Ok(())
+}
+
+fn detect_recursive_call(
+    function: &str,
+    graph: &HashMap<String, Vec<String>>,
+    visiting: &mut Vec<String>,
+    visited: &mut HashSet<String>,
+) -> Result<(), Diagnostic> {
+    if let Some(start) = visiting.iter().position(|name| name == function) {
+        let mut cycle = visiting[start..].to_vec();
+        cycle.push(function.to_owned());
+        return Err(Diagnostic::new(format!(
+            "recursive function calls are not supported yet: {}",
+            cycle.join(" -> ")
+        )));
+    }
+    if visited.contains(function) {
+        return Ok(());
+    }
+
+    visiting.push(function.to_owned());
+    if let Some(calls) = graph.get(function) {
+        for called in calls {
+            if graph.contains_key(called) {
+                detect_recursive_call(called, graph, visiting, visited)?;
+            }
+        }
+    }
+    visiting.pop();
+    visited.insert(function.to_owned());
+    Ok(())
+}
+
+fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. } => collect_expr_calls(value, calls),
+            Stmt::Assign { target, value, .. } => {
+                collect_place_calls(target, calls);
+                collect_expr_calls(value, calls);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_calls(condition, calls);
+                collect_stmt_calls(then_body, calls);
+                collect_stmt_calls(else_body, calls);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_calls(condition, calls);
+                collect_stmt_calls(body, calls);
+            }
+            Stmt::Loop { body } => collect_stmt_calls(body, calls),
+            Stmt::Return(Some(expr)) | Stmt::Expr(expr) => collect_expr_calls(expr, calls),
+            Stmt::Out { value, .. } => collect_expr_calls(value, calls),
+            Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_place_calls(place: &Place, calls: &mut Vec<String>) {
+    match place {
+        Place::Index { index, .. } | Place::Deref(index) => collect_expr_calls(index, calls),
+        Place::Ident(_) | Place::Field { .. } => {}
+    }
+}
+
+fn collect_expr_calls(expr: &Expr, calls: &mut Vec<String>) {
+    match expr {
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_calls(value, calls);
+            }
+        }
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } | Expr::Deref(index) => {
+            collect_expr_calls(index, calls);
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_calls(value, calls);
+            }
+        }
+        Expr::Call { path, args } => {
+            calls.push(path_text(path));
+            for arg in args {
+                collect_expr_calls(arg, calls);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => collect_expr_calls(expr, calls),
+        Expr::Binary { left, right, .. } => {
+            collect_expr_calls(left, calls);
+            collect_expr_calls(right, calls);
+        }
+        Expr::Int(_)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. }
+        | Expr::AddressOf(_) => {}
+    }
+}
+
 fn parse_int_text(text: &str) -> Result<i64, Diagnostic> {
     let digits = text
         .trim_end_matches("u8")
@@ -4582,6 +4713,56 @@ mod tests {
                 fn main() { test.pass() }
                 "#,
                 "function `bad` parameter `value` type `AliasPair` is a struct; pass it by pointer",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_recursive_function_calls_until_stack_locals_exist() {
+        let cases = [
+            (
+                r#"
+                fn countdown(value: u8) -> u8 {
+                    if value == 0 {
+                        return 0
+                    }
+                    return countdown(value - 1)
+                }
+
+                fn main() {
+                    test.assert_eq_u8(countdown(2), 0, 1)
+                }
+                "#,
+                "recursive function calls are not supported yet: countdown -> countdown",
+            ),
+            (
+                r#"
+                fn even(value: u8) -> bool {
+                    if value == 0 {
+                        return true
+                    }
+                    return odd(value - 1)
+                }
+
+                fn odd(value: u8) -> bool {
+                    if value == 0 {
+                        return false
+                    }
+                    return even(value - 1)
+                }
+
+                fn main() {
+                    test.assert_eq_u8(even(2), true, 1)
+                }
+                "#,
+                "recursive function calls are not supported yet: even -> odd -> even",
             ),
         ];
 
