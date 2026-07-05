@@ -4,6 +4,7 @@ use ezra::{
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
     cart::{CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
+    diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
     vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
 };
@@ -107,7 +108,12 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
 
 fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOutputs, String> {
     let source_path = PathBuf::from(&options.path);
-    let program = load_program(&source_path).map_err(|error| error.to_string())?;
+    let source_location = command_source_start_location(&source_path);
+    let program = load_program(&source_path).map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
     let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
         let message = errors
@@ -124,7 +130,11 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
             stack_top: layout.stack,
         },
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
 
     let stem = source_path
         .file_stem()
@@ -140,14 +150,18 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     let assembled = assemble_ez80_subset_with_symbols_at(&assembly, layout.entry.get())
         .map_err(|error| error.to_string())?;
     let map = build_cartridge_map(&program, &layout, assembled.bytes.len(), &assembled.symbols)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            error
+                .with_location_if_missing(source_location.clone())
+                .to_string()
+        })?;
     let cart = build_cartridge_with_layout_code_and_symbols(
         &program,
         &layout,
         &assembled.bytes,
         &assembled.symbols,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
 
     fs::write(&asm_path, &assembly)
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
@@ -173,10 +187,15 @@ fn test_source(path: &str) -> Result<(), String> {
 
 fn test_source_with_command_options(options: &CommandOptions) -> Result<(), String> {
     let source_path = PathBuf::from(&options.path);
+    let source_location = command_source_start_location(&source_path);
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let metadata = parse_test_metadata(&source)?;
-    let program = load_program(&source_path).map_err(|error| error.to_string())?;
+    let program = load_program(&source_path).map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
     let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
         let message = errors
@@ -193,7 +212,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
             stack_top: layout.stack,
         },
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
     let run = run_assembly_test_with_options_at(
         &assembly,
         &TestRunOptions {
@@ -280,7 +299,12 @@ fn emit_asm(options: &CommandOptions) -> Result<(), String> {
 
 fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String, String> {
     let source_path = PathBuf::from(&options.path);
-    let program = load_program(&source_path).map_err(|error| error.to_string())?;
+    let source_location = command_source_start_location(&source_path);
+    let program = load_program(&source_path).map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
     let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
         let message = errors
@@ -297,7 +321,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
             stack_top: layout.stack,
         },
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.with_location_if_missing(source_location).to_string())
 }
 
 fn check(path: &str) -> Result<(), String> {
@@ -342,6 +366,14 @@ fn load_layout(path: Option<&str>) -> Result<Layout, String> {
     let source =
         fs::read_to_string(path).map_err(|error| format!("failed to read {path}: {error}"))?;
     parse_layout(&source).map_err(|error| error.to_string())
+}
+
+fn command_source_start_location(path: &std::path::Path) -> SourceLocation {
+    SourceLocation {
+        file: path.to_path_buf(),
+        line: 1,
+        column: 1,
+    }
 }
 
 fn print_header() -> Result<(), String> {
@@ -462,6 +494,42 @@ mod tests {
         assert!(!plain_asm.contains("; source:"), "{plain_asm}");
         assert!(debug_asm.contains("; source: let x: u8 = 4"), "{debug_asm}");
         assert!(debug_asm.contains("; source: x += 1"), "{debug_asm}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commands_report_source_locations_for_semantic_errors() {
+        let root = temp_root("command_diagnostics");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            "fn main() { let value: u8 = 256; test.pass() }\n",
+        )
+        .unwrap();
+        let prefix = format!("{}:1:1:", source_path.display());
+
+        let build_error = build_source(source_path.to_str().unwrap()).unwrap_err();
+        assert!(
+            build_error.starts_with(&prefix),
+            "expected `{build_error}` to start with `{prefix}`"
+        );
+        let emit_error = emit_assembly_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            layout_path: None,
+        })
+        .unwrap_err();
+        assert!(
+            emit_error.starts_with(&prefix),
+            "expected `{emit_error}` to start with `{prefix}`"
+        );
+        let test_error = test_source(source_path.to_str().unwrap()).unwrap_err();
+        assert!(
+            test_error.starts_with(&prefix),
+            "expected `{test_error}` to start with `{prefix}`"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
