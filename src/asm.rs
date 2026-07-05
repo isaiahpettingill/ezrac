@@ -36,6 +36,7 @@ pub fn emit_ez80_assembly_with_debug_comments(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AssemblyOptions {
     pub debug_comments: bool,
+    pub default_sdk_symbols: bool,
     pub load_addr: Address24,
     pub entry_addr: Address24,
     pub code_base: Address24,
@@ -51,6 +52,7 @@ impl Default for AssemblyOptions {
     fn default() -> Self {
         Self {
             debug_comments: false,
+            default_sdk_symbols: true,
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
             code_base: EZRA_CODE_BASE,
@@ -238,13 +240,13 @@ impl Symbols {
     fn from_program(program: &Program, options: AssemblyOptions) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
             constants: sdk_constants(options),
-            constant_types: sdk_constant_types(),
+            constant_types: sdk_constant_types(options),
             evaluating_constants: HashSet::new(),
             aliases: HashMap::new(),
             structs: HashMap::new(),
             embeds: HashMap::new(),
             string_literals: HashMap::new(),
-            ports: sdk_ports(),
+            ports: sdk_ports(options),
             globals: HashMap::new(),
             global_types: HashMap::new(),
             readonly_global_pointer_aliases: HashMap::new(),
@@ -8602,7 +8604,7 @@ fn is_comparison(op: BinaryOp) -> bool {
 }
 
 fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
-    HashMap::from([
+    let mut constants = HashMap::from([
         ("EZRA_LOAD_ADDR".to_owned(), options.load_addr.get() as i64),
         (
             "EZRA_ENTRY_ADDR".to_owned(),
@@ -8616,8 +8618,6 @@ fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
             "EZRA_AUDIO_BASE".to_owned(),
             options.audio_base.get() as i64,
         ),
-        ("VRAM_BASE".to_owned(), options.vram_base.get() as i64),
-        ("AUDIO_BASE".to_owned(), options.audio_base.get() as i64),
         (
             "EZRA_ASSET_BASE".to_owned(),
             options.asset_base.get() as i64,
@@ -8626,27 +8626,34 @@ fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
             "EZRA_RODATA_BASE".to_owned(),
             options.rodata_base.get() as i64,
         ),
-        ("BTN_B".to_owned(), 0x0001),
-        ("BTN_Y".to_owned(), 0x0002),
-        ("BTN_SELECT".to_owned(), 0x0004),
-        ("BTN_START".to_owned(), 0x0008),
-        ("BTN_UP".to_owned(), 0x0010),
-        ("BTN_DOWN".to_owned(), 0x0020),
-        ("BTN_LEFT".to_owned(), 0x0040),
-        ("BTN_RIGHT".to_owned(), 0x0080),
-        ("BTN_A".to_owned(), 0x0100),
-        ("BTN_X".to_owned(), 0x0200),
-        ("BTN_L".to_owned(), 0x0400),
-        ("BTN_R".to_owned(), 0x0800),
-        ("VIDEO_PRESENT".to_owned(), 1),
-        ("VIDEO_CLEAR".to_owned(), 2),
-        ("VIDEO_SET_MODE".to_owned(), 3),
-        ("AUDIO_SUBMIT_BUFFER".to_owned(), 1),
-        ("AUDIO_STOP".to_owned(), 2),
-    ])
+    ]);
+    if options.default_sdk_symbols {
+        constants.extend([
+            ("VRAM_BASE".to_owned(), options.vram_base.get() as i64),
+            ("AUDIO_BASE".to_owned(), options.audio_base.get() as i64),
+            ("BTN_B".to_owned(), 0x0001),
+            ("BTN_Y".to_owned(), 0x0002),
+            ("BTN_SELECT".to_owned(), 0x0004),
+            ("BTN_START".to_owned(), 0x0008),
+            ("BTN_UP".to_owned(), 0x0010),
+            ("BTN_DOWN".to_owned(), 0x0020),
+            ("BTN_LEFT".to_owned(), 0x0040),
+            ("BTN_RIGHT".to_owned(), 0x0080),
+            ("BTN_A".to_owned(), 0x0100),
+            ("BTN_X".to_owned(), 0x0200),
+            ("BTN_L".to_owned(), 0x0400),
+            ("BTN_R".to_owned(), 0x0800),
+            ("VIDEO_PRESENT".to_owned(), 1),
+            ("VIDEO_CLEAR".to_owned(), 2),
+            ("VIDEO_SET_MODE".to_owned(), 3),
+            ("AUDIO_SUBMIT_BUFFER".to_owned(), 1),
+            ("AUDIO_STOP".to_owned(), 2),
+        ]);
+    }
+    constants
 }
 
-fn sdk_constant_types() -> HashMap<String, Type> {
+fn sdk_constant_types(options: AssemblyOptions) -> HashMap<String, Type> {
     let mut types = HashMap::new();
     for name in [
         "EZRA_LOAD_ADDR",
@@ -8660,6 +8667,9 @@ fn sdk_constant_types() -> HashMap<String, Type> {
         "EZRA_RODATA_BASE",
     ] {
         types.insert(name.to_owned(), Type::Named("u24".to_owned()));
+    }
+    if !options.default_sdk_symbols {
+        return types;
     }
     for name in ["VRAM_BASE", "AUDIO_BASE"] {
         types.insert(
@@ -8695,7 +8705,10 @@ fn sdk_constant_types() -> HashMap<String, Type> {
     types
 }
 
-fn sdk_ports() -> HashMap<String, u8> {
+fn sdk_ports(options: AssemblyOptions) -> HashMap<String, u8> {
+    if !options.default_sdk_symbols {
+        return HashMap::new();
+    }
     HashMap::from([
         ("PAD1_LO".to_owned(), 0x01),
         ("PAD1_HI".to_owned(), 0x02),
@@ -14636,6 +14649,67 @@ section .text
         assert_eq!(run.ports[0x09], 3, "{asm}");
         assert_eq!(run.ports[0x10], 0x33, "{asm}");
         assert_eq!(run.ports[0x16], 0x44, "{asm}");
+    }
+
+    #[test]
+    fn can_disable_default_sdk_symbols_for_target_specific_hardware() {
+        let source = r#"
+            const SCREEN: ptr<u8> = 0x040180
+            port TI_KEYGROUP: u8 = 0x01
+            port AGON_VDP: u8 = 0x9B
+
+            fn main() {
+                let keys: u8 = in TI_KEYGROUP;
+                *(SCREEN) = keys;
+                out AGON_VDP, *SCREEN;
+                test.assert_eq_u8(*SCREEN, 0x2C, 1);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                default_sdk_symbols: false,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        let run = run_assembly_test_with_options(
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 4_000,
+                initial_ports: vec![(0x01, 0x2C)],
+                initial_memory: Vec::new(),
+                stack_top: EZRA_STACK_TOP.get(),
+            },
+        )
+        .unwrap();
+
+        assert!(asm.contains("in0 a, (01h)"), "{asm}");
+        assert!(asm.contains("out0 (9Bh), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.ports[0x9B], 0x2C, "{asm}");
+
+        let default_port_source = r#"
+            fn main() {
+                let pad: u8 = in PAD1_LO
+                test.assert_eq_u8(pad, 0, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), default_port_source).unwrap();
+        let error = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                default_sdk_symbols: false,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "unknown port `PAD1_LO`");
     }
 
     #[test]

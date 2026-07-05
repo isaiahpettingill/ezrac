@@ -398,6 +398,7 @@ fn load_layout(path: Option<&str>) -> Result<Layout, String> {
 fn assembly_options_from_layout(layout: &Layout, debug_comments: bool) -> AssemblyOptions {
     AssemblyOptions {
         debug_comments,
+        default_sdk_symbols: true,
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),
