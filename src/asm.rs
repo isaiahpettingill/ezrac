@@ -387,6 +387,12 @@ impl Symbols {
                             decl.name
                         )));
                     }
+                    let align = u32::try_from(align).map_err(|_| {
+                        Diagnostic::new(format!(
+                            "embed `{}` alignment {align} exceeds 24-bit address space",
+                            decl.name
+                        ))
+                    })?;
                     if let Some(original) = module_alias_original_name(&decl.name) {
                         if let Some(embed) = symbols.embeds.get(original).cloned() {
                             symbols.register_embed_properties(
@@ -398,7 +404,7 @@ impl Symbols {
                         }
                     }
                     let bytes = symbols.embed_bytes(&decl.source, &program.source_path)?;
-                    symbols.align_next_addr(align as u32);
+                    symbols.align_next_addr(align);
                     let variable = symbols.alloc_array(ValueWidth::U8.bytes(), bytes.len() as u32);
                     symbols.register_embed_properties(&decl.name, variable, bytes.len() as u32);
                     symbols
@@ -7398,6 +7404,21 @@ mod tests {
 
             assert_eq!(error.message, expected);
         }
+    }
+
+    #[test]
+    fn rejects_embed_alignment_outside_address_space() {
+        let source = r#"
+            embed sprite: bytes = bytes [0xAA] align 0x100000000
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "embed `sprite` alignment 4294967296 exceeds 24-bit address space"
+        );
     }
 
     #[test]

@@ -430,6 +430,12 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
                 decl.name
             )));
         }
+        let align = u32::try_from(align).map_err(|_| {
+            Diagnostic::new(format!(
+                "embed `{}` alignment {align} exceeds 24-bit address space",
+                decl.name
+            ))
+        })?;
         let section = decl.section.clone().unwrap_or_else(|| ".assets".to_owned());
         let section_id = section_id(
             &section,
@@ -440,7 +446,7 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
         assets.push(AssetEntry {
             name: decl.name.clone(),
             bytes,
-            align: align as u32,
+            align,
             section,
             section_id,
             flags: 0,
@@ -1211,6 +1217,22 @@ mod tests {
         assert_eq!(
             error.message,
             "embed `too_big` exceeds section `.assets` region `assets`"
+        );
+    }
+
+    #[test]
+    fn cartridge_rejects_embed_alignment_outside_address_space() {
+        let source = r#"
+            embed sprite: bytes = bytes [0xAA] align 0x100000000
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+
+        let error = build_cartridge(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "embed `sprite` alignment 4294967296 exceeds 24-bit address space"
         );
     }
 
