@@ -506,6 +506,7 @@ impl Symbols {
         }
 
         let result = (|| {
+            self.ensure_const_dependencies_evaluated(&decl.value, program)?;
             let mut address_roots = Vec::new();
             collect_const_address_roots(&decl.value, &mut address_roots);
             for root in address_roots {
@@ -529,12 +530,35 @@ impl Symbols {
             }
             self.validate_value_for_type(value, &decl.ty)?;
             self.constants.insert(decl.name.clone(), value);
-            self.constant_types.insert(decl.name.clone(), decl.ty.clone());
+            self.constant_types
+                .insert(decl.name.clone(), decl.ty.clone());
             Ok(())
         })();
 
         self.evaluating_constants.remove(&decl.name);
         result
+    }
+
+    fn ensure_const_dependencies_evaluated(
+        &mut self,
+        expr: &Expr,
+        program: &Program,
+    ) -> Result<(), Diagnostic> {
+        let mut names = Vec::new();
+        collect_const_dependency_names(expr, &mut names);
+        for name in names {
+            if self.constant_types.contains_key(&name) {
+                continue;
+            }
+            if let Some(decl) = find_const_declaration(program, &name) {
+                self.evaluate_const_declaration(decl, program)?;
+                continue;
+            }
+            if self.constants.contains_key(&name) || self.embed_property_value(&name).is_some() {
+                continue;
+            }
+        }
+        Ok(())
     }
 
     fn ensure_global_storage_allocated_through(
@@ -6786,6 +6810,75 @@ fn declaration_name(declaration: &Declaration) -> Option<&str> {
     }
 }
 
+fn find_const_declaration<'a>(
+    program: &'a Program,
+    name: &str,
+) -> Option<&'a crate::ast::ConstDecl> {
+    program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Const(decl) if decl.name == name => Some(decl),
+            _ => None,
+        })
+}
+
+fn collect_const_dependency_names(expr: &Expr, names: &mut Vec<String>) {
+    match expr {
+        Expr::Ident(name) => names.push(name.clone()),
+        Expr::Field { base, field } => names.push(format!("{base}.{field}")),
+        Expr::Access(path) => {
+            if let Ok(name) = const_access_name(path) {
+                names.push(name);
+            }
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_const_dependency_names(index, names);
+                }
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            collect_const_dependency_names(expr, names)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_const_dependency_names(left, names);
+            collect_const_dependency_names(right, names);
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_const_dependency_names(value, names);
+            }
+        }
+        Expr::Index { index, .. } => collect_const_dependency_names(index, names),
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_const_dependency_names(value, names);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_const_dependency_names(arg, names);
+            }
+        }
+        Expr::AddressOfIndex { index, .. } => collect_const_dependency_names(index, names),
+        Expr::AddressOfAccess(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_const_dependency_names(index, names);
+                }
+            }
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::In(_)
+        | Expr::AddressOf(_)
+        | Expr::AddressOfField { .. } => {}
+    }
+}
+
 fn collect_const_address_roots(expr: &Expr, roots: &mut Vec<String>) {
     match expr {
         Expr::AddressOf(name) => roots.push(name.clone()),
@@ -11957,6 +12050,52 @@ section .text
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_forward_scalar_constants() {
+        let source = r#"
+            const DOUBLE_WIDTH: u16 = SCREEN_W * 2
+            const BYTE_COUNT: u8 = BASE + EXTRA
+            const MASKED: u8 = (FLAGS & ENABLED) | READY
+            const CASTED: u24 = cast<u24>(DOUBLE_WIDTH) + 1
+
+            const SCREEN_W: u16 = 160
+            const BASE: u8 = 3
+            const EXTRA: u8 = 4
+            const FLAGS: u8 = 0b1010
+            const ENABLED: u8 = 0b0110
+            const READY: u8 = 0b0001
+
+            fn main() {
+                test.assert_eq_u16(DOUBLE_WIDTH, 320, 1)
+                test.assert_eq_u8(BYTE_COUNT, 7, 2)
+                test.assert_eq_u8(MASKED, 3, 3)
+                test.assert_eq_u24(CASTED, 321, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_circular_constant_references() {
+        let source = r#"
+            const A: u8 = B + 1
+            const B: u8 = A + 1
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "circular constant reference involving `A`");
     }
 
     #[test]
