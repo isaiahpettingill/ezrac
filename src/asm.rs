@@ -8570,6 +8570,7 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
         }
         "ex" => asm_line_exchange_registers(operands),
         "exx" => vec!["bc", "de", "hl"],
+        "call" => vec!["af", "bc", "de", "hl"],
         "ldi" | "ldir" | "ldd" | "lddr" => vec!["bc", "de", "hl"],
         "cpi" | "cpir" | "cpd" | "cpdr" => vec!["bc", "hl"],
         _ => Vec::new(),
@@ -8905,7 +8906,7 @@ mod tests {
     fn emits_and_runs_memcpy_runtime_helper() {
         let source = r#"
             fn main() {
-                asm volatile(clobber a, clobber bc, clobber de, clobber hl, clobber memory) {
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber memory) {
                     "ld a, 41h"
                     "ld (040300h), a"
                     "ld a, 42h"
@@ -8936,7 +8937,7 @@ mod tests {
     fn emits_and_runs_memset_runtime_helper() {
         let source = r#"
             fn main() {
-                asm volatile(clobber a, clobber bc, clobber d, clobber hl, clobber memory) {
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber memory) {
                     "ld hl, 040320h"
                     "ld a, 5Ah"
                     "ld bc, 000003h"
@@ -8999,7 +9000,7 @@ mod tests {
         let source = format!(
             r#"
             fn main() {{
-                asm volatile(clobber a, clobber bc, clobber d, clobber memory) {{
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber memory) {{
                     "ld a, 0Fh"
                     "ld c, a"
                     "ld a, 11h"
@@ -9027,7 +9028,7 @@ mod tests {
         let source = format!(
             r#"
             fn main() {{
-                asm volatile(clobber a, clobber bc, clobber d, clobber memory) {{
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber memory) {{
                     "ld a, 05h"
                     "ld c, a"
                     "ld a, 17h"
@@ -13243,6 +13244,21 @@ section .text
                 "#,
                 "inline asm modifies `sp` without declaring clobber `sp`",
             ),
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "call .L_inline_sub"
+                        "jr .L_inline_after"
+                        ".L_inline_sub:"
+                        "ret"
+                        ".L_inline_after:"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `af` without declaring clobber `af`",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -13328,6 +13344,28 @@ section .text
     }
 
     #[test]
+    fn accepts_inline_asm_declared_call_clobbers() {
+        let source = r#"
+            fn main() {
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl) {
+                    "call .L_inline_sub"
+                    "jr .L_inline_after"
+                    ".L_inline_sub:"
+                    "ret"
+                    ".L_inline_after:"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_naked_asm_functions_without_epilogue() {
         let source = r#"
             naked fn raw_debug() {
@@ -13359,7 +13397,7 @@ section .text
     fn emits_naked_asm_functions_with_sp_clobber() {
         let source = r#"
             naked fn raw_entry() {
-                asm volatile(clobber sp) {
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber sp) {
                     "ld sp, 0F00000h"
                     "call _main"
                     "jp $"
