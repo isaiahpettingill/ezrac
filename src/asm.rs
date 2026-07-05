@@ -3376,14 +3376,19 @@ impl Emitter {
         let source_width = self.expr_width(expr)?;
         match width {
             ValueWidth::U8 => {
-                if source_width == ValueWidth::U8 {
+                if type_is_bool(&target_type) {
+                    if source_width == ValueWidth::U8 {
+                        self.emit_expr_to_a(expr)?;
+                        self.emit_normalize_a_to_bool();
+                    } else {
+                        self.emit_expr_to_hl(expr, source_width)?;
+                        self.emit_normalize_hl_to_bool(source_width);
+                    }
+                } else if source_width == ValueWidth::U8 {
                     self.emit_expr_to_a(expr)?;
                 } else {
                     self.emit_expr_to_hl(expr, source_width)?;
                     self.line("    ld a, l");
-                }
-                if type_is_bool(&target_type) {
-                    self.emit_normalize_a_to_bool();
                 }
             }
             ValueWidth::U16 => {
@@ -3422,6 +3427,18 @@ impl Emitter {
         self.line(&format!("{true_label}:"));
         self.line("    ld a, 01h");
         self.line(&format!("{end_label}:"));
+    }
+
+    fn emit_normalize_hl_to_bool(&mut self, width: ValueWidth) {
+        let value = self.alloc_var(width.bytes());
+        self.emit_store_width(value);
+        self.line("    xor a");
+        for offset in 0..width.bytes() {
+            self.line("    ld b, a");
+            self.line(&format!("    ld a, ({:06X}h)", value.addr + offset as u32));
+            self.line("    or b");
+        }
+        self.emit_normalize_a_to_bool();
     }
 
     fn emit_sign_extend_widened_integer(
@@ -13107,6 +13124,14 @@ section .text
                 return cast<bool>(v)
             }
 
+            fn bool_from_u16(v: u16) -> bool {
+                return cast<bool>(v)
+            }
+
+            fn bool_from_u24(v: u24) -> bool {
+                return cast<bool>(v)
+            }
+
             fn main() {
                 let wide: u16 = cast<u16>(0x12)
                 let narrow: u8 = cast<u8>(0x1234)
@@ -13128,6 +13153,10 @@ section .text
                 test.assert_eq_u8(bool_from_u8(2), true, 12)
                 test.assert_eq_u8(bool_from_u8(0), false, 13)
                 test.assert_eq_u8(bool_from_i8(-3), true, 14)
+                test.assert_eq_u8(bool_from_u16(0x0100), true, 15)
+                test.assert_eq_u8(bool_from_u16(0), false, 16)
+                test.assert_eq_u8(bool_from_u24(0x010000), true, 17)
+                test.assert_eq_u8(bool_from_u24(0), false, 18)
                 test.pass()
             }
         "#;
