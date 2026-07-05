@@ -639,7 +639,7 @@ impl Symbols {
     fn alloc_storage(&mut self, ty: &Type) -> Result<Variable, Diagnostic> {
         match self.resolved_type(ty)? {
             Type::Array { element, len } => {
-                let element_size = self.type_width(&element)?.bytes();
+                let element_size = self.type_size(&element)?;
                 let len = self.array_len(&len)?;
                 Ok(self.alloc_array(element_size, len))
             }
@@ -648,6 +648,22 @@ impl Symbols {
                 Ok(self.alloc_var(size))
             }
             scalar => Ok(self.alloc_var(self.type_width(&scalar)?.bytes())),
+        }
+    }
+
+    fn storage_at(&self, addr: u32, ty: &Type) -> Result<Variable, Diagnostic> {
+        match self.resolved_type(ty)? {
+            Type::Array { element, len } => {
+                let element_size = self.type_size(&element)?;
+                let len = self.array_len(&len)?;
+                Ok(Variable {
+                    addr,
+                    size: u32::from(element_size) * len,
+                    element_size: Some(element_size),
+                    len: Some(len),
+                })
+            }
+            resolved => Ok(scalar_var(addr, self.type_size(&resolved)?)),
         }
     }
 
@@ -1850,18 +1866,25 @@ impl Emitter {
             )));
         }
         for index in 0..len {
-            let element = scalar_var(variable.addr + index * element_size as u32, element_size);
+            let element_addr = variable.addr + index * u32::from(element_size);
+            let element = self.symbols.storage_at(element_addr, &element_ty)?;
             if let Some(value) = values.get(index as usize) {
                 self.validate_expr_assignable_to_type(value, &element_ty)?;
-                self.emit_expr_to_width(value, element.width()?)?;
+                match self.symbols.resolved_type(&element_ty)? {
+                    Type::Array { .. } => {
+                        self.emit_array_initializer(element, &element_ty, value)?
+                    }
+                    Type::Named(name) if self.symbols.structs.contains_key(&name) => {
+                        self.emit_struct_initializer(element, &element_ty, value)?
+                    }
+                    _ => {
+                        self.emit_expr_to_width(value, element.width()?)?;
+                        self.emit_store_width(element);
+                    }
+                }
             } else {
-                self.line(match element_size {
-                    1 => "    ld a, 00h",
-                    2 | 3 => "    ld hl, 000000h",
-                    _ => unreachable!("unsupported array element size"),
-                });
+                self.emit_zero_storage(element);
             }
-            self.emit_store_width(element);
         }
         Ok(())
     }
@@ -3142,6 +3165,13 @@ impl Emitter {
             _ => unreachable!("unsupported variable size {}", variable.size),
         }
         self.emit_store_width(variable);
+    }
+
+    fn emit_zero_storage(&mut self, variable: Variable) {
+        self.line("    xor a");
+        for offset in 0..variable.size {
+            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+        }
     }
 
     fn emit_increment_memory(&mut self, variable: Variable) {
@@ -8349,6 +8379,50 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_arrays_of_structs() {
+        let source = r#"
+            struct Point {
+                x: u8
+                y: u16
+            }
+
+            global points: [Point; 3] = [
+                Point { x: 1, y: 0x0203 },
+                Point { x: 4, y: 0x0506 }
+            ]
+
+            fn main() {
+                let raw: ptr<u8> = cast<ptr<u8>>(&points[0])
+                test.assert_eq_u8(mem.peek8(raw + 0), 1, 1)
+                test.assert_eq_u8(mem.peek8(raw + 1), 0x03, 2)
+                test.assert_eq_u8(mem.peek8(raw + 2), 0x02, 3)
+                test.assert_eq_u8(mem.peek8(raw + 3), 4, 4)
+                test.assert_eq_u8(mem.peek8(raw + 4), 0x06, 5)
+                test.assert_eq_u8(mem.peek8(raw + 5), 0x05, 6)
+                test.assert_eq_u8(mem.peek8(raw + 6), 0, 7)
+                test.assert_eq_u8(mem.peek8(raw + 7), 0, 8)
+                test.assert_eq_u8(mem.peek8(raw + 8), 0, 9)
+
+                let local: [Point; 2] = [Point { x: 7, y: 0x0809 }]
+                let local_raw: ptr<u8> = cast<ptr<u8>>(&local[0])
+                test.assert_eq_u8(mem.peek8(local_raw + 0), 7, 10)
+                test.assert_eq_u8(mem.peek8(local_raw + 1), 0x09, 11)
+                test.assert_eq_u8(mem.peek8(local_raw + 2), 0x08, 12)
+                test.assert_eq_u8(mem.peek8(local_raw + 3), 0, 13)
+                test.assert_eq_u8(mem.peek8(local_raw + 4), 0, 14)
+                test.assert_eq_u8(mem.peek8(local_raw + 5), 0, 15)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 10_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
