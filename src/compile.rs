@@ -40,6 +40,7 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
     if !has_main {
         return Err(Diagnostic::new("missing required `fn main()`"));
     }
+    validate_main_signature(program.main_function().expect("main presence checked"))?;
 
     Ok(CompileReport {
         imports,
@@ -120,6 +121,16 @@ fn resolve_program_imports(
         source_path: program.source_path,
         declarations,
     })
+}
+
+fn validate_main_signature(main: &Function) -> Result<(), Diagnostic> {
+    if !main.params.is_empty() {
+        return Err(Diagnostic::new("main function cannot take parameters"));
+    }
+    if main.return_type.is_some() {
+        return Err(Diagnostic::new("main function cannot return a value"));
+    }
+    Ok(())
 }
 
 fn resolve_import_path(source_path: &Path, import: &str) -> PathBuf {
@@ -599,6 +610,20 @@ mod tests {
         let error = check_source("const X: u8 = 1\n", &options).unwrap_err();
 
         assert_eq!(error.message, "missing required `fn main()`");
+    }
+
+    #[test]
+    fn rejects_invalid_main_signatures() {
+        let options = CompileOptions {
+            source: PathBuf::from("game.ezra"),
+            debug_comments: false,
+        };
+
+        let with_param = check_source("fn main(code: u8) {}\n", &options).unwrap_err();
+        let with_return = check_source("fn main() -> u8 { return 0 }\n", &options).unwrap_err();
+
+        assert_eq!(with_param.message, "main function cannot take parameters");
+        assert_eq!(with_return.message, "main function cannot return a value");
     }
 
     #[test]

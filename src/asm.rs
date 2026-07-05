@@ -55,6 +55,7 @@ pub fn emit_ez80_assembly_with_options(
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
+    validate_main_signature(main)?;
     validate_all_function_calls(program, &symbols.functions)?;
     let recursive_call_edges = recursive_call_edges(program, &symbols.functions);
     validate_all_function_bodies(program, symbols.clone(), recursive_call_edges.clone())?;
@@ -5842,6 +5843,16 @@ fn format_immediate(value: i64, width: ValueWidth) -> String {
     }
 }
 
+fn validate_main_signature(main: &Function) -> Result<(), Diagnostic> {
+    if !main.params.is_empty() {
+        return Err(Diagnostic::new("main function cannot take parameters"));
+    }
+    if main.return_type.is_some() {
+        return Err(Diagnostic::new("main function cannot return a value"));
+    }
+    Ok(())
+}
+
 fn validate_inline_asm_clobbers(
     clobbers: &[String],
     lines: &[String],
@@ -7282,6 +7293,25 @@ mod tests {
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "void function `main` cannot return a value");
+    }
+
+    #[test]
+    fn rejects_invalid_main_signatures() {
+        for (source, expected) in [
+            (
+                "fn main(code: u8) {}\n",
+                "main function cannot take parameters",
+            ),
+            (
+                "fn main() -> u8 { return 0 }\n",
+                "main function cannot return a value",
+            ),
+        ] {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
