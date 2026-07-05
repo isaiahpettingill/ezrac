@@ -308,6 +308,7 @@ layout big_asset_cart {
     region vram      0x080000..0x0BFFFF read write volatile;
     region audio     0x0C0000..0x0FFFFF read write volatile;
     region assets    0x100000..0xEFFFFF read;
+    region scratch   0xF00000..0xF7FFFF read write;
     region stack     0xF80000..0xFFFFFF read write reserved;
 
     section .header -> code   align 64;
@@ -316,11 +317,14 @@ layout big_asset_cart {
     section .data   -> ram    align 16;
     section .bss    -> ram    align 16;
     section .assets -> assets align 256;
+    section .scratch -> scratch align 16;
 
     symbol EZRA_VRAM_BASE  = 0x080000;
     symbol EZRA_AUDIO_BASE = 0x0C0000;
 }
 ```
+
+Custom layouts must define the standard sections used by the compiler and cartridge packer: `.header`, `.text`, `.rodata`, `.data`, `.bss`, `.assets`, and `.scratch`. Additional target- or game-specific sections may be added when needed.
 
 ---
 
