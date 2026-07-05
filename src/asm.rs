@@ -14473,6 +14473,43 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_same_type_pointer_comparisons() {
+        let source = r#"
+            global left: u8 = 1
+            global right: u8 = 2
+            global words: [u16; 2] = [0x0102, 0x0304]
+
+            fn same_byte(a: ptr<u8>, b: ptr<u8>) -> bool {
+                return a == b
+            }
+
+            fn different_word(a: ptr<u16>, b: ptr<u16>) -> bool {
+                return a != b
+            }
+
+            fn main() {
+                let left_ptr: ptr<u8> = &left
+                let also_left: ptr<u8> = &left
+                let right_ptr: ptr<u8> = &right
+                let first_word: ptr<u16> = &words[0]
+                let second_word: ptr<u16> = &words[1]
+
+                test.assert_eq_u8(same_byte(left_ptr, also_left), true, 1)
+                test.assert_eq_u8(same_byte(left_ptr, right_ptr), false, 2)
+                test.assert_eq_u8(different_word(first_word, second_word), true, 3)
+                test.assert_eq_u8(different_word(first_word, first_word), false, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_pointer_u24_cast_round_trip() {
         let source = r#"
             global byte: u8 = 0
