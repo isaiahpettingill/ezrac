@@ -6,6 +6,7 @@ use ezra::{
     compile::{CompileOptions, check_source, load_program},
     diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
+    parser::parse_program,
     target::{
         Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
         EZRA_VRAM_BASE,
@@ -359,12 +360,12 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
 }
 
 fn check(options: &CommandOptions) -> Result<(), String> {
-    if options.layout_path.is_some() {
-        return Err("`--layout` is not supported by `check`".to_owned());
-    }
     let source_path = PathBuf::from(&options.path);
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+    if options.layout_path.is_some() {
+        return check_source_with_layout(options, &source_path, &source);
+    }
     let compile_options = CompileOptions {
         source: source_path,
         debug_comments: options.debug_comments,
@@ -375,6 +376,42 @@ fn check(options: &CommandOptions) -> Result<(), String> {
     println!(
         "ok: {} imports, {} declarations, main present",
         report.imports, report.declarations
+    );
+    Ok(())
+}
+
+fn check_source_with_layout(
+    options: &CommandOptions,
+    source_path: &std::path::Path,
+    source: &str,
+) -> Result<(), String> {
+    let source_location = command_source_start_location(source_path);
+    let root = parse_program(source_path, source).map_err(|error| error.to_string())?;
+    let imports = root
+        .declarations
+        .iter()
+        .filter(|decl| matches!(decl, ezra::ast::Declaration::Import(_)))
+        .count();
+    let program = load_program(source_path).map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    let layout = load_layout(options.layout_path.as_deref())?;
+    if let Err(errors) = layout.validate() {
+        let message = format_layout_errors(options.layout_path.as_deref(), errors);
+        return Err(format!("layout is invalid:\n{message}"));
+    }
+    emit_ez80_assembly_with_options(
+        &program,
+        assembly_options_from_layout(&layout, options.debug_comments, options.default_sdk_symbols),
+    )
+    .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
+
+    println!(
+        "ok: {} imports, {} declarations, main present",
+        imports,
+        program.declarations.len()
     );
     Ok(())
 }
@@ -481,7 +518,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--debug-comments] [--no-default-sdk-symbols] <file.ezra>\n                                       parse and validate a source file\n  build [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -882,6 +919,55 @@ mod tests {
         .unwrap();
 
         test_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn check_command_can_use_custom_layout_file() {
+        let root = temp_root("custom_layout_check");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        let layout_path = root.join("game.ezralayout");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 1)
+                    test.assert_eq_u24(EZRA_STACK_TOP, 0xEFFE00, 2)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout check_custom {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xEFFE00;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    region ram 0x030000..0x03FFFF read write;
+                    section .header -> code align 64;
+                    section .text -> code align 16;
+                    section .data -> ram align 16;
+                    section .bss -> ram align 16;
+
+                    symbol EZRA_RAM_BASE = 0x030000;
+                }
+            "#,
+        )
+        .unwrap();
+
+        check(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
             default_sdk_symbols: true,
