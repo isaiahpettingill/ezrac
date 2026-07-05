@@ -195,6 +195,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         || text.starts_with("jr c,")
         || text.starts_with("jr nc,")
         || text.starts_with("jr ")
+        || text.starts_with("djnz ")
     {
         Ok(2)
     } else if matches!(
@@ -329,6 +330,9 @@ fn emit_instruction(
         bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
     } else if let Some(target) = text.strip_prefix("jr ") {
         bytes.push(0x18);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+    } else if let Some(target) = text.strip_prefix("djnz ") {
+        bytes.push(0x10);
         bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
     } else if let Some(offset) = parse_ix_byte_load(text)? {
         bytes.extend([0xDD, 0x7E, offset]);
@@ -777,6 +781,38 @@ mod tests {
             jr z, done
             jr loop
         done:
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn assembles_djnz_relative_loop() {
+        let asm = r#"
+            ld a, 03h
+            ld b, a
+        loop:
+            djnz loop
+            ret
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0x3E, 0x03, 0x47, 0x10, 0xFE, 0xC9]);
+    }
+
+    #[test]
+    fn runs_djnz_loop_on_ez80_vm() {
+        let asm = r#"
+            ld a, 03h
+            ld b, a
+        loop:
+            djnz loop
             xor a
             out0 (0Dh), a
             ld a, 01h
