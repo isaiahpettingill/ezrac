@@ -8388,6 +8388,7 @@ fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
         ("BTN_R".to_owned(), 0x0800),
         ("VIDEO_PRESENT".to_owned(), 1),
         ("VIDEO_CLEAR".to_owned(), 2),
+        ("VIDEO_SET_MODE".to_owned(), 3),
         ("AUDIO_SUBMIT_BUFFER".to_owned(), 1),
         ("AUDIO_STOP".to_owned(), 2),
     ])
@@ -8427,6 +8428,7 @@ fn sdk_constant_types() -> HashMap<String, Type> {
     for name in [
         "VIDEO_PRESENT",
         "VIDEO_CLEAR",
+        "VIDEO_SET_MODE",
         "AUDIO_SUBMIT_BUFFER",
         "AUDIO_STOP",
     ] {
@@ -8439,11 +8441,26 @@ fn sdk_ports() -> HashMap<String, u8> {
     HashMap::from([
         ("PAD1_LO".to_owned(), 0x01),
         ("PAD1_HI".to_owned(), 0x02),
+        ("PAD2_LO".to_owned(), 0x03),
+        ("PAD2_HI".to_owned(), 0x04),
+        ("PAD3_LO".to_owned(), 0x05),
+        ("PAD3_HI".to_owned(), 0x06),
+        ("PAD4_LO".to_owned(), 0x07),
+        ("PAD4_HI".to_owned(), 0x08),
         ("VIDEO_CMD".to_owned(), 0x09),
         ("AUDIO_CMD".to_owned(), 0x0A),
+        ("SYS_STATUS".to_owned(), 0x0B),
         ("DEBUG_CHAR".to_owned(), 0x0C),
         ("TEST_RESULT".to_owned(), 0x0D),
         ("TEST_HALT".to_owned(), 0x0E),
+        ("EXT_ADDR0".to_owned(), 0x10),
+        ("EXT_ADDR1".to_owned(), 0x11),
+        ("EXT_ADDR2".to_owned(), 0x12),
+        ("EXT_LEN0".to_owned(), 0x13),
+        ("EXT_LEN1".to_owned(), 0x14),
+        ("EXT_MODE".to_owned(), 0x15),
+        ("EXT_COMMAND".to_owned(), 0x16),
+        ("EXT_STATUS".to_owned(), 0x17),
     ])
 }
 
@@ -14031,6 +14048,45 @@ section .text
         assert!(asm.contains("out0 (9Bh), a"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_default_fantasy_port_map_symbols() {
+        let source = r#"
+            fn main() {
+                let pad2: u8 = in PAD2_LO
+                let status: u8 = in EXT_STATUS
+                out VIDEO_CMD, VIDEO_SET_MODE
+                out EXT_ADDR0, pad2
+                out EXT_COMMAND, status
+                test.assert_eq_u8(pad2, 0x33, 1)
+                test.assert_eq_u8(status, 0x44, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test_with_options(
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 4_000,
+                initial_ports: vec![(0x03, 0x33), (0x17, 0x44)],
+                initial_memory: Vec::new(),
+                stack_top: EZRA_STACK_TOP.get(),
+            },
+        )
+        .unwrap();
+
+        assert!(asm.contains("in0 a, (03h)"), "{asm}");
+        assert!(asm.contains("in0 a, (17h)"), "{asm}");
+        assert!(asm.contains("out0 (09h), a"), "{asm}");
+        assert!(asm.contains("out0 (10h), a"), "{asm}");
+        assert!(asm.contains("out0 (16h), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.ports[0x09], 3, "{asm}");
+        assert_eq!(run.ports[0x10], 0x33, "{asm}");
+        assert_eq!(run.ports[0x16], 0x44, "{asm}");
     }
 
     #[test]
