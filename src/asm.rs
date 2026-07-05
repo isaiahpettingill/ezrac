@@ -6933,6 +6933,16 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
         let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
+        if let Some(name) = struct_scalar_type(&left_type, &self.symbols.structs) {
+            return Err(Diagnostic::new(format!(
+                "struct `{name}` cannot be used as a scalar value"
+            )));
+        }
+        if let Some(name) = struct_scalar_type(&right_type, &self.symbols.structs) {
+            return Err(Diagnostic::new(format!(
+                "struct `{name}` cannot be used as a scalar value"
+            )));
+        }
         if !type_is_bool(&left_type)
             && !type_is_bool(&right_type)
             && !matches!(left_type, Type::Ptr(_))
@@ -8356,6 +8366,16 @@ fn type_display(ty: &Type) -> String {
 
 fn type_is_signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24"))
+}
+
+fn struct_scalar_type<'a>(
+    ty: &'a Type,
+    structs: &HashMap<String, StructLayout>,
+) -> Option<&'a str> {
+    match ty {
+        Type::Named(name) if structs.contains_key(name) => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 fn signed_min_bytes(width: ValueWidth) -> &'static [u8] {
@@ -10417,6 +10437,41 @@ section .text
                 }
                 "#,
                 "pointer comparisons support only == and !=",
+            ),
+            (
+                r#"
+                struct Pair {
+                    left: u8
+                    right: u8
+                }
+
+                global left: Pair = Pair { left: 1, right: 2 }
+                global right: Pair = Pair { left: 1, right: 2 }
+
+                fn main() {
+                    let same: bool = left == right
+                    test.pass()
+                }
+                "#,
+                "struct `Pair` cannot be used as a scalar value",
+            ),
+            (
+                r#"
+                struct Pair {
+                    left: u8
+                    right: u8
+                }
+                alias AliasPair = Pair
+
+                global left: AliasPair = Pair { left: 1, right: 2 }
+                global right: AliasPair = Pair { left: 1, right: 2 }
+
+                fn main() {
+                    let same: bool = left == right
+                    test.pass()
+                }
+                "#,
+                "struct `Pair` cannot be used as a scalar value",
             ),
             (
                 r#"
