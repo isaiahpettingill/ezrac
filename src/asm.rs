@@ -29,6 +29,8 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         string_literals: HashMap::new(),
         loop_stack: Vec::new(),
         return_stack: Vec::new(),
+        return_value_stack: Vec::new(),
+        function_name_stack: Vec::new(),
     };
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
@@ -571,6 +573,8 @@ struct Emitter {
     string_literals: HashMap<String, Variable>,
     loop_stack: Vec<LoopLabels>,
     return_stack: Vec<ValueWidth>,
+    return_value_stack: Vec<bool>,
+    function_name_stack: Vec<String>,
 }
 
 impl Emitter {
@@ -638,6 +642,15 @@ impl Emitter {
                 }
             }
         }
+        if !naked
+            && function.return_type.is_some()
+            && !block_guarantees_value_return(&function.body)
+        {
+            return Err(Diagnostic::new(format!(
+                "missing return value in function `{}`",
+                function.name
+            )));
+        }
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
@@ -649,6 +662,8 @@ impl Emitter {
                 .transpose()?
                 .unwrap_or(ValueWidth::U8),
         );
+        self.return_value_stack.push(function.return_type.is_some());
+        self.function_name_stack.push(function.name.clone());
         if !naked {
             if interrupt {
                 if !function.params.is_empty() {
@@ -664,6 +679,8 @@ impl Emitter {
         for stmt in &function.body {
             self.emit_stmt(stmt)?;
         }
+        self.function_name_stack.pop();
+        self.return_value_stack.pop();
         self.return_stack.pop();
         self.scope_types.pop();
         self.scopes.pop();
@@ -844,8 +861,22 @@ impl Emitter {
                 };
                 self.line(&format!("    jp {}", labels.continue_label));
             }
-            Stmt::Return(None) => self.line("    ret"),
+            Stmt::Return(None) => {
+                if self.current_function_requires_return_value() {
+                    return Err(Diagnostic::new(format!(
+                        "missing return value in function `{}`",
+                        self.current_function_name()
+                    )));
+                }
+                self.line("    ret");
+            }
             Stmt::Return(Some(expr)) => {
+                if !self.current_function_requires_return_value() {
+                    return Err(Diagnostic::new(format!(
+                        "void function `{}` cannot return a value",
+                        self.current_function_name()
+                    )));
+                }
                 self.emit_expr_to_width(expr, self.current_return_width())?;
                 self.line("    ret");
             }
@@ -2734,6 +2765,19 @@ impl Emitter {
             .expect("function return width exists during emission")
     }
 
+    fn current_function_requires_return_value(&self) -> bool {
+        *self
+            .return_value_stack
+            .last()
+            .expect("function return kind exists during emission")
+    }
+
+    fn current_function_name(&self) -> &str {
+        self.function_name_stack
+            .last()
+            .expect("function name exists during emission")
+    }
+
     fn port(&self, name: &str) -> Result<u8, Diagnostic> {
         self.symbols
             .ports
@@ -2883,6 +2927,24 @@ fn has_attr(function: &Function, attr: &str) -> bool {
     function.attrs.iter().any(|candidate| candidate == attr)
 }
 
+fn block_guarantees_value_return(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_guarantees_value_return)
+}
+
+fn stmt_guarantees_value_return(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(Some(_)) => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } if !else_body.is_empty() => {
+            block_guarantees_value_return(then_body) && block_guarantees_value_return(else_body)
+        }
+        _ => false,
+    }
+}
+
 fn type_display(ty: &Type) -> String {
     match ty {
         Type::Named(name) => name.clone(),
@@ -3012,6 +3074,49 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_return_value_in_non_void_function() {
+        let source = r#"
+            fn answer() -> u8 {
+                let value: u8 = 1
+            }
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "missing return value in function `answer`");
+    }
+
+    #[test]
+    fn rejects_empty_return_in_non_void_function() {
+        let source = r#"
+            fn answer() -> u8 {
+                return
+            }
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "missing return value in function `answer`");
+    }
+
+    #[test]
+    fn rejects_value_return_in_void_function() {
+        let source = r#"
+            fn main() {
+                return 1
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "void function `main` cannot return a value");
+    }
+
+    #[test]
     fn emits_and_runs_u8_loop_with_assertion() {
         let source = r#"
             global total: u8 = 0
@@ -3022,6 +3127,33 @@ mod tests {
                     i += 1
                 }
                 test.assert_eq_u8(total, 8, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_u8_function_with_returning_if_else() {
+        let source = r#"
+            fn choose(flag: bool) -> u8 {
+                if flag {
+                    return 1
+                } else {
+                    return 2
+                }
+            }
+
+            fn main() {
+                let yes: u8 = choose(true)
+                let no: u8 = choose(false)
+                test.assert_eq_u8(yes, 1, 9)
+                test.assert_eq_u8(no, 2, 10)
                 test.pass()
             }
         "#;
