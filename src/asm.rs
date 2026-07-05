@@ -85,7 +85,7 @@ pub fn emit_ez80_assembly_with_options(
 struct Variable {
     addr: u32,
     size: u32,
-    element_size: Option<u8>,
+    element_size: Option<u32>,
     len: Option<u32>,
 }
 
@@ -161,7 +161,7 @@ struct StructLayout {
 struct StructField {
     offset: u32,
     ty: Type,
-    size: u8,
+    size: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -411,7 +411,8 @@ impl Symbols {
                     }
                     let bytes = symbols.embed_bytes(&decl.source, &program.source_path)?;
                     symbols.align_next_addr(align);
-                    let variable = symbols.alloc_array(ValueWidth::U8.bytes(), bytes.len() as u32);
+                    let variable =
+                        symbols.alloc_array(u32::from(ValueWidth::U8.bytes()), bytes.len() as u32);
                     symbols.register_embed_properties(&decl.name, variable, bytes.len() as u32);
                     symbols
                         .embeds
@@ -441,19 +442,20 @@ impl Symbols {
         Ok(symbols)
     }
 
-    fn alloc_var(&mut self, size: u8) -> Variable {
+    fn alloc_var<S: Into<u32>>(&mut self, size: S) -> Variable {
+        let size = size.into();
         let variable = Variable {
             addr: self.next_addr,
-            size: size as u32,
+            size,
             element_size: None,
             len: None,
         };
-        self.next_addr += size as u32;
+        self.next_addr += size;
         variable
     }
 
-    fn alloc_array(&mut self, element_size: u8, len: u32) -> Variable {
-        let size = element_size as u32 * len;
+    fn alloc_array(&mut self, element_size: u32, len: u32) -> Variable {
+        let size = element_size * len;
         let variable = Variable {
             addr: self.next_addr,
             size,
@@ -707,29 +709,31 @@ impl Symbols {
         }
     }
 
-    fn type_size(&self, ty: &Type) -> Result<u8, Diagnostic> {
+    fn type_size(&self, ty: &Type) -> Result<u32, Diagnostic> {
         match self.resolved_type(ty)? {
             Type::Array { element, len } => {
                 let element_size = self.type_size(&element)?;
                 let len = self.array_len(&len)?;
-                let size = u32::from(element_size) * len;
-                if size > u8::MAX as u32 {
+                let size = element_size
+                    .checked_mul(len)
+                    .ok_or_else(|| Diagnostic::new("array size exceeds 24-bit address space"))?;
+                if size > 0xFF_FFFF {
                     return Err(Diagnostic::new(format!(
-                        "array size {size} exceeds current storage limit"
+                        "array size {size} exceeds 24-bit address space"
                     )));
                 }
-                Ok(size as u8)
+                Ok(size)
             }
             Type::Named(name) if self.structs.contains_key(&name) => {
                 let size = self.structs[&name].size;
-                if size > u8::MAX as u32 {
+                if size > 0xFF_FFFF {
                     return Err(Diagnostic::new(format!(
-                        "struct `{name}` size {size} exceeds current storage limit"
+                        "struct `{name}` size {size} exceeds 24-bit address space"
                     )));
                 }
-                Ok(size as u8)
+                Ok(size)
             }
-            scalar => Ok(self.type_width(&scalar)?.bytes()),
+            scalar => Ok(u32::from(self.type_width(&scalar)?.bytes())),
         }
     }
 
@@ -755,7 +759,7 @@ impl Symbols {
                 let len = self.array_len(&len)?;
                 Ok(Variable {
                     addr,
-                    size: u32::from(element_size) * len,
+                    size: element_size * len,
                     element_size: Some(element_size),
                     len: Some(len),
                 })
@@ -1205,7 +1209,7 @@ impl Emitter {
         self.line(&format!("    ld sp, {:06X}h", self.stack_top.get()));
     }
 
-    fn alloc_var(&mut self, size: u8) -> Variable {
+    fn alloc_var<S: Into<u32>>(&mut self, size: S) -> Variable {
         let variable = self.symbols.alloc_var(size);
         self.track_function_storage(variable);
         variable
@@ -1558,7 +1562,7 @@ impl Emitter {
                 self.line(&format!("    ld a, {byte:02X}h"));
                 self.emit_store_a(scalar_var(
                     embed.variable.addr + offset as u32,
-                    ValueWidth::U8.bytes(),
+                    u32::from(ValueWidth::U8.bytes()),
                 ));
             }
         }
@@ -3136,7 +3140,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_scaled_offset_to_hl(&mut self, expr: &Expr, scale: u8) -> Result<(), Diagnostic> {
+    fn emit_scaled_offset_to_hl(&mut self, expr: &Expr, scale: u32) -> Result<(), Diagnostic> {
         self.emit_expr_to_hl(expr, ValueWidth::U24)?;
         match scale {
             1 => {}
@@ -3432,12 +3436,14 @@ impl Emitter {
             return Err(Diagnostic::new("string literal is too large"));
         }
 
-        let variable = self.symbols.alloc_array(ValueWidth::U8.bytes(), len as u32);
+        let variable = self
+            .symbols
+            .alloc_array(u32::from(ValueWidth::U8.bytes()), len as u32);
         for (offset, byte) in value.bytes().chain(std::iter::once(0)).enumerate() {
             self.line(&format!("    ld a, {byte:02X}h"));
             self.emit_store_a(scalar_var(
                 variable.addr + offset as u32,
-                ValueWidth::U8.bytes(),
+                u32::from(ValueWidth::U8.bytes()),
             ));
         }
         self.string_literals.insert(value.to_owned(), variable);
@@ -3767,7 +3773,7 @@ impl Emitter {
         right: &Expr,
         op: BinaryOp,
     ) -> Result<(), Diagnostic> {
-        let left_var = self.alloc_var(1);
+        let left_var = self.alloc_var(1u32);
         self.emit_expr_to_a(left)?;
         self.emit_store_a(left_var);
         self.emit_expr_to_a(right)?;
@@ -3789,7 +3795,7 @@ impl Emitter {
         signed: bool,
     ) -> Result<(), Diagnostic> {
         if width == ValueWidth::U8 {
-            let left_var = self.alloc_var(1);
+            let left_var = self.alloc_var(1u32);
             self.emit_expr_to_a(left)?;
             self.emit_store_a(left_var);
             self.emit_expr_to_a(right)?;
@@ -4532,7 +4538,7 @@ impl Emitter {
             .map(Some)
     }
 
-    fn array_info(&self, name: &str) -> Result<(Variable, u8, u32), Diagnostic> {
+    fn array_info(&self, name: &str) -> Result<(Variable, u32, u32), Diagnostic> {
         let array = self.variable(name)?;
         let element_size = array
             .element_size
@@ -4786,7 +4792,7 @@ impl Emitter {
         self.line("    add hl, bc");
     }
 
-    fn emit_scale_hl_by(&mut self, factor: u8) {
+    fn emit_scale_hl_by(&mut self, factor: u32) {
         match factor {
             0 | 1 => {}
             2 => self.line("    add hl, hl"),
@@ -4841,7 +4847,7 @@ impl Emitter {
         }
     }
 
-    fn pointer_pointee_size(&self, expr: &Expr) -> Result<Option<u8>, Diagnostic> {
+    fn pointer_pointee_size(&self, expr: &Expr) -> Result<Option<u32>, Diagnostic> {
         match self.expr_type(expr) {
             Ok(ty) => match self.symbols.resolved_type(&ty)? {
                 Type::Ptr(inner) => Ok(Some(self.symbols.type_size(&inner)?)),
@@ -6247,7 +6253,7 @@ fn function_label(name: &str) -> String {
     label
 }
 
-fn scalar_var(addr: u32, size: u8) -> Variable {
+fn scalar_var(addr: u32, size: u32) -> Variable {
     Variable {
         addr,
         size: size as u32,
@@ -11326,6 +11332,36 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_large_aggregate_storage() {
+        let source = r#"
+            struct Big {
+                padding: [u8; 300]
+                tail: u8
+            }
+
+            global bytes: [u8; 300] = []
+            global big: Big = Big { tail: 7 }
+
+            fn main() {
+                bytes[299] = 0xA5
+                test.assert_eq_u8(bytes[299], 0xA5, 1)
+                test.assert_eq_u8(big.tail, 7, 2)
+
+                let local: [u8; 260] = []
+                local[259] = 0xC3
+                test.assert_eq_u8(local[259], 0xC3, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 80_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
