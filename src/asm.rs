@@ -2075,7 +2075,7 @@ impl Emitter {
             }
             "imm" => {
                 let width = self.symbols.type_width(&input.ty)?;
-                let value = self.symbols.eval_i64(&Expr::Ident(input.name.clone()))?;
+                let value = self.eval_i64_with_local_constants(&Expr::Ident(input.name.clone()))?;
                 Ok(format_immediate(value, width))
             }
             _ => Err(Diagnostic::new(format!(
@@ -9724,9 +9724,10 @@ section .text
             const DEBUG_PORT: u8 = 0x0C
 
             fn main() {
+                let port: u8 = DEBUG_PORT
                 let ch: u8 = 0x43
-                asm volatile(in DEBUG_PORT: u8 as imm, in ch: u8 as reg8, clobber ports) {
-                    "out0 ({DEBUG_PORT}), {ch}"
+                asm volatile(in port: u8 as imm, in ch: u8 as reg8, clobber ports) {
+                    "out0 ({port}), {ch}"
                 }
                 test.pass()
             }
@@ -9735,10 +9736,30 @@ section .text
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
 
+        assert!(asm.contains("    ; in port: u8 as imm"), "{asm}");
         assert!(asm.contains("    out0 (0Ch), a"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"C", "{asm}");
+    }
+
+    #[test]
+    fn rejects_runtime_values_as_inline_asm_immediates() {
+        let source = r#"
+            fn main() {
+                let port: u8 = 0x0C
+                port = port + 1
+                let ch: u8 = 0x43
+                asm volatile(in port: u8 as imm, in ch: u8 as reg8, clobber ports) {
+                    "out0 ({port}), {ch}"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "unknown constant `port`");
     }
 
     #[test]
