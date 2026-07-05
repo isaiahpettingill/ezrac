@@ -192,7 +192,16 @@ impl Symbols {
                 _ => continue,
             };
             for param in params {
+                symbols.validate_signature_value_type(
+                    name,
+                    &param.ty,
+                    "parameter",
+                    Some(&param.name),
+                )?;
                 symbols.type_width(&param.ty)?;
+            }
+            if let Some(return_type) = return_type {
+                symbols.validate_signature_value_type(name, return_type, "return type", None)?;
             }
             let param_widths = params
                 .iter()
@@ -496,6 +505,31 @@ impl Symbols {
                 "array storage codegen is not implemented yet",
             )),
         }
+    }
+
+    fn validate_signature_value_type(
+        &self,
+        function: &str,
+        ty: &Type,
+        role: &str,
+        name: Option<&str>,
+    ) -> Result<(), Diagnostic> {
+        let resolved = self.resolved_type(ty)?;
+        let invalid = match &resolved {
+            Type::Array { .. } => Some("an array"),
+            Type::Named(name) if self.structs.contains_key(name) => Some("a struct"),
+            _ => None,
+        };
+        if let Some(kind) = invalid {
+            let subject = name
+                .map(|name| format!("{role} `{name}` type"))
+                .unwrap_or_else(|| role.to_owned());
+            return Err(Diagnostic::new(format!(
+                "function `{function}` {subject} `{}` is {kind}; pass it by pointer",
+                type_display(ty)
+            )));
+        }
+        Ok(())
     }
 
     fn validate_value_for_type(&self, value: i64, ty: &Type) -> Result<(), Diagnostic> {
@@ -4081,6 +4115,70 @@ mod tests {
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "parameter `value` shadows an existing name");
+    }
+
+    #[test]
+    fn rejects_array_and_struct_function_values() {
+        let cases = [
+            (
+                r#"
+                fn bad(values: [u8; 2]) {}
+                fn main() { test.pass() }
+                "#,
+                "function `bad` parameter `values` type `[u8; 2]` is an array; pass it by pointer",
+            ),
+            (
+                r#"
+                fn bad() -> [u8; 2] {
+                    return [1, 2]
+                }
+                fn main() { test.pass() }
+                "#,
+                "function `bad` return type `[u8; 2]` is an array; pass it by pointer",
+            ),
+            (
+                r#"
+                struct Pair { x: u8 }
+                fn bad(value: Pair) {}
+                fn main() { test.pass() }
+                "#,
+                "function `bad` parameter `value` type `Pair` is a struct; pass it by pointer",
+            ),
+            (
+                r#"
+                struct Pair { x: u8 }
+                fn bad() -> Pair {
+                    return Pair { x: 1 }
+                }
+                fn main() { test.pass() }
+                "#,
+                "function `bad` return type `Pair` is a struct; pass it by pointer",
+            ),
+            (
+                r#"
+                alias Bytes = [u8; 2]
+                fn bad(values: Bytes) {}
+                fn main() { test.pass() }
+                "#,
+                "function `bad` parameter `values` type `Bytes` is an array; pass it by pointer",
+            ),
+            (
+                r#"
+                struct Pair { x: u8 }
+                alias AliasPair = Pair
+                fn bad(value: AliasPair) {}
+                fn main() { test.pass() }
+                "#,
+                "function `bad` parameter `value` type `AliasPair` is a struct; pass it by pointer",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
