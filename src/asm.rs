@@ -1457,18 +1457,15 @@ impl Symbols {
         let left_type = self.resolved_type(&self.const_expr_type(left)?)?;
         validate_shift_operand_type(&left_type)?;
 
-        if expr_is_untyped_literal(right) {
-            let value = self.eval_i64(right)?;
-            if !(0..=u8::MAX as i64).contains(&value) {
-                return Err(Diagnostic::new(format!(
-                    "shift count {value} is outside supported range 0..=255"
-                )));
-            }
-            return Ok(());
-        }
-
         let right_type = self.resolved_type(&self.const_expr_type(right)?)?;
-        validate_shift_count_type(&right_type)
+        validate_shift_count_integer_type(&right_type)?;
+        let value = self.eval_i64(right)?;
+        if !(0..=u8::MAX as i64).contains(&value) {
+            return Err(Diagnostic::new(format!(
+                "shift count {value} is outside supported range 0..=255"
+            )));
+        }
+        Ok(())
     }
 
     fn validate_const_comparison_operand_types(
@@ -6360,26 +6357,19 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
         validate_shift_operand_type(&left_type)?;
-
-        if expr_is_untyped_literal(right) {
-            let value = self.symbols.eval_i64(right)?;
-            self.validate_shift_count(value)?;
-            return Ok(());
-        }
-
-        let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
-        validate_shift_count_type(&right_type)
+        self.ensure_shift_count_compatible(right)
     }
 
     fn ensure_shift_count_compatible(&self, count: &Expr) -> Result<(), Diagnostic> {
-        if expr_is_untyped_literal(count) {
-            let value = self.symbols.eval_i64(count)?;
+        let ty = self.symbols.resolved_type(&self.expr_type(count)?)?;
+        validate_shift_count_integer_type(&ty)?;
+
+        if let Ok(value) = self.eval_i64_with_local_constants(count) {
             self.validate_shift_count(value)?;
             return Ok(());
         }
 
-        let ty = self.symbols.resolved_type(&self.expr_type(count)?)?;
-        validate_shift_count_type(&ty)
+        validate_runtime_shift_count_type(&ty)
     }
 
     fn ensure_pointer_arithmetic_expr_compatible(
@@ -7701,7 +7691,7 @@ fn validate_shift_operand_type(ty: &Type) -> Result<(), Diagnostic> {
     }
 }
 
-fn validate_shift_count_type(ty: &Type) -> Result<(), Diagnostic> {
+fn validate_shift_count_integer_type(ty: &Type) -> Result<(), Diagnostic> {
     if type_is_bool(ty) || matches!(ty, Type::Ptr(_)) {
         return Err(Diagnostic::new("shift count must be an integer"));
     }
@@ -7722,6 +7712,13 @@ fn validate_shift_count_type(ty: &Type) -> Result<(), Diagnostic> {
         Type::Named(name) => Err(Diagnostic::new(format!("unknown type `{name}`"))),
         Type::Array { .. } => Err(Diagnostic::new("shift count must be an integer")),
         Type::Ptr(_) => Err(Diagnostic::new("shift count must be an integer")),
+    }
+}
+
+fn validate_runtime_shift_count_type(ty: &Type) -> Result<(), Diagnostic> {
+    match ty {
+        Type::Named(name) if name == "u8" => Ok(()),
+        _ => Err(Diagnostic::new("runtime shift count must be u8")),
     }
 }
 
@@ -9774,6 +9771,30 @@ section .text
             ),
             (
                 r#"
+                fn shift(value: u8, count: i8) -> u8 {
+                    return value << count
+                }
+                fn main() {
+                    let value: u8 = shift(1, 1)
+                    test.pass()
+                }
+                "#,
+                "runtime shift count must be u8",
+            ),
+            (
+                r#"
+                fn shift(value: u16, count: u16) -> u16 {
+                    return value >> count
+                }
+                fn main() {
+                    let value: u16 = shift(0x1234, 1)
+                    test.pass()
+                }
+                "#,
+                "runtime shift count must be u8",
+            ),
+            (
+                r#"
                 const BAD: u8 = true << 1
                 fn main() { test.pass() }
                 "#,
@@ -9788,6 +9809,13 @@ section .text
             ),
             (
                 r#"
+                const BAD: u8 = 1 << -1i8
+                fn main() { test.pass() }
+                "#,
+                "shift count -1 is outside supported range 0..=255",
+            ),
+            (
+                r#"
                 fn main() {
                     let value: u8 = 1
                     value <<= false
@@ -9795,6 +9823,19 @@ section .text
                 }
                 "#,
                 "shift count must be an integer",
+            ),
+            (
+                r#"
+                fn shift(value: u24, count: u16) -> u24 {
+                    value <<= count
+                    return value
+                }
+                fn main() {
+                    let value: u24 = shift(1, 1)
+                    test.pass()
+                }
+                "#,
+                "runtime shift count must be u8",
             ),
             (
                 r#"
@@ -12484,6 +12525,7 @@ section .text
         let source = r#"
             const BYTE_COUNT: u8 = 3
             const WORD_COUNT: u16 = 4
+            const SIGNED_CONST_COUNT: i8 = 1
             const WIDE_LEFT: u24 = 0x010203u24 << BYTE_COUNT
             const WIDE_RIGHT: u24 = WIDE_LEFT >> WORD_COUNT
             const SIGNED_RIGHT: i16 = (-0x1234i16) >> BYTE_COUNT
@@ -12528,8 +12570,7 @@ section .text
                 test.assert_eq_u24(WIDE_RIGHT, 0x008101, 9)
                 test.assert_eq_u16(cast<u16>(SIGNED_RIGHT), 0xFDB9, 10)
 
-                let signed_count: i8 = 1
-                test.assert_eq_u16(0x1234u16 >> signed_count, 0x091A, 11)
+                test.assert_eq_u16(0x1234u16 >> SIGNED_CONST_COUNT, 0x091A, 11)
                 test.pass()
             }
         "#;
