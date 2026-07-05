@@ -8849,19 +8849,25 @@ mod tests {
     #[test]
     fn emits_calls_to_extern_asm_functions_without_bodies() {
         let source = r#"
-            extern asm fn raw_status(port: u8) -> u8
+            extern asm fn raw_add(a: u8, b: u8) -> u8
 
             fn main() {
-                let value: u8 = raw_status(0x17)
+                let value: u8 = raw_add(0x17, 0x2B)
+                test.assert_eq_u8(value, 0x42, 1)
                 debug.char(value)
                 test.pass()
             }
         "#;
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
+        let linked = format!("{asm}\n_raw_add:\n    add a, b\n    ret\n");
+        let run = run_assembly_test(&linked, 4_000).unwrap();
 
-        assert!(asm.contains("    call _raw_status"), "{asm}");
-        assert!(!asm.contains("_raw_status:"), "{asm}");
+        assert!(asm.contains("    call _raw_add"), "{asm}");
+        assert!(!asm.contains("_raw_add:"), "{asm}");
+        assert!(run.halted, "{linked}");
+        assert_eq!(run.result_code, 0, "{linked}");
+        assert_eq!(run.debug_output, b"B", "{linked}");
     }
 
     #[test]
