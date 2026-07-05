@@ -1207,6 +1207,7 @@ struct Emitter {
     recursive_call_edges: HashSet<(String, String)>,
     debug_comments: bool,
     stack_top: Address24,
+    eliminate_dead_code: bool,
 }
 
 impl Emitter {
@@ -1233,7 +1234,12 @@ impl Emitter {
             recursive_call_edges,
             debug_comments: options.debug_comments,
             stack_top: options.stack_top,
+            eliminate_dead_code: true,
         }
+    }
+
+    fn disable_dead_code_elimination(&mut self) {
+        self.eliminate_dead_code = false;
     }
 
     fn emit_prelude(&mut self) {
@@ -1662,9 +1668,7 @@ impl Emitter {
             }
             self.bind_params(function)?;
         }
-        for stmt in &function.body {
-            self.emit_stmt(stmt)?;
-        }
+        self.emit_block(&function.body)?;
         self.function_naked_stack.pop();
         self.function_interrupt_stack.pop();
         self.function_frame_stack.pop();
@@ -1775,6 +1779,16 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_block(&mut self, body: &[Stmt]) -> Result<(), Diagnostic> {
+        for stmt in body {
+            self.emit_stmt(stmt)?;
+            if self.eliminate_dead_code && stmt_terminates_current_block(stmt) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         if self.debug_comments {
             self.line(&format!("    ; source: {}", stmt_summary(stmt)));
@@ -1816,14 +1830,10 @@ impl Emitter {
                 self.emit_expr_to_a(condition)?;
                 self.line("    or a");
                 self.line(&format!("    jp z, {else_label}"));
-                for stmt in then_body {
-                    self.emit_stmt(stmt)?;
-                }
+                self.emit_block(then_body)?;
                 self.line(&format!("    jp {end_label}"));
                 self.line(&format!("{else_label}:"));
-                for stmt in else_body {
-                    self.emit_stmt(stmt)?;
-                }
+                self.emit_block(else_body)?;
                 self.line(&format!("{end_label}:"));
             }
             Stmt::While { condition, body } => {
@@ -1838,9 +1848,7 @@ impl Emitter {
                 self.emit_expr_to_a(condition)?;
                 self.line("    or a");
                 self.line(&format!("    jp z, {end_label}"));
-                for stmt in body {
-                    self.emit_stmt(stmt)?;
-                }
+                self.emit_block(body)?;
                 self.line(&format!("    jp {start_label}"));
                 self.line(&format!("{end_label}:"));
                 self.loop_stack.pop();
@@ -1853,9 +1861,7 @@ impl Emitter {
                     break_label: end_label.clone(),
                 });
                 self.line(&format!("{start_label}:"));
-                for stmt in body {
-                    self.emit_stmt(stmt)?;
-                }
+                self.emit_block(body)?;
                 self.line(&format!("    jp {start_label}"));
                 self.line(&format!("{end_label}:"));
                 self.loop_stack.pop();
@@ -5894,6 +5900,7 @@ fn validate_all_function_bodies(
     recursive_call_edges: HashSet<(String, String)>,
 ) -> Result<(), Diagnostic> {
     let mut emitter = Emitter::new(symbols, AssemblyOptions::default(), recursive_call_edges);
+    emitter.disable_dead_code_elimination();
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;
     }
@@ -6333,6 +6340,24 @@ fn stmt_guarantees_value_return(stmt: &Stmt) -> bool {
         }
         Stmt::Loop { body } => {
             !block_can_break_current_loop(body) && block_guarantees_value_return(body)
+        }
+        _ => false,
+    }
+}
+
+fn block_terminates_current_block(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_terminates_current_block)
+}
+
+fn stmt_terminates_current_block(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } if !else_body.is_empty() => {
+            block_terminates_current_block(then_body) && block_terminates_current_block(else_body)
         }
         _ => false,
     }
@@ -7433,6 +7458,54 @@ section .text
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "unknown function `missing`");
+    }
+
+    #[test]
+    fn omits_unreachable_statements_after_terminators() {
+        let source = r#"
+            fn choose(flag: bool) -> u8 {
+                if flag {
+                    return 1
+                } else {
+                    return 2
+                }
+                test.fail(7)
+                return 3
+            }
+
+            fn main() {
+                test.assert_eq_u8(choose(true), 1, 1)
+                test.assert_eq_u8(choose(false), 2, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(!asm.contains("; source: test.fail(7)"), "{asm}");
+        assert!(!asm.contains("; source: return 3"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn validates_unreachable_statements_before_omitting_them() {
+        let source = r#"
+            fn done() {
+                return;
+                let value: u8 = 0x100
+            }
+
+            fn main() {
+                done()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "value 256 is outside u8 range");
     }
 
     #[test]
