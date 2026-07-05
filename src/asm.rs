@@ -3499,13 +3499,12 @@ impl Emitter {
                 )));
             }
         };
-        let width = self.symbols.type_width(&pointee_type)?;
-
         let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
         self.emit_store_hl(addr);
 
         if op != AssignOp::Set {
+            let width = self.symbols.type_width(&pointee_type)?;
             let current = self.alloc_var(width.bytes());
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
@@ -3519,9 +3518,8 @@ impl Emitter {
         }
 
         self.validate_expr_assignable_to_type(value, &pointee_type)?;
-        let stored = self.alloc_var(width.bytes());
-        self.emit_expr_to_width(value, width)?;
-        self.emit_store_width(stored);
+        let stored = self.alloc_storage(&pointee_type)?;
+        self.emit_storage_initializer(stored, &pointee_type, value)?;
         self.emit_load_hl(addr);
         self.emit_store_var_to_pointed_width(stored);
         Ok(())
@@ -11753,6 +11751,38 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_aggregate_pointer_assignments() {
+        let source = r#"
+            struct Pair {
+                left: u8
+                right: u16
+            }
+
+            global bytes: [u8; 3] = [0, 0, 0]
+            global pair: Pair = Pair { left: 0, right: 0 }
+
+            fn main() {
+                let byte_ptr: ptr<[u8; 3]> = &bytes;
+                *(byte_ptr) = [4, 5, 6]
+                test.assert_eq_u8(bytes[0], 4, 1)
+                test.assert_eq_u8(bytes[2], 6, 2)
+
+                let pair_ptr: ptr<Pair> = &pair;
+                *(pair_ptr) = Pair { left: 7, right: 0x0809 }
+                test.assert_eq_u8(pair.left, 7, 3)
+                test.assert_eq_u16(pair.right, 0x0809, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
