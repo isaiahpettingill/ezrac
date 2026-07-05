@@ -354,7 +354,16 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if matches!(
         text,
-        "reti" | "sra a" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix" | "push iy" | "pop iy"
+        "reti"
+            | "retn"
+            | "sra a"
+            | "srl a"
+            | "rl a"
+            | "rr a"
+            | "push ix"
+            | "pop ix"
+            | "push iy"
+            | "pop iy"
     ) {
         Ok(2)
     } else if parse_block_operation(text).is_some() {
@@ -588,6 +597,8 @@ fn emit_instruction(
         bytes.extend([0xFD, 0xE1]);
     } else if text == "reti" {
         bytes.extend([0xED, 0x4D]);
+    } else if text == "retn" {
+        bytes.extend([0xED, 0x45]);
     } else if let Some(opcode) = parse_block_operation(text) {
         bytes.extend([0xED, opcode]);
     } else if let Some(opcode) = parse_mlt_reg16(text) {
@@ -1308,6 +1319,13 @@ mod tests {
         let bytes = assemble_ez80_subset_at("nop\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0x00, 0xC9]);
+    }
+
+    #[test]
+    fn assembles_interrupt_return_instructions() {
+        let bytes = assemble_ez80_subset_at("reti\nretn\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0xED, 0x4D, 0xED, 0x45]);
     }
 
     #[test]
@@ -2128,6 +2146,24 @@ mod tests {
         assert!(bytes.contains(&0xD8));
 
         let run = run_assembly_test(asm, 200).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn runs_non_maskable_interrupt_return_on_ez80_vm() {
+        let asm = r#"
+            call raw_return
+            ld a, 00h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        raw_return:
+            retn
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
