@@ -11,8 +11,8 @@ use crate::{
     },
     diagnostic::Diagnostic,
     target::{
-        Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR,
-        EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
+        Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
+        EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
     },
 };
 
@@ -38,6 +38,7 @@ pub struct AssemblyOptions {
     pub debug_comments: bool,
     pub load_addr: Address24,
     pub entry_addr: Address24,
+    pub code_base: Address24,
     pub stack_top: Address24,
     pub ram_base: Address24,
     pub vram_base: Address24,
@@ -52,6 +53,7 @@ impl Default for AssemblyOptions {
             debug_comments: false,
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
+            code_base: EZRA_CODE_BASE,
             stack_top: EZRA_STACK_TOP,
             ram_base: EZRA_RAM_BASE,
             vram_base: EZRA_VRAM_BASE,
@@ -8356,6 +8358,7 @@ fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
             "EZRA_ENTRY_ADDR".to_owned(),
             options.entry_addr.get() as i64,
         ),
+        ("EZRA_CODE_BASE".to_owned(), options.code_base.get() as i64),
         ("EZRA_STACK_TOP".to_owned(), options.stack_top.get() as i64),
         ("EZRA_RAM_BASE".to_owned(), options.ram_base.get() as i64),
         ("EZRA_VRAM_BASE".to_owned(), options.vram_base.get() as i64),
@@ -8395,6 +8398,7 @@ fn sdk_constant_types() -> HashMap<String, Type> {
     for name in [
         "EZRA_LOAD_ADDR",
         "EZRA_ENTRY_ADDR",
+        "EZRA_CODE_BASE",
         "EZRA_STACK_TOP",
         "EZRA_RAM_BASE",
         "EZRA_VRAM_BASE",

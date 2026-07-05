@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::diagnostic::Diagnostic;
 use crate::target::{
-    Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR, EZRA_RAM_BASE,
-    EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
+    Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR,
+    EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
 };
 use pest::{Parser, iterators::Pair};
 use pest_derive::Parser;
@@ -141,6 +141,7 @@ impl Layout {
             symbols: vec![
                 symbol("EZRA_LOAD_ADDR", EZRA_LOAD_ADDR),
                 symbol("EZRA_ENTRY_ADDR", EZRA_ENTRY_ADDR),
+                symbol("EZRA_CODE_BASE", EZRA_CODE_BASE),
                 symbol("EZRA_STACK_TOP", EZRA_STACK_TOP),
                 symbol("EZRA_RAM_BASE", EZRA_RAM_BASE),
                 symbol("EZRA_VRAM_BASE", EZRA_VRAM_BASE),
@@ -677,6 +678,7 @@ mod tests {
 
                 symbol EZRA_LOAD_ADDR   = 0x010000;
                 symbol EZRA_ENTRY_ADDR  = 0x010040;
+                symbol EZRA_CODE_BASE   = 0x010040;
                 symbol EZRA_STACK_TOP   = 0xF00000;
                 symbol EZRA_RAM_BASE    = 0x040000;
                 symbol EZRA_VRAM_BASE   = 0x080000;

@@ -400,6 +400,7 @@ fn assembly_options_from_layout(layout: &Layout, debug_comments: bool) -> Assemb
         debug_comments,
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
+        code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),
         stack_top: layout_symbol(layout, "EZRA_STACK_TOP").unwrap_or(layout.stack),
         ram_base: layout_symbol(layout, "EZRA_RAM_BASE").unwrap_or(EZRA_RAM_BASE),
         vram_base: layout_symbol(layout, "EZRA_VRAM_BASE").unwrap_or(EZRA_VRAM_BASE),
@@ -778,6 +779,7 @@ mod tests {
                     test.assert_eq_u8(marker, 0x42, 1)
                     test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 2)
                     test.assert_eq_u24(EZRA_VRAM_BASE, 0x090000, 3)
+                    test.assert_eq_u24(EZRA_CODE_BASE, 0x020040, 4)
                     test.pass()
                 }
             "#,
@@ -858,6 +860,7 @@ mod tests {
                     test.assert_eq_u8(marker, 0x5A, 1)
                     test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 2)
                     test.assert_eq_u24(EZRA_AUDIO_BASE, 0x0D0000, 3)
+                    test.assert_eq_u24(EZRA_CODE_BASE, 0x020080, 4)
                     test.pass()
                 }
             "#,
@@ -880,6 +883,7 @@ mod tests {
 
                     symbol EZRA_LOAD_ADDR = 0x020000;
                     symbol EZRA_ENTRY_ADDR = 0x020040;
+                    symbol EZRA_CODE_BASE = 0x020080;
                     symbol EZRA_STACK_TOP = 0xEFFF00;
                     symbol EZRA_RAM_BASE = 0x030000;
                     symbol EZRA_AUDIO_BASE = 0x0D0000;

@@ -223,6 +223,7 @@ layout ezra_default {
 
     symbol EZRA_LOAD_ADDR   = 0x010000;
     symbol EZRA_ENTRY_ADDR  = 0x010040;
+    symbol EZRA_CODE_BASE   = 0x010040;
     symbol EZRA_STACK_TOP   = 0xF00000;
     symbol EZRA_RAM_BASE    = 0x040000;
     symbol EZRA_VRAM_BASE   = 0x080000;
