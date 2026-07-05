@@ -1585,6 +1585,7 @@ impl Symbols {
         let target_type = self.resolved_type(target)?;
         match (&source_type, &target_type) {
             (Type::Ptr(_), Type::Ptr(_)) => Ok(()),
+            (Type::Ptr(_), Type::Named(name)) if name == "bool" => Ok(()),
             (Type::Ptr(_), Type::Named(name)) if is_raw_address_type(name) => Ok(()),
             (Type::Ptr(_), Type::Named(_)) => Err(Diagnostic::new(
                 "pointer-to-integer casts produce u24 or ptr24",
@@ -3526,6 +3527,7 @@ impl Emitter {
         let target_type = self.symbols.resolved_type(target)?;
         match (&source_type, &target_type) {
             (Type::Ptr(_), Type::Ptr(_)) => Ok(()),
+            (Type::Ptr(_), Type::Named(name)) if name == "bool" => Ok(()),
             (Type::Ptr(_), Type::Named(name)) if is_raw_address_type(name) => Ok(()),
             (Type::Ptr(_), Type::Named(_)) => Err(Diagnostic::new(
                 "pointer-to-integer casts produce u24 or ptr24",
@@ -13507,11 +13509,17 @@ section .text
                 return cast<bool>(v)
             }
 
+            fn bool_from_ptr(v: ptr<u8>) -> bool {
+                return cast<bool>(v)
+            }
+
             fn main() {
                 let wide: u16 = cast<u16>(0x12)
                 let narrow: u8 = cast<u8>(0x1234)
                 let local_true: bool = cast<bool>(2)
                 let local_false: bool = cast<bool>(0)
+                let local_ptr_true: bool = cast<bool>(cast<ptr<u8>>(0x040123))
+                let local_ptr_false: bool = cast<bool>(cast<ptr<u8>>(0u24))
                 let assigned: u8 = 0
                 assigned = cast<u8>(0x01FE)
                 test.assert_eq_u16(wide, 0x0012, 1)
@@ -13532,6 +13540,10 @@ section .text
                 test.assert_eq_u8(bool_from_u16(0), false, 16)
                 test.assert_eq_u8(bool_from_u24(0x010000), true, 17)
                 test.assert_eq_u8(bool_from_u24(0), false, 18)
+                test.assert_eq_u8(local_ptr_true, true, 19)
+                test.assert_eq_u8(local_ptr_false, false, 20)
+                test.assert_eq_u8(bool_from_ptr(cast<ptr<u8>>(0x040123)), true, 21)
+                test.assert_eq_u8(bool_from_ptr(cast<ptr<u8>>(0u24)), false, 22)
                 test.pass()
             }
         "#;
@@ -13555,6 +13567,8 @@ section .text
             const TRUE_VALUE: bool = cast<bool>(2)
             const FALSE_VALUE: bool = cast<bool>(0)
             const RAW: u24 = cast<u24>(cast<ptr<u8>>(0x040123))
+            const PTR_TRUE: bool = cast<bool>(cast<ptr<u8>>(0x040123))
+            const PTR_FALSE: bool = cast<bool>(cast<ptr<u8>>(0u24))
 
             fn main() {
                 test.assert_eq_u8(NARROW, 0x34, 1)
@@ -13564,6 +13578,8 @@ section .text
                 test.assert_eq_u8(TRUE_VALUE, true, 5)
                 test.assert_eq_u8(FALSE_VALUE, false, 6)
                 test.assert_eq_u24(RAW, 0x040123, 7)
+                test.assert_eq_u8(PTR_TRUE, true, 8)
+                test.assert_eq_u8(PTR_FALSE, false, 9)
                 test.pass()
             }
         "#;
