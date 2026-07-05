@@ -317,6 +317,10 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if parse_accumulator_alu_imm(text)?.is_some() {
         Ok(2)
+    } else if parse_ld_reg16_direct_load(text).is_some()
+        || parse_ld_direct_reg16_store(text).is_some()
+    {
+        Ok(5)
     } else if text.starts_with("ld hl, (")
         || text.starts_with("ld a, (")
         || text.starts_with("ld (")
@@ -404,6 +408,12 @@ fn emit_instruction(
         bytes.push(0x12);
     } else if text == "ld (bc), a" {
         bytes.push(0x02);
+    } else if let Some((register, addr)) = parse_ld_reg16_direct_load(text) {
+        bytes.extend([0xED, ld_reg16_direct_load_opcode(register)]);
+        push24(bytes, parse_addr(addr, labels)?);
+    } else if let Some((addr, register)) = parse_ld_direct_reg16_store(text) {
+        bytes.extend([0xED, ld_direct_reg16_store_opcode(register)]);
+        push24(bytes, parse_addr(addr, labels)?);
     } else if let Some(rest) = text.strip_prefix("ld hl, (") {
         let addr = rest
             .strip_suffix(')')
@@ -680,6 +690,42 @@ fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix("ld ")?;
     let (dst, src) = rest.split_once(',')?;
     Some((dst.trim(), src.trim()))
+}
+
+fn parse_ld_reg16_direct_load(text: &str) -> Option<(&str, &str)> {
+    let (dst, src) = parse_ld_operands(text)?;
+    if !matches!(dst, "bc" | "de") {
+        return None;
+    }
+    Some((dst, parse_wrapped_indirect(src)?))
+}
+
+fn parse_ld_direct_reg16_store(text: &str) -> Option<(&str, &str)> {
+    let (dst, src) = parse_ld_operands(text)?;
+    if !matches!(src, "bc" | "de") {
+        return None;
+    }
+    Some((parse_wrapped_indirect(dst)?, src))
+}
+
+fn parse_wrapped_indirect(text: &str) -> Option<&str> {
+    text.strip_prefix('(')?.strip_suffix(')')
+}
+
+fn ld_reg16_direct_load_opcode(register: &str) -> u8 {
+    match register {
+        "bc" => 0x4B,
+        "de" => 0x5B,
+        _ => unreachable!("invalid direct-load register {register}"),
+    }
+}
+
+fn ld_direct_reg16_store_opcode(register: &str) -> u8 {
+    match register {
+        "bc" => 0x43,
+        "de" => 0x53,
+        _ => unreachable!("invalid direct-store register {register}"),
+    }
 }
 
 fn reg8_code(register: &str) -> Option<u8> {
@@ -1173,6 +1219,47 @@ mod tests {
             ld a, (bc)
             out0 (0Ch), a
             ld a, (de)
+            out0 (0Ch), a
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"BD");
+    }
+
+    #[test]
+    fn assembles_bc_de_direct_memory_loads_and_stores() {
+        let asm = r#"
+            ld bc, (040100h)
+            ld de, (040103h)
+            ld (040106h), bc
+            ld (040109h), de
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xED, 0x4B, 0x00, 0x01, 0x04, 0xED, 0x5B, 0x03, 0x01, 0x04, 0xED, 0x43, 0x06,
+                0x01, 0x04, 0xED, 0x53, 0x09, 0x01, 0x04,
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_bc_de_direct_memory_loads_and_stores_on_ez80_vm() {
+        let asm = r#"
+            ld bc, 004244h
+            ld (040100h), bc
+            ld de, (040100h)
+            ld a, d
+            out0 (0Ch), a
+            ld a, e
             out0 (0Ch), a
             xor a
             out0 (0Dh), a
