@@ -25,7 +25,10 @@ pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
     let declarations = program
         .into_inner()
         .filter(|pair| pair.as_rule() != Rule::EOI)
-        .map(build_decl)
+        .map(|pair| {
+            let location = pair_location(file, &pair);
+            build_decl(pair).map_err(|error| error.with_location_if_missing(location))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Program {
         source_path: file.to_path_buf(),
@@ -863,6 +866,15 @@ fn pest_error(file: &Path, error: pest::error::Error<Rule>) -> Diagnostic {
     )
 }
 
+fn pair_location(file: &Path, pair: &Pair<'_, Rule>) -> SourceLocation {
+    let (line, column) = pair.as_span().start_pos().line_col();
+    SourceLocation {
+        file: file.to_path_buf(),
+        line,
+        column,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1159,6 +1171,25 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.message, "unknown inline asm clobber `made_up`");
+    }
+
+    #[test]
+    fn reports_locations_for_ast_build_errors() {
+        let error = parse_program(
+            Path::new("game.ezra"),
+            "const bad: ptr<u8> = \"\\q\"\nfn main() {}",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "unknown escape `\\q`");
+        assert_eq!(
+            error.location,
+            Some(SourceLocation {
+                file: Path::new("game.ezra").to_path_buf(),
+                line: 1,
+                column: 1,
+            })
+        );
     }
 
     #[test]

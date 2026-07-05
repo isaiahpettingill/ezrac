@@ -27,6 +27,13 @@ impl Diagnostic {
             message: message.into(),
         }
     }
+
+    pub fn with_location_if_missing(mut self, location: SourceLocation) -> Self {
+        if self.location.is_none() {
+            self.location = Some(location);
+        }
+        self
+    }
 }
 
 impl std::fmt::Display for Diagnostic {
