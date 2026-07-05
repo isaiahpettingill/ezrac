@@ -1824,7 +1824,10 @@ impl Emitter {
                 if op == AssignOp::Set {
                     let ty = self.field_type(base, field)?;
                     self.validate_expr_assignable_to_type(value, &ty)?;
+                    self.emit_storage_initializer(variable, &ty, value)?;
+                    return Ok(());
                 }
+                variable.width()?;
                 self.emit_assignment_value(variable, op, value)?;
                 self.emit_store_width(variable);
             }
@@ -1925,23 +1928,21 @@ impl Emitter {
                     "duplicate initializer for field `{field_name}`"
                 )));
             }
-            let field_var = scalar_var(variable.addr + field.offset, field.size);
+            let field_var = self
+                .symbols
+                .storage_at(variable.addr + field.offset, &field.ty)?;
             self.validate_expr_assignable_to_type(field_value, &field.ty)?;
-            self.emit_expr_to_width(field_value, field_var.width()?)?;
-            self.emit_store_width(field_var);
+            self.emit_storage_initializer(field_var, &field.ty, field_value)?;
         }
 
         for (field_name, field) in &layout.fields {
             if initialized.contains_key(field_name) {
                 continue;
             }
-            let field_var = scalar_var(variable.addr + field.offset, field.size);
-            match field.size {
-                1 => self.line("    ld a, 00h"),
-                2 | 3 => self.line("    ld hl, 000000h"),
-                _ => unreachable!("unsupported struct field size"),
-            }
-            self.emit_store_width(field_var);
+            let field_var = self
+                .symbols
+                .storage_at(variable.addr + field.offset, &field.ty)?;
+            self.emit_zero_storage(field_var);
         }
         Ok(())
     }
@@ -3645,7 +3646,8 @@ impl Emitter {
         let field = layout.fields.get(field).ok_or_else(|| {
             Diagnostic::new(format!("struct `{struct_name}` has no field `{field}`"))
         })?;
-        Ok(scalar_var(base_variable.addr + field.offset, field.size))
+        self.symbols
+            .storage_at(base_variable.addr + field.offset, &field.ty)
     }
 
     fn field_type(&self, base: &str, field: &str) -> Result<Type, Diagnostic> {
@@ -8544,6 +8546,54 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_structs_with_array_fields() {
+        let source = r#"
+            struct Packet {
+                tag: u8
+                bytes: [u8; 3]
+                words: [u16; 2]
+            }
+
+            global packet: Packet = Packet {
+                tag: 0xAA,
+                bytes: [1, 2, 3],
+                words: [0x0405]
+            }
+
+            fn main() {
+                let raw: ptr<u8> = cast<ptr<u8>>(&packet)
+                test.assert_eq_u8(mem.peek8(raw + 0), 0xAA, 1)
+                test.assert_eq_u8(mem.peek8(raw + 1), 1, 2)
+                test.assert_eq_u8(mem.peek8(raw + 2), 2, 3)
+                test.assert_eq_u8(mem.peek8(raw + 3), 3, 4)
+                test.assert_eq_u8(mem.peek8(raw + 4), 0x05, 5)
+                test.assert_eq_u8(mem.peek8(raw + 5), 0x04, 6)
+                test.assert_eq_u8(mem.peek8(raw + 6), 0, 7)
+                test.assert_eq_u8(mem.peek8(raw + 7), 0, 8)
+
+                packet.bytes = [9, 8]
+                let bytes: ptr<u8> = cast<ptr<u8>>(&packet.bytes)
+                test.assert_eq_u8(mem.peek8(bytes + 0), 9, 9)
+                test.assert_eq_u8(mem.peek8(bytes + 1), 8, 10)
+                test.assert_eq_u8(mem.peek8(bytes + 2), 0, 11)
+
+                let local: Packet = Packet { tag: 0x55 }
+                let local_raw: ptr<u8> = cast<ptr<u8>>(&local)
+                test.assert_eq_u8(mem.peek8(local_raw + 0), 0x55, 12)
+                test.assert_eq_u8(mem.peek8(local_raw + 1), 0, 13)
+                test.assert_eq_u8(mem.peek8(local_raw + 7), 0, 14)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 10_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
