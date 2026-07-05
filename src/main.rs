@@ -317,7 +317,7 @@ mod tests {
         assert!(map.contains(".header"));
         assert_eq!(&cart[0..4], b"EZRA");
         assert_eq!(read_addr24(&cart, 0x08), EZRA_ENTRY_ADDR.get());
-        assert_eq!(&cart[64..68], &[0x31, 0x00, 0x00, 0xF0]);
+        assert_eq!(&cart[64..69], &[0xF3, 0x31, 0x00, 0x00, 0xF0]);
         let layout_table = read_addr24(&cart, 0x1E);
         assert!(layout_table > EZRA_ENTRY_ADDR.get());
         let symbol_table = read_addr24(&cart, 0x24);
@@ -404,7 +404,7 @@ mod tests {
         assert!(layout_table > 0x020040);
         let layout_offset = usize::try_from(layout_table - 0x020000).unwrap();
         assert!(cart[layout_offset..].starts_with(b"layout custom\n"));
-        assert_eq!(&cart[64..68], &[0x31, 0x00, 0xFF, 0xEF]);
+        assert_eq!(&cart[64..69], &[0xF3, 0x31, 0x00, 0xFF, 0xEF]);
 
         let _ = std::fs::remove_dir_all(root);
     }

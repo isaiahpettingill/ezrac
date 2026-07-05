@@ -131,6 +131,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         text,
         "ret"
             | "ret z"
+            | "di"
             | "or a"
             | "ex de, hl"
             | "push af"
@@ -302,6 +303,8 @@ fn emit_instruction(
         bytes.push(0xC9);
     } else if text == "ret z" {
         bytes.push(0xC8);
+    } else if text == "di" {
+        bytes.push(0xF3);
     } else if text == "or a" {
         bytes.push(0xB7);
     } else if text == "ex de, hl" {
@@ -589,6 +592,13 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn assembles_interrupt_disable_instruction() {
+        let bytes = assemble_ez80_subset_at("di\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0xF3, 0xC9]);
     }
 
     #[test]
