@@ -2,7 +2,7 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
     asm::emit_ez80_assembly,
-    cart::CartridgeHeader,
+    cart::{CartridgeHeader, build_cartridge},
     compile::{CompileOptions, check_source, load_program},
     layout::Layout,
     vm::run_assembly_test,
@@ -79,8 +79,11 @@ fn build_source(path: &str) -> Result<BuildOutputs, String> {
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, layout.map_summary())
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    fs::write(&cart_path, CartridgeHeader::default().serialize())
-        .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
+    fs::write(
+        &cart_path,
+        build_cartridge(&program).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
 
     Ok(BuildOutputs {
         asm: asm_path,
@@ -199,7 +202,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             &source_path,
-            "import lib.math\nfn main() { let x: u8 = add_one(4); test.pass() }\n",
+            "import lib.math\nembed palette: bytes = bytes [0x11, 0x22]\nfn main() { let x: u8 = add_one(4); test.pass() }\n",
         )
         .unwrap();
 
@@ -212,7 +215,9 @@ mod tests {
         assert!(asm.contains("_add_one:"));
         assert!(map.contains(".header"));
         assert_eq!(&cart[0..4], b"EZRA");
-        assert_eq!(cart.len(), 64);
+        assert_eq!(&cart[0x21..0x24], &[0x40, 0x00, 0x00]);
+        assert!(cart.len() > 64);
+        assert!(cart.ends_with(&[0x11, 0x22]));
 
         let _ = std::fs::remove_dir_all(root);
     }
