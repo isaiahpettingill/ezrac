@@ -56,11 +56,11 @@ pub fn emit_ez80_assembly_with_options(
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
     validate_all_function_calls(program, &symbols.functions)?;
-    validate_all_function_bodies(program, symbols.clone())?;
-    validate_no_recursive_calls(program, &symbols.functions)?;
+    let recursive_call_edges = recursive_call_edges(program, &symbols.functions);
+    validate_all_function_bodies(program, symbols.clone(), recursive_call_edges.clone())?;
     let emitted_functions = reachable_function_names(program, &symbols);
 
-    let mut emitter = Emitter::new(symbols, options);
+    let mut emitter = Emitter::new(symbols, options, recursive_call_edges);
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
     emitter.emit_global_initializers(program)?;
@@ -1040,12 +1040,18 @@ struct Emitter {
     function_frame_stack: Vec<bool>,
     function_interrupt_stack: Vec<bool>,
     function_naked_stack: Vec<bool>,
+    function_storage_stack: Vec<Vec<Variable>>,
+    recursive_call_edges: HashSet<(String, String)>,
     debug_comments: bool,
     stack_top: Address24,
 }
 
 impl Emitter {
-    fn new(symbols: Symbols, options: AssemblyOptions) -> Self {
+    fn new(
+        symbols: Symbols,
+        options: AssemblyOptions,
+        recursive_call_edges: HashSet<(String, String)>,
+    ) -> Self {
         Self {
             symbols,
             out: String::new(),
@@ -1060,6 +1066,8 @@ impl Emitter {
             function_frame_stack: Vec::new(),
             function_interrupt_stack: Vec::new(),
             function_naked_stack: Vec::new(),
+            function_storage_stack: Vec::new(),
+            recursive_call_edges,
             debug_comments: options.debug_comments,
             stack_top: options.stack_top,
         }
@@ -1071,6 +1079,24 @@ impl Emitter {
         self.line("section .text");
         self.line("__ezra_start:");
         self.line(&format!("    ld sp, {:06X}h", self.stack_top.get()));
+    }
+
+    fn alloc_var(&mut self, size: u8) -> Variable {
+        let variable = self.symbols.alloc_var(size);
+        self.track_function_storage(variable);
+        variable
+    }
+
+    fn alloc_storage(&mut self, ty: &Type) -> Result<Variable, Diagnostic> {
+        let variable = self.symbols.alloc_storage(ty)?;
+        self.track_function_storage(variable);
+        Ok(variable)
+    }
+
+    fn track_function_storage(&mut self, variable: Variable) {
+        if let Some(storage) = self.function_storage_stack.last_mut() {
+            storage.push(variable);
+        }
     }
 
     fn emit_required_sections(&mut self) {
@@ -1297,11 +1323,11 @@ impl Emitter {
     }
 
     fn emit_signed_i24_div_mod_helper(&mut self, label: &str, op: BinaryOp) {
-        let dividend = self.symbols.alloc_var(ValueWidth::U24.bytes());
-        let divisor = self.symbols.alloc_var(ValueWidth::U24.bytes());
-        let quotient = self.symbols.alloc_var(ValueWidth::U24.bytes());
-        let quotient_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
-        let remainder_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let dividend = self.alloc_var(ValueWidth::U24.bytes());
+        let divisor = self.alloc_var(ValueWidth::U24.bytes());
+        let quotient = self.alloc_var(ValueWidth::U24.bytes());
+        let quotient_negative = self.alloc_var(ValueWidth::U8.bytes());
+        let remainder_negative = self.alloc_var(ValueWidth::U8.bytes());
         let loop_label = self.next_label("sdiv_i24_loop");
         let zero_label = self.next_label("sdiv_i24_zero");
         let done_label = self.next_label("sdiv_i24_done");
@@ -1442,6 +1468,7 @@ impl Emitter {
         self.function_frame_stack.push(uses_stack_frame);
         self.function_interrupt_stack.push(interrupt);
         self.function_naked_stack.push(naked);
+        self.function_storage_stack.push(Vec::new());
         if !naked {
             if interrupt {
                 if !function.params.is_empty() {
@@ -1464,6 +1491,7 @@ impl Emitter {
         self.function_interrupt_stack.pop();
         self.function_frame_stack.pop();
         self.function_name_stack.pop();
+        self.function_storage_stack.pop();
         self.return_value_stack.pop();
         self.return_type_stack.pop();
         self.scope_types.pop();
@@ -1527,7 +1555,7 @@ impl Emitter {
                 )));
             }
             let width = self.symbols.type_width(&param.ty)?;
-            let variable = self.symbols.alloc_var(width.bytes());
+            let variable = self.alloc_var(width.bytes());
             self.current_scope_mut()
                 .insert(param.name.clone(), variable);
             self.current_scope_types_mut()
@@ -1580,7 +1608,7 @@ impl Emitter {
                         "local `{name}` shadows an existing name"
                     )));
                 }
-                let variable = self.symbols.alloc_storage(ty)?;
+                let variable = self.alloc_storage(ty)?;
                 self.current_scope_mut().insert(name.clone(), variable);
                 self.current_scope_types_mut()
                     .insert(name.clone(), ty.clone());
@@ -2167,7 +2195,7 @@ impl Emitter {
         op: BinaryOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
-        let temp = self.symbols.alloc_var(variable.width()?.bytes());
+        let temp = self.alloc_var(variable.width()?.bytes());
         self.emit_load_width(variable);
         self.emit_store_width(temp);
         self.emit_shift_memory_by_expr(temp, op, value)?;
@@ -2277,7 +2305,7 @@ impl Emitter {
         for (index, arg) in args.iter().enumerate() {
             let width = sig.params[index];
             let ty = &sig.param_types[index];
-            let temp = self.symbols.alloc_var(width.bytes());
+            let temp = self.alloc_var(width.bytes());
             self.emit_expr_to_type(arg, ty)?;
             self.emit_store_width(temp);
             temps.push(temp);
@@ -2289,15 +2317,27 @@ impl Emitter {
             }
         }
 
+        let saved_variables = self.recursive_call_saved_variables(name);
+        let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
+            None
+        } else {
+            Some(self.alloc_var(sig.return_width.bytes()))
+        };
+
         if sig.uses_arg_slots {
             for (temp, slot) in temps.iter().copied().zip(sig.arg_slots.iter().copied()) {
                 self.emit_load_width(temp);
                 self.emit_store_width(slot);
             }
+            self.emit_save_recursive_call_variables(&saved_variables);
             self.line(&format!("    call {}", function_label(name)));
+            self.emit_store_recursive_call_return(return_temp);
+            self.emit_restore_recursive_call_variables(&saved_variables);
+            self.emit_load_recursive_call_return(return_temp);
             return Ok(());
         }
 
+        self.emit_save_recursive_call_variables(&saved_variables);
         if sig.stack_arg_bytes > 0 {
             for temp in temps.iter().copied().skip(3).rev() {
                 self.emit_push_stack_arg_variable(temp);
@@ -2333,7 +2373,64 @@ impl Emitter {
         if sig.stack_arg_bytes > 0 {
             self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
         }
+        self.emit_store_recursive_call_return(return_temp);
+        self.emit_restore_recursive_call_variables(&saved_variables);
+        self.emit_load_recursive_call_return(return_temp);
         Ok(())
+    }
+
+    fn recursive_call_saved_variables(&self, callee: &str) -> Vec<Variable> {
+        let caller = self.current_function_name();
+        if !self
+            .recursive_call_edges
+            .contains(&(caller.to_owned(), callee.to_owned()))
+        {
+            return Vec::new();
+        }
+
+        let Some(storage) = self.function_storage_stack.last() else {
+            return Vec::new();
+        };
+        let mut variables = storage.clone();
+        variables.sort_by_key(|variable| variable.addr);
+        variables.dedup_by_key(|variable| variable.addr);
+        variables
+    }
+
+    fn emit_save_recursive_call_variables(&mut self, variables: &[Variable]) {
+        for variable in variables {
+            for offset in 0..variable.size {
+                self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
+                self.line("    dec sp");
+                self.line("    ld hl, 000000h");
+                self.line("    add hl, sp");
+                self.line("    ld (hl), a");
+            }
+        }
+    }
+
+    fn emit_restore_recursive_call_variables(&mut self, variables: &[Variable]) {
+        for variable in variables.iter().rev() {
+            for offset in (0..variable.size).rev() {
+                self.line("    ld hl, 000000h");
+                self.line("    add hl, sp");
+                self.line("    ld a, (hl)");
+                self.line("    inc sp");
+                self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+            }
+        }
+    }
+
+    fn emit_store_recursive_call_return(&mut self, return_temp: Option<Variable>) {
+        if let Some(return_temp) = return_temp {
+            self.emit_store_width(return_temp);
+        }
+    }
+
+    fn emit_load_recursive_call_return(&mut self, return_temp: Option<Variable>) {
+        if let Some(return_temp) = return_temp {
+            self.emit_load_width(return_temp);
+        }
     }
 
     fn emit_inline_return_call(
@@ -2532,7 +2629,7 @@ impl Emitter {
                     return Ok(());
                 }
                 self.emit_access_address(path)?;
-                let stored = self.symbols.alloc_var(size);
+                let stored = self.alloc_var(size);
                 self.emit_load_pointed_width_into(stored);
                 self.emit_load_width(stored);
             }
@@ -2576,7 +2673,7 @@ impl Emitter {
                     self.emit_wide_op_with_left_in_bc(*op, width)?;
                 }
                 BinaryOp::Shl | BinaryOp::Shr => {
-                    let temp = self.symbols.alloc_var(width.bytes());
+                    let temp = self.alloc_var(width.bytes());
                     self.emit_expr_to_hl(left, width)?;
                     self.emit_store_width(temp);
                     self.emit_shift_memory_by_expr(temp, *op, right)?;
@@ -2613,7 +2710,7 @@ impl Emitter {
     }
 
     fn zero_extend_hl16(&mut self) {
-        let temp = self.symbols.alloc_var(ValueWidth::U16.bytes());
+        let temp = self.alloc_var(ValueWidth::U16.bytes());
         self.emit_store_hl16(temp);
         self.emit_load_hl16(temp);
     }
@@ -2685,7 +2782,7 @@ impl Emitter {
         match scale {
             1 => {}
             _ => {
-                let base = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                let base = self.alloc_var(ValueWidth::U24.bytes());
                 self.emit_store_width(base);
                 self.line("    ld hl, 000000h");
                 for _ in 0..scale {
@@ -2728,13 +2825,13 @@ impl Emitter {
         op: BinaryOp,
         width: ValueWidth,
     ) -> Result<(), Diagnostic> {
-        let right = self.symbols.alloc_var(width.bytes());
+        let right = self.alloc_var(width.bytes());
         self.emit_store_width(right);
         self.line("    push bc");
         self.line("    pop hl");
-        let left = self.symbols.alloc_var(width.bytes());
+        let left = self.alloc_var(width.bytes());
         self.emit_store_width(left);
-        let result = self.symbols.alloc_var(width.bytes());
+        let result = self.alloc_var(width.bytes());
 
         for offset in 0..width.bytes() {
             self.line(&format!("    ld a, ({:06X}h)", left.addr + offset as u32));
@@ -2858,8 +2955,8 @@ impl Emitter {
         if args.len() != 2 {
             return Err(Diagnostic::new("mem.poke8 requires two arguments"));
         }
-        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
-        let value = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let addr = self.alloc_var(ValueWidth::U24.bytes());
+        let value = self.alloc_var(ValueWidth::U8.bytes());
         self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
         self.emit_store_hl(addr);
         self.emit_expr_to_a(&args[1])?;
@@ -2937,7 +3034,7 @@ impl Emitter {
                 self.line("    ld l, a");
             }
             ValueWidth::U16 | ValueWidth::U24 => {
-                let result = self.symbols.alloc_var(width.bytes());
+                let result = self.alloc_var(width.bytes());
                 for offset in 0..width.bytes() {
                     if offset != 0 {
                         self.line("    inc hl");
@@ -2972,15 +3069,15 @@ impl Emitter {
         };
         let width = self.symbols.type_width(&pointee_type)?;
 
-        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
         self.emit_store_hl(addr);
 
         if op != AssignOp::Set {
-            let current = self.symbols.alloc_var(width.bytes());
+            let current = self.alloc_var(width.bytes());
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
-            let stored = self.symbols.alloc_var(width.bytes());
+            let stored = self.alloc_var(width.bytes());
             self.emit_assignment_value(current, op, value)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
@@ -2989,7 +3086,7 @@ impl Emitter {
         }
 
         self.validate_expr_assignable_to_type(value, &pointee_type)?;
-        let stored = self.symbols.alloc_var(width.bytes());
+        let stored = self.alloc_var(width.bytes());
         self.emit_expr_to_width(value, width)?;
         self.emit_store_width(stored);
         self.emit_load_hl(addr);
@@ -3046,11 +3143,12 @@ impl Emitter {
         ) {
             self.ensure_binary_arithmetic_operands_compatible(left, right)?;
         }
+        let left_var = self.alloc_var(ValueWidth::U8.bytes());
         self.emit_expr_to_a(left)?;
-        self.line("    ld b, a");
+        self.emit_store_a(left_var);
         self.emit_expr_to_a(right)?;
         self.line("    ld c, a");
-        self.line("    ld a, b");
+        self.emit_load_a(left_var);
         match op {
             BinaryOp::Add => self.line("    add a, c"),
             BinaryOp::Sub => self.line("    sub c"),
@@ -3138,7 +3236,7 @@ impl Emitter {
         right: &Expr,
         op: BinaryOp,
     ) -> Result<(), Diagnostic> {
-        let left_var = self.symbols.alloc_var(1);
+        let left_var = self.alloc_var(1);
         self.emit_expr_to_a(left)?;
         self.emit_store_a(left_var);
         self.emit_expr_to_a(right)?;
@@ -3160,7 +3258,7 @@ impl Emitter {
         signed: bool,
     ) -> Result<(), Diagnostic> {
         if width == ValueWidth::U8 {
-            let left_var = self.symbols.alloc_var(1);
+            let left_var = self.alloc_var(1);
             self.emit_expr_to_a(left)?;
             self.emit_store_a(left_var);
             self.emit_expr_to_a(right)?;
@@ -3194,9 +3292,9 @@ impl Emitter {
             return Ok(());
         }
 
-        let left_var = self.symbols.alloc_var(width.bytes());
-        let counter = self.symbols.alloc_var(width.bytes());
-        let result = self.symbols.alloc_var(width.bytes());
+        let left_var = self.alloc_var(width.bytes());
+        let counter = self.alloc_var(width.bytes());
+        let result = self.alloc_var(width.bytes());
         let loop_label = self.next_label("mul_loop");
         let done_label = self.next_label("mul_done");
 
@@ -3269,9 +3367,9 @@ impl Emitter {
             return Ok(());
         }
 
-        let dividend = self.symbols.alloc_var(width.bytes());
-        let divisor = self.symbols.alloc_var(width.bytes());
-        let quotient = self.symbols.alloc_var(width.bytes());
+        let dividend = self.alloc_var(width.bytes());
+        let divisor = self.alloc_var(width.bytes());
+        let quotient = self.alloc_var(width.bytes());
         let loop_label = self.next_label("div_loop");
         let zero_label = self.next_label("div_zero");
         let done_label = self.next_label("div_done");
@@ -3330,11 +3428,11 @@ impl Emitter {
             return Ok(());
         }
 
-        let dividend = self.symbols.alloc_var(width.bytes());
-        let divisor = self.symbols.alloc_var(width.bytes());
-        let quotient = self.symbols.alloc_var(width.bytes());
-        let quotient_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
-        let remainder_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let dividend = self.alloc_var(width.bytes());
+        let divisor = self.alloc_var(width.bytes());
+        let quotient = self.alloc_var(width.bytes());
+        let quotient_negative = self.alloc_var(ValueWidth::U8.bytes());
+        let remainder_negative = self.alloc_var(ValueWidth::U8.bytes());
         let loop_label = self.next_label("sdiv_loop");
         let zero_label = self.next_label("sdiv_zero");
         let done_label = self.next_label("sdiv_done");
@@ -3515,7 +3613,7 @@ impl Emitter {
         if let Some(count) = self.maybe_const_shift_count(count)? {
             return self.emit_shift_a(op, count);
         }
-        let temp = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let temp = self.alloc_var(ValueWidth::U8.bytes());
         self.emit_store_a(temp);
         self.emit_expr_to_a(count)?;
         self.line("    ld b, a");
@@ -3646,9 +3744,9 @@ impl Emitter {
             }
             UnaryOp::BitNot => {
                 self.emit_expr_to_hl(expr, width)?;
-                let value = self.symbols.alloc_var(width.bytes());
+                let value = self.alloc_var(width.bytes());
                 self.emit_store_width(value);
-                let result = self.symbols.alloc_var(width.bytes());
+                let result = self.alloc_var(width.bytes());
                 for offset in 0..width.bytes() {
                     self.line(&format!("    ld a, ({:06X}h)", value.addr + offset as u32));
                     self.line("    xor FFh");
@@ -4077,7 +4175,7 @@ impl Emitter {
                     };
                     let _ = self.symbols.array_len(&len)?;
                     let element_size = self.symbols.type_size(&element)?;
-                    let base_addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                    let base_addr = self.alloc_var(ValueWidth::U24.bytes());
                     self.emit_store_hl(base_addr);
                     self.emit_expr_to_hl(index, ValueWidth::U24)?;
                     self.emit_scale_hl_by(element_size);
@@ -4113,7 +4211,7 @@ impl Emitter {
                 self.line("    add hl, bc");
             }
             _ => {
-                let index_value = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                let index_value = self.alloc_var(ValueWidth::U24.bytes());
                 self.emit_store_hl(index_value);
                 for _ in 1..factor {
                     self.line("    push hl");
@@ -4186,7 +4284,7 @@ impl Emitter {
                 self.line("    add hl, bc");
             }
             _ => {
-                let index_value = self.symbols.alloc_var(ValueWidth::U24.bytes());
+                let index_value = self.alloc_var(ValueWidth::U24.bytes());
                 self.emit_store_hl(index_value);
                 for _ in 1..element_size {
                     self.line("    push hl");
@@ -4238,7 +4336,7 @@ impl Emitter {
                 self.line("    ld l, a");
             }
             2 | 3 => {
-                let result = self.symbols.alloc_var(element_size);
+                let result = self.alloc_var(element_size);
                 for offset in 0..element_size {
                     if offset != 0 {
                         self.line("    inc hl");
@@ -4274,17 +4372,17 @@ impl Emitter {
         }
 
         let (_, element_size, _) = self.array_info(name)?;
-        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_array_element_address(name, index)?;
         self.emit_store_hl(addr);
 
         let element = self.symbols.storage_at(0, &ty)?;
         if op != AssignOp::Set {
             element.width()?;
-            let current = self.symbols.alloc_var(element_size);
+            let current = self.alloc_var(element_size);
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
-            let stored = self.symbols.alloc_var(element_size);
+            let stored = self.alloc_var(element_size);
             self.emit_assignment_value(current, op, value)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
@@ -4295,7 +4393,7 @@ impl Emitter {
         if op == AssignOp::Set {
             self.validate_expr_assignable_to_type(value, &ty)?;
         }
-        let stored = self.symbols.alloc_storage(&ty)?;
+        let stored = self.alloc_storage(&ty)?;
         self.emit_storage_initializer(stored, &ty, value)?;
         self.emit_load_hl(addr);
         self.emit_store_var_to_pointed_width(stored);
@@ -4322,16 +4420,16 @@ impl Emitter {
         }
 
         let size = self.symbols.type_size(&ty)?;
-        let addr = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_access_address(path)?;
         self.emit_store_hl(addr);
 
         if op != AssignOp::Set {
-            let current = self.symbols.alloc_var(size);
+            let current = self.alloc_var(size);
             current.width()?;
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
-            let stored = self.symbols.alloc_var(size);
+            let stored = self.alloc_var(size);
             self.emit_assignment_value(current, op, value)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
@@ -4340,7 +4438,7 @@ impl Emitter {
         }
 
         self.validate_expr_assignable_to_type(value, &ty)?;
-        let stored = self.symbols.alloc_storage(&ty)?;
+        let stored = self.alloc_storage(&ty)?;
         self.emit_storage_initializer(stored, &ty, value)?;
         self.emit_load_hl(addr);
         self.emit_store_var_to_pointed_width(stored);
@@ -4939,29 +5037,54 @@ fn trunc_mod_or_zero(left: i64, right: i64) -> i64 {
     }
 }
 
-fn validate_no_recursive_calls(
+fn recursive_call_edges(
     program: &Program,
     functions: &HashMap<String, FunctionSig>,
-) -> Result<(), Diagnostic> {
+) -> HashSet<(String, String)> {
+    let graph = function_call_graph(program, functions);
+    let mut edges = HashSet::new();
+    for (caller, callees) in &graph {
+        for callee in callees {
+            if function_reaches(callee, caller, &graph) {
+                edges.insert((caller.clone(), callee.clone()));
+            }
+        }
+    }
+    edges
+}
+
+fn function_call_graph(
+    program: &Program,
+    functions: &HashMap<String, FunctionSig>,
+) -> HashMap<String, Vec<String>> {
     let mut graph = HashMap::new();
-    let mut function_names = Vec::new();
     for declaration in &program.declarations {
         let Declaration::Function(function) = declaration else {
             continue;
         };
-        function_names.push(function.name.clone());
         let mut calls = Vec::new();
         collect_stmt_calls(&function.body, &mut calls);
         calls.retain(|name| functions.contains_key(name));
         graph.insert(function.name.clone(), calls);
     }
+    graph
+}
 
-    let mut visiting = Vec::new();
+fn function_reaches(start: &str, target: &str, graph: &HashMap<String, Vec<String>>) -> bool {
+    let mut stack = vec![start.to_owned()];
     let mut visited = HashSet::new();
-    for function in &function_names {
-        detect_recursive_call(function, &graph, &mut visiting, &mut visited)?;
+    while let Some(function) = stack.pop() {
+        if !visited.insert(function.clone()) {
+            continue;
+        }
+        if function == target {
+            return true;
+        }
+        if let Some(calls) = graph.get(&function) {
+            stack.extend(calls.iter().cloned());
+        }
     }
-    Ok(())
+    false
 }
 
 fn validate_all_function_calls(
@@ -4977,8 +5100,12 @@ fn validate_all_function_calls(
     Ok(())
 }
 
-fn validate_all_function_bodies(program: &Program, symbols: Symbols) -> Result<(), Diagnostic> {
-    let mut emitter = Emitter::new(symbols, AssemblyOptions::default());
+fn validate_all_function_bodies(
+    program: &Program,
+    symbols: Symbols,
+    recursive_call_edges: HashSet<(String, String)>,
+) -> Result<(), Diagnostic> {
+    let mut emitter = Emitter::new(symbols, AssemblyOptions::default(), recursive_call_edges);
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;
     }
@@ -5200,37 +5327,6 @@ fn reachable_calls_for_body(stmts: &[Stmt], symbols: &Symbols) -> Vec<String> {
         }
     }
     calls
-}
-
-fn detect_recursive_call(
-    function: &str,
-    graph: &HashMap<String, Vec<String>>,
-    visiting: &mut Vec<String>,
-    visited: &mut HashSet<String>,
-) -> Result<(), Diagnostic> {
-    if let Some(start) = visiting.iter().position(|name| name == function) {
-        let mut cycle = visiting[start..].to_vec();
-        cycle.push(function.to_owned());
-        return Err(Diagnostic::new(format!(
-            "recursive function calls are not supported yet: {}",
-            cycle.join(" -> ")
-        )));
-    }
-    if visited.contains(function) {
-        return Ok(());
-    }
-
-    visiting.push(function.to_owned());
-    if let Some(calls) = graph.get(function) {
-        for called in calls {
-            if graph.contains_key(called) {
-                detect_recursive_call(called, graph, visiting, visited)?;
-            }
-        }
-    }
-    visiting.pop();
-    visited.insert(function.to_owned());
-    Ok(())
 }
 
 fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
@@ -6127,53 +6223,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_recursive_function_calls_until_stack_locals_exist() {
-        let cases = [
-            (
-                r#"
-                fn countdown(value: u8) -> u8 {
-                    if value == 0 {
-                        return 0
-                    }
-                    return countdown(value - 1)
+    fn emits_and_runs_recursive_function_calls() {
+        let source = r#"
+            fn sum_to(value: u8) -> u8 {
+                if value == 0 {
+                    return 0
                 }
+                let current: u8 = value
+                return current + sum_to(value - 1)
+            }
 
-                fn main() {
-                    test.assert_eq_u8(countdown(2), 0, 1)
+            fn even(value: u8) -> bool {
+                if value == 0 {
+                    return true
                 }
-                "#,
-                "recursive function calls are not supported yet: countdown -> countdown",
-            ),
-            (
-                r#"
-                fn even(value: u8) -> bool {
-                    if value == 0 {
-                        return true
-                    }
-                    return odd(value - 1)
+                return odd(value - 1)
+            }
+
+            fn odd(value: u8) -> bool {
+                if value == 0 {
+                    return false
                 }
+                return even(value - 1)
+            }
 
-                fn odd(value: u8) -> bool {
-                    if value == 0 {
-                        return false
-                    }
-                    return even(value - 1)
-                }
+            fn main() {
+                test.assert_eq_u8(sum_to(4), 10, 1)
+                test.assert_eq_u8(even(6), true, 2)
+                test.assert_eq_u8(odd(6), false, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 80_000).unwrap();
 
-                fn main() {
-                    test.assert_eq_u8(even(2), true, 1)
-                }
-                "#,
-                "recursive function calls are not supported yet: even -> odd -> even",
-            ),
-        ];
-
-        for (source, expected) in cases {
-            let program = parse_program(Path::new("game.ezra"), source).unwrap();
-            let error = emit_ez80_assembly(&program).unwrap_err();
-
-            assert_eq!(error.message, expected);
-        }
+        assert!(asm.contains("call _sum_to"), "{asm}");
+        assert!(asm.contains("call _odd"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
