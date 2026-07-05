@@ -282,6 +282,19 @@ impl Symbols {
             }
         }
 
+        let mut function_labels = HashMap::new();
+        for declaration in &program.declarations {
+            let Some(name) = function_declaration_name(declaration) else {
+                continue;
+            };
+            let label = function_label(name);
+            if let Some(existing) = function_labels.insert(label.clone(), name.to_owned()) {
+                return Err(Diagnostic::new(format!(
+                    "function `{name}` emits assembly label `{label}` already used by function `{existing}`"
+                )));
+            }
+        }
+
         for declaration in &program.declarations {
             if let Declaration::Alias(decl) = declaration {
                 symbols.aliases.insert(decl.name.clone(), decl.ty.clone());
@@ -8175,6 +8188,14 @@ fn declaration_name(declaration: &Declaration) -> Option<&str> {
     }
 }
 
+fn function_declaration_name(declaration: &Declaration) -> Option<&str> {
+    match declaration {
+        Declaration::ExternAsmFunction(decl) => Some(&decl.name),
+        Declaration::Function(decl) => Some(&decl.name),
+        _ => None,
+    }
+}
+
 fn find_const_declaration<'a>(
     program: &'a Program,
     name: &str,
@@ -13284,6 +13305,49 @@ section .text
         assert!(asm.contains("    call _math_add"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_function_assembly_label_collisions() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_label_collision_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/math.ezra"),
+            "pub fn add(a: u8, b: u8) -> u8 { return a + b }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.math
+
+            fn lib_math_add(a: u8, b: u8) -> u8 {
+                return a - b
+            }
+
+            fn main() {
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            error.message,
+            "function `lib_math_add` emits assembly label `_lib_math_add` already used by function `lib.math.add`"
+        );
     }
 
     #[test]
