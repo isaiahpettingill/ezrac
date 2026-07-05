@@ -274,6 +274,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if parse_accumulator_alu_reg8(text).is_some() {
         Ok(1)
+    } else if parse_accumulator_alu_imm(text)?.is_some() {
+        Ok(2)
     } else if text.starts_with("ld hl, (")
         || text.starts_with("ld a, (")
         || text.starts_with("ld (")
@@ -392,6 +394,9 @@ fn emit_instruction(
         bytes.push(inc_dec_reg8_opcode(inc, register));
     } else if let Some((op, register)) = parse_accumulator_alu_reg8(text) {
         bytes.push(accumulator_alu_reg8_opcode(op, register));
+    } else if let Some((op, value)) = parse_accumulator_alu_imm(text)? {
+        bytes.push(accumulator_alu_imm_opcode(op));
+        bytes.push(value);
     } else if let Some(rest) = text.strip_prefix("in0 ") {
         let port = rest
             .trim()
@@ -655,6 +660,32 @@ fn parse_accumulator_alu_reg8(text: &str) -> Option<(AccumulatorAluOp, u8)> {
     None
 }
 
+fn parse_accumulator_alu_imm(text: &str) -> Result<Option<(AccumulatorAluOp, u8)>, Diagnostic> {
+    if let Some(src) = text.strip_prefix("add a,") {
+        let src = src.trim();
+        if reg8_code(src).is_some() {
+            return Ok(None);
+        }
+        return Ok(Some((AccumulatorAluOp::Add, parse_u8(src)?)));
+    }
+    for (prefix, op) in [
+        ("sub ", AccumulatorAluOp::Sub),
+        ("and ", AccumulatorAluOp::And),
+        ("or ", AccumulatorAluOp::Or),
+        ("xor ", AccumulatorAluOp::Xor),
+        ("cp ", AccumulatorAluOp::Cp),
+    ] {
+        if let Some(src) = text.strip_prefix(prefix) {
+            let src = src.trim();
+            if reg8_code(src).is_some() {
+                return Ok(None);
+            }
+            return Ok(Some((op, parse_u8(src)?)));
+        }
+    }
+    Ok(None)
+}
+
 fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
     let base = match op {
         AccumulatorAluOp::Add => 0x80,
@@ -665,6 +696,17 @@ fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
         AccumulatorAluOp::Cp => 0xB8,
     };
     base + register
+}
+
+fn accumulator_alu_imm_opcode(op: AccumulatorAluOp) -> u8 {
+    match op {
+        AccumulatorAluOp::Add => 0xC6,
+        AccumulatorAluOp::Sub => 0xD6,
+        AccumulatorAluOp::And => 0xE6,
+        AccumulatorAluOp::Xor => 0xEE,
+        AccumulatorAluOp::Or => 0xF6,
+        AccumulatorAluOp::Cp => 0xFE,
+    }
 }
 
 fn is_ix_byte_load_or_store(text: &str) -> bool {
@@ -988,6 +1030,54 @@ mod tests {
             ld e, 00h
             xor e
             cp e
+            out0 (0Ch), a
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"C");
+    }
+
+    #[test]
+    fn assembles_8_bit_accumulator_alu_immediate_forms() {
+        let asm = r#"
+            add a, 01h
+            sub 02h
+            and 03h
+            xor 04h
+            or 05h
+            cp 06h
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xC6, 0x01, 0xD6, 0x02, 0xE6, 0x03, 0xEE, 0x04, 0xF6, 0x05, 0xFE, 0x06
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_8_bit_accumulator_alu_immediate_forms_on_ez80_vm() {
+        let asm = r#"
+            ld a, 40h
+            add a, 04h
+            sub 01h
+            or 03h
+            and 7Fh
+            xor 00h
+            cp 43h
+            jp z, ok
+            ld a, 01h
+            out0 (0Dh), a
+            out0 (0Eh), a
+        ok:
             out0 (0Ch), a
             xor a
             out0 (0Dh), a
