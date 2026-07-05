@@ -1893,7 +1893,10 @@ Test metadata:
 
 ```text
 port 0x01 = 0x10
+mem 0x040123 = 0x6C
 ```
+
+`port` metadata seeds an 8-bit input port before the test runs. `mem` metadata seeds a single byte at a 24-bit address before the assembled code is loaded.
 
 ---
 

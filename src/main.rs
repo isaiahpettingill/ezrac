@@ -210,7 +210,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
         &TestRunOptions {
             instruction_budget: 1_000_000,
             initial_ports: metadata.initial_ports,
-            initial_memory: Vec::new(),
+            initial_memory: metadata.initial_memory,
         },
         layout.entry.get(),
     )
@@ -240,10 +240,12 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TestMetadata {
     initial_ports: Vec<(u8, u8)>,
+    initial_memory: Vec<(u32, u8)>,
 }
 
 fn parse_test_metadata(source: &str) -> Result<TestMetadata, String> {
     let mut initial_ports = Vec::new();
+    let mut initial_memory = Vec::new();
     for (index, line) in source.lines().enumerate() {
         let Some(comment) = line.trim_start().strip_prefix("//") else {
             continue;
@@ -251,25 +253,42 @@ fn parse_test_metadata(source: &str) -> Result<TestMetadata, String> {
         let comment = comment.trim_start();
         let rest = if let Some(rest) = comment.strip_prefix("test:") {
             rest.trim()
-        } else if comment.starts_with("port") {
+        } else if comment.starts_with("port") || comment.starts_with("mem") {
             comment
         } else {
             continue;
         };
-        let Some(rest) = rest.strip_prefix("port") else {
+        if let Some(rest) = rest.strip_prefix("port") {
+            let (port, value) = rest
+                .trim()
+                .split_once('=')
+                .ok_or_else(|| format!("invalid test port metadata on line {}", index + 1))?;
+            let port = parse_metadata_u8(port.trim())
+                .map_err(|error| format!("invalid test port on line {}: {error}", index + 1))?;
+            let value = parse_metadata_u8(value.trim()).map_err(|error| {
+                format!("invalid test port value on line {}: {error}", index + 1)
+            })?;
+            initial_ports.push((port, value));
+        } else if let Some(rest) = rest.strip_prefix("mem") {
+            let (address, value) = rest
+                .trim()
+                .split_once('=')
+                .ok_or_else(|| format!("invalid test memory metadata on line {}", index + 1))?;
+            let address = parse_metadata_u24(address.trim()).map_err(|error| {
+                format!("invalid test memory address on line {}: {error}", index + 1)
+            })?;
+            let value = parse_metadata_u8(value.trim()).map_err(|error| {
+                format!("invalid test memory value on line {}: {error}", index + 1)
+            })?;
+            initial_memory.push((address, value));
+        } else {
             return Err(format!("invalid test metadata on line {}", index + 1));
-        };
-        let (port, value) = rest
-            .trim()
-            .split_once('=')
-            .ok_or_else(|| format!("invalid test port metadata on line {}", index + 1))?;
-        let port = parse_metadata_u8(port.trim())
-            .map_err(|error| format!("invalid test port on line {}: {error}", index + 1))?;
-        let value = parse_metadata_u8(value.trim())
-            .map_err(|error| format!("invalid test port value on line {}: {error}", index + 1))?;
-        initial_ports.push((port, value));
+        }
     }
-    Ok(TestMetadata { initial_ports })
+    Ok(TestMetadata {
+        initial_ports,
+        initial_memory,
+    })
 }
 
 fn parse_metadata_u8(text: &str) -> Result<u8, String> {
@@ -282,6 +301,22 @@ fn parse_metadata_u8(text: &str) -> Result<u8, String> {
     }
     .map_err(|_| format!("invalid u8 literal `{text}`"))?;
     u8::try_from(value).map_err(|_| format!("value {text} is outside u8 range"))
+}
+
+fn parse_metadata_u24(text: &str) -> Result<u32, String> {
+    let value = if let Some(hex) = text.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16)
+    } else if let Some(bin) = text.strip_prefix("0b") {
+        u32::from_str_radix(bin, 2)
+    } else {
+        text.parse::<u32>()
+    }
+    .map_err(|_| format!("invalid u24 literal `{text}`"))?;
+    if value <= 0xFF_FFFF {
+        Ok(value)
+    } else {
+        Err(format!("value {text} is outside u24 range"))
+    }
 }
 
 fn emit_asm(options: &CommandOptions) -> Result<(), String> {
@@ -638,15 +673,24 @@ mod tests {
             r#"
                 // port 0x01 = 0x10
                 // test: port 2 = 0b00100000
+                // mem 0x040123 = 0x6C
+                // test: mem 262436 = 0b01101101
                 fn main() { test.pass() }
             "#,
         )
         .unwrap();
 
         assert_eq!(metadata.initial_ports, vec![(0x01, 0x10), (0x02, 0x20)]);
+        assert_eq!(
+            metadata.initial_memory,
+            vec![(0x040123, 0x6C), (0x040124, 0x6D)]
+        );
 
         let error = parse_test_metadata("// port 0x100 = 0").unwrap_err();
         assert!(error.contains("outside u8 range"), "{error}");
+
+        let error = parse_test_metadata("// mem 0x1000000 = 0").unwrap_err();
+        assert!(error.contains("outside u24 range"), "{error}");
     }
 
     #[test]
@@ -662,6 +706,29 @@ mod tests {
                 fn main() {
                     let pad: u8 = in PAD
                     test.assert_eq_u8(pad, 0x10, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        test_source(source_path.to_str().unwrap()).unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_command_uses_memory_metadata() {
+        let root = temp_root("test_memory_metadata");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                // mem 0x040123 = 0x6C
+                fn main() {
+                    let byte: ptr<u8> = cast<ptr<u8>>(0x040123)
+                    test.assert_eq_u8(*byte, 0x6C, 1)
                     test.pass()
                 }
             "#,
