@@ -514,9 +514,6 @@ impl Symbols {
         decl: &crate::ast::ConstDecl,
         program: &Program,
     ) -> Result<(), Diagnostic> {
-        if self.constant_types.contains_key(&decl.name) {
-            return Ok(());
-        }
         if !self.evaluating_constants.insert(decl.name.clone()) {
             return Err(Diagnostic::new(format!(
                 "circular constant reference involving `{}`",
@@ -566,11 +563,11 @@ impl Symbols {
         let mut names = Vec::new();
         collect_const_dependency_names(expr, &mut names);
         for name in names {
-            if self.constant_types.contains_key(&name) {
-                continue;
-            }
             if let Some(decl) = find_const_declaration(program, &name) {
                 self.evaluate_const_declaration(decl, program)?;
+                continue;
+            }
+            if self.constant_types.contains_key(&name) {
                 continue;
             }
             if self.constants.contains_key(&name) || self.embed_property_value(&name).is_some() {
@@ -8366,6 +8363,8 @@ fn sdk_constants(options: AssemblyOptions) -> HashMap<String, i64> {
             "EZRA_AUDIO_BASE".to_owned(),
             options.audio_base.get() as i64,
         ),
+        ("VRAM_BASE".to_owned(), options.vram_base.get() as i64),
+        ("AUDIO_BASE".to_owned(), options.audio_base.get() as i64),
         (
             "EZRA_ASSET_BASE".to_owned(),
             options.asset_base.get() as i64,
@@ -8408,6 +8407,12 @@ fn sdk_constant_types() -> HashMap<String, Type> {
         "EZRA_RODATA_BASE",
     ] {
         types.insert(name.to_owned(), Type::Named("u24".to_owned()));
+    }
+    for name in ["VRAM_BASE", "AUDIO_BASE"] {
+        types.insert(
+            name.to_owned(),
+            Type::Ptr(Box::new(Type::Named("u8".to_owned()))),
+        );
     }
     for name in [
         "BTN_B",
@@ -14087,6 +14092,35 @@ section .text
         assert_eq!(run.ports[0x09], 3, "{asm}");
         assert_eq!(run.ports[0x10], 0x33, "{asm}");
         assert_eq!(run.ports[0x16], 0x44, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_default_video_audio_base_pointer_symbols() {
+        let source = r#"
+            fn main() {
+                *(VRAM_BASE + 1) = 0x4A;
+                *(AUDIO_BASE + 2) = 0x5B;
+                test.assert_eq_u8(*(VRAM_BASE + 1), 0x4A, 1)
+                test.assert_eq_u8(*(AUDIO_BASE + 2), 0x5B, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                vram_base: Address24::new(0x04_0180),
+                audio_base: Address24::new(0x04_0190),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("040180h"), "{asm}");
+        assert!(asm.contains("040190h"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
