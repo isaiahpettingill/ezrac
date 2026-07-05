@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use crate::{
     ast::{BinaryOp, Declaration, EmbedSource, Expr, Program, UnaryOp},
     diagnostic::Diagnostic,
-    layout::Layout,
+    layout::{Layout, Region},
     target::{
         Address24, CART_MAGIC, CPU_MODE_EZ80_ADL, EZRA_ASSET_BASE, EZRA_AUDIO_BASE,
         EZRA_ENTRY_ADDR, EZRA_RAM_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE, FORMAT_VERSION,
@@ -81,6 +81,7 @@ struct AssetEntry {
     name: String,
     bytes: Vec<u8>,
     align: u32,
+    section: String,
     section_id: u8,
     flags: u8,
 }
@@ -90,6 +91,7 @@ struct PackedAssetEntry {
     asset_addr: Address24,
     asset_len: u32,
     name_offset: u16,
+    bytes: Vec<u8>,
     section_id: u8,
     flags: u8,
 }
@@ -168,8 +170,8 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     };
     let mut table = Vec::with_capacity(assets.len() * ASSET_TABLE_ENTRY_SIZE);
     let mut names = Vec::new();
-    let mut payload = Vec::new();
     let mut packed = Vec::new();
+    let mut section_cursors = Vec::<(String, u32)>::new();
 
     for asset in assets {
         let name_offset = u16::try_from(names.len())
@@ -177,10 +179,11 @@ pub fn build_cartridge_with_layout_code_and_symbols(
         names.extend_from_slice(asset.name.as_bytes());
         names.push(0);
 
-        align_payload(&mut payload, asset.align);
-        let payload_offset = u32::try_from(payload.len())
-            .map_err(|_| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
-        let asset_addr = checked_asset_addr(header.asset_base, payload_offset)?;
+        let (section, section_align) = layout_section_placement(layout, &asset.section)?;
+        let cursor = section_cursor(&mut section_cursors, &asset.section, section.start.get());
+        *cursor = align_addr(*cursor, asset.align.max(section_align))?;
+        let asset_addr =
+            Address24::try_from(*cursor).map_err(|error| Diagnostic::new(error.to_string()))?;
         let asset_len = u32::try_from(asset.bytes.len())
             .map_err(|_| Diagnostic::new("asset length exceeds 24-bit address space"))?;
         if asset_len > Address24::MAX {
@@ -189,11 +192,26 @@ pub fn build_cartridge_with_layout_code_and_symbols(
                 asset.name
             )));
         }
-        payload.extend_from_slice(&asset.bytes);
+        let asset_end = asset_addr
+            .get()
+            .checked_add(asset_len.saturating_sub(1))
+            .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
+        let asset_end =
+            Address24::try_from(asset_end).map_err(|error| Diagnostic::new(error.to_string()))?;
+        if asset_len > 0 && !section.contains_range(asset_addr, asset_end) {
+            return Err(Diagnostic::new(format!(
+                "embed `{}` exceeds section `{}` region `{}`",
+                asset.name, asset.section, section.name
+            )));
+        }
+        *cursor = cursor
+            .checked_add(asset_len)
+            .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
         packed.push(PackedAssetEntry {
             asset_addr,
             asset_len,
             name_offset,
+            bytes: asset.bytes,
             section_id: asset.section_id,
             flags: asset.flags,
         });
@@ -213,7 +231,16 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     image.extend_from_slice(&symbol_table);
     image.append(&mut table);
     image.append(&mut names);
-    image.append(&mut payload);
+    for entry in &packed {
+        let offset = image_offset(layout.load, entry.asset_addr)?;
+        let end = offset
+            .checked_add(entry.bytes.len())
+            .ok_or_else(|| Diagnostic::new("asset payload exceeds addressable image size"))?;
+        if image.len() < end {
+            image.resize(end, 0);
+        }
+        image[offset..end].copy_from_slice(&entry.bytes);
+    }
     header.header_size = HEADER_SIZE;
     image[..HEADER_SIZE as usize].copy_from_slice(&header.serialize());
     Ok(image)
@@ -240,12 +267,14 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
                 decl.name
             )));
         }
-        let section_id = section_id(decl.section.as_deref())?;
+        let section = decl.section.clone().unwrap_or_else(|| ".assets".to_owned());
+        let section_id = section_id(&section)?;
         let bytes = embed_bytes(&decl.source, &program.source_path)?;
         assets.push(AssetEntry {
             name: decl.name.clone(),
             bytes,
             align: align as u32,
+            section,
             section_id,
             flags: 0,
         });
@@ -253,14 +282,48 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
     Ok(assets)
 }
 
-fn section_id(section: Option<&str>) -> Result<u8, Diagnostic> {
-    match section.unwrap_or(".assets") {
+fn section_id(section: &str) -> Result<u8, Diagnostic> {
+    match section {
         ".assets" => Ok(SECTION_ASSETS),
         ".rodata" => Ok(SECTION_RODATA),
         section => Err(Diagnostic::new(format!(
             "embed section `{section}` is not supported by the current cartridge packer"
         ))),
     }
+}
+
+fn layout_section_placement<'a>(
+    layout: &'a Layout,
+    section_name: &str,
+) -> Result<(&'a Region, u32), Diagnostic> {
+    let section = layout
+        .sections
+        .iter()
+        .find(|section| section.name == section_name)
+        .ok_or_else(|| Diagnostic::new(format!("layout has no section `{section_name}`")))?;
+    let region = layout
+        .regions
+        .iter()
+        .find(|region| region.name == section.region)
+        .ok_or_else(|| {
+            Diagnostic::new(format!(
+                "layout section `{section_name}` targets unknown region `{}`",
+                section.region
+            ))
+        })?;
+    Ok((region, section.align))
+}
+
+fn section_cursor<'a>(
+    cursors: &'a mut Vec<(String, u32)>,
+    section: &str,
+    start: u32,
+) -> &'a mut u32 {
+    if let Some(index) = cursors.iter().position(|(name, _)| name == section) {
+        return &mut cursors[index].1;
+    }
+    cursors.push((section.to_owned(), start));
+    &mut cursors.last_mut().expect("cursor was just pushed").1
 }
 
 fn embed_bytes(source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
@@ -364,21 +427,14 @@ fn eval_embed_expr(expr: &Expr) -> Result<i64, Diagnostic> {
     }
 }
 
-fn align_payload(payload: &mut Vec<u8>, align: u32) {
+fn align_addr(addr: u32, align: u32) -> Result<u32, Diagnostic> {
     if align <= 1 {
-        return;
+        return Ok(addr);
     }
-    while payload.len() as u32 % align != 0 {
-        payload.push(0);
-    }
-}
-
-fn checked_asset_addr(asset_base: Address24, offset: u32) -> Result<Address24, Diagnostic> {
-    let addr = asset_base
-        .get()
-        .checked_add(offset)
-        .ok_or_else(|| Diagnostic::new("asset payload exceeds 24-bit address space"))?;
-    Address24::try_from(addr).map_err(|error| Diagnostic::new(error.to_string()))
+    let mask = align - 1;
+    addr.checked_add(mask)
+        .map(|addr| addr & !mask)
+        .ok_or_else(|| Diagnostic::new("asset alignment exceeds 24-bit address space"))
 }
 
 fn checked_image_addr(load: Address24, offset: u32) -> Result<Address24, Diagnostic> {
@@ -387,6 +443,16 @@ fn checked_image_addr(load: Address24, offset: u32) -> Result<Address24, Diagnos
         .checked_add(offset)
         .ok_or_else(|| Diagnostic::new("cartridge image exceeds 24-bit address space"))?;
     Address24::try_from(addr).map_err(|error| Diagnostic::new(error.to_string()))
+}
+
+fn image_offset(load: Address24, addr: Address24) -> Result<usize, Diagnostic> {
+    let offset = addr.get().checked_sub(load.get()).ok_or_else(|| {
+        Diagnostic::new(format!(
+            "address {addr} is below cartridge load address {}",
+            load
+        ))
+    })?;
+    usize::try_from(offset).map_err(|_| Diagnostic::new("image offset exceeds host usize range"))
 }
 
 fn header_from_layout(layout: &Layout) -> CartridgeHeader {
@@ -478,6 +544,7 @@ fn write_optional_addr24(bytes: &mut [u8], offset: usize, addr: Option<Address24
 mod tests {
     use std::path::Path;
 
+    use crate::layout::parse_layout;
     use crate::parser::parse_program;
     use crate::target::EZRA_LOAD_ADDR;
 
@@ -529,14 +596,16 @@ mod tests {
         assert!(image[layout_table..].starts_with(b"layout ezra_default\n"));
         assert!(table > layout_table);
 
-        assert_eq!(&image[table..table + 3], &[0x00, 0x00, 0x10]);
+        let first_addr = read_addr24(&image, table);
+        assert_eq!(first_addr, 0x100000);
         assert_eq!(&image[table + 3..table + 6], &[0x03, 0x00, 0x00]);
         assert_eq!(&image[table + 6..table + 8], &[0x00, 0x00]);
         assert_eq!(image[table + 8], SECTION_ASSETS);
         assert_eq!(image[table + 9], 0);
 
         let second = table + ASSET_TABLE_ENTRY_SIZE;
-        assert_eq!(&image[second..second + 3], &[0x04, 0x00, 0x10]);
+        let second_addr = read_addr24(&image, second);
+        assert_eq!(second_addr, 0x020000);
         assert_eq!(&image[second + 3..second + 6], &[0x03, 0x00, 0x00]);
         assert_eq!(&image[second + 6..second + 8], &[0x08, 0x00]);
         assert_eq!(image[second + 8], SECTION_RODATA);
@@ -545,8 +614,12 @@ mod tests {
         let names = second + ASSET_TABLE_ENTRY_SIZE;
         assert_eq!(&image[names..names + 14], b"palette\0title\0");
         assert_eq!(
-            &image[names + 14..],
-            &[0x11, 0x22, 0x33, 0x00, b'O', b'K', 0]
+            &image[image_offset(first_addr)..image_offset(first_addr) + 3],
+            &[0x11, 0x22, 0x33]
+        );
+        assert_eq!(
+            &image[image_offset(second_addr)..image_offset(second_addr) + 3],
+            &[b'O', b'K', 0]
         );
     }
 
@@ -590,6 +663,39 @@ mod tests {
         let text = std::str::from_utf8(&image[symbol_table..]).unwrap();
         assert!(text.starts_with("symbol __ezra_start 0x010040\n"), "{text}");
         assert!(text.contains("symbol _main 0x010064\n"), "{text}");
+    }
+
+    #[test]
+    fn cartridge_rejects_embed_that_exceeds_section_region() {
+        let source = r#"
+            embed too_big: bytes = repeat(0xAA, 3) section .assets align 1
+            fn main() { test.pass() }
+        "#;
+        let layout = parse_layout(
+            r#"
+                layout tiny_assets {
+                    load 0x010000;
+                    entry 0x010040;
+                    stack 0xF00000;
+
+                    region code 0x010000..0x01FFFF read execute;
+                    region assets 0x100000..0x100001 read;
+
+                    section .text -> code align 16;
+                    section .assets -> assets align 1;
+                }
+            "#,
+        )
+        .unwrap();
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+
+        let error =
+            build_cartridge_with_layout_code_and_symbols(&program, &layout, &[], &[]).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "embed `too_big` exceeds section `.assets` region `assets`"
+        );
     }
 
     fn read_addr24(bytes: &[u8], offset: usize) -> u32 {
