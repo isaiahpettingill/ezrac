@@ -480,7 +480,7 @@ fn build_type(pair: Pair<'_, Rule>) -> Result<Type, Diagnostic> {
             let mut parts = inner.into_inner();
             Ok(Type::Array {
                 element: Box::new(build_type(parts.next().unwrap())?),
-                len: parts.next().unwrap().as_str().to_owned(),
+                len: Box::new(build_expr(parts.next().unwrap())?),
             })
         }
         _ => unreachable!("unexpected type rule {:?}", inner.as_rule()),

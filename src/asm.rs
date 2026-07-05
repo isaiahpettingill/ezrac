@@ -729,12 +729,13 @@ impl Symbols {
         }
     }
 
-    fn array_len(&self, text: &str) -> Result<u32, Diagnostic> {
-        let value = if let Some(value) = self.constants.get(text).copied() {
-            value
-        } else {
-            parse_int_text(text)?
-        };
+    fn array_len(&self, expr: &Expr) -> Result<u32, Diagnostic> {
+        let ty = self.resolved_type(&self.const_expr_type(expr)?)?;
+        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_)) {
+            return Err(Diagnostic::new("array length must be an integer constant"));
+        }
+        self.validate_const_expr_arithmetic_compatibility(expr)?;
+        let value = self.eval_i64(expr)?;
         if value < 0 {
             return Err(Diagnostic::new(format!("array length {value} is negative")));
         }
@@ -6175,24 +6176,6 @@ fn collect_access_calls(path: &AccessPath, calls: &mut Vec<String>) {
     }
 }
 
-fn parse_int_text(text: &str) -> Result<i64, Diagnostic> {
-    let digits = text
-        .trim_end_matches("u8")
-        .trim_end_matches("i8")
-        .trim_end_matches("u16")
-        .trim_end_matches("i16")
-        .trim_end_matches("u24")
-        .trim_end_matches("i24");
-    if let Some(hex) = digits.strip_prefix("0x") {
-        i64::from_str_radix(hex, 16)
-    } else if let Some(bin) = digits.strip_prefix("0b") {
-        i64::from_str_radix(bin, 2)
-    } else {
-        digits.parse()
-    }
-    .map_err(|_| Diagnostic::new(format!("invalid integer literal `{text}`")))
-}
-
 fn const_shl_or_zero(left: i64, right: i64) -> i64 {
     if !(0..64).contains(&right) {
         0
@@ -6465,7 +6448,9 @@ fn type_display(ty: &Type) -> String {
     match ty {
         Type::Named(name) => name.clone(),
         Type::Ptr(inner) => format!("ptr<{}>", type_display(inner)),
-        Type::Array { element, len } => format!("[{}; {len}]", type_display(element)),
+        Type::Array { element, len } => {
+            format!("[{}; {}]", type_display(element), expr_summary(len))
+        }
     }
 }
 
@@ -7845,6 +7830,14 @@ mod tests {
             (
                 r#"
                 global bytes: [u8; 0x1000000] = []
+                fn main() { test.pass() }
+                "#,
+                "array length 16777216 exceeds 24-bit address space",
+            ),
+            (
+                r#"
+                const LEN: u24 = 0xFFFFFF
+                global bytes: [u8; LEN + 1] = []
                 fn main() { test.pass() }
                 "#,
                 "array length 16777216 exceeds 24-bit address space",
@@ -11221,6 +11214,33 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_array_length_constant_expressions() {
+        let source = r#"
+            const BASE: u8 = 2
+            const EXTRA: u8 = 1
+            global bytes: [u8; BASE + EXTRA] = [7, 8, 9]
+
+            fn main() {
+                test.assert_eq_u8(bytes[2], 9, 1)
+                bytes[BASE] = 11
+                test.assert_eq_u8(bytes[2], 11, 2)
+
+                let local: [u16; BASE * 2] = [1, 2, 3, 4]
+                test.assert_eq_u16(local[3], 4, 3)
+                local[EXTRA + 1] = 0x1234
+                test.assert_eq_u16(local[2], 0x1234, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");

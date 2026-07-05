@@ -561,19 +561,9 @@ fn validate_type_private_import_access(
         Type::Ptr(inner) => validate_type_private_import_access(inner, private_imports),
         Type::Array { element, len } => {
             validate_type_private_import_access(element, private_imports)?;
-            validate_expr_private_import_access(
-                &parse_array_len_expr(len),
-                private_imports,
-                &HashSet::new(),
-            )
+            validate_expr_private_import_access(len, private_imports, &HashSet::new())
         }
     }
-}
-
-fn parse_array_len_expr(len: &str) -> Expr {
-    len.parse::<i64>()
-        .map(Expr::Int)
-        .unwrap_or_else(|_| Expr::Ident(len.to_owned()))
 }
 
 fn reject_private_import_type_name(

@@ -191,7 +191,7 @@ pub enum AssignOp {
     Shr,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
     Int(i64),
     TypedInt(i64, Type),
@@ -244,13 +244,13 @@ pub enum Expr {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccessPath {
     pub root: String,
     pub segments: Vec<AccessSegment>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccessSegment {
     Field(String),
     Index(Box<Expr>),
@@ -289,7 +289,7 @@ pub enum BinaryOp {
 pub enum Type {
     Named(String),
     Ptr(Box<Type>),
-    Array { element: Box<Type>, len: String },
+    Array { element: Box<Type>, len: Box<Expr> },
 }
 
 impl Program {
