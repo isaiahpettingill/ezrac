@@ -3,9 +3,8 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 use ezra::{
     asm::emit_ez80_assembly,
     cart::CartridgeHeader,
-    compile::{CompileOptions, check_source},
+    compile::{CompileOptions, check_source, load_program},
     layout::Layout,
-    parser::parse_program,
     vm::run_assembly_test,
 };
 
@@ -53,9 +52,7 @@ struct BuildOutputs {
 
 fn build_source(path: &str) -> Result<BuildOutputs, String> {
     let source_path = PathBuf::from(path);
-    let source = fs::read_to_string(&source_path)
-        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
-    let program = parse_program(&source_path, &source).map_err(|error| error.to_string())?;
+    let program = load_program(&source_path).map_err(|error| error.to_string())?;
     let assembly = emit_ez80_assembly(&program).map_err(|error| error.to_string())?;
     let layout = Layout::ezra_default();
     if let Err(errors) = layout.validate() {
@@ -94,9 +91,7 @@ fn build_source(path: &str) -> Result<BuildOutputs, String> {
 
 fn test_source(path: &str) -> Result<(), String> {
     let source_path = PathBuf::from(path);
-    let source = fs::read_to_string(&source_path)
-        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
-    let program = parse_program(&source_path, &source).map_err(|error| error.to_string())?;
+    let program = load_program(&source_path).map_err(|error| error.to_string())?;
     let assembly = emit_ez80_assembly(&program).map_err(|error| error.to_string())?;
     let run = run_assembly_test(&assembly, 1_000_000).map_err(|error| error.to_string())?;
     if !run.halted {
@@ -114,9 +109,7 @@ fn test_source(path: &str) -> Result<(), String> {
 
 fn emit_asm(path: &str) -> Result<(), String> {
     let source_path = PathBuf::from(path);
-    let source = fs::read_to_string(&source_path)
-        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
-    let program = parse_program(&source_path, &source).map_err(|error| error.to_string())?;
+    let program = load_program(&source_path).map_err(|error| error.to_string())?;
     let assembly = emit_ez80_assembly(&program).map_err(|error| error.to_string())?;
     print!("{assembly}");
     Ok(())
@@ -197,8 +190,18 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
         let source_path = root.join("game.ezra");
-        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            root.join("lib/math.ezra"),
+            "fn add_one(v: u8) -> u8 { return v + 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &source_path,
+            "import lib.math\nfn main() { let x: u8 = add_one(4); test.pass() }\n",
+        )
+        .unwrap();
 
         let outputs = build_source(source_path.to_str().unwrap()).unwrap();
         let asm = std::fs::read_to_string(&outputs.asm).unwrap();
@@ -206,6 +209,7 @@ mod tests {
         let cart = std::fs::read(&outputs.cart).unwrap();
 
         assert!(asm.contains("__ezra_start:"));
+        assert!(asm.contains("_add_one:"));
         assert!(map.contains(".header"));
         assert_eq!(&cart[0..4], b"EZRA");
         assert_eq!(cart.len(), 64);
