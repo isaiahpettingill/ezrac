@@ -409,6 +409,11 @@ impl Symbols {
             Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => {
                 Ok(ValueWidth::U24)
             }
+            Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
+                Err(Diagnostic::new(format!(
+                    "type `{name}` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
+                )))
+            }
             Type::Named(name) => {
                 if self.structs.contains_key(name) {
                     return Err(Diagnostic::new(format!(
@@ -2923,6 +2928,21 @@ mod tests {
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "local `score` shadows an existing name");
+    }
+
+    #[test]
+    fn rejects_forbidden_integer_widths() {
+        let source = r#"
+            global score: u32 = 0
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "type `u32` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
+        );
     }
 
     #[test]
