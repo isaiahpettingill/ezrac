@@ -112,6 +112,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "pop hl"
             | "dec sp"
             | "inc sp"
+            | "inc b"
             | "dec b"
             | "dec c"
             | "ld b, a"
@@ -303,6 +304,8 @@ fn emit_instruction(
         bytes.extend([0xDD, 0x39]);
     } else if text == "add hl, sp" {
         bytes.push(0x39);
+    } else if text == "inc b" {
+        bytes.push(0x04);
     } else if text == "dec b" {
         bytes.push(0x05);
     } else if text == "dec c" {

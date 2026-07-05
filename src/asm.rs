@@ -1069,6 +1069,45 @@ impl Emitter {
         self.line(".L_mul_u8_done:");
         self.line("    ld a, d");
         self.line("    ret");
+        self.line("__ezra_div_u8:");
+        self.line("    ld d, a");
+        self.line("    xor a");
+        self.line("    ld b, a");
+        self.line("    ld a, c");
+        self.line("    or a");
+        self.line("    jp z, .L_div_u8_zero");
+        self.line(".L_div_u8_loop:");
+        self.line("    ld a, d");
+        self.line("    cp c");
+        self.line("    jp c, .L_div_u8_done");
+        self.line("    sub c");
+        self.line("    ld d, a");
+        self.line("    inc b");
+        self.line("    jp .L_div_u8_loop");
+        self.line(".L_div_u8_zero:");
+        self.line("    xor a");
+        self.line("    ret");
+        self.line(".L_div_u8_done:");
+        self.line("    ld a, b");
+        self.line("    ret");
+        self.line("__ezra_mod_u8:");
+        self.line("    ld d, a");
+        self.line("    ld a, c");
+        self.line("    or a");
+        self.line("    jp z, .L_mod_u8_zero");
+        self.line(".L_mod_u8_loop:");
+        self.line("    ld a, d");
+        self.line("    cp c");
+        self.line("    jp c, .L_mod_u8_done");
+        self.line("    sub c");
+        self.line("    ld d, a");
+        self.line("    jp .L_mod_u8_loop");
+        self.line(".L_mod_u8_zero:");
+        self.line("    xor a");
+        self.line("    ret");
+        self.line(".L_mod_u8_done:");
+        self.line("    ld a, d");
+        self.line("    ret");
     }
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
@@ -5201,6 +5240,53 @@ mod tests {
         let run = run_assembly_test(&asm, 3_000).unwrap();
 
         assert!(asm.contains("__ezra_mul_u8:"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_div_mod_u8_runtime_helpers() {
+        let expected_div = 23u8 / 5;
+        let expected_mod = 23u8 % 5;
+        let source = format!(
+            r#"
+            fn main() {{
+                asm volatile(clobber a, clobber bc, clobber d, clobber memory) {{
+                    "ld a, 05h"
+                    "ld c, a"
+                    "ld a, 17h"
+                    "call __ezra_div_u8"
+                    "ld (040340h), a"
+                    "ld a, 05h"
+                    "ld c, a"
+                    "ld a, 17h"
+                    "call __ezra_mod_u8"
+                    "ld (040341h), a"
+                    "ld a, 00h"
+                    "ld c, a"
+                    "ld a, 17h"
+                    "call __ezra_div_u8"
+                    "ld (040342h), a"
+                    "ld a, 00h"
+                    "ld c, a"
+                    "ld a, 17h"
+                    "call __ezra_mod_u8"
+                    "ld (040343h), a"
+                }}
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040340)), {expected_div}, 1)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040341)), {expected_mod}, 2)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040342)), 0, 3)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040343)), 0, 4)
+                test.pass()
+            }}
+        "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 3_000).unwrap();
+
+        assert!(asm.contains("__ezra_div_u8:"), "{asm}");
+        assert!(asm.contains("__ezra_mod_u8:"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
