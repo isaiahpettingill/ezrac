@@ -232,7 +232,14 @@ impl Symbols {
                 ),
                 _ => continue,
             };
+            let mut param_names = HashSet::new();
             for param in params {
+                if !param_names.insert(param.name.as_str()) {
+                    return Err(Diagnostic::new(format!(
+                        "function `{name}` has duplicate parameter `{}`",
+                        param.name
+                    )));
+                }
                 symbols.validate_signature_value_type(
                     name,
                     &param.ty,
@@ -6603,7 +6610,10 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let error = emit_ez80_assembly(&program).unwrap_err();
 
-        assert_eq!(error.message, "parameter `value` shadows an existing name");
+        assert_eq!(
+            error.message,
+            "function `add` has duplicate parameter `value`"
+        );
     }
 
     #[test]
@@ -9050,6 +9060,24 @@ mod tests {
         assert_eq!(
             error.message,
             "extern asm function `raw_mixed` cannot use a byte second argument followed by a wide third argument"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_extern_asm_parameters() {
+        let source = r#"
+            extern asm fn raw_dup(value: u8, value: u8) -> u8
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "function `raw_dup` has duplicate parameter `value`"
         );
     }
 
