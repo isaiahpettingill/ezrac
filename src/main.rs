@@ -2,11 +2,11 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
     asm::{emit_ez80_assembly, emit_ez80_assembly_with_debug_comments},
-    cart::{CartridgeHeader, build_cartridge_with_code},
+    cart::{CartridgeHeader, build_cartridge_with_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
     layout::Layout,
-    target::EZRA_ENTRY_ADDR,
-    vm::{assemble_ez80_subset_at, run_assembly_test},
+    target::{EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR},
+    vm::{assemble_ez80_subset_with_symbols_at, run_assembly_test},
 };
 
 fn main() -> ExitCode {
@@ -115,11 +115,12 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, layout.map_summary())
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let code = assemble_ez80_subset_at(&assembly, EZRA_ENTRY_ADDR.get())
+    let assembled = assemble_ez80_subset_with_symbols_at(&assembly, EZRA_ENTRY_ADDR.get())
         .map_err(|error| error.to_string())?;
     fs::write(
         &cart_path,
-        build_cartridge_with_code(&program, &code).map_err(|error| error.to_string())?,
+        build_cartridge_with_code_and_symbols(&program, &assembled.bytes, &assembled.symbols)
+            .map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
 
@@ -262,6 +263,15 @@ mod tests {
         assert_eq!(&cart[64..68], &[0x31, 0x00, 0x00, 0xF0]);
         let layout_table = read_addr24(&cart, 0x1E);
         assert!(layout_table > EZRA_ENTRY_ADDR.get());
+        let symbol_table = read_addr24(&cart, 0x24);
+        assert!(symbol_table > layout_table);
+        let symbol_offset = usize::try_from(symbol_table - EZRA_LOAD_ADDR.get()).unwrap();
+        let symbols = std::str::from_utf8(&cart[symbol_offset..]).unwrap();
+        assert!(
+            symbols.contains("symbol __ezra_start 0x010040"),
+            "{symbols}"
+        );
+        assert!(symbols.contains("symbol _main"), "{symbols}");
         assert!(read_addr24(&cart, 0x21) > read_addr24(&cart, 0x1E));
         assert!(cart.len() > 64);
         assert!(cart.ends_with(&[0x11, 0x22]));

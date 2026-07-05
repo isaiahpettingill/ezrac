@@ -1,4 +1,7 @@
-use std::{cell::Cell, collections::HashMap};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, HashMap},
+};
 
 use ez80::{Cpu, Machine};
 
@@ -11,6 +14,18 @@ pub struct TestRun {
     pub result_code: u8,
     pub instructions: u64,
     pub debug_output: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssembledProgram {
+    pub bytes: Vec<u8>,
+    pub symbols: Vec<AssemblySymbol>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssemblySymbol {
+    pub name: String,
+    pub addr: u32,
 }
 
 pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<TestRun, Diagnostic> {
@@ -48,8 +63,15 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
 }
 
 pub fn assemble_ez80_subset_at(assembly: &str, base_addr: u32) -> Result<Vec<u8>, Diagnostic> {
+    Ok(assemble_ez80_subset_with_symbols_at(assembly, base_addr)?.bytes)
+}
+
+pub fn assemble_ez80_subset_with_symbols_at(
+    assembly: &str,
+    base_addr: u32,
+) -> Result<AssembledProgram, Diagnostic> {
     let instructions = assembly.lines().filter_map(parse_line).collect::<Vec<_>>();
-    let mut labels = HashMap::new();
+    let mut labels = BTreeMap::new();
     let mut pc = base_addr & 0xFF_FFFF;
 
     for instruction in &instructions {
@@ -61,13 +83,21 @@ pub fn assemble_ez80_subset_at(assembly: &str, base_addr: u32) -> Result<Vec<u8>
         }
     }
 
+    let symbols = labels
+        .iter()
+        .map(|(name, addr)| AssemblySymbol {
+            name: name.clone(),
+            addr: *addr,
+        })
+        .collect();
+    let labels = labels.into_iter().collect::<HashMap<_, _>>();
     let mut bytes = Vec::new();
     for instruction in instructions {
         if let AsmLine::Instruction(text) = instruction {
             emit_instruction(&text, &labels, &mut bytes)?;
         }
     }
-    Ok(bytes)
+    Ok(AssembledProgram { bytes, symbols })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -9,6 +9,7 @@ use crate::{
         EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
         FORMAT_VERSION, HEADER_SIZE,
     },
+    vm::AssemblySymbol,
 };
 
 const ASSET_TABLE_ENTRY_SIZE: usize = 10;
@@ -98,32 +99,50 @@ pub fn build_cartridge(program: &Program) -> Result<Vec<u8>, Diagnostic> {
 }
 
 pub fn build_cartridge_with_code(program: &Program, code: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+    build_cartridge_with_code_and_symbols(program, code, &[])
+}
+
+pub fn build_cartridge_with_code_and_symbols(
+    program: &Program,
+    code: &[u8],
+    symbols: &[AssemblySymbol],
+) -> Result<Vec<u8>, Diagnostic> {
     let layout_table = serialize_layout_table(&Layout::ezra_default());
+    let symbol_table = serialize_symbol_table(symbols);
     let code_len = u32::try_from(code.len())
         .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
-    let layout_table_addr = checked_image_addr(
-        u32::from(HEADER_SIZE)
-            .checked_add(code_len)
-            .ok_or_else(|| Diagnostic::new("program code exceeds 24-bit address space"))?,
-    )?;
+    let layout_offset = u32::from(HEADER_SIZE)
+        .checked_add(code_len)
+        .ok_or_else(|| Diagnostic::new("program code exceeds 24-bit address space"))?;
+    let symbol_offset = layout_offset
+        .checked_add(
+            u32::try_from(layout_table.len())
+                .map_err(|_| Diagnostic::new("layout table exceeds 24-bit address space"))?,
+        )
+        .ok_or_else(|| Diagnostic::new("layout table exceeds 24-bit address space"))?;
+    let asset_table_offset = symbol_offset
+        .checked_add(
+            u32::try_from(symbol_table.len())
+                .map_err(|_| Diagnostic::new("symbol table exceeds 24-bit address space"))?,
+        )
+        .ok_or_else(|| Diagnostic::new("symbol table exceeds 24-bit address space"))?;
+
+    let layout_table_addr = checked_image_addr(layout_offset)?;
+    let symbol_table_addr = if symbol_table.is_empty() {
+        None
+    } else {
+        Some(checked_image_addr(symbol_offset)?)
+    };
     let assets = collect_assets(program)?;
-    let asset_table_addr =
-        if assets.is_empty() {
-            None
-        } else {
-            Some(checked_image_addr(
-                u32::from(HEADER_SIZE)
-                    .checked_add(code_len)
-                    .ok_or_else(|| Diagnostic::new("program code exceeds 24-bit address space"))?
-                    .checked_add(u32::try_from(layout_table.len()).map_err(|_| {
-                        Diagnostic::new("layout table exceeds 24-bit address space")
-                    })?)
-                    .ok_or_else(|| Diagnostic::new("layout table exceeds 24-bit address space"))?,
-            )?)
-        };
+    let asset_table_addr = if assets.is_empty() {
+        None
+    } else {
+        Some(checked_image_addr(asset_table_offset)?)
+    };
     let mut header = CartridgeHeader {
         layout_table_addr: Some(layout_table_addr),
         asset_table_addr,
+        symbol_table_addr,
         ..CartridgeHeader::default()
     };
     let mut table = Vec::with_capacity(assets.len() * ASSET_TABLE_ENTRY_SIZE);
@@ -170,6 +189,7 @@ pub fn build_cartridge_with_code(program: &Program, code: &[u8]) -> Result<Vec<u
     let mut image = header.serialize().to_vec();
     image.extend_from_slice(code);
     image.extend_from_slice(&layout_table);
+    image.extend_from_slice(&symbol_table);
     image.append(&mut table);
     image.append(&mut names);
     image.append(&mut payload);
@@ -381,6 +401,21 @@ fn serialize_layout_table(layout: &Layout) -> Vec<u8> {
     out
 }
 
+fn serialize_symbol_table(symbols: &[AssemblySymbol]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for symbol in symbols {
+        push_line(
+            &mut out,
+            format!(
+                "symbol {} 0x{:06X}",
+                symbol.name,
+                symbol.addr & Address24::MAX
+            ),
+        );
+    }
+    out
+}
+
 fn push_line(out: &mut Vec<u8>, line: String) {
     out.extend_from_slice(line.as_bytes());
     out.push(b'\n');
@@ -488,6 +523,31 @@ mod tests {
         let layout_table = image_offset(read_addr24(&image, 0x1E));
         assert_eq!(layout_table, HEADER_SIZE as usize + code.len());
         assert!(image[layout_table..].starts_with(b"layout ezra_default\n"));
+    }
+
+    #[test]
+    fn cartridge_with_symbols_writes_symbol_table_after_layout() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let code = [0x31, 0x00, 0x00, 0xF0];
+        let symbols = [
+            AssemblySymbol {
+                name: "__ezra_start".to_owned(),
+                addr: EZRA_ENTRY_ADDR.get(),
+            },
+            AssemblySymbol {
+                name: "_main".to_owned(),
+                addr: EZRA_ENTRY_ADDR.get() + 0x24,
+            },
+        ];
+        let image = build_cartridge_with_code_and_symbols(&program, &code, &symbols).unwrap();
+
+        let layout_table = image_offset(read_addr24(&image, 0x1E));
+        let symbol_table = image_offset(read_addr24(&image, 0x24));
+        assert!(symbol_table > layout_table);
+
+        let text = std::str::from_utf8(&image[symbol_table..]).unwrap();
+        assert!(text.starts_with("symbol __ezra_start 0x010040\n"), "{text}");
+        assert!(text.contains("symbol _main 0x010064\n"), "{text}");
     }
 
     fn read_addr24(bytes: &[u8], offset: usize) -> u32 {
