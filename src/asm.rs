@@ -7256,6 +7256,14 @@ fn validate_inline_asm_clobbers(
     lines: &[String],
     allow_sp_clobber: bool,
 ) -> Result<(), Diagnostic> {
+    let mut seen = HashSet::new();
+    for clobber in clobbers {
+        if !seen.insert(clobber.as_str()) {
+            return Err(Diagnostic::new(format!(
+                "duplicate inline asm clobber `{clobber}`"
+            )));
+        }
+    }
     if asm_clobbers_include(clobbers, "sp") && !allow_sp_clobber {
         return Err(Diagnostic::new(
             "inline asm clobber `sp` is only allowed in naked functions",
@@ -11029,6 +11037,22 @@ section .text
 
             assert_eq!(error.message, expected);
         }
+    }
+
+    #[test]
+    fn rejects_duplicate_inline_asm_clobbers() {
+        let source = r#"
+            fn main() {
+                asm volatile(clobber a, clobber a) {
+                    "ld a, 1"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "duplicate inline asm clobber `a`");
     }
 
     #[test]
