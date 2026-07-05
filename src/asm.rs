@@ -5254,7 +5254,14 @@ impl Emitter {
                 AccessSegment::Index(index) => {
                     self.validate_array_index_type(index)?;
                     match self.symbols.resolved_type(&ty)? {
-                        Type::Array { element, .. } => *element,
+                        Type::Array { element, len } => {
+                            self.validate_const_access_index_bounds(
+                                index,
+                                &len,
+                                &access_path_summary(path),
+                            )?;
+                            *element
+                        }
                         _ => {
                             return Err(Diagnostic::new(format!(
                                 "value `{}` is not an array",
@@ -5368,7 +5375,11 @@ impl Emitter {
                             access_path_summary(path)
                         )));
                     };
-                    let _ = self.symbols.array_len(&len)?;
+                    self.validate_const_access_index_bounds(
+                        index,
+                        &len,
+                        &access_path_summary(path),
+                    )?;
                     let element_size = self.symbols.type_size(&element)?;
                     let base_addr = self.alloc_var(ValueWidth::U24.bytes());
                     self.emit_store_hl(base_addr);
@@ -5448,6 +5459,23 @@ impl Emitter {
                 type_display(&ty)
             )))
         }
+    }
+
+    fn validate_const_access_index_bounds(
+        &self,
+        index: &Expr,
+        len: &Expr,
+        path: &str,
+    ) -> Result<(), Diagnostic> {
+        let len = self.symbols.array_len(len)?;
+        if let Ok(index_value) = self.symbols.eval_i64(index) {
+            if index_value < 0 || index_value as u32 >= len {
+                return Err(Diagnostic::new(format!(
+                    "array index {index_value} is out of bounds for `{path}` length {len}",
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn pointer_pointee_size(&self, expr: &Expr) -> Result<Option<u32>, Diagnostic> {
@@ -9047,6 +9075,17 @@ section .text
                 }
                 "#,
                 "array index 2 is out of bounds for `bytes` length 2",
+            ),
+            (
+                r#"
+                global grid: [[u8; 2]; 2] = [[1, 2], [3, 4]]
+                fn main() {
+                    let row: u8 = 0
+                    let value: u8 = grid[row][2]
+                    test.pass()
+                }
+                "#,
+                "array index 2 is out of bounds for `grid[row][2]` length 2",
             ),
         ];
 
