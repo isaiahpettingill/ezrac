@@ -28,7 +28,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         scope_types: Vec::new(),
         string_literals: HashMap::new(),
         loop_stack: Vec::new(),
-        return_stack: Vec::new(),
+        return_type_stack: Vec::new(),
         return_value_stack: Vec::new(),
         function_name_stack: Vec::new(),
     };
@@ -572,7 +572,7 @@ struct Emitter {
     scope_types: Vec<HashMap<String, Type>>,
     string_literals: HashMap<String, Variable>,
     loop_stack: Vec<LoopLabels>,
-    return_stack: Vec<ValueWidth>,
+    return_type_stack: Vec<Option<Type>>,
     return_value_stack: Vec<bool>,
     function_name_stack: Vec<String>,
 }
@@ -654,14 +654,10 @@ impl Emitter {
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
         self.scope_types.push(HashMap::new());
-        self.return_stack.push(
-            function
-                .return_type
-                .as_ref()
-                .map(|ty| self.symbols.type_width(ty))
-                .transpose()?
-                .unwrap_or(ValueWidth::U8),
-        );
+        if let Some(return_type) = &function.return_type {
+            self.symbols.type_width(return_type)?;
+        }
+        self.return_type_stack.push(function.return_type.clone());
         self.return_value_stack.push(function.return_type.is_some());
         self.function_name_stack.push(function.name.clone());
         if !naked {
@@ -681,7 +677,7 @@ impl Emitter {
         }
         self.function_name_stack.pop();
         self.return_value_stack.pop();
-        self.return_stack.pop();
+        self.return_type_stack.pop();
         self.scope_types.pop();
         self.scopes.pop();
         if naked {
@@ -877,7 +873,8 @@ impl Emitter {
                         self.current_function_name()
                     )));
                 }
-                self.emit_expr_to_width(expr, self.current_return_width())?;
+                let return_type = self.current_return_type().clone();
+                self.emit_expr_to_type(expr, &return_type)?;
                 self.line("    ret");
             }
             Stmt::Asm {
@@ -3068,11 +3065,11 @@ impl Emitter {
         )
     }
 
-    fn current_return_width(&self) -> ValueWidth {
-        *self
-            .return_stack
+    fn current_return_type(&self) -> &Type {
+        self.return_type_stack
             .last()
-            .expect("function return width exists during emission")
+            .and_then(|ty| ty.as_ref())
+            .expect("function return type exists during value return emission")
     }
 
     fn current_function_requires_return_value(&self) -> bool {
@@ -4130,6 +4127,39 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 300_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_signed_constant_returns() {
+        let expected_i16 = (-300i16) as u16;
+        let expected_i24 = (-0x012345i32) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            alias subpx = i24
+            const NEG16: i16 = -300
+            const NEG24: subpx = -0x012345
+
+            fn neg16() -> i16 {{
+                return NEG16
+            }}
+
+            fn neg24() -> subpx {{
+                return NEG24
+            }}
+
+            fn main() {{
+                test.assert_eq_u16(neg16(), 0x{expected_i16:04X}, 1)
+                test.assert_eq_u24(neg24(), 0x{expected_i24:06X}, 2)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
