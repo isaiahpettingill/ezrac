@@ -6,6 +6,7 @@ use ezra::{
     compile::{CompileOptions, check_source, load_program},
     diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
+    target::{Address24, EZRA_RAM_BASE},
     vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
 };
 
@@ -124,6 +125,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         AssemblyOptions {
             debug_comments: options.debug_comments,
             stack_top: layout.stack,
+            ram_base: layout_ram_base(&layout),
         },
     )
     .map_err(|error| {
@@ -203,6 +205,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
         AssemblyOptions {
             debug_comments: options.debug_comments,
             stack_top: layout.stack,
+            ram_base: layout_ram_base(&layout),
         },
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
@@ -349,6 +352,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         AssemblyOptions {
             debug_comments: options.debug_comments,
             stack_top: layout.stack,
+            ram_base: layout_ram_base(&layout),
         },
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())
@@ -398,6 +402,15 @@ fn load_layout(path: Option<&str>) -> Result<Layout, String> {
             .with_location_if_missing(command_source_start_location(std::path::Path::new(path)))
             .to_string()
     })
+}
+
+fn layout_ram_base(layout: &Layout) -> Address24 {
+    layout
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "EZRA_RAM_BASE")
+        .map(|symbol| symbol.value)
+        .unwrap_or(EZRA_RAM_BASE)
 }
 
 fn format_layout_errors(path: Option<&str>, errors: Vec<ezra::diagnostic::Diagnostic>) -> String {
@@ -755,7 +768,10 @@ mod tests {
         std::fs::write(
             &source_path,
             r#"
+                global marker: u8 = 0x42
+
                 fn main() {
+                    test.assert_eq_u8(marker, 0x42, 1)
                     test.pass()
                 }
             "#,
@@ -770,8 +786,13 @@ mod tests {
                     stack 0xEFFE80;
 
                     region code 0x020000..0x02FFFF read execute;
+                    region ram 0x030000..0x03FFFF read write;
                     section .header -> code align 64;
                     section .text -> code align 16;
+                    section .data -> ram align 16;
+                    section .bss -> ram align 16;
+
+                    symbol EZRA_RAM_BASE = 0x030000;
                 }
             "#,
         )
@@ -822,7 +843,17 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("game.ezra");
         let layout_path = root.join("game.ezralayout");
-        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            &source_path,
+            r#"
+                global marker: u8 = 0x5A
+                fn main() {
+                    test.assert_eq_u8(marker, 0x5A, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
         std::fs::write(
             &layout_path,
             r#"
@@ -832,12 +863,16 @@ mod tests {
                     stack 0xEFFF00;
 
                     region code 0x020000..0x02FFFF read execute;
+                    region ram 0x030000..0x03FFFF read write;
                     section .header -> code align 64;
                     section .text -> code align 16;
+                    section .data -> ram align 16;
+                    section .bss -> ram align 16;
 
                     symbol EZRA_LOAD_ADDR = 0x020000;
                     symbol EZRA_ENTRY_ADDR = 0x020040;
                     symbol EZRA_STACK_TOP = 0xEFFF00;
+                    symbol EZRA_RAM_BASE = 0x030000;
                 }
             "#,
         )
@@ -860,8 +895,11 @@ mod tests {
         );
         assert!(map.contains(".text        0x020040"), "{map}");
         assert!(asm.contains("    ld sp, EFFF00h"), "{asm}");
+        assert!(asm.contains("    ld (030000h), a"), "{asm}");
+        assert!(!asm.contains("    ld (040000h), a"), "{asm}");
         assert_eq!(read_addr24(&cart, 0x08), 0x020040);
         assert_eq!(read_addr24(&cart, 0x0B), 0xEFFF00);
+        assert_eq!(read_addr24(&cart, 0x0E), 0x030000);
         let layout_table = read_addr24(&cart, 0x1E);
         assert!(layout_table > 0x020040);
         let layout_offset = usize::try_from(layout_table - 0x020000).unwrap();

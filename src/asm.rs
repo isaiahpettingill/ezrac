@@ -10,10 +10,8 @@ use crate::{
         Function, Place, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::Diagnostic,
-    target::{Address24, EZRA_STACK_TOP},
+    target::{Address24, EZRA_RAM_BASE, EZRA_STACK_TOP},
 };
-
-const VAR_BASE: u32 = 0x04_0000;
 
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
     emit_ez80_assembly_with_options(program, AssemblyOptions::default())
@@ -36,6 +34,7 @@ pub fn emit_ez80_assembly_with_debug_comments(
 pub struct AssemblyOptions {
     pub debug_comments: bool,
     pub stack_top: Address24,
+    pub ram_base: Address24,
 }
 
 impl Default for AssemblyOptions {
@@ -43,6 +42,7 @@ impl Default for AssemblyOptions {
         Self {
             debug_comments: false,
             stack_top: EZRA_STACK_TOP,
+            ram_base: EZRA_RAM_BASE,
         }
     }
 }
@@ -51,7 +51,7 @@ pub fn emit_ez80_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
-    let symbols = Symbols::from_program(program)?;
+    let symbols = Symbols::from_program(program, options.ram_base)?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
@@ -217,7 +217,7 @@ struct FunctionSig {
 }
 
 impl Symbols {
-    fn from_program(program: &Program) -> Result<Self, Diagnostic> {
+    fn from_program(program: &Program, ram_base: Address24) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
             constants: sdk_constants(),
             constant_types: HashMap::new(),
@@ -231,7 +231,7 @@ impl Symbols {
             global_types: HashMap::new(),
             functions: HashMap::new(),
             inline_functions: HashMap::new(),
-            next_addr: VAR_BASE,
+            next_addr: ram_base.get(),
         };
 
         let mut declared_names = HashSet::new();
