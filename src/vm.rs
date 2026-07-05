@@ -270,6 +270,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if parse_ld_reg8_imm(text)?.is_some() {
         Ok(2)
+    } else if parse_inc_dec_reg8(text).is_some() {
+        Ok(1)
     } else if text.starts_with("ld hl, (")
         || text.starts_with("ld a, (")
         || text.starts_with("ld (")
@@ -384,6 +386,8 @@ fn emit_instruction(
     } else if let Some((dst, value)) = parse_ld_reg8_imm(text)? {
         bytes.push(ld_reg8_imm_opcode(dst));
         bytes.push(value);
+    } else if let Some((inc, register)) = parse_inc_dec_reg8(text) {
+        bytes.push(inc_dec_reg8_opcode(inc, register));
     } else if let Some(rest) = text.strip_prefix("in0 ") {
         let port = rest
             .trim()
@@ -602,6 +606,21 @@ fn ld_reg8_imm_opcode(register: u8) -> u8 {
         7 => 0x3E,
         _ => unreachable!("invalid 8-bit register code {register}"),
     }
+}
+
+fn parse_inc_dec_reg8(text: &str) -> Option<(bool, u8)> {
+    if let Some(register) = text.strip_prefix("inc ") {
+        return Some((true, reg8_code(register.trim())?));
+    }
+    if let Some(register) = text.strip_prefix("dec ") {
+        return Some((false, reg8_code(register.trim())?));
+    }
+    None
+}
+
+fn inc_dec_reg8_opcode(inc: bool, register: u8) -> u8 {
+    let base = if inc { 0x04 } else { 0x05 };
+    base + register * 8
 }
 
 fn is_ix_byte_load_or_store(text: &str) -> bool {
@@ -827,6 +846,55 @@ mod tests {
             ld a, 43h
             ld e, a
             ld a, e
+            out0 (0Ch), a
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"C");
+    }
+
+    #[test]
+    fn assembles_8_bit_register_inc_and_dec() {
+        let asm = r#"
+            inc b
+            inc c
+            inc d
+            inc e
+            inc h
+            inc l
+            inc a
+            dec b
+            dec c
+            dec d
+            dec e
+            dec h
+            dec l
+            dec a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x04, 0x0C, 0x14, 0x1C, 0x24, 0x2C, 0x3C, 0x05, 0x0D, 0x15, 0x1D, 0x25, 0x2D, 0x3D,
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_8_bit_register_inc_and_dec_on_ez80_vm() {
+        let asm = r#"
+            ld e, 42h
+            inc e
+            ld a, e
+            dec a
+            inc a
             out0 (0Ch), a
             xor a
             out0 (0Dh), a
