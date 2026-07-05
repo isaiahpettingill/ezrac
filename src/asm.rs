@@ -712,7 +712,13 @@ impl Symbols {
                     self.validate_const_binary_operand_types(left, right)?;
                 }
             }
-            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            Expr::Unary { expr, op } => {
+                self.validate_const_expr_arithmetic_compatibility(expr)?;
+                if *op == UnaryOp::Not {
+                    self.ensure_const_expr_is_bool(expr, "logical operand")?;
+                }
+            }
+            Expr::Cast { expr, .. } | Expr::Deref(expr) => {
                 self.validate_const_expr_arithmetic_compatibility(expr)?;
             }
             Expr::Array(values) => {
@@ -790,7 +796,10 @@ impl Symbols {
             Expr::Char(_) => Ok(Type::Named("u8".to_owned())),
             Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
             Expr::Unary { expr, op } => match op {
-                UnaryOp::Not => Ok(Type::Named("bool".to_owned())),
+                UnaryOp::Not => {
+                    self.ensure_const_expr_is_bool(expr, "logical operand")?;
+                    Ok(Type::Named("bool".to_owned()))
+                }
                 UnaryOp::Neg | UnaryOp::BitNot => self.const_expr_type(expr),
             },
             Expr::Binary { left, op, right } => {
@@ -1917,7 +1926,12 @@ impl Emitter {
                 self.line(&format!("    ld hl, {:06X}h", value));
             }
             Expr::Cast { expr, ty } => self.emit_cast_to_type(expr, ty)?,
-            Expr::Unary { op, expr } => self.emit_unary_to_hl(*op, expr, width)?,
+            Expr::Unary { op, expr } => {
+                if *op == UnaryOp::Not {
+                    self.ensure_expr_is_bool(expr, "logical operand")?;
+                }
+                self.emit_unary_to_hl(*op, expr, width)?
+            }
             Expr::Binary { left, op, right } => match op {
                 BinaryOp::Add | BinaryOp::Sub
                     if self.emit_pointer_arithmetic(left, *op, right)? =>
@@ -2142,7 +2156,12 @@ impl Emitter {
                 self.line(&format!("    ld a, {:02X}h", value));
             }
             Expr::Cast { expr, ty } => self.emit_cast_to_type(expr, ty)?,
-            Expr::Unary { op, expr } => self.emit_unary_to_a(*op, expr)?,
+            Expr::Unary { op, expr } => {
+                if *op == UnaryOp::Not {
+                    self.ensure_expr_is_bool(expr, "logical operand")?;
+                }
+                self.emit_unary_to_a(*op, expr)?
+            }
             Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right)?,
             Expr::Call { path, args }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
@@ -3468,7 +3487,10 @@ impl Emitter {
                 .and_then(|sig| sig.return_type.clone())
                 .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path_text(path)))),
             Expr::Unary { expr, op } => match op {
-                UnaryOp::Not => Ok(Type::Named("bool".to_owned())),
+                UnaryOp::Not => {
+                    self.ensure_expr_is_bool(expr, "logical operand")?;
+                    Ok(Type::Named("bool".to_owned()))
+                }
                 UnaryOp::Neg | UnaryOp::BitNot => self.expr_type(expr),
             },
             Expr::Binary { left, op, right } => {
@@ -3687,7 +3709,13 @@ impl Emitter {
                     self.ensure_binary_arithmetic_operands_compatible(left, right)?;
                 }
             }
-            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            Expr::Unary { expr, op } => {
+                self.validate_expr_arithmetic_compatibility(expr)?;
+                if *op == UnaryOp::Not {
+                    self.ensure_expr_is_bool(expr, "logical operand")?;
+                }
+            }
+            Expr::Cast { expr, .. } | Expr::Deref(expr) => {
                 self.validate_expr_arithmetic_compatibility(expr)?;
             }
             Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
@@ -4663,6 +4691,15 @@ mod tests {
                 r#"
                 const FLAG: bool = 1 || false
                 fn main() { test.pass() }
+                "#,
+                "logical operand must be bool",
+            ),
+            (
+                r#"
+                fn main() {
+                    let flag: bool = !1
+                    test.pass()
+                }
                 "#,
                 "logical operand must be bool",
             ),
@@ -5732,8 +5769,8 @@ mod tests {
                 let b: u8 = 0x5A
                 test.assert_eq_u8(-a, 0x{expected_u8_neg:02X}, 1)
                 test.assert_eq_u8(~b, 0x{expected_u8_not:02X}, 2)
-                test.assert_eq_u8(!0, 1, 3)
-                test.assert_eq_u8(!a, 0, 4)
+                test.assert_eq_u8(!(a == 0), 1, 3)
+                test.assert_eq_u8(!(a != 0), 0, 4)
 
                 let c: u16 = 0x0023
                 let d: u16 = 0x120F
