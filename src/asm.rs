@@ -14974,6 +14974,41 @@ section .text
     }
 
     #[test]
+    fn preserves_order_between_ports_and_volatile_mmio() {
+        let source = r#"
+            port FIRST: u8 = 0x20
+            port SECOND: u8 = 0x21
+            port THIRD: u8 = 0x22
+            volatile mmio STATUS: ptr<u8> = 0x040270
+
+            fn main() {
+                out FIRST, 0x11
+                *(STATUS) = 0x22
+                out SECOND, *STATUS
+                *(STATUS) = 0x33
+                out THIRD, *STATUS
+                test.assert_eq_u8(*STATUS, 0x33, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("out0 (20h), a"), "{asm}");
+        assert!(asm.contains("out0 (21h), a"), "{asm}");
+        assert!(asm.contains("out0 (22h), a"), "{asm}");
+        assert!(asm.matches("    ld hl, 040270h").count() >= 4, "{asm}");
+        assert!(asm.matches("    ld a, (hl)").count() >= 3, "{asm}");
+        assert!(asm.matches("    ld (hl), a").count() >= 2, "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.ports[0x20], 0x11, "{asm}");
+        assert_eq!(run.ports[0x21], 0x22, "{asm}");
+        assert_eq!(run.ports[0x22], 0x33, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_static_arrays() {
         let source = r#"
             global palette: [u8; 4] = [1, 2, 3]
