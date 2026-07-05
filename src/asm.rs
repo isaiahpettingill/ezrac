@@ -1220,9 +1220,14 @@ impl Emitter {
                 }
                 BinaryOp::Add
                 | BinaryOp::Sub
+                | BinaryOp::Mul
                 | BinaryOp::BitAnd
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor => {
+                    if *op == BinaryOp::Mul {
+                        self.emit_mul_to_width(left, right, width)?;
+                        return Ok(());
+                    }
                     self.emit_expr_to_hl(left, width)?;
                     self.line("    push hl");
                     self.emit_expr_to_hl(right, width)?;
@@ -1614,6 +1619,10 @@ impl Emitter {
             self.emit_u8_div_mod(left, right, op)?;
             return Ok(());
         }
+        if op == BinaryOp::Mul {
+            self.emit_mul_to_width(left, right, ValueWidth::U8)?;
+            return Ok(());
+        }
 
         self.emit_expr_to_a(left)?;
         self.line("    ld b, a");
@@ -1633,11 +1642,12 @@ impl Emitter {
             | BinaryOp::Gt
             | BinaryOp::Ge => self.emit_comparison(op),
             BinaryOp::And | BinaryOp::Or => self.emit_logical(op),
-            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Shl | BinaryOp::Shr => {
+            BinaryOp::Div | BinaryOp::Mod | BinaryOp::Shl | BinaryOp::Shr => {
                 return Err(Diagnostic::new(format!(
                     "binary operator `{op:?}` is not implemented in u8 codegen yet"
                 )));
             }
+            BinaryOp::Mul => unreachable!("multiplication handled before u8 binary dispatch"),
         }
         Ok(())
     }
@@ -1711,6 +1721,80 @@ impl Emitter {
             _ => unreachable!("not a division op"),
         }
         Ok(())
+    }
+
+    fn emit_mul_to_width(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        let left_var = self.symbols.alloc_var(width.bytes());
+        let counter = self.symbols.alloc_var(width.bytes());
+        let result = self.symbols.alloc_var(width.bytes());
+        let loop_label = self.next_label("mul_loop");
+        let done_label = self.next_label("mul_done");
+
+        self.emit_expr_to_width(left, width)?;
+        self.emit_store_width(left_var);
+        self.emit_expr_to_width(right, width)?;
+        self.emit_store_width(counter);
+        match width {
+            ValueWidth::U8 => self.line("    xor a"),
+            ValueWidth::U16 | ValueWidth::U24 => self.line("    ld hl, 000000h"),
+        }
+        self.emit_store_width(result);
+
+        self.line(&format!("{loop_label}:"));
+        self.emit_jump_if_memory_zero(counter, &done_label);
+        if width == ValueWidth::U8 {
+            self.emit_load_a(result);
+            self.line("    ld b, a");
+            self.emit_load_a(left_var);
+            self.line("    add a, b");
+            self.emit_store_a(result);
+        } else {
+            self.emit_load_width(result);
+            self.line("    push hl");
+            self.emit_load_width(left_var);
+            self.line("    pop bc");
+            self.emit_wide_op_with_left_in_bc(BinaryOp::Add, width)?;
+            self.emit_store_width(result);
+        }
+        self.emit_decrement_memory(counter);
+        self.line(&format!("    jp {loop_label}"));
+        self.line(&format!("{done_label}:"));
+        self.emit_load_width(result);
+        Ok(())
+    }
+
+    fn emit_jump_if_memory_zero(&mut self, variable: Variable, zero_label: &str) {
+        let nonzero_label = self.next_label("nonzero");
+        for offset in 0..variable.size {
+            self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
+            self.line("    or a");
+            self.line(&format!("    jp nz, {nonzero_label}"));
+        }
+        self.line(&format!("    jp {zero_label}"));
+        self.line(&format!("{nonzero_label}:"));
+    }
+
+    fn emit_decrement_memory(&mut self, variable: Variable) {
+        let done_label = self.next_label("dec_done");
+        for offset in 0..variable.size {
+            let addr = variable.addr + offset;
+            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.line("    ld b, a");
+            self.line("    ld a, 01h");
+            self.line("    ld c, a");
+            self.line("    ld a, b");
+            self.line("    sub c");
+            self.line(&format!("    ld ({addr:06X}h), a"));
+            self.line("    ld a, b");
+            self.line("    or a");
+            self.line(&format!("    jp nz, {done_label}"));
+        }
+        self.line(&format!("{done_label}:"));
     }
 
     fn emit_shift_a(&mut self, op: BinaryOp, count: u8) -> Result<(), Diagnostic> {
@@ -2935,6 +3019,61 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_runtime_multiplication() {
+        let expected_u8 = 17u8.wrapping_mul(15);
+        let expected_u16 = 0x0123u16.wrapping_mul(0x0021);
+        let expected_u24 = (0x000123u32 * 0x000045) & 0x00FF_FFFF;
+        let expected_wrap = (0x00FF00u32 * 0x000101) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            struct Accum {{
+                wide: u16
+                long: u24
+            }}
+
+            fn mul8(a: u8, b: u8) -> u8 {{
+                return a * b
+            }}
+
+            fn mul16(a: u16, b: u16) -> u16 {{
+                return a * b
+            }}
+
+            fn mul24(a: u24, b: u24) -> u24 {{
+                return a * b
+            }}
+
+            fn main() {{
+                let a: u8 = mul8(17, 15)
+                test.assert_eq_u8(a, 0x{expected_u8:02X}, 1)
+
+                let b: u16 = mul16(0x0123, 0x0021)
+                test.assert_eq_u16(b, 0x{expected_u16:04X}, 2)
+
+                let c: u24 = mul24(0x000123, 0x000045)
+                test.assert_eq_u24(c, 0x{expected_u24:06X}, 3)
+
+                let d: u24 = mul24(0x00FF00, 0x000101)
+                test.assert_eq_u24(d, 0x{expected_wrap:06X}, 4)
+
+                let accum: Accum = Accum {{ wide: 3, long: 5 }}
+                accum.wide = accum.wide * 7
+                accum.long = accum.long * 9
+                test.assert_eq_u16(accum.wide, 21, 5)
+                test.assert_eq_u24(accum.long, 45, 6)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 120_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
