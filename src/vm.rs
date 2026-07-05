@@ -266,6 +266,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if is_ix_byte_load_or_store(text) {
         Ok(3)
+    } else if parse_ld_reg8_from_hl(text).is_some() || parse_ld_hl_from_reg8(text).is_some() {
+        Ok(1)
     } else if parse_ld_reg8_reg8(text).is_some() {
         Ok(1)
     } else if parse_ld_reg8_imm(text)?.is_some() {
@@ -348,12 +350,12 @@ fn emit_instruction(
         bytes.extend([0xDD, 0x7E, offset]);
     } else if let Some(offset) = parse_ix_byte_store(text)? {
         bytes.extend([0xDD, 0x77, offset]);
-    } else if text == "ld a, (hl)" {
-        bytes.push(0x7E);
+    } else if let Some(register) = parse_ld_reg8_from_hl(text) {
+        bytes.push(0x46 + register * 8);
+    } else if let Some(register) = parse_ld_hl_from_reg8(text) {
+        bytes.push(0x70 + register);
     } else if text == "ld a, (de)" {
         bytes.push(0x1A);
-    } else if text == "ld (hl), a" {
-        bytes.push(0x77);
     } else if let Some(rest) = text.strip_prefix("ld hl, (") {
         let addr = rest
             .strip_suffix(')')
@@ -583,6 +585,22 @@ fn parse_ld_reg8_imm(text: &str) -> Result<Option<(u8, u8)>, Diagnostic> {
         return Ok(None);
     }
     Ok(Some((dst, parse_u8(value)?)))
+}
+
+fn parse_ld_reg8_from_hl(text: &str) -> Option<u8> {
+    let (dst, src) = parse_ld_operands(text)?;
+    if src != "(hl)" {
+        return None;
+    }
+    reg8_code(dst)
+}
+
+fn parse_ld_hl_from_reg8(text: &str) -> Option<u8> {
+    let (dst, src) = parse_ld_operands(text)?;
+    if dst != "(hl)" {
+        return None;
+    }
+    reg8_code(src)
 }
 
 fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
@@ -932,6 +950,59 @@ mod tests {
             ld a, 43h
             ld e, a
             ld a, e
+            out0 (0Ch), a
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"C");
+    }
+
+    #[test]
+    fn assembles_hl_indirect_8_bit_loads_and_stores() {
+        let asm = r#"
+            ld b, (hl)
+            ld c, (hl)
+            ld d, (hl)
+            ld e, (hl)
+            ld h, (hl)
+            ld l, (hl)
+            ld a, (hl)
+            ld (hl), b
+            ld (hl), c
+            ld (hl), d
+            ld (hl), e
+            ld (hl), h
+            ld (hl), l
+            ld (hl), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x46, 0x4E, 0x56, 0x5E, 0x66, 0x6E, 0x7E, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x77,
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_hl_indirect_8_bit_loads_and_stores_on_ez80_vm() {
+        let asm = r#"
+            ld hl, 040100h
+            ld a, 41h
+            ld (hl), a
+            ld b, (hl)
+            inc hl
+            ld (hl), b
+            ld e, (hl)
+            ld a, e
+            add a, 02h
             out0 (0Ch), a
             xor a
             out0 (0Dh), a
