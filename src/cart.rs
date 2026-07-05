@@ -118,15 +118,20 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     code: &[u8],
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<u8>, Diagnostic> {
-    let expected_entry = layout
-        .load
+    let code_offset = layout
+        .entry
         .get()
-        .checked_add(u32::from(HEADER_SIZE))
-        .ok_or_else(|| Diagnostic::new("layout load address leaves no room for header"))?;
-    if !code.is_empty() && layout.entry.get() != expected_entry {
+        .checked_sub(layout.load.get())
+        .ok_or_else(|| {
+            Diagnostic::new(format!(
+                "entry {} is below load address {}",
+                layout.entry, layout.load
+            ))
+        })?;
+    if code_offset < u32::from(HEADER_SIZE) {
         return Err(Diagnostic::new(format!(
-            "current cartridge packer requires entry {} to equal load + header_size 0x{expected_entry:06X}",
-            layout.entry
+            "entry {} overlaps the cartridge header at {}",
+            layout.entry, layout.load
         )));
     }
 
@@ -134,7 +139,7 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     let symbol_table = serialize_symbol_table(symbols);
     let code_len = u32::try_from(code.len())
         .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?;
-    let layout_offset = u32::from(HEADER_SIZE)
+    let layout_offset = code_offset
         .checked_add(code_len)
         .ok_or_else(|| Diagnostic::new("program code exceeds 24-bit address space"))?;
     let symbol_offset = layout_offset
@@ -226,7 +231,15 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     }
 
     let mut image = header.serialize().to_vec();
-    image.extend_from_slice(code);
+    let code_start = usize::try_from(code_offset)
+        .map_err(|_| Diagnostic::new("code offset exceeds host usize range"))?;
+    let code_end = code_start
+        .checked_add(code.len())
+        .ok_or_else(|| Diagnostic::new("program code exceeds addressable image size"))?;
+    if image.len() < code_end {
+        image.resize(code_end, 0);
+    }
+    image[code_start..code_end].copy_from_slice(code);
     image.extend_from_slice(&layout_table);
     image.extend_from_slice(&symbol_table);
     image.append(&mut table);
@@ -638,6 +651,65 @@ mod tests {
         let layout_table = image_offset(read_addr24(&image, 0x1E));
         assert_eq!(layout_table, HEADER_SIZE as usize + code.len());
         assert!(image[layout_table..].starts_with(b"layout ezra_default\n"));
+    }
+
+    #[test]
+    fn cartridge_with_code_can_start_after_header_padding() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let code = [0x31, 0x00, 0x00, 0xF0];
+        let layout = parse_layout(
+            r#"
+                layout padded_entry {
+                    load 0x020000;
+                    entry 0x020080;
+                    stack 0xF00000;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    section .text -> code align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let image =
+            build_cartridge_with_layout_code_and_symbols(&program, &layout, &code, &[]).unwrap();
+
+        assert_eq!(read_addr24(&image, 0x08), 0x020080);
+        assert!(
+            image[HEADER_SIZE as usize..0x80]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert_eq!(&image[0x80..0x80 + code.len()], &code);
+        let layout_table = usize::try_from(read_addr24(&image, 0x1E) - layout.load.get()).unwrap();
+        assert_eq!(layout_table, 0x80 + code.len());
+        assert!(image[layout_table..].starts_with(b"layout padded_entry\n"));
+    }
+
+    #[test]
+    fn cartridge_rejects_entry_inside_header() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let layout = parse_layout(
+            r#"
+                layout bad_entry {
+                    load 0x020000;
+                    entry 0x020020;
+                    stack 0xF00000;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    section .text -> code align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = build_cartridge_with_layout_code_and_symbols(&program, &layout, &[0x00], &[])
+            .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "entry 0x020020 overlaps the cartridge header at 0x020000"
+        );
     }
 
     #[test]
