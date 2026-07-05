@@ -8190,6 +8190,35 @@ mod tests {
     }
 
     #[test]
+    fn rejects_break_and_continue_outside_loops() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    break
+                }
+                "#,
+                "`break` outside loop",
+            ),
+            (
+                r#"
+                fn main() {
+                    continue
+                }
+                "#,
+                "`continue` outside loop",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
     fn rejects_invalid_out_value_types() {
         let cases = [
             (
