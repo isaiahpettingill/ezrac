@@ -1242,6 +1242,10 @@ impl Emitter {
                     self.emit_shift_memory(temp, *op, count)?;
                     self.emit_load_width(temp);
                 }
+                BinaryOp::Div | BinaryOp::Mod => {
+                    self.emit_div_mod_to_width(left, right, *op, width)?;
+                    return Ok(());
+                }
                 _ => {
                     return Err(Diagnostic::new(format!(
                         "binary operator `{op:?}` is not implemented in wide codegen yet"
@@ -1768,6 +1772,52 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_div_mod_to_width(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        op: BinaryOp,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        let dividend = self.symbols.alloc_var(width.bytes());
+        let divisor = self.symbols.alloc_var(width.bytes());
+        let quotient = self.symbols.alloc_var(width.bytes());
+        let loop_label = self.next_label("div_loop");
+        let zero_label = self.next_label("div_zero");
+        let done_label = self.next_label("div_done");
+
+        self.emit_expr_to_hl(left, width)?;
+        self.emit_store_width(dividend);
+        self.emit_expr_to_hl(right, width)?;
+        self.emit_store_width(divisor);
+        self.emit_jump_if_memory_zero(divisor, &zero_label);
+        self.emit_zero_variable(quotient);
+
+        self.line(&format!("{loop_label}:"));
+        self.emit_load_width(dividend);
+        self.line("    push hl");
+        self.emit_load_width(divisor);
+        self.line("    ex de, hl");
+        self.line("    pop hl");
+        self.line("    or a");
+        self.line("    sbc hl, de");
+        self.line(&format!("    jp c, {done_label}"));
+        self.emit_store_width(dividend);
+        self.emit_increment_memory(quotient);
+        self.line(&format!("    jp {loop_label}"));
+
+        self.line(&format!("{zero_label}:"));
+        self.emit_zero_variable(dividend);
+        self.emit_zero_variable(quotient);
+        self.line(&format!("{done_label}:"));
+        match op {
+            BinaryOp::Div => self.emit_load_width(quotient),
+            BinaryOp::Mod => self.emit_load_width(dividend),
+            _ => unreachable!("not a division op"),
+        }
+        Ok(())
+    }
+
     fn emit_jump_if_memory_zero(&mut self, variable: Variable, zero_label: &str) {
         let nonzero_label = self.next_label("nonzero");
         for offset in 0..variable.size {
@@ -1777,6 +1827,30 @@ impl Emitter {
         }
         self.line(&format!("    jp {zero_label}"));
         self.line(&format!("{nonzero_label}:"));
+    }
+
+    fn emit_zero_variable(&mut self, variable: Variable) {
+        match variable.size {
+            1 => self.line("    xor a"),
+            2 | 3 => self.line("    ld hl, 000000h"),
+            _ => unreachable!("unsupported variable size {}", variable.size),
+        }
+        self.emit_store_width(variable);
+    }
+
+    fn emit_increment_memory(&mut self, variable: Variable) {
+        let done_label = self.next_label("inc_done");
+        for offset in 0..variable.size {
+            let addr = variable.addr + offset;
+            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.line("    ld b, a");
+            self.line("    ld a, 01h");
+            self.line("    add a, b");
+            self.line(&format!("    ld ({addr:06X}h), a"));
+            self.line("    or a");
+            self.line(&format!("    jp nz, {done_label}"));
+        }
+        self.line(&format!("{done_label}:"));
     }
 
     fn emit_decrement_memory(&mut self, variable: Variable) {
@@ -3074,6 +3148,52 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), &source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 120_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_wide_runtime_division_and_modulo() {
+        let expected_u16_div = 1000u16 / 17;
+        let expected_u16_mod = 1000u16 % 17;
+        let expected_u24_div = 0x000123u32 / 5;
+        let expected_u24_mod = 0x000123u32 % 5;
+        let source = format!(
+            r#"
+            fn div16(a: u16, b: u16) -> u16 {{
+                return a / b
+            }}
+
+            fn mod16(a: u16, b: u16) -> u16 {{
+                return a % b
+            }}
+
+            fn div24(a: u24, b: u24) -> u24 {{
+                return a / b
+            }}
+
+            fn mod24(a: u24, b: u24) -> u24 {{
+                return a % b
+            }}
+
+            fn main() {{
+                test.assert_eq_u16(div16(1000, 17), {expected_u16_div}, 1)
+                test.assert_eq_u16(mod16(1000, 17), {expected_u16_mod}, 2)
+                test.assert_eq_u16(div16(1000, 0), 0, 3)
+                test.assert_eq_u16(mod16(1000, 0), 0, 4)
+
+                test.assert_eq_u24(div24(0x000123, 5), 0x{expected_u24_div:06X}, 5)
+                test.assert_eq_u24(mod24(0x000123, 5), 0x{expected_u24_mod:06X}, 6)
+                test.assert_eq_u24(div24(0x000123, 0), 0, 7)
+                test.assert_eq_u24(mod24(0x000123, 0), 0, 8)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 80_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
