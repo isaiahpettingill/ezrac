@@ -217,13 +217,19 @@ impl Symbols {
         }
 
         for declaration in &program.declarations {
-            let (name, params, return_type) = match declaration {
-                Declaration::Function(function) => {
-                    (&function.name, &function.params, &function.return_type)
-                }
-                Declaration::ExternAsmFunction(function) => {
-                    (&function.name, &function.params, &function.return_type)
-                }
+            let (name, params, return_type, extern_asm) = match declaration {
+                Declaration::Function(function) => (
+                    &function.name,
+                    &function.params,
+                    &function.return_type,
+                    false,
+                ),
+                Declaration::ExternAsmFunction(function) => (
+                    &function.name,
+                    &function.params,
+                    &function.return_type,
+                    true,
+                ),
                 _ => continue,
             };
             for param in params {
@@ -246,6 +252,11 @@ impl Symbols {
                 && param_widths
                     .get(1)
                     .is_some_and(|second| second.bytes() == 1);
+            if extern_asm && uses_arg_slots {
+                return Err(Diagnostic::new(format!(
+                    "extern asm function `{name}` cannot use a byte second argument followed by a wide third argument"
+                )));
+            }
             let mut stack_arg_offsets = vec![None; params.len()];
             let mut stack_arg_bytes = 0u8;
             if params.len() > 3 {
@@ -8868,6 +8879,24 @@ mod tests {
         assert!(run.halted, "{linked}");
         assert_eq!(run.result_code, 0, "{linked}");
         assert_eq!(run.debug_output, b"B", "{linked}");
+    }
+
+    #[test]
+    fn rejects_extern_asm_signatures_that_need_internal_arg_slots() {
+        let source = r#"
+            extern asm fn raw_mixed(first: u8, second: u8, third: u24) -> u24
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "extern asm function `raw_mixed` cannot use a byte second argument followed by a wide third argument"
+        );
     }
 
     #[test]
