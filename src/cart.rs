@@ -6,8 +6,8 @@ use std::{
 
 use crate::{
     ast::{
-        AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, Program, StructDecl,
-        Type, UnaryOp,
+        AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, Program, Stmt,
+        StructDecl, Type, UnaryOp,
     },
     diagnostic::Diagnostic,
     layout::{Layout, Region},
@@ -451,6 +451,11 @@ fn append_layout_section_map_entries(
             })?;
         usage.insert(section, total);
     }
+    add_section_usage(
+        &mut usage,
+        ".rodata",
+        section_usage_from_string_literals(program)?,
+    )?;
 
     let mut region_cursors = Vec::<(String, u32)>::new();
     for section in &layout.sections {
@@ -557,18 +562,152 @@ fn section_usage_from_globals(program: &Program) -> Result<HashMap<String, u32>,
         } else {
             ".data"
         };
-        let total = usage
-            .get(section)
-            .copied()
-            .unwrap_or(0)
-            .checked_add(size)
-            .ok_or_else(|| {
-                Diagnostic::new(format!("section `{section}` exceeds 24-bit address space"))
-            })?;
-        usage.insert(section.to_owned(), total);
+        add_section_usage(&mut usage, section, size)?;
     }
 
     Ok(usage)
+}
+
+fn add_section_usage(
+    usage: &mut HashMap<String, u32>,
+    section: &str,
+    size: u32,
+) -> Result<(), Diagnostic> {
+    let total = usage
+        .get(section)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(size)
+        .ok_or_else(|| {
+            Diagnostic::new(format!("section `{section}` exceeds 24-bit address space"))
+        })?;
+    usage.insert(section.to_owned(), total);
+    Ok(())
+}
+
+fn section_usage_from_string_literals(program: &Program) -> Result<u32, Diagnostic> {
+    let mut literals = HashSet::<String>::new();
+    for declaration in &program.declarations {
+        collect_declaration_string_literals(declaration, &mut literals);
+    }
+
+    literals.into_iter().try_fold(0u32, |size, value| {
+        let len = value
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("string literal is too large"))?;
+        let len = u32::try_from(len).map_err(|_| Diagnostic::new("string literal is too large"))?;
+        size.checked_add(len)
+            .ok_or_else(|| Diagnostic::new("section `.rodata` exceeds 24-bit address space"))
+    })
+}
+
+fn collect_declaration_string_literals(declaration: &Declaration, literals: &mut HashSet<String>) {
+    match declaration {
+        Declaration::Const(decl) => collect_expr_string_literals(&decl.value, literals),
+        Declaration::Port(decl) => collect_expr_string_literals(&decl.value, literals),
+        Declaration::Mmio(decl) => collect_expr_string_literals(&decl.value, literals),
+        Declaration::Global(decl) => collect_expr_string_literals(&decl.value, literals),
+        Declaration::Embed(_) => {}
+        Declaration::Function(function) => collect_stmt_string_literals(&function.body, literals),
+        Declaration::Import(_)
+        | Declaration::Alias(_)
+        | Declaration::Struct(_)
+        | Declaration::ExternAsmFunction(_) => {}
+    }
+}
+
+fn collect_stmt_string_literals(stmts: &[Stmt], literals: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Out { value, .. } | Stmt::Expr(value) => {
+                collect_expr_string_literals(value, literals)
+            }
+            Stmt::Assign { target, value, .. } => {
+                collect_place_string_literals(target, literals);
+                collect_expr_string_literals(value, literals);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_string_literals(condition, literals);
+                collect_stmt_string_literals(then_body, literals);
+                collect_stmt_string_literals(else_body, literals);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_string_literals(condition, literals);
+                collect_stmt_string_literals(body, literals);
+            }
+            Stmt::Loop { body } => collect_stmt_string_literals(body, literals),
+            Stmt::Return(Some(value)) => collect_expr_string_literals(value, literals),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_place_string_literals(place: &crate::ast::Place, literals: &mut HashSet<String>) {
+    match place {
+        crate::ast::Place::Index { index, .. } | crate::ast::Place::Deref(index) => {
+            collect_expr_string_literals(index, literals)
+        }
+        crate::ast::Place::Access(path) => collect_access_path_string_literals(path, literals),
+        crate::ast::Place::Ident(_) | crate::ast::Place::Field { .. } => {}
+    }
+}
+
+fn collect_expr_string_literals(expr: &Expr, literals: &mut HashSet<String>) {
+    match expr {
+        Expr::String(value) => {
+            literals.insert(value.clone());
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_string_literals(value, literals);
+            }
+        }
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+            collect_expr_string_literals(index, literals)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            collect_access_path_string_literals(path, literals)
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_string_literals(value, literals);
+            }
+        }
+        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+            collect_expr_string_literals(value, literals)
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_string_literals(arg, literals);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_string_literals(left, literals);
+            collect_expr_string_literals(right, literals);
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. }
+        | Expr::AddressOf(_) => {}
+    }
+}
+
+fn collect_access_path_string_literals(path: &AccessPath, literals: &mut HashSet<String>) {
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            collect_expr_string_literals(index, literals);
+        }
+    }
 }
 
 fn collect_structs(program: &Program) -> HashMap<String, &StructDecl> {
@@ -1862,6 +2001,30 @@ mod tests {
         );
         assert!(
             map.contains(".bss         0x040010 0x040015 0x000006"),
+            "{map}"
+        );
+    }
+
+    #[test]
+    fn cartridge_map_reports_string_literal_rodata_usage() {
+        let source = r#"
+            global title: ptr<u8> = "EZ"
+
+            fn same(a: ptr<u8>, b: ptr<u8>) -> bool {
+                return a == b
+            }
+
+            fn main() {
+                let text: ptr<u8> = "OK"
+                test.assert_eq_u8(same(text, "OK"), true, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let map = build_cartridge_map(&program, &Layout::ezra_default(), 4, &[]).unwrap();
+
+        assert!(
+            map.contains(".rodata      0x020000 0x020005 0x000006"),
             "{map}"
         );
     }
