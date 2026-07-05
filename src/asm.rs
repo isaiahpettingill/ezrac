@@ -1875,7 +1875,6 @@ impl Emitter {
         self.emit_out(0x0E, 1);
         self.line("    ret");
         self.line("__ezra_memcpy:");
-        self.line(".L_memcpy_loop:");
         self.line("    push de");
         self.line("    push hl");
         self.line("    push bc");
@@ -1886,12 +1885,9 @@ impl Emitter {
         self.line("    pop hl");
         self.line("    pop de");
         self.line("    ret z");
-        self.line("    ld a, (de)");
-        self.line("    ld (hl), a");
-        self.line("    inc de");
-        self.line("    inc hl");
-        self.line("    dec bc");
-        self.line("    jp .L_memcpy_loop");
+        self.line("    ex de, hl");
+        self.line("    ldir");
+        self.line("    ret");
         self.line("__ezra_memset:");
         self.line(".L_memset_loop:");
         self.line("    push hl");
@@ -8997,7 +8993,7 @@ mod tests {
         assert!(asm.contains("__ezra_memcpy:"), "{asm}");
         assert!(
             asm.contains(
-                "__ezra_memcpy:\n.L_memcpy_loop:\n    push de\n    push hl\n    push bc\n    pop hl\n    ld de, 000000h\n    or a\n    sbc hl, de\n    pop hl\n    pop de\n    ret z"
+                "__ezra_memcpy:\n    push de\n    push hl\n    push bc\n    pop hl\n    ld de, 000000h\n    or a\n    sbc hl, de\n    pop hl\n    pop de\n    ret z\n    ex de, hl\n    ldir\n    ret"
             ),
             "{asm}"
         );
