@@ -434,6 +434,7 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
     let mut assets = Vec::new();
     let mut custom_section_ids = HashMap::<String, u8>::new();
     let mut next_custom_section_id = SECTION_CUSTOM_BASE;
+    let aliases = collect_embed_aliases(program);
     let constants = collect_embed_constants(program)?;
     for declaration in &program.declarations {
         let Declaration::Embed(decl) = declaration else {
@@ -445,7 +446,7 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
         let align = decl
             .align
             .as_ref()
-            .map(|expr| eval_embed_expr(expr, &constants))
+            .map(|expr| eval_embed_expr_with_aliases(expr, &constants, &aliases))
             .transpose()?
             .unwrap_or(1);
         if align <= 0 || (align & (align - 1)) != 0 {
@@ -466,7 +467,7 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
             &mut custom_section_ids,
             &mut next_custom_section_id,
         )?;
-        let bytes = embed_bytes(&decl.source, &program.source_path, &constants)?;
+        let bytes = embed_bytes(&decl.source, &program.source_path, &constants, &aliases)?;
         assets.push(AssetEntry {
             name: decl.name.clone(),
             bytes,
@@ -477,6 +478,16 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
         });
     }
     Ok(assets)
+}
+
+fn collect_embed_aliases(program: &Program) -> HashMap<String, Type> {
+    let mut aliases = HashMap::new();
+    for declaration in &program.declarations {
+        if let Declaration::Alias(decl) = declaration {
+            aliases.insert(decl.name.clone(), decl.ty.clone());
+        }
+    }
+    aliases
 }
 
 fn section_id(
@@ -610,12 +621,7 @@ fn section_cursor<'a>(
 }
 
 fn collect_embed_constants(program: &Program) -> Result<HashMap<String, i64>, Diagnostic> {
-    let mut aliases = HashMap::new();
-    for declaration in &program.declarations {
-        if let Declaration::Alias(decl) = declaration {
-            aliases.insert(decl.name.clone(), decl.ty.clone());
-        }
-    }
+    let aliases = collect_embed_aliases(program);
 
     let mut constants = HashMap::new();
     let mut evaluating = HashSet::new();
@@ -671,7 +677,7 @@ fn evaluate_embed_constant(
         ensure_embed_constant_dependencies_evaluated(
             value_expr, program, aliases, constants, evaluating,
         )?;
-        let value = eval_embed_expr(value_expr, constants)?;
+        let value = eval_embed_expr_with_aliases(value_expr, constants, aliases)?;
         let value = if let Some(ty) = ty {
             wrap_embed_const_value(value, ty, aliases)?
         } else {
@@ -783,6 +789,7 @@ fn embed_bytes(
     source: &EmbedSource,
     source_path: &Path,
     constants: &HashMap<String, i64>,
+    aliases: &HashMap<String, Type>,
 ) -> Result<Vec<u8>, Diagnostic> {
     match source {
         EmbedSource::File(path) => {
@@ -809,7 +816,7 @@ fn embed_bytes(
         EmbedSource::Bytes(values) => values
             .iter()
             .map(|value| {
-                let byte = eval_embed_expr(value, constants)?;
+                let byte = eval_embed_expr_with_aliases(value, constants, aliases)?;
                 if !(0..=0xFF).contains(&byte) {
                     return Err(Diagnostic::new(format!(
                         "embedded byte value {byte} is outside u8 range"
@@ -825,13 +832,13 @@ fn embed_bytes(
             Ok(bytes)
         }
         EmbedSource::Repeat { value, len } => {
-            let byte = eval_embed_expr(value, constants)?;
+            let byte = eval_embed_expr_with_aliases(value, constants, aliases)?;
             if !(0..=0xFF).contains(&byte) {
                 return Err(Diagnostic::new(format!(
                     "embedded repeat byte value {byte} is outside u8 range"
                 )));
             }
-            let len = eval_embed_expr(len, constants)?;
+            let len = eval_embed_expr_with_aliases(len, constants, aliases)?;
             if !(0..=0xFF_FFFF).contains(&len) {
                 return Err(Diagnostic::new(format!(
                     "embedded repeat length {len} is outside u24 range"
@@ -842,7 +849,11 @@ fn embed_bytes(
     }
 }
 
-fn eval_embed_expr(expr: &Expr, constants: &HashMap<String, i64>) -> Result<i64, Diagnostic> {
+fn eval_embed_expr_with_aliases(
+    expr: &Expr,
+    constants: &HashMap<String, i64>,
+    aliases: &HashMap<String, Type>,
+) -> Result<i64, Diagnostic> {
     match expr {
         Expr::Int(value) | Expr::TypedInt(value, _) => Ok(*value),
         Expr::Char(value) => Ok(i64::from(*value)),
@@ -866,7 +877,7 @@ fn eval_embed_expr(expr: &Expr, constants: &HashMap<String, i64>) -> Result<i64,
                 .ok_or_else(|| Diagnostic::new(format!("unknown embed constant `{name}`")))
         }
         Expr::Unary { op, expr } => {
-            let value = eval_embed_expr(expr, constants)?;
+            let value = eval_embed_expr_with_aliases(expr, constants, aliases)?;
             match op {
                 UnaryOp::Neg => Ok(value.wrapping_neg()),
                 UnaryOp::BitNot => Ok(!value),
@@ -874,8 +885,8 @@ fn eval_embed_expr(expr: &Expr, constants: &HashMap<String, i64>) -> Result<i64,
             }
         }
         Expr::Binary { left, op, right } => {
-            let left = eval_embed_expr(left, constants)?;
-            let right = eval_embed_expr(right, constants)?;
+            let left = eval_embed_expr_with_aliases(left, constants, aliases)?;
+            let right = eval_embed_expr_with_aliases(right, constants, aliases)?;
             match op {
                 BinaryOp::Add => Ok(left.wrapping_add(right)),
                 BinaryOp::Sub => Ok(left.wrapping_sub(right)),
@@ -895,10 +906,19 @@ fn eval_embed_expr(expr: &Expr, constants: &HashMap<String, i64>) -> Result<i64,
                 } else {
                     0
                 }),
-                _ => Err(Diagnostic::new(
-                    "embed expressions must be integer constants",
-                )),
+                BinaryOp::Lt => Ok(i64::from(left < right)),
+                BinaryOp::Le => Ok(i64::from(left <= right)),
+                BinaryOp::Gt => Ok(i64::from(left > right)),
+                BinaryOp::Ge => Ok(i64::from(left >= right)),
+                BinaryOp::Eq => Ok(i64::from(left == right)),
+                BinaryOp::Ne => Ok(i64::from(left != right)),
+                BinaryOp::And => Ok(i64::from(left != 0 && right != 0)),
+                BinaryOp::Or => Ok(i64::from(left != 0 || right != 0)),
             }
+        }
+        Expr::Cast { expr, ty } => {
+            let value = eval_embed_expr_with_aliases(expr, constants, aliases)?;
+            wrap_embed_const_value(value, ty, aliases)
         }
         _ => Err(Diagnostic::new(
             "embed expressions must be integer constants",
@@ -1288,7 +1308,7 @@ mod tests {
         let source = r#"
             alias byte = u8
 
-            embed values: bytes = bytes [VALUE, DEVICE & 0xFF] section .assets align ALIGN
+            embed values: bytes = bytes [VALUE, cast<byte>(DEVICE)] section .assets align ALIGN
             embed repeated: bytes = repeat(FILL, COUNT) section .assets align 1
 
             const VALUE: byte = RAW_VALUE
@@ -1315,6 +1335,41 @@ mod tests {
     }
 
     #[test]
+    fn cartridge_embed_expressions_support_casts_and_comparisons() {
+        let source = r#"
+            alias byte = u8
+
+            const RAW: u16 = 0x1234
+            const DEVICE: ptr<u8> = cast<ptr<u8>>(0x040123)
+
+            embed values: bytes = bytes [
+                cast<byte>(RAW),
+                cast<u8>(-1),
+                cast<bool>(2),
+                cast<u8>(cast<ptr24>(DEVICE)),
+                RAW > 0x1000,
+                RAW == 0xFFFF,
+                true && false,
+                false || (RAW != 0),
+                !false,
+            ] section .assets align cast<u8>(4)
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let image = build_cartridge(&program).unwrap();
+        let table = image_offset(read_addr24(&image, 0x21));
+        let values_addr = read_addr24(&image, table);
+        let values = image_offset(values_addr);
+
+        assert_eq!(values_addr % 4, 0);
+        assert_eq!(
+            &image[values..values + 9],
+            &[0x34, 0xFF, 0x01, 0x23, 0x01, 0x00, 0x00, 0x01, 0x01]
+        );
+    }
+
+    #[test]
     fn embed_expression_division_overflow_is_defined() {
         let min = Expr::Int(i64::MIN);
         let minus_one = Expr::Unary {
@@ -1333,8 +1388,15 @@ mod tests {
         };
 
         let constants = HashMap::new();
-        assert_eq!(eval_embed_expr(&div, &constants).unwrap(), i64::MIN);
-        assert_eq!(eval_embed_expr(&rem, &constants).unwrap(), 0);
+        let aliases = HashMap::new();
+        assert_eq!(
+            eval_embed_expr_with_aliases(&div, &constants, &aliases).unwrap(),
+            i64::MIN
+        );
+        assert_eq!(
+            eval_embed_expr_with_aliases(&rem, &constants, &aliases).unwrap(),
+            0
+        );
     }
 
     #[test]
