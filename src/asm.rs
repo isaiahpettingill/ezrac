@@ -7095,10 +7095,16 @@ fn inline_return_body(function: &Function) -> Option<(&[Stmt], Expr)> {
 }
 
 fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
-    if function.return_type.is_some() || function.body.iter().any(stmt_contains_return) {
+    if function.return_type.is_some() {
         return None;
     }
-    Some(&function.body)
+    match function.body.split_last() {
+        Some((Stmt::Return(None), prefix)) if !prefix.iter().any(stmt_contains_return) => {
+            Some(prefix)
+        }
+        _ if !function.body.iter().any(stmt_contains_return) => Some(&function.body),
+        _ => None,
+    }
 }
 
 fn is_inlinable_function(function: &Function) -> bool {
@@ -11045,6 +11051,32 @@ section .text
         assert_eq!(run.result_code, 0, "{asm}");
         assert!(!asm.contains("call _send"), "{asm}");
         assert!(!asm.contains("_send:"), "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_void_inline_functions_with_final_return() {
+        let source = r#"
+            global value: u8 = 0
+
+            inline fn store(value_arg: u8) {
+                value = value_arg
+                return
+            }
+
+            fn main() {
+                store(7)
+                test.assert_eq_u8(value, 7, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(!asm.contains("call _store"), "{asm}");
+        assert!(!asm.contains("_store:"), "{asm}");
     }
 
     #[test]
