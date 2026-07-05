@@ -5878,6 +5878,11 @@ fn validate_inline_asm_clobbers(
                 "inline asm uses ports without declaring clobber `ports`",
             ));
         }
+        if asm_line_clobbers_flags(&lower) && !asm_clobbers_include_flags(clobbers) {
+            return Err(Diagnostic::new(
+                "inline asm changes flags without declaring clobber `flags`",
+            ));
+        }
     }
     Ok(())
 }
@@ -5886,11 +5891,55 @@ fn asm_clobbers_include(clobbers: &[String], name: &str) -> bool {
     clobbers.iter().any(|clobber| clobber == name)
 }
 
+fn asm_clobbers_include_flags(clobbers: &[String]) -> bool {
+    asm_clobbers_include(clobbers, "flags")
+        || asm_clobbers_include(clobbers, "f")
+        || asm_clobbers_include(clobbers, "af")
+}
+
 fn asm_line_uses_ports(line: &str) -> bool {
     asm_line_mentions_word(line, "out")
         || asm_line_mentions_word(line, "out0")
         || asm_line_mentions_word(line, "in")
         || asm_line_mentions_word(line, "in0")
+}
+
+fn asm_line_clobbers_flags(line: &str) -> bool {
+    let mut text = line.trim_start();
+    if let Some((label, rest)) = text.split_once(':') {
+        if !label.chars().any(char::is_whitespace) {
+            text = rest.trim_start();
+        }
+    }
+    let mnemonic = text.split_whitespace().next().unwrap_or("");
+    matches!(
+        mnemonic,
+        "adc"
+            | "add"
+            | "and"
+            | "bit"
+            | "cp"
+            | "cpl"
+            | "daa"
+            | "dec"
+            | "inc"
+            | "neg"
+            | "or"
+            | "rl"
+            | "rla"
+            | "rlc"
+            | "rlca"
+            | "rr"
+            | "rra"
+            | "rrc"
+            | "rrca"
+            | "sbc"
+            | "sla"
+            | "sra"
+            | "srl"
+            | "sub"
+            | "xor"
+    )
 }
 
 fn asm_line_mentions_word(line: &str, word: &str) -> bool {
@@ -8127,6 +8176,17 @@ mod tests {
                 "#,
                 "inline asm clobber `sp` is only allowed in naked functions",
             ),
+            (
+                r#"
+                fn main() {
+                    asm volatile(clobber a) {
+                        "xor a"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm changes flags without declaring clobber `flags`",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -8134,6 +8194,28 @@ mod tests {
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn accepts_inline_asm_declared_flags_clobbers() {
+        for clobber in ["flags", "f", "af"] {
+            let source = format!(
+                r#"
+                fn main() {{
+                    asm volatile(clobber a, clobber {clobber}) {{
+                        "xor a"
+                    }}
+                    test.pass()
+                }}
+                "#
+            );
+            let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+            let asm = emit_ez80_assembly(&program).unwrap();
+            let run = run_assembly_test(&asm, 1_000).unwrap();
+
+            assert!(run.halted, "{asm}");
+            assert_eq!(run.result_code, 0, "{asm}");
         }
     }
 
