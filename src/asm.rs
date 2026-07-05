@@ -1609,7 +1609,9 @@ impl Emitter {
                 self.emit_mem_poke8(args)?;
             }
             path if path.contains('.') => {
-                self.line(&format!("    call _{}", path.replace('.', "_")))
+                return Err(Diagnostic::new(format!(
+                    "module-qualified call `{path}` is not implemented in assembly codegen yet"
+                )));
             }
             path => self.emit_user_call(path, args)?,
         }
@@ -1875,7 +1877,13 @@ impl Emitter {
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
-            Expr::Array(_) | Expr::StructInit { .. } | Expr::In(_) | Expr::Call { .. } => {
+            Expr::Call { path, .. } => {
+                return Err(Diagnostic::new(format!(
+                    "module-qualified call `{}` is not implemented in assembly codegen yet",
+                    path_text(path)
+                )));
+            }
+            Expr::Array(_) | Expr::StructInit { .. } | Expr::In(_) => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u16 codegen"
                 )));
@@ -2052,12 +2060,17 @@ impl Emitter {
             Expr::Call { path, args } if path.len() == 1 => {
                 self.emit_user_call(&path[0], args)?;
             }
+            Expr::Call { path, .. } => {
+                return Err(Diagnostic::new(format!(
+                    "module-qualified call `{}` is not implemented in assembly codegen yet",
+                    path_text(path)
+                )));
+            }
             Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
             | Expr::AddressOf(_)
             | Expr::Array(_)
             | Expr::StructInit { .. }
-            | Expr::Call { .. }
             | Expr::String(_) => {
                 return Err(Diagnostic::new(format!(
                     "expression `{expr:?}` is not supported in u8 codegen"
@@ -3279,7 +3292,10 @@ impl Emitter {
             {
                 Ok(Type::Named("u8".to_owned()))
             }
-            Expr::Call { .. } => Ok(Type::Named("u8".to_owned())),
+            Expr::Call { path, .. } => Err(Diagnostic::new(format!(
+                "module-qualified call `{}` is not implemented in assembly codegen yet",
+                path_text(path)
+            ))),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => Ok(Type::Named("bool".to_owned())),
                 UnaryOp::Neg | UnaryOp::BitNot => self.expr_type(expr),
@@ -3366,7 +3382,10 @@ impl Emitter {
                 .get(&path[0])
                 .map(|sig| sig.return_width)
                 .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path[0]))),
-            Expr::Call { .. } => Ok(ValueWidth::U8),
+            Expr::Call { path, .. } => Err(Diagnostic::new(format!(
+                "module-qualified call `{}` is not implemented in assembly codegen yet",
+                path_text(path)
+            ))),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => Ok(ValueWidth::U8),
                 UnaryOp::Neg | UnaryOp::BitNot => self.expr_width(expr),
@@ -4651,6 +4670,34 @@ mod tests {
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "duplicate inline asm operand `value`");
+    }
+
+    #[test]
+    fn rejects_unsupported_module_qualified_calls() {
+        let cases = [
+            r#"
+            fn main() {
+                math.add(1, 2)
+                test.pass()
+            }
+            "#,
+            r#"
+            fn main() {
+                let value: u8 = math.add(1, 2)
+                test.pass()
+            }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(
+                error.message,
+                "module-qualified call `math.add` is not implemented in assembly codegen yet"
+            );
+        }
     }
 
     #[test]
