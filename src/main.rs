@@ -883,10 +883,10 @@ mod tests {
 
                     symbol EZRA_LOAD_ADDR = 0x020000;
                     symbol EZRA_ENTRY_ADDR = 0x020040;
-                    symbol EZRA_CODE_BASE = 0x020080;
-                    symbol EZRA_STACK_TOP = 0xEFFF00;
-                    symbol EZRA_RAM_BASE = 0x030000;
-                    symbol EZRA_AUDIO_BASE = 0x0D0000;
+                    symbol EZRA_CODE_BASE = 0x020000 + cast<u8>(0x0180);
+                    symbol EZRA_STACK_TOP = 0xEFFEFF + cast<bool>(0x1234);
+                    symbol EZRA_RAM_BASE = 0x020000 + cast<ptr<u8>>(0x1010000);
+                    symbol EZRA_AUDIO_BASE = 0x0CFF00 + cast<u16>(0x010100);
                 }
             "#,
         )

@@ -440,11 +440,15 @@ fn eval_layout_expr(
             .copied()
             .ok_or_else(|| Diagnostic::new(format!("unknown layout symbol `{}`", pair.as_str()))),
         Rule::cast_expr => {
-            let expr = pair
-                .into_inner()
-                .find(|inner| inner.as_rule() == Rule::expr)
+            let mut inner = pair.into_inner();
+            let ty = inner
+                .next()
+                .ok_or_else(|| Diagnostic::new("layout cast is missing a type"))?;
+            let expr = inner
+                .next()
                 .ok_or_else(|| Diagnostic::new("layout cast is missing an expression"))?;
-            eval_layout_expr(expr, symbols)
+            let value = eval_layout_expr(expr, symbols)?;
+            eval_layout_cast(value, ty)
         }
         other => Err(Diagnostic::new(format!(
             "unsupported layout expression `{}` ({other:?})",
@@ -517,6 +521,51 @@ fn eval_layout_binary_op(left: i128, op: &str, right: i128) -> Result<i128, Diag
         other => Err(Diagnostic::new(format!(
             "unsupported layout binary operator `{other}`"
         ))),
+    }
+}
+
+fn eval_layout_cast(value: i128, ty: Pair<'_, Rule>) -> Result<i128, Diagnostic> {
+    let inner = ty
+        .into_inner()
+        .next()
+        .ok_or_else(|| Diagnostic::new("layout cast is missing a type"))?;
+    match inner.as_rule() {
+        Rule::named_ty => cast_layout_named_type(value, inner.as_str()),
+        Rule::ptr_ty => Ok(wrap_layout_unsigned(value, 24)),
+        Rule::array_ty => Err(Diagnostic::new("layout casts cannot target array types")),
+        other => Err(Diagnostic::new(format!(
+            "unsupported layout cast type `{}` ({other:?})",
+            inner.as_str()
+        ))),
+    }
+}
+
+fn cast_layout_named_type(value: i128, name: &str) -> Result<i128, Diagnostic> {
+    match name {
+        "bool" => Ok(i128::from(value != 0)),
+        "u8" => Ok(wrap_layout_unsigned(value, 8)),
+        "u16" => Ok(wrap_layout_unsigned(value, 16)),
+        "u24" | "ptr24" => Ok(wrap_layout_unsigned(value, 24)),
+        "i8" => Ok(wrap_layout_signed(value, 8)),
+        "i16" => Ok(wrap_layout_signed(value, 16)),
+        "i24" => Ok(wrap_layout_signed(value, 24)),
+        other => Err(Diagnostic::new(format!(
+            "unknown layout cast type `{other}`"
+        ))),
+    }
+}
+
+fn wrap_layout_unsigned(value: i128, bits: u32) -> i128 {
+    value & ((1_i128 << bits) - 1)
+}
+
+fn wrap_layout_signed(value: i128, bits: u32) -> i128 {
+    let unsigned = wrap_layout_unsigned(value, bits);
+    let sign_bit = 1_i128 << (bits - 1);
+    if unsigned & sign_bit != 0 {
+        unsigned - (1_i128 << bits)
+    } else {
+        unsigned
     }
 }
 
@@ -706,6 +755,9 @@ mod tests {
                 symbol MIRROR = TEXT_END + (0b1000 | 0b0011);
                 symbol DIV_ZERO = 0x123456 / 0;
                 symbol MOD_ZERO = 0x123456 % 0;
+                symbol CAST_BYTE = cast<u8>(0x1234);
+                symbol CAST_BOOL = cast<bool>(0x20);
+                symbol CAST_PTR = cast<ptr<u8>>(0x1020003);
             }
         "#;
 
@@ -718,6 +770,9 @@ mod tests {
         );
         assert_eq!(layout.symbols[2].value.get(), 0);
         assert_eq!(layout.symbols[3].value.get(), 0);
+        assert_eq!(layout.symbols[4].value.get(), 0x34);
+        assert_eq!(layout.symbols[5].value.get(), 1);
+        assert_eq!(layout.symbols[6].value.get(), 0x020003);
     }
 
     #[test]
