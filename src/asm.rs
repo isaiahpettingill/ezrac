@@ -5883,6 +5883,13 @@ fn validate_inline_asm_clobbers(
                 "inline asm changes flags without declaring clobber `flags`",
             ));
         }
+        for register in asm_line_modified_registers(&lower) {
+            if !asm_clobbers_include_register(clobbers, register) {
+                return Err(Diagnostic::new(format!(
+                    "inline asm modifies `{register}` without declaring clobber `{register}`"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -5897,6 +5904,26 @@ fn asm_clobbers_include_flags(clobbers: &[String]) -> bool {
         || asm_clobbers_include(clobbers, "af")
 }
 
+fn asm_clobbers_include_register(clobbers: &[String], register: &str) -> bool {
+    if asm_clobbers_include(clobbers, register) {
+        return true;
+    }
+    match register {
+        "a" | "f" => asm_clobbers_include(clobbers, "af"),
+        "b" | "c" => asm_clobbers_include(clobbers, "bc"),
+        "d" | "e" => asm_clobbers_include(clobbers, "de"),
+        "h" | "l" => asm_clobbers_include(clobbers, "hl"),
+        "af" => {
+            asm_clobbers_include(clobbers, "a")
+                && (asm_clobbers_include(clobbers, "f") || asm_clobbers_include(clobbers, "flags"))
+        }
+        "bc" => asm_clobbers_include(clobbers, "b") && asm_clobbers_include(clobbers, "c"),
+        "de" => asm_clobbers_include(clobbers, "d") && asm_clobbers_include(clobbers, "e"),
+        "hl" => asm_clobbers_include(clobbers, "h") && asm_clobbers_include(clobbers, "l"),
+        _ => false,
+    }
+}
+
 fn asm_line_uses_ports(line: &str) -> bool {
     asm_line_mentions_word(line, "out")
         || asm_line_mentions_word(line, "out0")
@@ -5904,14 +5931,35 @@ fn asm_line_uses_ports(line: &str) -> bool {
         || asm_line_mentions_word(line, "in0")
 }
 
-fn asm_line_clobbers_flags(line: &str) -> bool {
-    let mut text = line.trim_start();
-    if let Some((label, rest)) = text.split_once(':') {
-        if !label.chars().any(char::is_whitespace) {
-            text = rest.trim_start();
+fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
+    let Some((mnemonic, operands)) = asm_line_mnemonic_and_operands(line) else {
+        return Vec::new();
+    };
+    let first = asm_first_operand(operands);
+    match mnemonic {
+        "ld" | "lea" | "pop" | "in" | "in0" => asm_operand_register(first).into_iter().collect(),
+        "inc" | "dec" | "rl" | "rlc" | "rr" | "rrc" | "sla" | "sra" | "srl" => {
+            asm_operand_register(first).into_iter().collect()
         }
+        "add" | "adc" | "sbc" => match asm_operand_register(first) {
+            Some(register) => vec![register],
+            None => vec!["a"],
+        },
+        "sub" | "and" | "or" | "xor" | "cpl" | "daa" | "neg" | "rla" | "rlca" | "rra" | "rrca" => {
+            vec!["a"]
+        }
+        "ex" => asm_line_exchange_registers(operands),
+        "exx" => vec!["bc", "de", "hl"],
+        "ldi" | "ldir" | "ldd" | "lddr" => vec!["bc", "de", "hl"],
+        "cpi" | "cpir" | "cpd" | "cpdr" => vec!["bc", "hl"],
+        _ => Vec::new(),
     }
-    let mnemonic = text.split_whitespace().next().unwrap_or("");
+}
+
+fn asm_line_clobbers_flags(line: &str) -> bool {
+    let Some((mnemonic, _)) = asm_line_mnemonic_and_operands(line) else {
+        return false;
+    };
     matches!(
         mnemonic,
         "adc"
@@ -5940,6 +5988,68 @@ fn asm_line_clobbers_flags(line: &str) -> bool {
             | "sub"
             | "xor"
     )
+}
+
+fn asm_line_mnemonic_and_operands(line: &str) -> Option<(&str, &str)> {
+    let mut text = line.trim_start();
+    if let Some((label, rest)) = text.split_once(':') {
+        if !label.chars().any(char::is_whitespace) {
+            text = rest.trim_start();
+        }
+    }
+    let mnemonic_end = text
+        .find(|ch: char| ch.is_ascii_whitespace())
+        .unwrap_or(text.len());
+    if mnemonic_end == 0 {
+        return None;
+    }
+    let mnemonic = &text[..mnemonic_end];
+    let operands = text[mnemonic_end..].trim_start();
+    Some((mnemonic, operands))
+}
+
+fn asm_first_operand(operands: &str) -> &str {
+    operands
+        .split_once(',')
+        .map(|(first, _)| first)
+        .unwrap_or(operands)
+        .trim()
+}
+
+fn asm_operand_register(operand: &str) -> Option<&'static str> {
+    let register = operand
+        .trim()
+        .trim_end_matches(',')
+        .trim_end_matches(':')
+        .trim();
+    match register {
+        "a" => Some("a"),
+        "f" => Some("f"),
+        "af" => Some("af"),
+        "b" => Some("b"),
+        "c" => Some("c"),
+        "bc" => Some("bc"),
+        "d" => Some("d"),
+        "e" => Some("e"),
+        "de" => Some("de"),
+        "h" => Some("h"),
+        "l" => Some("l"),
+        "hl" => Some("hl"),
+        "ix" => Some("ix"),
+        "iy" => Some("iy"),
+        "sp" => Some("sp"),
+        _ => None,
+    }
+}
+
+fn asm_line_exchange_registers(operands: &str) -> Vec<&'static str> {
+    let mut registers = Vec::new();
+    for operand in operands.split(',') {
+        if let Some(register) = asm_operand_register(operand) {
+            registers.push(register);
+        }
+    }
+    registers
 }
 
 fn asm_line_mentions_word(line: &str, word: &str) -> bool {
@@ -7812,7 +7922,7 @@ mod tests {
     fn rejects_unknown_inline_asm_operand_placeholder() {
         let source = r#"
             fn main() {
-                asm volatile {
+                asm volatile(clobber a) {
                     "ld a, {missing}"
                 }
                 test.pass()
@@ -8187,6 +8297,28 @@ mod tests {
                 "#,
                 "inline asm changes flags without declaring clobber `flags`",
             ),
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "ld a, 1"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `a` without declaring clobber `a`",
+            ),
+            (
+                r#"
+                fn main() {
+                    asm volatile {
+                        "ld hl, 040000h"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `hl` without declaring clobber `hl`",
+            ),
         ];
 
         for (source, expected) in cases {
@@ -8220,10 +8352,37 @@ mod tests {
     }
 
     #[test]
+    fn accepts_inline_asm_declared_register_clobbers() {
+        let cases = [
+            "asm volatile(clobber af, clobber flags) { \"xor a\" }",
+            "asm volatile(clobber b, clobber c) { \"ld bc, 1234h\" }",
+            "asm volatile(clobber h, clobber l) { \"ld hl, 040000h\" }",
+            "asm volatile(clobber de, clobber hl) { \"ex de, hl\" }",
+        ];
+
+        for asm_stmt in cases {
+            let source = format!(
+                r#"
+                fn main() {{
+                    {asm_stmt}
+                    test.pass()
+                }}
+                "#
+            );
+            let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+            let asm = emit_ez80_assembly(&program).unwrap();
+            let run = run_assembly_test(&asm, 1_000).unwrap();
+
+            assert!(run.halted, "{asm}");
+            assert_eq!(run.result_code, 0, "{asm}");
+        }
+    }
+
+    #[test]
     fn emits_and_runs_naked_asm_functions_without_epilogue() {
         let source = r#"
             naked fn raw_debug() {
-                asm volatile(clobber ports) {
+                asm volatile(clobber a, clobber ports) {
                     "ld a, 0x42"
                     "out0 (0Ch), a"
                     "ret"
@@ -8334,7 +8493,7 @@ mod tests {
     fn emits_and_runs_naked_interrupt_functions() {
         let source = r#"
             naked interrupt fn raw_irq() {
-                asm volatile(clobber ports) {
+                asm volatile(clobber a, clobber ports) {
                     "ld a, 0x4E"
                     "out0 (0Ch), a"
                     "reti"
