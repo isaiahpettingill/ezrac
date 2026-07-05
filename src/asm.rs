@@ -4935,6 +4935,48 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_imported_module_qualified_array_globals() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_module_array_globals_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/state.ezra"),
+            "pub global bytes: [u8; 3] = [1, 2, 3]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.state
+            fn main() {
+                test.assert_eq_u8(state.bytes[1], 2, 1)
+                state.bytes[2] = state.bytes[1] + 5
+                test.assert_eq_u8(bytes[2], 7, 2)
+                let ptr: ptr<u8> = &state.bytes[0]
+                test.assert_eq_u8(*(ptr + 2), 7, 3)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_imported_module_qualified_embeds() {
         let root = std::env::temp_dir().join(format!(
             "ezra_module_embeds_{}_{}",
