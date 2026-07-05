@@ -832,6 +832,183 @@ impl Symbols {
         }
     }
 
+    fn const_address_value(&self, expr: &Expr) -> Result<i64, Diagnostic> {
+        let variable = match expr {
+            Expr::AddressOf(name) => self
+                .globals
+                .get(name)
+                .copied()
+                .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))?,
+            Expr::AddressOfIndex { name, index } => {
+                self.const_array_element_variable(name, index)?
+            }
+            Expr::AddressOfField { base, field } => self.const_field_variable(base, field)?,
+            Expr::AddressOfAccess(path) => self.const_access_variable(path)?,
+            _ => unreachable!("not an address-of expression"),
+        };
+        Ok(variable.addr as i64)
+    }
+
+    fn const_address_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
+        let ty = match expr {
+            Expr::AddressOf(name) => self
+                .global_types
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))?,
+            Expr::AddressOfIndex { name, .. } => self.array_element_type(name)?,
+            Expr::AddressOfField { base, field } => self.field_type(base, field)?,
+            Expr::AddressOfAccess(path) => self.access_type(path)?,
+            _ => unreachable!("not an address-of expression"),
+        };
+        Ok(Type::Ptr(Box::new(self.resolved_type(&ty)?)))
+    }
+
+    fn const_array_element_variable(
+        &self,
+        name: &str,
+        index: &Expr,
+    ) -> Result<Variable, Diagnostic> {
+        let array = self
+            .globals
+            .get(name)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown array `{name}`")))?;
+        let Type::Array { element, len } = self
+            .global_types
+            .get(name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown array `{name}`")))
+            .and_then(|ty| self.resolved_type(ty))?
+        else {
+            return Err(Diagnostic::new(format!("`{name}` is not an array")));
+        };
+        let index_value = self.eval_i64(index)?;
+        let len = self.array_len(&len)?;
+        if index_value < 0 || index_value as u32 >= len {
+            return Err(Diagnostic::new(format!(
+                "array index {index_value} is out of bounds for `{name}` length {len}"
+            )));
+        }
+        let element_size = self.type_size(&element)?;
+        self.storage_at(array.addr + index_value as u32 * element_size, &element)
+    }
+
+    fn const_field_variable(&self, base: &str, field: &str) -> Result<Variable, Diagnostic> {
+        let base_variable = self
+            .globals
+            .get(base)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{base}`")))?;
+        let field = self.const_field_info(
+            self.global_types
+                .get(base)
+                .ok_or_else(|| Diagnostic::new(format!("unknown variable `{base}`")))?,
+            field,
+        )?;
+        self.storage_at(base_variable.addr + field.offset, &field.ty)
+    }
+
+    fn const_field_info(&self, ty: &Type, field: &str) -> Result<StructField, Diagnostic> {
+        let Type::Named(struct_name) = self.resolved_type(ty)? else {
+            return Err(Diagnostic::new(format!(
+                "type `{}` is not a struct type",
+                type_display(ty)
+            )));
+        };
+        let layout = self
+            .structs
+            .get(&struct_name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown struct `{struct_name}`")))?;
+        layout.fields.get(field).cloned().ok_or_else(|| {
+            Diagnostic::new(format!("struct `{struct_name}` has no field `{field}`"))
+        })
+    }
+
+    fn const_access_variable(&self, path: &AccessPath) -> Result<Variable, Diagnostic> {
+        let mut variable = self
+            .globals
+            .get(&path.root)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{}`", path.root)))?;
+        let mut ty = self
+            .global_types
+            .get(&path.root)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{}`", path.root)))?;
+
+        for segment in &path.segments {
+            match segment {
+                AccessSegment::Field(field) => {
+                    let field = self.const_field_info(&ty, field)?;
+                    variable = self.storage_at(variable.addr + field.offset, &field.ty)?;
+                    ty = field.ty;
+                }
+                AccessSegment::Index(index) => {
+                    let Type::Array { element, len } = self.resolved_type(&ty)? else {
+                        return Err(Diagnostic::new(format!(
+                            "value `{}` is not an array",
+                            access_path_summary(path)
+                        )));
+                    };
+                    let index_value = self.eval_i64(index)?;
+                    let len = self.array_len(&len)?;
+                    if index_value < 0 || index_value as u32 >= len {
+                        return Err(Diagnostic::new(format!(
+                            "array index {index_value} is out of bounds for `{}` length {len}",
+                            access_path_summary(path)
+                        )));
+                    }
+                    let element_size = self.type_size(&element)?;
+                    variable = self
+                        .storage_at(variable.addr + index_value as u32 * element_size, &element)?;
+                    ty = *element;
+                }
+            }
+        }
+
+        Ok(variable)
+    }
+
+    fn array_element_type(&self, name: &str) -> Result<Type, Diagnostic> {
+        let Some(ty) = self.global_types.get(name) else {
+            return Err(Diagnostic::new(format!("unknown array `{name}`")));
+        };
+        match self.resolved_type(ty)? {
+            Type::Array { element, .. } => Ok(*element),
+            _ => Err(Diagnostic::new(format!("`{name}` is not an array"))),
+        }
+    }
+
+    fn field_type(&self, base: &str, field: &str) -> Result<Type, Diagnostic> {
+        let Some(ty) = self.global_types.get(base) else {
+            return Err(Diagnostic::new(format!("unknown variable `{base}`")));
+        };
+        self.const_field_info(ty, field).map(|field| field.ty)
+    }
+
+    fn access_type(&self, path: &AccessPath) -> Result<Type, Diagnostic> {
+        let mut ty = self
+            .global_types
+            .get(&path.root)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{}`", path.root)))?;
+        for segment in &path.segments {
+            ty = match segment {
+                AccessSegment::Field(field) => self.const_field_info(&ty, field)?.ty,
+                AccessSegment::Index(_) => match self.resolved_type(&ty)? {
+                    Type::Array { element, .. } => *element,
+                    _ => {
+                        return Err(Diagnostic::new(format!(
+                            "value `{}` is not an array",
+                            access_path_summary(path)
+                        )));
+                    }
+                },
+            };
+        }
+        Ok(ty)
+    }
+
     fn array_len(&self, expr: &Expr) -> Result<u32, Diagnostic> {
         let ty = self.resolved_type(&self.const_expr_type(expr)?)?;
         if type_is_bool(&ty) || matches!(ty, Type::Ptr(_)) {
@@ -897,12 +1074,12 @@ impl Symbols {
                 let value = self.eval_i64(expr)?;
                 self.const_cast_value(value, ty)
             }
-            Expr::Array(_)
-            | Expr::Index { .. }
-            | Expr::AddressOfIndex { .. }
+            Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
             | Expr::AddressOfAccess(_)
-            | Expr::AddressOf(_)
+            | Expr::AddressOf(_) => self.const_address_value(expr),
+            Expr::Array(_)
+            | Expr::Index { .. }
             | Expr::StructInit { .. }
             | Expr::Deref(_)
             | Expr::In(_)
@@ -1179,12 +1356,12 @@ impl Symbols {
             }
             Expr::Cast { ty, .. } => Ok(ty.clone()),
             Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
-            Expr::Array(_)
-            | Expr::Index { .. }
-            | Expr::AddressOfIndex { .. }
+            Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
             | Expr::AddressOfAccess(_)
-            | Expr::AddressOf(_)
+            | Expr::AddressOf(_) => self.const_address_type(expr),
+            Expr::Array(_)
+            | Expr::Index { .. }
             | Expr::StructInit { .. }
             | Expr::Deref(_)
             | Expr::In(_)
@@ -9129,6 +9306,62 @@ section .text
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_constant_storage_addresses() {
+        let source = r#"
+            struct Cell {
+                value: u8
+                next: u16
+            }
+
+            struct Packet {
+                cells: [Cell; 2]
+            }
+
+            global byte: u8 = 0
+            global bytes: [u8; 3] = [0, 0, 0]
+            global cell: Cell = Cell { value: 0, next: 0 }
+            global packet: Packet = Packet {
+                cells: [
+                    Cell { value: 0, next: 0 },
+                    Cell { value: 0, next: 0 }
+                ]
+            }
+
+            const BYTE: ptr<u8> = &byte
+            const SECOND: ptr<u8> = &bytes[1]
+            const CELL_NEXT: ptr<u16> = &cell.next
+            const PACKET_NEXT: ptr<u16> = &packet.cells[1].next
+            const RAW_THIRD: ptr24 = cast<ptr24>(&bytes[2])
+
+            fn main() {
+                let byte_ptr: ptr<u8> = BYTE;
+                let second_ptr: ptr<u8> = SECOND;
+                let cell_next_ptr: ptr<u16> = CELL_NEXT;
+                let packet_next_ptr: ptr<u16> = PACKET_NEXT;
+                *(byte_ptr) = 0x11;
+                *(second_ptr) = 0x22;
+                *(cell_next_ptr) = 0x3344;
+                *(packet_next_ptr) = 0x5566;
+                let third: ptr<u8> = cast<ptr<u8>>(RAW_THIRD);
+                *(third) = 0x77;
+
+                test.assert_eq_u8(byte, 0x11, 1)
+                test.assert_eq_u8(bytes[1], 0x22, 2)
+                test.assert_eq_u16(cell.next, 0x3344, 3)
+                test.assert_eq_u16(packet.cells[1].next, 0x5566, 4)
+                test.assert_eq_u8(bytes[2], 0x77, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 20_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
