@@ -1008,6 +1008,33 @@ mod tests {
     }
 
     #[test]
+    fn test_command_reports_execution_outside_mapped_memory() {
+        let root = temp_root("outside_mapped_test");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                naked fn main() {
+                    asm volatile {
+                        "jp 020000h"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = test_source(source_path.to_str().unwrap()).unwrap_err();
+
+        assert!(
+            error.contains("test executed outside mapped memory at 0x020000"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_can_use_custom_layout_file() {
         let root = temp_root("custom_layout_build");
         std::fs::create_dir_all(&root).unwrap();
