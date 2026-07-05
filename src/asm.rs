@@ -1347,6 +1347,8 @@ impl Symbols {
                     self.ensure_const_expr_is_bool(right, "logical operand")?;
                 } else if is_comparison(*op) {
                     self.validate_const_comparison_operand_types(left, *op, right)?;
+                } else if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+                    self.validate_const_shift_operand_types(left, right)?;
                 } else {
                     self.validate_const_binary_operand_types(left, right)?;
                 }
@@ -1445,6 +1447,28 @@ impl Symbols {
             ));
         }
         Ok(())
+    }
+
+    fn validate_const_shift_operand_types(
+        &self,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let left_type = self.resolved_type(&self.const_expr_type(left)?)?;
+        validate_shift_operand_type(&left_type)?;
+
+        if expr_is_untyped_literal(right) {
+            let value = self.eval_i64(right)?;
+            if !(0..=u8::MAX as i64).contains(&value) {
+                return Err(Diagnostic::new(format!(
+                    "shift count {value} is outside supported range 0..=255"
+                )));
+            }
+            return Ok(());
+        }
+
+        let right_type = self.resolved_type(&self.const_expr_type(right)?)?;
+        validate_shift_count_type(&right_type)
     }
 
     fn validate_const_comparison_operand_types(
@@ -2653,10 +2677,12 @@ impl Emitter {
                 self.line("    xor b");
             }
             AssignOp::Shl => {
+                self.ensure_shift_count_compatible(value)?;
                 self.emit_load_a(variable);
                 self.emit_shift_a_by_expr(BinaryOp::Shl, value, signed)?;
             }
             AssignOp::Shr => {
+                self.ensure_shift_count_compatible(value)?;
                 self.emit_load_a(variable);
                 self.emit_shift_a_by_expr(BinaryOp::Shr, value, signed)?;
             }
@@ -2836,6 +2862,7 @@ impl Emitter {
         ty: &Type,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
+        self.validate_expr_arithmetic_compatibility(value)?;
         self.validate_expr_assignable_to_type(value, ty)?;
         if let Expr::Deref(ptr) = value {
             return self.emit_copy_pointed_storage_into(ptr, variable);
@@ -2874,6 +2901,7 @@ impl Emitter {
         value: &Expr,
         signed: bool,
     ) -> Result<(), Diagnostic> {
+        self.ensure_shift_count_compatible(value)?;
         let temp = self.alloc_var(variable.width()?.bytes());
         self.emit_load_width(variable);
         self.emit_store_width(temp);
@@ -3555,6 +3583,7 @@ impl Emitter {
                     self.emit_wide_op_with_left_in_bc(*op, width)?;
                 }
                 BinaryOp::Shl | BinaryOp::Shr => {
+                    self.ensure_shift_operands_compatible(left, right)?;
                     let temp = self.alloc_var(width.bytes());
                     let signed = self.expr_is_signed(left)?;
                     self.emit_expr_to_hl(left, width)?;
@@ -4152,6 +4181,7 @@ impl Emitter {
             }
         }
         if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+            self.ensure_shift_operands_compatible(left, right)?;
             let signed = self.expr_is_signed(left)?;
             self.emit_expr_to_a(left)?;
             self.emit_shift_a_by_expr(op, right, signed)?;
@@ -6259,6 +6289,8 @@ impl Emitter {
                         || self.pointer_pointee_size(right)?.is_some())
                 {
                     self.ensure_pointer_arithmetic_expr_compatible(left, *op, right)?;
+                } else if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+                    self.ensure_shift_operands_compatible(left, right)?;
                 } else if matches!(
                     op,
                     BinaryOp::Add
@@ -6319,6 +6351,35 @@ impl Emitter {
             | Expr::AddressOfField { .. } => {}
         }
         Ok(())
+    }
+
+    fn ensure_shift_operands_compatible(
+        &self,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
+        validate_shift_operand_type(&left_type)?;
+
+        if expr_is_untyped_literal(right) {
+            let value = self.symbols.eval_i64(right)?;
+            self.validate_shift_count(value)?;
+            return Ok(());
+        }
+
+        let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
+        validate_shift_count_type(&right_type)
+    }
+
+    fn ensure_shift_count_compatible(&self, count: &Expr) -> Result<(), Diagnostic> {
+        if expr_is_untyped_literal(count) {
+            let value = self.symbols.eval_i64(count)?;
+            self.validate_shift_count(value)?;
+            return Ok(());
+        }
+
+        let ty = self.symbols.resolved_type(&self.expr_type(count)?)?;
+        validate_shift_count_type(&ty)
     }
 
     fn ensure_pointer_arithmetic_expr_compatible(
@@ -7614,6 +7675,54 @@ fn signed_negative_one_bytes(width: ValueWidth) -> &'static [u8] {
 
 fn type_is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name == "bool")
+}
+
+fn validate_shift_operand_type(ty: &Type) -> Result<(), Diagnostic> {
+    if type_is_bool(ty) || matches!(ty, Type::Ptr(_)) {
+        return Err(Diagnostic::new("shift operand must be an integer"));
+    }
+    match ty {
+        Type::Named(name)
+            if matches!(name.as_str(), "u8" | "i8" | "u16" | "i16" | "u24" | "i24") =>
+        {
+            Ok(())
+        }
+        Type::Named(name) if name == "ptr24" => {
+            Err(Diagnostic::new("shift operand must be an integer"))
+        }
+        Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
+            Err(Diagnostic::new(format!(
+                "type `{name}` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
+            )))
+        }
+        Type::Named(name) => Err(Diagnostic::new(format!("unknown type `{name}`"))),
+        Type::Array { .. } => Err(Diagnostic::new("shift operand must be an integer")),
+        Type::Ptr(_) => Err(Diagnostic::new("shift operand must be an integer")),
+    }
+}
+
+fn validate_shift_count_type(ty: &Type) -> Result<(), Diagnostic> {
+    if type_is_bool(ty) || matches!(ty, Type::Ptr(_)) {
+        return Err(Diagnostic::new("shift count must be an integer"));
+    }
+    match ty {
+        Type::Named(name)
+            if matches!(name.as_str(), "u8" | "i8" | "u16" | "i16" | "u24" | "i24") =>
+        {
+            Ok(())
+        }
+        Type::Named(name) if name == "ptr24" => {
+            Err(Diagnostic::new("shift count must be an integer"))
+        }
+        Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
+            Err(Diagnostic::new(format!(
+                "type `{name}` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
+            )))
+        }
+        Type::Named(name) => Err(Diagnostic::new(format!("unknown type `{name}`"))),
+        Type::Array { .. } => Err(Diagnostic::new("shift count must be an integer")),
+        Type::Ptr(_) => Err(Diagnostic::new("shift count must be an integer")),
+    }
 }
 
 fn ptr_u8_type() -> Type {
@@ -9609,6 +9718,95 @@ section .text
                 }
                 "#,
                 "while condition must be bool",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_non_integer_shift_operands_and_counts() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let value: u8 = true << 1
+                    test.pass()
+                }
+                "#,
+                "shift operand must be an integer",
+            ),
+            (
+                r#"
+                global byte: u8 = 1
+                fn main() {
+                    let ptr: ptr<u8> = &byte
+                    let value: u24 = ptr >> 1
+                    test.pass()
+                }
+                "#,
+                "shift operand must be an integer",
+            ),
+            (
+                r#"
+                fn main() {
+                    let value: u8 = 1 << false
+                    test.pass()
+                }
+                "#,
+                "shift count must be an integer",
+            ),
+            (
+                r#"
+                global byte: u8 = 1
+                fn main() {
+                    let ptr: ptr<u8> = &byte
+                    let value: u8 = 1 << ptr
+                    test.pass()
+                }
+                "#,
+                "shift count must be an integer",
+            ),
+            (
+                r#"
+                const BAD: u8 = true << 1
+                fn main() { test.pass() }
+                "#,
+                "shift operand must be an integer",
+            ),
+            (
+                r#"
+                const BAD: u8 = 1 << false
+                fn main() { test.pass() }
+                "#,
+                "shift count must be an integer",
+            ),
+            (
+                r#"
+                fn main() {
+                    let value: u8 = 1
+                    value <<= false
+                    test.pass()
+                }
+                "#,
+                "shift count must be an integer",
+            ),
+            (
+                r#"
+                global byte: u8 = 1
+                fn main() {
+                    let value: u16 = 1
+                    let ptr: ptr<u8> = &byte
+                    value >>= ptr
+                    test.pass()
+                }
+                "#,
+                "shift count must be an integer",
             ),
         ];
 
@@ -12284,6 +12482,12 @@ section .text
     #[test]
     fn emits_and_runs_runtime_shift_counts() {
         let source = r#"
+            const BYTE_COUNT: u8 = 3
+            const WORD_COUNT: u16 = 4
+            const WIDE_LEFT: u24 = 0x010203u24 << BYTE_COUNT
+            const WIDE_RIGHT: u24 = WIDE_LEFT >> WORD_COUNT
+            const SIGNED_RIGHT: i16 = (-0x1234i16) >> BYTE_COUNT
+
             fn shl8(value: u8, count: u8) -> u8 {
                 return value << count
             }
@@ -12319,6 +12523,13 @@ section .text
                 let byte_shift: u8 = 8
                 let zero: u8 = byte >> byte_shift
                 test.assert_eq_u8(zero, 0, 7)
+
+                test.assert_eq_u24(WIDE_LEFT, 0x081018, 8)
+                test.assert_eq_u24(WIDE_RIGHT, 0x008101, 9)
+                test.assert_eq_u16(cast<u16>(SIGNED_RIGHT), 0xFDB9, 10)
+
+                let signed_count: i8 = 1
+                test.assert_eq_u16(0x1234u16 >> signed_count, 0x091A, 11)
                 test.pass()
             }
         "#;
