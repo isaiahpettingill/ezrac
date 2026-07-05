@@ -2133,6 +2133,12 @@ impl Emitter {
                         function.name
                     )));
                 }
+                if function.return_type.is_some() {
+                    return Err(Diagnostic::new(format!(
+                        "interrupt function `{}` cannot return a value",
+                        function.name
+                    )));
+                }
                 self.emit_interrupt_prologue();
             }
             if uses_stack_frame {
@@ -12749,6 +12755,26 @@ section .text
         assert_eq!(
             error.message,
             "interrupt function `invalid` cannot take parameters"
+        );
+    }
+
+    #[test]
+    fn rejects_interrupt_function_return_values() {
+        let source = r#"
+            interrupt fn invalid() -> u8 {
+                return 1
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "interrupt function `invalid` cannot return a value"
         );
     }
 
