@@ -295,6 +295,16 @@ impl Symbols {
                             decl.name
                         )));
                     }
+                    if let Some(original) = module_alias_original_name(&decl.name) {
+                        if let Some(embed) = symbols.embeds.get(original).cloned() {
+                            symbols.register_embed_properties(
+                                &decl.name,
+                                embed.variable,
+                                embed.variable.len.unwrap_or(0),
+                            );
+                            continue;
+                        }
+                    }
                     let bytes = symbols.embed_bytes(&decl.source, &program.source_path)?;
                     symbols.align_next_addr(align as u32);
                     let variable = symbols.alloc_array(ValueWidth::U8.bytes(), bytes.len() as u32);
@@ -304,6 +314,15 @@ impl Symbols {
                         .insert(decl.name.clone(), EmbedObject { variable, bytes });
                 }
                 Declaration::Global(decl) => {
+                    if let Some(original) = module_alias_original_name(&decl.name) {
+                        if let Some(variable) = symbols.globals.get(original).copied() {
+                            symbols.globals.insert(decl.name.clone(), variable);
+                            if let Some(ty) = symbols.global_types.get(original).cloned() {
+                                symbols.global_types.insert(decl.name.clone(), ty);
+                            }
+                            continue;
+                        }
+                    }
                     let variable = symbols.alloc_storage(&decl.ty)?;
                     symbols.globals.insert(decl.name.clone(), variable);
                     symbols
@@ -1819,6 +1838,10 @@ impl Emitter {
                 if self.emit_dotted_constant_to_hl(base, field, width)? {
                     return Ok(());
                 }
+                if let Some(variable) = self.dotted_variable(base, field) {
+                    self.emit_load_width(variable);
+                    return Ok(());
+                }
                 let variable = self.field_variable(base, field)?;
                 self.emit_load_width(variable);
             }
@@ -2028,6 +2051,15 @@ impl Emitter {
             }
             Expr::Field { base, field } => {
                 if self.emit_dotted_constant_to_a(base, field)? {
+                    return Ok(());
+                }
+                if let Some(variable) = self.dotted_variable(base, field) {
+                    if variable.size != 1 {
+                        return Err(Diagnostic::new(format!(
+                            "value `{base}.{field}` is not u8-sized"
+                        )));
+                    }
+                    self.emit_load_a(variable);
                     return Ok(());
                 }
                 let variable = self.field_variable(base, field)?;
@@ -3047,6 +3079,9 @@ impl Emitter {
     }
 
     fn field_variable(&self, base: &str, field: &str) -> Result<Variable, Diagnostic> {
+        if let Some(variable) = self.dotted_variable(base, field) {
+            return Ok(variable);
+        }
         let base_variable = self.variable(base)?;
         let base_type = self
             .variable_type(base)
@@ -3064,6 +3099,10 @@ impl Emitter {
     }
 
     fn field_type(&self, base: &str, field: &str) -> Result<Type, Diagnostic> {
+        let key = format!("{base}.{field}");
+        if let Some(ty) = self.variable_type(&key) {
+            return Ok(ty.clone());
+        }
         let base_type = self
             .variable_type(base)
             .ok_or_else(|| Diagnostic::new(format!("unknown variable `{base}`")))?;
@@ -3621,6 +3660,10 @@ impl Emitter {
             .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))
     }
 
+    fn dotted_variable(&self, base: &str, field: &str) -> Option<Variable> {
+        self.variable_opt(&format!("{base}.{field}"))
+    }
+
     fn variable_opt(&self, name: &str) -> Option<Variable> {
         self.scopes
             .iter()
@@ -3727,6 +3770,10 @@ fn const_shr_or_zero(left: i64, right: i64) -> i64 {
 
 fn path_text(path: &[String]) -> String {
     path.join(".")
+}
+
+fn module_alias_original_name(name: &str) -> Option<&str> {
+    name.rsplit_once('.').map(|(_, original)| original)
 }
 
 fn function_label(name: &str) -> String {
@@ -4845,6 +4892,83 @@ mod tests {
         let program = load_program(&main_path).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_imported_module_qualified_globals() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_module_globals_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(root.join("lib/state.ezra"), "pub global score: u8 = 5\n").unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.state
+            fn main() {
+                state.score += 2
+                test.assert_eq_u8(state.score, 7, 1)
+                test.assert_eq_u8(score, 7, 2)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_imported_module_qualified_embeds() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_module_embeds_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/assets.ezra"),
+            "pub embed sprite: bytes = bytes [0x41, 0x42]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.assets
+            fn main() {
+                test.assert_eq_u24(assets.sprite.len, 2, 1)
+                test.assert_eq_u8(*(assets.sprite.ptr + 0), 0x41, 2)
+                test.assert_eq_u8(*(assets.sprite.ptr + 1), 0x42, 3)
+                test.assert_eq_u8(*(sprite.ptr + 1), 0x42, 4)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         let _ = std::fs::remove_dir_all(&root);
         assert!(run.halted, "{asm}");

@@ -155,6 +155,16 @@ fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<
                 alias.name = format!("{module}.{}", alias.name);
                 Some(Declaration::Mmio(alias))
             }
+            Declaration::Embed(decl) if decl.public => {
+                let mut alias = decl.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Embed(alias))
+            }
+            Declaration::Global(decl) if decl.public => {
+                let mut alias = decl.clone();
+                alias.name = format!("{module}.{}", alias.name);
+                Some(Declaration::Global(alias))
+            }
             Declaration::Struct(decl) if decl.public => {
                 let mut alias = decl.clone();
                 alias.name = format!("{module}.{}", alias.name);
@@ -386,7 +396,10 @@ fn validate_place_private_import_access(
             reject_private_import_name(name, private_imports, locals)?;
             validate_expr_private_import_access(index, private_imports, locals)
         }
-        Place::Field { base, .. } => reject_private_import_name(base, private_imports, locals),
+        Place::Field { base, field } => {
+            reject_private_import_name(&format!("{base}.{field}"), private_imports, locals)?;
+            reject_private_import_name(base, private_imports, locals)
+        }
         Place::Deref(expr) => validate_expr_private_import_access(expr, private_imports, locals),
     }
 }
@@ -404,7 +417,8 @@ fn validate_expr_private_import_access(
             reject_private_import_name(name, private_imports, locals)?;
             validate_expr_private_import_access(index, private_imports, locals)
         }
-        Expr::Field { base, .. } | Expr::AddressOfField { base, .. } => {
+        Expr::Field { base, field } | Expr::AddressOfField { base, field } => {
+            reject_private_import_name(&format!("{base}.{field}"), private_imports, locals)?;
             reject_private_import_name(base, private_imports, locals)
         }
         Expr::Cast { expr, ty } => {
@@ -617,6 +631,24 @@ mod tests {
         assert_eq!(
             error.message,
             "declaration `hidden` from import `lib.math` is private"
+        );
+
+        std::fs::write(
+            &lib_path,
+            "global secret: u8 = 7\npub fn shown(v: u8) -> u8 { return v }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            "import lib.math\nfn main() { let x: u8 = math.secret; test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `math.secret` from import `lib.math` is private"
         );
 
         let _ = std::fs::remove_dir_all(root);
