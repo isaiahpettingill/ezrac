@@ -2279,6 +2279,12 @@ impl Emitter {
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_mem_poke8(args)?;
             }
+            "mem.memcpy" | "ezra.mem.memcpy" => {
+                self.emit_memcpy(args)?;
+            }
+            "mem.memset" | "ezra.mem.memset" => {
+                self.emit_memset(args)?;
+            }
             path => self.emit_user_call(path, args)?,
         }
         Ok(())
@@ -2993,6 +2999,55 @@ impl Emitter {
         self.emit_load_hl(addr);
         self.emit_load_a(value);
         self.line("    ld (hl), a");
+        Ok(())
+    }
+
+    fn emit_memcpy(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        if args.len() != 3 {
+            return Err(Diagnostic::new("mem.memcpy requires three arguments"));
+        }
+        let dst = self.alloc_var(ValueWidth::U24.bytes());
+        let src = self.alloc_var(ValueWidth::U24.bytes());
+        let len = self.alloc_var(ValueWidth::U24.bytes());
+
+        self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
+        self.emit_store_hl(dst);
+        self.emit_expr_to_hl(&args[1], ValueWidth::U24)?;
+        self.emit_store_hl(src);
+        self.emit_expr_to_hl(&args[2], ValueWidth::U24)?;
+        self.emit_store_hl(len);
+
+        self.emit_load_hl(len);
+        self.line("    push hl");
+        self.line("    pop bc");
+        self.emit_load_hl(src);
+        self.line("    ex de, hl");
+        self.emit_load_hl(dst);
+        self.line("    call __ezra_memcpy");
+        Ok(())
+    }
+
+    fn emit_memset(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        if args.len() != 3 {
+            return Err(Diagnostic::new("mem.memset requires three arguments"));
+        }
+        let dst = self.alloc_var(ValueWidth::U24.bytes());
+        let value = self.alloc_var(ValueWidth::U8.bytes());
+        let len = self.alloc_var(ValueWidth::U24.bytes());
+
+        self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
+        self.emit_store_hl(dst);
+        self.emit_expr_to_a(&args[1])?;
+        self.emit_store_a(value);
+        self.emit_expr_to_hl(&args[2], ValueWidth::U24)?;
+        self.emit_store_hl(len);
+
+        self.emit_load_hl(len);
+        self.line("    push hl");
+        self.line("    pop bc");
+        self.emit_load_a(value);
+        self.emit_load_hl(dst);
+        self.line("    call __ezra_memset");
         Ok(())
     }
 
@@ -5285,6 +5340,8 @@ fn builtin_function_arity(name: &str) -> Option<usize> {
         "debug.char" | "ezra.debug.char" => Some(1),
         "mem.poke8" | "ezra.mem.poke8" => Some(2),
         "mem.peek8" | "ezra.mem.peek8" => Some(1),
+        "mem.memcpy" | "ezra.mem.memcpy" => Some(3),
+        "mem.memset" | "ezra.mem.memset" => Some(3),
         _ => None,
     }
 }
@@ -5299,6 +5356,8 @@ fn builtin_arity_error(name: &str) -> String {
         "debug.char" => "debug.char requires one argument".to_owned(),
         "mem.poke8" => "mem.poke8 requires two arguments".to_owned(),
         "mem.peek8" => "mem.peek8 requires one argument".to_owned(),
+        "mem.memcpy" => "mem.memcpy requires three arguments".to_owned(),
+        "mem.memset" => "mem.memset requires three arguments".to_owned(),
         builtin => format!("{builtin} has invalid argument count"),
     }
 }
@@ -6230,6 +6289,42 @@ mod tests {
         let run = run_assembly_test(&asm, 3_000).unwrap();
 
         assert!(asm.contains("__ezra_memset:"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_memcpy_and_memset_builtins() {
+        let source = r#"
+            global src: [u8; 5] = [0x11, 0x22, 0x33, 0x44, 0x55]
+            global dst: [u8; 5] = [0, 0, 0, 0, 0]
+
+            fn main() {
+                mem.memcpy(&dst[1], &src[0], 3)
+                test.assert_eq_u8(dst[0], 0, 1)
+                test.assert_eq_u8(dst[1], 0x11, 2)
+                test.assert_eq_u8(dst[2], 0x22, 3)
+                test.assert_eq_u8(dst[3], 0x33, 4)
+                test.assert_eq_u8(dst[4], 0, 5)
+
+                ezra.mem.memset(&dst[2], 0x7A, 2)
+                test.assert_eq_u8(dst[1], 0x11, 6)
+                test.assert_eq_u8(dst[2], 0x7A, 7)
+                test.assert_eq_u8(dst[3], 0x7A, 8)
+                test.assert_eq_u8(dst[4], 0, 9)
+
+                mem.memcpy(&dst[4], &src[4], 0)
+                mem.memset(&dst[4], 0xEE, 0)
+                test.assert_eq_u8(dst[4], 0, 10)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(asm.contains("    call __ezra_memcpy"), "{asm}");
+        assert!(asm.contains("    call __ezra_memset"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
