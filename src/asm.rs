@@ -2287,6 +2287,9 @@ impl Emitter {
                 self.emit_expr_to_a(expr)?;
                 self.emit_out_a(0x0C);
             }
+            "debug.str" | "ezra.debug.str" => {
+                self.emit_debug_str(args)?;
+            }
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_mem_poke8(args)?;
             }
@@ -2303,6 +2306,30 @@ impl Emitter {
 
     fn emit_test_fail_call(&mut self) {
         self.line("    call __ezra_fail");
+    }
+
+    fn emit_debug_str(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        if args.len() != 1 {
+            return Err(Diagnostic::new("debug.str requires one argument"));
+        }
+
+        let cursor = self.alloc_var(ValueWidth::U24.bytes());
+        let loop_label = self.next_label("debug_str");
+        let done_label = self.next_label("debug_str_done");
+        self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
+        self.emit_store_hl(cursor);
+        self.line(&format!("{loop_label}:"));
+        self.emit_load_hl(cursor);
+        self.line("    ld a, (hl)");
+        self.line("    or a");
+        self.line(&format!("    jp z, {done_label}"));
+        self.emit_out_a(0x0C);
+        self.emit_load_hl(cursor);
+        self.line("    inc hl");
+        self.emit_store_hl(cursor);
+        self.line(&format!("    jp {loop_label}"));
+        self.line(&format!("{done_label}:"));
+        Ok(())
     }
 
     fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
@@ -5349,6 +5376,7 @@ fn builtin_function_arity(name: &str) -> Option<usize> {
         "test.assert_eq_u16" | "ezra.test.assert_eq_u16" => Some(3),
         "test.assert_eq_u24" | "ezra.test.assert_eq_u24" => Some(3),
         "debug.char" | "ezra.debug.char" => Some(1),
+        "debug.str" | "ezra.debug.str" => Some(1),
         "mem.poke8" | "ezra.mem.poke8" => Some(2),
         "mem.peek8" | "ezra.mem.peek8" => Some(1),
         "mem.memcpy" | "ezra.mem.memcpy" => Some(3),
@@ -5365,6 +5393,7 @@ fn builtin_arity_error(name: &str) -> String {
         "test.assert_eq_u16" => "test.assert_eq_u16 requires three arguments".to_owned(),
         "test.assert_eq_u24" => "test.assert_eq_u24 requires three arguments".to_owned(),
         "debug.char" => "debug.char requires one argument".to_owned(),
+        "debug.str" => "debug.str requires one argument".to_owned(),
         "mem.poke8" => "mem.poke8 requires two arguments".to_owned(),
         "mem.peek8" => "mem.peek8 requires one argument".to_owned(),
         "mem.memcpy" => "mem.memcpy requires three arguments".to_owned(),
@@ -10531,6 +10560,28 @@ mod tests {
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_debug_str_builtin() {
+        let source = r#"
+            global title: ptr<u8> = "EZ"
+
+            fn main() {
+                debug.str("OK")
+                debug.char(' ')
+                ezra.debug.str(title)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("out0 (0Ch), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"OK EZ", "{asm}");
     }
 
     #[test]
