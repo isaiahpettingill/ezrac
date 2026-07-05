@@ -39,6 +39,7 @@ pub struct AliasDecl {
 pub struct PortDecl {
     pub public: bool,
     pub name: String,
+    pub ty: Type,
     pub value: Expr,
 }
 

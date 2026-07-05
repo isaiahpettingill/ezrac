@@ -330,6 +330,14 @@ impl Symbols {
                         .insert(decl.name.clone(), decl.ty.clone());
                 }
                 Declaration::Port(decl) => {
+                    let resolved = symbols.resolved_type(&decl.ty)?;
+                    if resolved != Type::Named("u8".to_owned()) {
+                        return Err(Diagnostic::new(format!(
+                            "port `{}` type `{}` must be u8",
+                            decl.name,
+                            type_display(&decl.ty)
+                        )));
+                    }
                     let value = symbols.eval_i64(&decl.value)?;
                     if !(0..=0xFF).contains(&value) {
                         return Err(Diagnostic::new(format!(
@@ -7039,6 +7047,50 @@ mod tests {
                 fn main() { test.pass() }
                 "#,
                 "mmio `STATUS` type `byte` must be a pointer type",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn validates_port_declaration_types() {
+        let ok = r#"
+            alias byte = u8
+            port DEBUG: byte = 0x0C
+
+            fn main() {
+                out DEBUG, 65
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), ok).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+
+        let cases = [
+            (
+                r#"
+                port WIDE: u16 = 0x01
+                fn main() { test.pass() }
+                "#,
+                "port `WIDE` type `u16` must be u8",
+            ),
+            (
+                r#"
+                alias word = u16
+                port BAD: word = 0x01
+                fn main() { test.pass() }
+                "#,
+                "port `BAD` type `word` must be u8",
             ),
         ];
 

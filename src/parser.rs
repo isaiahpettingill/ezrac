@@ -208,11 +208,13 @@ fn build_alias(pair: Pair<'_, Rule>) -> Result<AliasDecl, Diagnostic> {
 fn build_port(pair: Pair<'_, Rule>) -> Result<PortDecl, Diagnostic> {
     let mut public = false;
     let mut name = None;
+    let mut ty = None;
     let mut value = None;
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::visibility => public = true,
             Rule::ident => name = Some(inner.as_str().to_owned()),
+            Rule::ty => ty = Some(build_type(inner)?),
             Rule::expr => value = Some(build_expr(inner)?),
             _ => {}
         }
@@ -220,6 +222,7 @@ fn build_port(pair: Pair<'_, Rule>) -> Result<PortDecl, Diagnostic> {
     Ok(PortDecl {
         public,
         name: name.unwrap(),
+        ty: ty.unwrap(),
         value: value.unwrap(),
     })
 }
@@ -925,6 +928,24 @@ mod tests {
                 value: Expr::In(port),
                 ..
             } if port == "input.PAD1_LO"
+        ));
+    }
+
+    #[test]
+    fn parses_port_declaration_type() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "port DEBUG_CHAR: byte = 0x0C\nfn main() {}",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &program.declarations[0],
+            Declaration::Port(PortDecl {
+                name,
+                ty: Type::Named(ty),
+                ..
+            }) if name == "DEBUG_CHAR" && ty == "byte"
         ));
     }
 

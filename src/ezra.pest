@@ -21,7 +21,7 @@ attr = { "inline" | "naked" | "interrupt" }
 import_decl = { "import" ~ path ~ semi? }
 const_decl = { visibility? ~ "const" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 alias_decl = { visibility? ~ "alias" ~ ident ~ "=" ~ ty ~ semi? }
-port_decl = { visibility? ~ "port" ~ ident ~ ":" ~ "u8" ~ "=" ~ expr ~ semi? }
+port_decl = { visibility? ~ "port" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 mmio_decl = { visibility? ~ volatile_kw? ~ "mmio" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 embed_decl = { visibility? ~ "embed" ~ ident ~ ":" ~ "bytes" ~ "=" ~ embed_source ~ embed_opts? ~ semi? }
 embed_source = { file_embed | bytes_embed | text_embed | cstr_embed | repeat_embed }

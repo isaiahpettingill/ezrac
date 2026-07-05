@@ -246,6 +246,7 @@ fn validate_declaration_private_import_access(
         }
         Declaration::Alias(decl) => validate_type_private_import_access(&decl.ty, private_imports),
         Declaration::Port(decl) => {
+            validate_type_private_import_access(&decl.ty, private_imports)?;
             validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
         }
         Declaration::Mmio(decl) => {
