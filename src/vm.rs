@@ -313,6 +313,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "di"
             | "ei"
             | "or a"
+            | "cpl"
+            | "daa"
             | "ex de, hl"
             | "exx"
             | "push af"
@@ -373,6 +375,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         text,
         "reti"
             | "retn"
+            | "neg"
             | "sra a"
             | "srl a"
             | "rl a"
@@ -628,6 +631,10 @@ fn emit_instruction(
         bytes.push(0xFB);
     } else if text == "or a" {
         bytes.push(0xB7);
+    } else if text == "cpl" {
+        bytes.push(0x2F);
+    } else if text == "daa" {
+        bytes.push(0x27);
     } else if text == "ex de, hl" {
         bytes.push(0xEB);
     } else if text == "exx" {
@@ -664,6 +671,8 @@ fn emit_instruction(
         bytes.extend([0xED, 0x4D]);
     } else if text == "retn" {
         bytes.extend([0xED, 0x45]);
+    } else if text == "neg" {
+        bytes.extend([0xED, 0x44]);
     } else if let Some(opcode) = parse_block_operation(text) {
         bytes.extend([0xED, opcode]);
     } else if let Some(opcode) = parse_mlt_reg16(text) {
@@ -2012,6 +2021,13 @@ mod tests {
     }
 
     #[test]
+    fn assembles_misc_accumulator_alu_instructions() {
+        let bytes = assemble_ez80_subset_at("cpl\ndaa\nneg\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0x2F, 0x27, 0xED, 0x44]);
+    }
+
+    #[test]
     fn runs_8_bit_accumulator_alu_immediate_forms_on_ez80_vm() {
         let asm = r#"
             ld a, 40h
@@ -2041,6 +2057,31 @@ mod tests {
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
         assert_eq!(run.debug_output, b"C");
+    }
+
+    #[test]
+    fn runs_misc_accumulator_alu_instructions_on_ez80_vm() {
+        let asm = r#"
+            ld a, 0F0h
+            cpl
+            cp 0Fh
+            jp nz, fail
+            neg
+            cp 0F1h
+            jp nz, fail
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        fail:
+            ld a, 01h
+            out0 (0Dh), a
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
     }
 
     #[test]
