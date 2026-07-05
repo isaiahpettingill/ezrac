@@ -5744,6 +5744,30 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_inline_asm_with_inferred_operand_classes() {
+        let source = r#"
+            fn main() {
+                let ch: u8 = 0x53
+                let result: u8 = 0
+                asm volatile(in ch: u8, out result: u8, clobber a, clobber ports) {
+                    "out0 (0Ch), a"
+                }
+                test.assert_eq_u8(result, 0x53, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    ; in ch: u8 as reg8"), "{asm}");
+        assert!(asm.contains("    ; out result: u8 as reg8"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"S", "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_inline_asm_reg8_and_imm_placeholders() {
         let source = r#"
             const DEBUG_PORT: u8 = 0x0C

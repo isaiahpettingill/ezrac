@@ -676,7 +676,10 @@ fn build_asm_operand(pair: Pair<'_, Rule>) -> Result<AsmOperand, Diagnostic> {
             let mut parts = inner.into_inner();
             let name = parts.next().unwrap().as_str().to_owned();
             let ty = build_type(parts.next().unwrap())?;
-            let class = parts.next().unwrap().as_str().to_owned();
+            let class = parts
+                .next()
+                .map(|part| part.as_str().to_owned())
+                .unwrap_or_else(|| infer_asm_operand_class(&ty));
             validate_asm_operand_class(&ty, &class)?;
             Ok(AsmOperand::Input(AsmInput { name, ty, class }))
         }
@@ -684,7 +687,10 @@ fn build_asm_operand(pair: Pair<'_, Rule>) -> Result<AsmOperand, Diagnostic> {
             let mut parts = inner.into_inner();
             let name = parts.next().unwrap().as_str().to_owned();
             let ty = build_type(parts.next().unwrap())?;
-            let class = parts.next().unwrap().as_str().to_owned();
+            let class = parts
+                .next()
+                .map(|part| part.as_str().to_owned())
+                .unwrap_or_else(|| infer_asm_operand_class(&ty));
             validate_asm_operand_class(&ty, &class)?;
             Ok(AsmOperand::Output(AsmOutput { name, ty, class }))
         }
@@ -699,6 +705,16 @@ fn build_asm_operand(pair: Pair<'_, Rule>) -> Result<AsmOperand, Diagnostic> {
         }
         _ => unreachable!("unexpected inline asm operand {:?}", inner.as_rule()),
     }
+}
+
+fn infer_asm_operand_class(ty: &Type) -> String {
+    match type_storage_size(ty) {
+        Some(1) => "reg8",
+        Some(2) => "reg16",
+        Some(3) => "reg24",
+        _ => "mem",
+    }
+    .to_owned()
 }
 
 fn validate_asm_operand_class(ty: &Type, class: &str) -> Result<(), Diagnostic> {
@@ -1061,6 +1077,38 @@ mod tests {
                 && outputs[0].class == "reg8"
                 && clobbers == &["a"]
                 && lines.len() == 3
+        ));
+    }
+
+    #[test]
+    fn parses_inline_asm_operands_with_inferred_classes() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                asm volatile(in ch: u8, in word: u16, in addr: ptr<u8>, out result: u8, clobber a) {
+                    "ld a, {ch}"
+                    "ld hl, {word}"
+                    "ld hl, {addr}"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Asm {
+                inputs,
+                outputs,
+                ..
+            } if inputs.len() == 3
+                && inputs[0].class == "reg8"
+                && inputs[1].class == "reg16"
+                && inputs[2].class == "reg24"
+                && outputs.len() == 1
+                && outputs[0].class == "reg8"
         ));
     }
 
