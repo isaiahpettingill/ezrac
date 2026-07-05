@@ -11861,7 +11861,13 @@ mod tests {
                 flags: u8
             }
 
+            struct BigCell {
+                padding: [u8; 300]
+                value: u8
+            }
+
             global cell: Cell = Cell { value: 0x010203, flags: 0x44 }
+            global big: BigCell = BigCell { value: 0x99 }
 
             fn main() {
                 let p: ptr<Cell> = &cell
@@ -11869,6 +11875,12 @@ mod tests {
                 let r: ptr<Cell> = q - 1
                 test.assert_eq_u24(cast<u24>(q), cast<u24>(p) + 8, 1)
                 test.assert_eq_u24(cast<u24>(r), cast<u24>(p) + 4, 2)
+
+                let big_p: ptr<BigCell> = &big
+                let big_q: ptr<BigCell> = big_p + 1
+                let big_r: ptr<BigCell> = big_q - 1
+                test.assert_eq_u24(cast<u24>(big_q), cast<u24>(big_p) + 301, 3)
+                test.assert_eq_u24(cast<u24>(big_r), cast<u24>(big_p), 4)
                 test.pass()
             }
         "#;
