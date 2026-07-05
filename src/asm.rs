@@ -8340,6 +8340,11 @@ fn validate_inline_asm_clobbers(
 ) -> Result<(), Diagnostic> {
     let mut seen = HashSet::new();
     for clobber in clobbers {
+        if !is_allowed_inline_asm_clobber(clobber) {
+            return Err(Diagnostic::new(format!(
+                "unknown inline asm clobber `{clobber}`"
+            )));
+        }
         if !seen.insert(clobber.as_str()) {
             return Err(Diagnostic::new(format!(
                 "duplicate inline asm clobber `{clobber}`"
@@ -8380,6 +8385,29 @@ fn validate_inline_asm_clobbers(
         }
     }
     Ok(())
+}
+
+fn is_allowed_inline_asm_clobber(clobber: &str) -> bool {
+    matches!(
+        clobber,
+        "a" | "f"
+            | "af"
+            | "b"
+            | "c"
+            | "bc"
+            | "d"
+            | "e"
+            | "de"
+            | "h"
+            | "l"
+            | "hl"
+            | "ix"
+            | "iy"
+            | "sp"
+            | "memory"
+            | "ports"
+            | "flags"
+    )
 }
 
 fn asm_clobbers_include(clobbers: &[String], name: &str) -> bool {
@@ -13088,6 +13116,15 @@ section .text
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "duplicate inline asm clobber `a`");
+    }
+
+    #[test]
+    fn rejects_unknown_inline_asm_clobbers() {
+        let error =
+            validate_inline_asm_clobbers(&["scratch".to_owned()], &["nop".to_owned()], false)
+                .unwrap_err();
+
+        assert_eq!(error.message, "unknown inline asm clobber `scratch`");
     }
 
     #[test]
