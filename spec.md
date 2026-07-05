@@ -556,6 +556,9 @@ Character literals:
 '\0'
 ```
 
+Character literals are byte values. After escape decoding, the literal must contain
+exactly one byte.
+
 Boolean literals:
 
 ```text

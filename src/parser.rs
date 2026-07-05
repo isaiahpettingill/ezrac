@@ -947,7 +947,13 @@ fn strip_int_suffix(text: &str) -> (&str, Option<&str>) {
 fn parse_char(text: &str) -> Result<u8, Diagnostic> {
     let body = &text[1..text.len() - 1];
     let value = parse_escaped(body)?;
-    Ok(value.into_bytes().first().copied().unwrap_or(0))
+    let bytes = value.into_bytes();
+    if bytes.len() != 1 {
+        return Err(Diagnostic::new(
+            "character literal must contain exactly one byte",
+        ));
+    }
+    Ok(bytes[0])
 }
 
 fn parse_string(text: &str) -> Result<String, Diagnostic> {
@@ -1377,6 +1383,25 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.message, "unknown escape `\\q`");
+        assert_eq!(
+            error.location,
+            Some(SourceLocation {
+                file: Path::new("game.ezra").to_path_buf(),
+                line: 1,
+                column: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_multibyte_character_literals() {
+        let error =
+            parse_program(Path::new("game.ezra"), "const bad: u8 = 'é'\nfn main() {}").unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "character literal must contain exactly one byte"
+        );
         assert_eq!(
             error.location,
             Some(SourceLocation {

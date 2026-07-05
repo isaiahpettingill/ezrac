@@ -16372,6 +16372,26 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_character_literal_escapes() {
+        let source = r#"
+            fn main() {
+                test.assert_eq_u8('\n', 10, 1)
+                test.assert_eq_u8('\0', 0, 2)
+                test.assert_eq_u8('\t', 9, 3)
+                test.assert_eq_u8('\'', 39, 4)
+                test.assert_eq_u8('\\', 92, 5)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 10_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_const_string_literal_pointers() {
         let source = r#"
             const TITLE: ptr<u8> = "EZ"
