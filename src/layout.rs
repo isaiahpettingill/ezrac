@@ -758,6 +758,13 @@ mod tests {
                 symbol CAST_BYTE = cast<u8>(0x1234);
                 symbol CAST_BOOL = cast<bool>(0x20);
                 symbol CAST_PTR = cast<ptr<u8>>(0x1020003);
+                symbol NEG_WRAP = cast<u8>(-3);
+                symbol NOT_ZERO = !0;
+                symbol BIT_NOT = ~0x00FF & 0xFFFF;
+                symbol SHIFT_LEFT = 3 << 4;
+                symbol SHIFT_RIGHT = 0x8000 >> 8;
+                symbol LOGIC = (1 < 2) && (3 >= 3) || false;
+                symbol COMPARE = 0x20 != 0x10;
             }
         "#;
 
@@ -773,6 +780,13 @@ mod tests {
         assert_eq!(layout.symbols[4].value.get(), 0x34);
         assert_eq!(layout.symbols[5].value.get(), 1);
         assert_eq!(layout.symbols[6].value.get(), 0x020003);
+        assert_eq!(layout.symbols[7].value.get(), 253);
+        assert_eq!(layout.symbols[8].value.get(), 1);
+        assert_eq!(layout.symbols[9].value.get(), (!0x00FF_u32) & 0xFFFF);
+        assert_eq!(layout.symbols[10].value.get(), 3 << 4);
+        assert_eq!(layout.symbols[11].value.get(), 0x8000 >> 8);
+        assert_eq!(layout.symbols[12].value.get(), 1);
+        assert_eq!(layout.symbols[13].value.get(), 1);
     }
 
     #[test]
