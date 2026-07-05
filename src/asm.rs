@@ -202,6 +202,7 @@ struct Symbols {
     functions: HashMap<String, FunctionSig>,
     inline_functions: HashMap<String, Function>,
     next_addr: u32,
+    rodata_next_addr: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -253,6 +254,7 @@ impl Symbols {
             functions: HashMap::new(),
             inline_functions: HashMap::new(),
             next_addr: options.ram_base.get(),
+            rodata_next_addr: options.rodata_base.get(),
         };
 
         let mut declared_names = HashSet::new();
@@ -490,7 +492,23 @@ impl Symbols {
         if len > u32::MAX as usize {
             return Err(Diagnostic::new("string literal is too large"));
         }
-        let variable = self.alloc_array(u32::from(ValueWidth::U8.bytes()), len as u32);
+        let size =
+            u32::try_from(len).map_err(|_| Diagnostic::new("string literal is too large"))?;
+        let variable = Variable {
+            addr: self.rodata_next_addr,
+            size,
+            element_size: Some(u32::from(ValueWidth::U8.bytes())),
+            len: Some(size),
+        };
+        self.rodata_next_addr = self
+            .rodata_next_addr
+            .checked_add(size)
+            .ok_or_else(|| Diagnostic::new("string literal exceeds 24-bit address space"))?;
+        if self.rodata_next_addr > Address24::MAX + 1 {
+            return Err(Diagnostic::new(
+                "string literal exceeds 24-bit address space",
+            ));
+        }
         self.string_literals.insert(value.to_owned(), variable);
         Ok(variable)
     }
@@ -16463,6 +16481,8 @@ section .text
                 test.assert_eq_u8(*(title + 1), 'Z', 5);
                 test.assert_eq_u8(*(title + 2), 0, 6);
                 test.assert_eq_u8(same("OK", "OK"), true, 7);
+                test.assert_eq_u24(cast<ptr24>(title), EZRA_RODATA_BASE, 8);
+                test.assert_eq_u24(cast<ptr24>(text), EZRA_RODATA_BASE + 3, 9);
                 test.pass()
             }
         "#;
