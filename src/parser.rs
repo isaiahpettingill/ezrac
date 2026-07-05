@@ -17,6 +17,13 @@ use crate::{
 struct EzraParser;
 
 pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
+    let normalized;
+    let source = if needs_implicit_deref_assignment_separators(source) {
+        normalized = insert_implicit_deref_assignment_separators(source);
+        normalized.as_str()
+    } else {
+        source
+    };
     let mut pairs =
         EzraParser::parse(Rule::program, source).map_err(|error| pest_error(file, error))?;
     let program = pairs
@@ -34,6 +41,98 @@ pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
         source_path: file.to_path_buf(),
         declarations,
     })
+}
+
+fn needs_implicit_deref_assignment_separators(source: &str) -> bool {
+    source.lines().skip(1).any(line_starts_deref_assignment)
+}
+
+fn insert_implicit_deref_assignment_separators(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for (index, line) in source.lines().enumerate() {
+        if index > 0 && line_starts_deref_assignment(line) && previous_line_can_end_stmt(&out) {
+            out.push(';');
+        }
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if source.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn previous_line_can_end_stmt(source_so_far: &str) -> bool {
+    let Some(ch) = source_so_far.chars().rev().find(|ch| !ch.is_whitespace()) else {
+        return false;
+    };
+    !matches!(
+        ch,
+        ';' | '{'
+            | '('
+            | '['
+            | ','
+            | '='
+            | '+'
+            | '-'
+            | '/'
+            | '%'
+            | '&'
+            | '|'
+            | '^'
+            | '<'
+            | '>'
+            | '!'
+            | '~'
+    )
+}
+
+fn line_starts_deref_assignment(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with('*') && line_contains_assignment_op(line)
+}
+
+fn line_contains_assignment_op(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string || in_char {
+            match ch {
+                '\\' => escaped = true,
+                '"' if in_string => in_string = false,
+                '\'' if in_char => in_char = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            '/' if chars.peek() == Some(&'/') => return false,
+            '=' => return true,
+            '+' | '-' | '&' | '|' | '^' => {
+                if chars.peek() == Some(&'=') {
+                    return true;
+                }
+            }
+            '<' | '>' => {
+                let mut lookahead = chars.clone();
+                if lookahead.next() == Some(ch) && lookahead.next() == Some('=') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
@@ -1041,6 +1140,25 @@ mod tests {
         let program = parse_program(
             Path::new("game.ezra"),
             "global bytes: [u8; 2] = [0, 0]\nconst PTR: ptr<u8> = &bytes[0]\nfn main() { let p: ptr<u8> = &bytes[0]; *p = 7; let x: u8 = *(p + 1); let y: u8 = *PTR }",
+        )
+        .unwrap();
+
+        assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_newline_separated_deref_assignment_without_semicolon() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+                global screen: [u8; 2] = [0, 0]
+
+                fn main() {
+                    let p: ptr<u8> = &screen[0]
+                    *p = 7
+                    *(p + 1) = 8
+                }
+            "#,
         )
         .unwrap();
 

@@ -14659,10 +14659,10 @@ section .text
             port AGON_VDP: u8 = 0x9B
 
             fn main() {
-                let keys: u8 = in TI_KEYGROUP;
-                *(SCREEN) = keys;
-                out AGON_VDP, *SCREEN;
-                test.assert_eq_u8(*SCREEN, 0x2C, 1);
+                let keys: u8 = in TI_KEYGROUP
+                *(SCREEN) = keys
+                out AGON_VDP, *SCREEN
+                test.assert_eq_u8(*SCREEN, 0x2C, 1)
                 test.pass()
             }
         "#;
