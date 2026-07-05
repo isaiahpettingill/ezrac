@@ -5180,9 +5180,9 @@ impl Emitter {
     }
 
     fn validate_shift_count(&self, value: i64) -> Result<u8, Diagnostic> {
-        if !(0..=24).contains(&value) {
+        if !(0..=u8::MAX as i64).contains(&value) {
             return Err(Diagnostic::new(format!(
-                "shift count {value} is outside supported range 0..=24"
+                "shift count {value} is outside supported range 0..=255"
             )));
         }
         Ok(value as u8)
@@ -9997,6 +9997,30 @@ mod tests {
         let run = run_assembly_test(&asm, 40_000).unwrap();
 
         assert!(asm.contains("    dec b"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_large_literal_shift_counts() {
+        let source = r#"
+            fn main() {
+                test.assert_eq_u8(0x80 >> 25, 0, 1)
+                test.assert_eq_u8(0x01 << 25, 0, 2)
+                test.assert_eq_u16(0x8000 >> 25, 0, 3)
+                test.assert_eq_u16(0x0001 << 25, 0, 4)
+                test.assert_eq_u24(0x800000 >> 25, 0, 5)
+                test.assert_eq_u24(0x000001 << 25, 0, 6)
+                test.assert_eq_u8((-1i8) >> 25, 0xFF, 7)
+                test.assert_eq_u16((-1i16) >> 25, 0xFFFF, 8)
+                test.assert_eq_u24((-1i24) >> 25, 0xFFFFFF, 9)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 20_000).unwrap();
+
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
