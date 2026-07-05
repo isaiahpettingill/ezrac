@@ -140,15 +140,22 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "cp c"
     ) {
         Ok(1)
-    } else if matches!(text, "reti" | "srl a" | "rl a" | "rr a") {
+    } else if matches!(
+        text,
+        "reti" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix"
+    ) {
         Ok(2)
-    } else if text == "sbc hl, bc" || text == "sbc hl, de" {
+    } else if text == "sbc hl, bc" || text == "sbc hl, de" || text == "add ix, sp" {
         Ok(2)
+    } else if is_ix_byte_load_or_store(text) {
+        Ok(3)
     } else if text.starts_with("ld hl, (")
         || text.starts_with("ld a, (")
         || text.starts_with("ld (")
     {
         Ok(4)
+    } else if text.starts_with("ld ix,") {
+        Ok(5)
     } else if text.starts_with("ld hl,") {
         Ok(4)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") || text.starts_with("in0 ") {
@@ -190,6 +197,10 @@ fn emit_instruction(
     } else if let Some(target) = text.strip_prefix("jp ") {
         bytes.push(0xC3);
         push24(bytes, parse_addr(target.trim(), labels)?);
+    } else if let Some(offset) = parse_ix_byte_load(text)? {
+        bytes.extend([0xDD, 0x7E, offset]);
+    } else if let Some(offset) = parse_ix_byte_store(text)? {
+        bytes.extend([0xDD, 0x77, offset]);
     } else if text == "ld a, (hl)" {
         bytes.push(0x7E);
     } else if text == "ld (hl), a" {
@@ -248,6 +259,8 @@ fn emit_instruction(
         bytes.push(0xD5);
     } else if text == "push hl" {
         bytes.push(0xE5);
+    } else if text == "push ix" {
+        bytes.extend([0xDD, 0xE5]);
     } else if text == "pop af" {
         bytes.push(0xF1);
     } else if text == "pop bc" {
@@ -256,8 +269,15 @@ fn emit_instruction(
         bytes.push(0xD1);
     } else if text == "pop hl" {
         bytes.push(0xE1);
+    } else if text == "pop ix" {
+        bytes.extend([0xDD, 0xE1]);
     } else if text == "reti" {
         bytes.extend([0xED, 0x4D]);
+    } else if text == "add ix, sp" {
+        bytes.extend([0xDD, 0x39]);
+    } else if let Some(value) = text.strip_prefix("ld ix,") {
+        bytes.extend([0xDD, 0x21]);
+        push24(bytes, parse_addr(value.trim(), labels)?);
     } else if text == "ld b, a" {
         bytes.push(0x47);
     } else if text == "ld c, a" {
@@ -337,6 +357,51 @@ fn emit_instruction(
         )));
     }
     Ok(())
+}
+
+fn is_ix_byte_load_or_store(text: &str) -> bool {
+    parse_ix_byte_load(text).is_ok_and(|offset| offset.is_some())
+        || parse_ix_byte_store(text).is_ok_and(|offset| offset.is_some())
+}
+
+fn parse_ix_byte_load(text: &str) -> Result<Option<u8>, Diagnostic> {
+    let Some(rest) = text.strip_prefix("ld a, (ix") else {
+        return Ok(None);
+    };
+    parse_ix_offset(rest).map(Some)
+}
+
+fn parse_ix_byte_store(text: &str) -> Result<Option<u8>, Diagnostic> {
+    let Some(rest) = text.strip_prefix("ld (ix") else {
+        return Ok(None);
+    };
+    let Some(rest) = rest.strip_suffix("), a") else {
+        return Ok(None);
+    };
+    parse_ix_offset(rest).map(Some)
+}
+
+fn parse_ix_offset(text: &str) -> Result<u8, Diagnostic> {
+    let text = text.trim();
+    let text = text.strip_suffix(')').unwrap_or(text);
+    if text.is_empty() {
+        return Ok(0);
+    }
+    let (sign, digits) = text.split_at(1);
+    let magnitude = parse_number(digits.trim())?;
+    if magnitude > 0x7F {
+        return Err(Diagnostic::new(format!(
+            "ix displacement `{text}` is outside signed 8-bit range"
+        )));
+    }
+    let value = match sign {
+        "+" => magnitude as i8,
+        "-" => -(magnitude as i8),
+        _ => {
+            return Err(Diagnostic::new(format!("invalid ix displacement `{text}`")));
+        }
+    };
+    Ok(value as u8)
 }
 
 fn parse_addr(text: &str, labels: &HashMap<String, u32>) -> Result<u32, Diagnostic> {
@@ -474,5 +539,58 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn runs_ix_displacement_loads_and_stores() {
+        let asm = r#"
+            ld sp, 0F00000h
+            ld ix, 040200h
+            ld a, 2Ah
+            ld (ix+3), a
+            ld a, 00h
+            ld a, (ix+3)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0x2A);
+    }
+
+    #[test]
+    fn runs_ix_push_pop_and_sp_add() {
+        let asm = r#"
+            ld sp, 040400h
+            ld ix, 000000h
+            add ix, sp
+            ld a, 11h
+            ld (ix+1), a
+            ld b, a
+            ld a, (040401h)
+            cp b
+            jp z, sp_ok
+            ld a, 0EEh
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        sp_ok:
+            ld ix, 040220h
+            push ix
+            ld ix, 040240h
+            pop ix
+            ld a, 07h
+            ld (ix+0), a
+            ld a, (040220h)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 200).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 7);
     }
 }
