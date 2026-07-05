@@ -14600,6 +14600,42 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_repeated_volatile_mmio_dereferences() {
+        let source = r#"
+            volatile mmio STATUS: ptr<u8> = 0x040270
+            volatile mmio CONTROL: ptr<u8> = 0x040271
+
+            fn main() {
+                *STATUS;
+                *STATUS;
+                *(CONTROL) = 0x34;
+                *(CONTROL) = 0x35;
+                test.assert_eq_u8(*STATUS, 0x12, 1)
+                test.assert_eq_u8(*CONTROL, 0x35, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test_with_options(
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 4_000,
+                initial_ports: Vec::new(),
+                initial_memory: vec![(0x040270, 0x12)],
+                stack_top: EZRA_STACK_TOP.get(),
+            },
+        )
+        .unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(asm.matches("    ld hl, 040270h").count() >= 3, "{asm}");
+        assert!(asm.matches("    ld a, (hl)").count() >= 4, "{asm}");
+        assert!(asm.matches("    ld (hl), a").count() >= 2, "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_static_arrays() {
         let source = r#"
             global palette: [u8; 4] = [1, 2, 3]
