@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{
+    asm::{AssemblyOptions, emit_ez80_assembly_with_options},
     ast::{
         AccessPath, AccessSegment, Declaration, EmbedSource, Expr, Function, Place, Program, Stmt,
         Type,
@@ -41,6 +42,13 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
         return Err(Diagnostic::new("missing required `fn main()`"));
     }
     validate_main_signature(program.main_function().expect("main presence checked"))?;
+    emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            debug_comments: options.debug_comments,
+            ..AssemblyOptions::default()
+        },
+    )?;
 
     Ok(CompileReport {
         imports,
@@ -626,6 +634,21 @@ mod tests {
 
         assert_eq!(with_param.message, "main function cannot take parameters");
         assert_eq!(with_return.message, "main function cannot return a value");
+    }
+
+    #[test]
+    fn check_rejects_semantic_errors_in_function_bodies() {
+        let options = CompileOptions {
+            source: PathBuf::from("game.ezra"),
+            debug_comments: false,
+        };
+
+        let mismatch = check_source("fn main() { let x: u8 = 0x0100 }\n", &options).unwrap_err();
+        let bad_call =
+            check_source("fn helper() { missing() }\nfn main() {}\n", &options).unwrap_err();
+
+        assert_eq!(mismatch.message, "value 256 is outside u8 range");
+        assert_eq!(bad_call.message, "unknown function `missing`");
     }
 
     #[test]
