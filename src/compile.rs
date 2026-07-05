@@ -128,7 +128,12 @@ fn resolve_program_imports(
         let imported = parse_program(&import_path, &source)?;
         let module_aliases = module_alias_declarations(import, &imported.declarations);
         let imported = resolve_program_imports(imported, stack, seen)?;
-        declarations.extend(imported.declarations);
+        declarations.extend(
+            imported
+                .declarations
+                .into_iter()
+                .filter(|declaration| !is_entry_function(declaration)),
+        );
         declarations.extend(module_aliases);
     }
     stack.pop();
@@ -154,6 +159,10 @@ fn validate_main_signature(main: &Function) -> Result<(), Diagnostic> {
         return Err(Diagnostic::new("main function cannot return a value"));
     }
     Ok(())
+}
+
+fn is_entry_function(declaration: &Declaration) -> bool {
+    matches!(declaration, Declaration::Function(function) if function.name == "main")
 }
 
 fn resolve_import_path(source_path: &Path, import: &str) -> PathBuf {
@@ -700,6 +709,48 @@ mod tests {
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "math.add_one")
         }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn root_source_must_define_main_entry() {
+        let root = temp_root("root_main");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/app.ezra");
+        std::fs::write(&lib_path, "fn main() { test.fail(1) }\n").unwrap();
+        let source = "import lib.app\n";
+        std::fs::write(&main_path, source).unwrap();
+
+        let options = CompileOptions {
+            source: main_path.clone(),
+            debug_comments: false,
+        };
+        let error = check_source(source, &options).unwrap_err();
+
+        assert_eq!(error.message, "missing required `fn main()`");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imported_main_does_not_conflict_with_root_main() {
+        let root = temp_root("imported_main");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/app.ezra");
+        std::fs::write(&lib_path, "fn main() { test.fail(1) }\n").unwrap();
+        std::fs::write(&main_path, "import lib.app\nfn main() { test.pass() }\n").unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let main_count = program
+            .declarations
+            .iter()
+            .filter(|declaration| is_entry_function(declaration))
+            .count();
+
+        assert_eq!(main_count, 1);
 
         let _ = std::fs::remove_dir_all(root);
     }
