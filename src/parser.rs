@@ -449,6 +449,13 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
                 index: Box::new(build_expr(inner.next().unwrap())?),
             })
         }
+        Rule::addr_field_expr => {
+            let mut inner = pair.into_inner();
+            Ok(Expr::AddressOfField {
+                base: inner.next().unwrap().as_str().to_owned(),
+                field: inner.next().unwrap().as_str().to_owned(),
+            })
+        }
         Rule::addr_expr => Ok(Expr::AddressOf(
             pair.into_inner().next().unwrap().as_str().to_owned(),
         )),
@@ -750,6 +757,7 @@ mod tests {
     fn parses_struct_declaration_literals_and_fields() {
         EzraParser::parse(Rule::field_expr, "player.x").unwrap();
         EzraParser::parse(Rule::expr, "player.x").unwrap();
+        EzraParser::parse(Rule::expr, "&player.x").unwrap();
         EzraParser::parse(Rule::expr, "test.assert_eq_u24(player.x, 0x010000, 1)").unwrap();
         EzraParser::parse(Rule::stmt, "test.assert_eq_u24(player.x, 0x010000, 1);").unwrap();
         let program = parse_program(

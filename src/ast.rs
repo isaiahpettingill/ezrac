@@ -177,6 +177,10 @@ pub enum Expr {
         name: String,
         index: Box<Expr>,
     },
+    AddressOfField {
+        base: String,
+        field: String,
+    },
     AddressOf(String),
     StructInit {
         ty: String,

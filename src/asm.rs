@@ -504,6 +504,7 @@ impl Symbols {
             Expr::Array(_)
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
             | Expr::AddressOf(_)
             | Expr::Field { .. }
             | Expr::StructInit { .. }
@@ -1184,6 +1185,9 @@ impl Emitter {
             Expr::AddressOfIndex { name, index } => {
                 self.emit_array_element_address(name, index)?;
             }
+            Expr::AddressOfField { base, field } => {
+                self.emit_field_address(base, field)?;
+            }
             Expr::AddressOf(name) => {
                 self.emit_variable_address(name)?;
             }
@@ -1437,6 +1441,7 @@ impl Emitter {
                 self.emit_user_call(&path[0], args)?;
             }
             Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
             | Expr::AddressOf(_)
             | Expr::Array(_)
             | Expr::StructInit { .. }
@@ -2170,6 +2175,12 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_field_address(&mut self, base: &str, field: &str) -> Result<(), Diagnostic> {
+        let variable = self.field_variable(base, field)?;
+        self.line(&format!("    ld hl, {:06X}h", variable.addr));
+        Ok(())
+    }
+
     fn struct_type_name(&self, ty: &Type) -> Result<String, Diagnostic> {
         match self.symbols.resolved_type(ty)? {
             Type::Named(name) if self.symbols.structs.contains_key(&name) => Ok(name),
@@ -2414,6 +2425,9 @@ impl Emitter {
             Expr::AddressOfIndex { name, .. } => {
                 Ok(Type::Ptr(Box::new(self.array_element_type(name)?)))
             }
+            Expr::AddressOfField { base, field } => {
+                Ok(Type::Ptr(Box::new(self.field_type(base, field)?)))
+            }
             Expr::AddressOf(name) => {
                 let Some(ty) = self.variable_type(name) else {
                     return Err(Diagnostic::new(format!("unknown variable `{name}`")));
@@ -2511,6 +2525,7 @@ impl Emitter {
                 }
             }
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
+            Expr::AddressOfField { .. } => Ok(ValueWidth::U24),
             Expr::AddressOf(_) => Ok(ValueWidth::U24),
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => self.symbols.type_width(&inner),
@@ -3521,6 +3536,49 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_struct_field_addresses() {
+        let source = r#"
+            struct Entity {
+                x: u24
+                sprite: u8
+                hp: u16
+            }
+
+            global player: Entity = Entity {
+                x: 0,
+                sprite: 1,
+                hp: 100,
+            }
+
+            fn write_u24(ptr: ptr<u24>, value: u24) {
+                *ptr = value
+            }
+
+            fn main() {
+                let x_ptr: ptr<u24> = &player.x;
+                write_u24(x_ptr, 0x010203);
+                test.assert_eq_u24(player.x, 0x010203, 1);
+                test.assert_eq_u24(*x_ptr, 0x010203, 2);
+
+                let sprite_ptr: ptr<u8> = &player.sprite;
+                *sprite_ptr = 7;
+                test.assert_eq_u8(player.sprite, 7, 3);
+
+                let hp_ptr: ptr<u16> = &player.hp;
+                *hp_ptr = *hp_ptr + 23;
+                test.assert_eq_u16(player.hp, 123, 4);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
