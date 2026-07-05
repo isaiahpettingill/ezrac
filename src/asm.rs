@@ -196,6 +196,7 @@ struct Symbols {
     ports: HashMap<String, u8>,
     globals: HashMap<String, Variable>,
     global_types: HashMap<String, Type>,
+    readonly_global_pointer_aliases: HashMap<String, u32>,
     functions: HashMap<String, FunctionSig>,
     inline_functions: HashMap<String, Function>,
     next_addr: u32,
@@ -246,6 +247,7 @@ impl Symbols {
             ports: sdk_ports(),
             globals: HashMap::new(),
             global_types: HashMap::new(),
+            readonly_global_pointer_aliases: HashMap::new(),
             functions: HashMap::new(),
             inline_functions: HashMap::new(),
             next_addr: options.ram_base.get(),
@@ -445,6 +447,8 @@ impl Symbols {
                 _ => {}
             }
         }
+
+        symbols.record_readonly_global_pointer_aliases(program);
 
         Ok(symbols)
     }
@@ -686,6 +690,36 @@ impl Symbols {
         self.globals.insert(decl.name.clone(), variable);
         self.global_types.insert(decl.name.clone(), decl.ty.clone());
         Ok(())
+    }
+
+    fn record_readonly_global_pointer_aliases(&mut self, program: &Program) {
+        let assigned = assigned_names_in_program(program);
+        for declaration in &program.declarations {
+            let Declaration::Global(decl) = declaration else {
+                continue;
+            };
+            if assigned.contains(&decl.name) {
+                continue;
+            }
+            if let Some(addr) = self.readonly_initializer_addr(&decl.value) {
+                self.readonly_global_pointer_aliases
+                    .insert(decl.name.clone(), addr);
+            }
+        }
+    }
+
+    fn readonly_initializer_addr(&mut self, expr: &Expr) -> Option<u32> {
+        let addr = match expr {
+            Expr::String(value) => self.intern_string_literal(value).ok()?.addr,
+            _ => addr24(self.eval_i64(expr).ok()?)?,
+        };
+        if self.readonly_embed_name_for_addr(addr).is_some()
+            || self.readonly_string_literal_for_addr(addr).is_some()
+        {
+            Some(addr)
+        } else {
+            None
+        }
     }
 
     fn ensure_type_const_dependencies_evaluated(
@@ -1320,6 +1354,42 @@ impl Symbols {
             "end" => Some((embed.variable.addr + embed.variable.len.unwrap_or(0)) as i64),
             _ => None,
         }
+    }
+
+    fn readonly_embed_name_for_addr(&self, addr: u32) -> Option<&str> {
+        let addr = u64::from(addr);
+        for (name, embed) in &self.embeds {
+            let Some(len) = embed.variable.len else {
+                continue;
+            };
+            let start = u64::from(embed.variable.addr);
+            let end = start + u64::from(len);
+            if addr >= start && addr < end {
+                return Some(name.as_str());
+            }
+        }
+        None
+    }
+
+    fn readonly_string_literal_for_addr(&self, addr: u32) -> Option<&str> {
+        self.readonly_string_literal_for_range(u64::from(addr), u64::from(addr) + 1)
+    }
+
+    fn readonly_string_literal_for_range(&self, start: u64, end: u64) -> Option<&str> {
+        for (value, variable) in &self.string_literals {
+            let Some(len) = variable.len else {
+                continue;
+            };
+            if len == 0 {
+                continue;
+            }
+            let literal_start = u64::from(variable.addr);
+            let literal_end = literal_start + u64::from(len);
+            if start < literal_end && end > literal_start {
+                return Some(value.as_str());
+            }
+        }
+        None
     }
 
     fn const_expr_uses_wrapping_arithmetic(&self, expr: &Expr) -> bool {
@@ -4247,7 +4317,12 @@ impl Emitter {
 
     fn readonly_expr_addr(&mut self, expr: &Expr) -> Option<u32> {
         match expr {
-            Expr::Ident(name) => self.readonly_pointer_alias(name),
+            Expr::Ident(name) => self.readonly_pointer_alias(name).or_else(|| {
+                self.symbols
+                    .readonly_global_pointer_aliases
+                    .get(name)
+                    .copied()
+            }),
             Expr::String(value) => {
                 if let Some(variable) = self
                     .string_literals
@@ -7486,6 +7561,14 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<String>) {
     }
 }
 
+fn addr24(addr: i64) -> Option<u32> {
+    if (0..=0xFF_FFFF).contains(&addr) {
+        Some(addr as u32)
+    } else {
+        None
+    }
+}
+
 fn collect_access_calls(path: &AccessPath, calls: &mut Vec<String>) {
     for segment in &path.segments {
         if let AccessSegment::Index(index) = segment {
@@ -7776,6 +7859,16 @@ fn stmt_terminates_current_block(stmt: &Stmt) -> bool {
 fn assigned_names_in_block(stmts: &[Stmt]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_assigned_names(stmts, &mut names);
+    names
+}
+
+fn assigned_names_in_program(program: &Program) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for declaration in &program.declarations {
+        if let Declaration::Function(function) = declaration {
+            collect_assigned_names(&function.body, &mut names);
+        }
+    }
     names
 }
 
@@ -15910,6 +16003,18 @@ section .text
             (
                 r#"
                 embed sprite: bytes = bytes [0x11, 0x22]
+                global sprite_alias: ptr<u8> = sprite.ptr
+
+                fn main() {
+                    *(sprite_alias + 1) = 0x33
+                    test.pass()
+                }
+                "#,
+                "embedded object `sprite` is read-only",
+            ),
+            (
+                r#"
+                embed sprite: bytes = bytes [0x11, 0x22]
 
                 fn main() {
                     let offset: u8 = 1
@@ -16093,6 +16198,14 @@ section .text
                     test.pass()
                 }
             "#,
+            r#"
+                global title_copy: ptr<u8> = "EZ";
+
+                fn main() {
+                    *(title_copy + 1) = 'X'
+                    test.pass()
+                }
+            "#,
         ];
 
         for source in cases {
@@ -16101,6 +16214,31 @@ section .text
 
             assert_eq!(error.message, "string literal is read-only");
         }
+    }
+
+    #[test]
+    fn allows_reassigned_global_readonly_pointer_aliases_to_mutable_memory() {
+        let source = r#"
+            embed sprite: bytes = bytes [0x11, 0x22]
+            global p: ptr<u8> = sprite.ptr
+            global text: ptr<u8> = "OK"
+
+            fn main() {
+                p = cast<ptr<u8>>(0x040120);
+                text = cast<ptr<u8>>(0x040121);
+                *(p) = 0x33;
+                *(text) = 0x44
+                test.assert_eq_u8(*(cast<ptr<u8>>(0x040120)), 0x33, 1)
+                test.assert_eq_u8(*(cast<ptr<u8>>(0x040121)), 0x44, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
