@@ -101,9 +101,13 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         "ret"
             | "or a"
             | "ex de, hl"
+            | "push af"
             | "push bc"
+            | "push de"
             | "push hl"
+            | "pop af"
             | "pop bc"
+            | "pop de"
             | "pop hl"
             | "ld b, a"
             | "ld c, a"
@@ -136,7 +140,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "cp c"
     ) {
         Ok(1)
-    } else if matches!(text, "srl a" | "rl a" | "rr a") {
+    } else if matches!(text, "reti" | "srl a" | "rl a" | "rr a") {
         Ok(2)
     } else if text == "sbc hl, bc" || text == "sbc hl, de" {
         Ok(2)
@@ -236,14 +240,24 @@ fn emit_instruction(
         bytes.push(0xB7);
     } else if text == "ex de, hl" {
         bytes.push(0xEB);
+    } else if text == "push af" {
+        bytes.push(0xF5);
     } else if text == "push bc" {
         bytes.push(0xC5);
+    } else if text == "push de" {
+        bytes.push(0xD5);
     } else if text == "push hl" {
         bytes.push(0xE5);
+    } else if text == "pop af" {
+        bytes.push(0xF1);
     } else if text == "pop bc" {
         bytes.push(0xC1);
+    } else if text == "pop de" {
+        bytes.push(0xD1);
     } else if text == "pop hl" {
         bytes.push(0xE1);
+    } else if text == "reti" {
+        bytes.extend([0xED, 0x4D]);
     } else if text == "ld b, a" {
         bytes.push(0x47);
     } else if text == "ld c, a" {

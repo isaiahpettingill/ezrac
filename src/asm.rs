@@ -626,7 +626,8 @@ impl Emitter {
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
-        let naked = function.attrs.iter().any(|attr| attr == "naked");
+        let naked = has_attr(function, "naked");
+        let interrupt = has_attr(function, "interrupt");
         if naked {
             for stmt in &function.body {
                 if !matches!(stmt, Stmt::Asm { .. }) {
@@ -649,6 +650,15 @@ impl Emitter {
                 .unwrap_or(ValueWidth::U8),
         );
         if !naked {
+            if interrupt {
+                if !function.params.is_empty() {
+                    return Err(Diagnostic::new(format!(
+                        "interrupt function `{}` cannot take parameters",
+                        function.name
+                    )));
+                }
+                self.emit_interrupt_prologue();
+            }
             self.bind_params(function)?;
         }
         for stmt in &function.body {
@@ -660,12 +670,31 @@ impl Emitter {
         if naked {
             return Ok(());
         }
+        if interrupt {
+            self.emit_interrupt_epilogue();
+            return Ok(());
+        }
         if function.name == "main" {
             self.line("    jp __ezra_exit");
         } else {
             self.line("    ret");
         }
         Ok(())
+    }
+
+    fn emit_interrupt_prologue(&mut self) {
+        self.line("    push af");
+        self.line("    push bc");
+        self.line("    push de");
+        self.line("    push hl");
+    }
+
+    fn emit_interrupt_epilogue(&mut self) {
+        self.line("    pop hl");
+        self.line("    pop de");
+        self.line("    pop bc");
+        self.line("    pop af");
+        self.line("    reti");
     }
 
     fn bind_params(&mut self, function: &Function) -> Result<(), Diagnostic> {
@@ -2825,6 +2854,10 @@ fn declaration_name(declaration: &Declaration) -> Option<&str> {
     }
 }
 
+fn has_attr(function: &Function, attr: &str) -> bool {
+    function.attrs.iter().any(|candidate| candidate == attr)
+}
+
 fn is_comparison(op: BinaryOp) -> bool {
     matches!(
         op,
@@ -3122,6 +3155,52 @@ mod tests {
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"B", "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_interrupt_functions_with_reti() {
+        let source = r#"
+            interrupt fn vblank_irq() {
+                debug.char('I')
+            }
+
+            fn main() {
+                vblank_irq()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        let irq = asm.split("_vblank_irq:").nth(1).unwrap();
+        let irq = irq.split("_main:").next().unwrap();
+        assert!(irq.contains("    push af"), "{asm}");
+        assert!(irq.contains("    pop af"), "{asm}");
+        assert!(irq.contains("    reti"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"I", "{asm}");
+    }
+
+    #[test]
+    fn rejects_interrupt_function_parameters() {
+        let source = r#"
+            interrupt fn invalid(code: u8) {
+                debug.char(code)
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "interrupt function `invalid` cannot take parameters"
+        );
     }
 
     #[test]
