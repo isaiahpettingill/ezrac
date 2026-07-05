@@ -1543,14 +1543,7 @@ impl Emitter {
                 .get(&decl.name)
                 .copied()
                 .expect("global allocation exists");
-            if variable.element_size.is_some() {
-                self.emit_array_initializer(variable, &decl.ty, &decl.value)?;
-            } else if self.is_struct_type(&decl.ty)? {
-                self.emit_struct_initializer(variable, &decl.ty, &decl.value)?;
-            } else {
-                self.emit_expr_to_type(&decl.value, &decl.ty)?;
-                self.emit_store_width(variable);
-            }
+            self.emit_storage_initializer(variable, &decl.ty, &decl.value)?;
         }
         Ok(())
     }
@@ -1761,14 +1754,7 @@ impl Emitter {
                 self.current_scope_mut().insert(name.clone(), variable);
                 self.current_scope_types_mut()
                     .insert(name.clone(), ty.clone());
-                if variable.element_size.is_some() {
-                    self.emit_array_initializer(variable, ty, value)?;
-                } else if self.is_struct_type(ty)? {
-                    self.emit_struct_initializer(variable, ty, value)?;
-                } else {
-                    self.emit_expr_to_type(value, ty)?;
-                    self.emit_store_width(variable);
-                }
+                self.emit_storage_initializer(variable, ty, value)?;
             }
             Stmt::Assign { target, op, value } => {
                 self.emit_assignment(target, *op, value)?;
@@ -2371,6 +2357,10 @@ impl Emitter {
         ty: &Type,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
+        self.validate_expr_assignable_to_type(value, ty)?;
+        if let Expr::Deref(ptr) = value {
+            return self.emit_copy_pointed_storage_into(ptr, variable);
+        }
         match self.symbols.resolved_type(ty)? {
             Type::Array { .. } => self.emit_array_initializer(variable, ty, value),
             Type::Named(name) if self.symbols.structs.contains_key(&name) => {
@@ -2800,14 +2790,7 @@ impl Emitter {
         self.current_scope_mut().insert(name.clone(), variable);
         self.current_scope_types_mut()
             .insert(name.clone(), ty.clone());
-        if variable.element_size.is_some() {
-            self.emit_array_initializer(variable, ty, value)?;
-        } else if self.is_struct_type(ty)? {
-            self.emit_struct_initializer(variable, ty, value)?;
-        } else {
-            self.emit_expr_to_type(value, ty)?;
-            self.emit_store_width(variable);
-        }
+        self.emit_storage_initializer(variable, ty, value)?;
         Ok(())
     }
 
@@ -4511,6 +4494,16 @@ impl Emitter {
         }
     }
 
+    fn emit_copy_pointed_storage_into(
+        &mut self,
+        ptr: &Expr,
+        variable: Variable,
+    ) -> Result<(), Diagnostic> {
+        self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
+        self.emit_load_pointed_width_into(variable);
+        Ok(())
+    }
+
     fn const_array_element_variable(
         &self,
         name: &str,
@@ -4570,13 +4563,6 @@ impl Emitter {
             other => Err(Diagnostic::new(format!(
                 "type `{other:?}` is not a struct type"
             ))),
-        }
-    }
-
-    fn is_struct_type(&self, ty: &Type) -> Result<bool, Diagnostic> {
-        match self.symbols.resolved_type(ty)? {
-            Type::Named(name) => Ok(self.symbols.structs.contains_key(&name)),
-            _ => Ok(false),
         }
     }
 
@@ -11777,6 +11763,38 @@ mod tests {
                 *(pair_ptr) = Pair { left: 7, right: 0x0809 }
                 test.assert_eq_u8(pair.left, 7, 3)
                 test.assert_eq_u16(pair.right, 0x0809, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_aggregate_pointer_reads() {
+        let source = r#"
+            struct Pair {
+                left: u8
+                right: u16
+            }
+
+            global bytes: [u8; 3] = [4, 5, 6]
+            global pair: Pair = Pair { left: 7, right: 0x0809 }
+
+            fn main() {
+                let byte_ptr: ptr<[u8; 3]> = &bytes;
+                let local_bytes: [u8; 3] = *(byte_ptr)
+                test.assert_eq_u8(local_bytes[0], 4, 1)
+                test.assert_eq_u8(local_bytes[2], 6, 2)
+
+                let pair_ptr: ptr<Pair> = &pair;
+                let local_pair: Pair = *(pair_ptr)
+                test.assert_eq_u8(local_pair.left, 7, 3)
+                test.assert_eq_u16(local_pair.right, 0x0809, 4)
                 test.pass()
             }
         "#;
