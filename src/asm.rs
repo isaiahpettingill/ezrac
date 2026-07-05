@@ -32,6 +32,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         return_value_stack: Vec::new(),
         function_name_stack: Vec::new(),
         function_frame_stack: Vec::new(),
+        function_interrupt_stack: Vec::new(),
     };
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
@@ -957,6 +958,7 @@ struct Emitter {
     return_value_stack: Vec<bool>,
     function_name_stack: Vec<String>,
     function_frame_stack: Vec<bool>,
+    function_interrupt_stack: Vec<bool>,
 }
 
 impl Emitter {
@@ -1058,6 +1060,7 @@ impl Emitter {
         self.return_value_stack.push(function.return_type.is_some());
         self.function_name_stack.push(function.name.clone());
         self.function_frame_stack.push(uses_stack_frame);
+        self.function_interrupt_stack.push(interrupt);
         if !naked {
             if interrupt {
                 if !function.params.is_empty() {
@@ -1076,6 +1079,7 @@ impl Emitter {
         for stmt in &function.body {
             self.emit_stmt(stmt)?;
         }
+        self.function_interrupt_stack.pop();
         self.function_frame_stack.pop();
         self.function_name_stack.pop();
         self.return_value_stack.pop();
@@ -1294,7 +1298,11 @@ impl Emitter {
                 if self.current_function_uses_frame() {
                     self.emit_frame_epilogue();
                 }
-                self.line("    ret");
+                if self.current_function_is_interrupt() {
+                    self.emit_interrupt_epilogue();
+                } else {
+                    self.line("    ret");
+                }
             }
             Stmt::Return(Some(expr)) => {
                 if !self.current_function_requires_return_value() {
@@ -1308,7 +1316,11 @@ impl Emitter {
                 if self.current_function_uses_frame() {
                     self.emit_frame_epilogue();
                 }
-                self.line("    ret");
+                if self.current_function_is_interrupt() {
+                    self.emit_interrupt_epilogue();
+                } else {
+                    self.line("    ret");
+                }
             }
             Stmt::Asm {
                 volatile,
@@ -3999,6 +4011,13 @@ impl Emitter {
             .expect("function frame state exists during emission")
     }
 
+    fn current_function_is_interrupt(&self) -> bool {
+        self.function_interrupt_stack
+            .last()
+            .copied()
+            .expect("function interrupt state exists during emission")
+    }
+
     fn port(&self, name: &str) -> Result<u8, Diagnostic> {
         self.symbols
             .ports
@@ -6056,6 +6075,40 @@ mod tests {
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"I", "{asm}");
+    }
+
+    #[test]
+    fn emits_interrupt_epilogue_for_explicit_return() {
+        let source = r#"
+            interrupt fn vblank_irq() {
+                debug.char('R')
+                if true {
+                    return
+                }
+                debug.char('X')
+            }
+
+            fn main() {
+                vblank_irq()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        let irq = asm.split("_vblank_irq:").nth(1).unwrap();
+        let irq = irq.split("_main:").next().unwrap();
+        let return_site = irq
+            .split("out0 (0Ch), a")
+            .nth(1)
+            .expect("debug output in interrupt handler");
+        assert!(return_site.contains("    pop hl"), "{asm}");
+        assert!(return_site.contains("    pop af"), "{asm}");
+        assert!(return_site.contains("    reti"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"R", "{asm}");
     }
 
     #[test]
