@@ -4214,6 +4214,26 @@ fn stmt_guarantees_value_return(stmt: &Stmt) -> bool {
         } if !else_body.is_empty() => {
             block_guarantees_value_return(then_body) && block_guarantees_value_return(else_body)
         }
+        Stmt::Loop { body } => {
+            !block_can_break_current_loop(body) && block_guarantees_value_return(body)
+        }
+        _ => false,
+    }
+}
+
+fn block_can_break_current_loop(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_can_break_current_loop)
+}
+
+fn stmt_can_break_current_loop(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => block_can_break_current_loop(then_body) || block_can_break_current_loop(else_body),
+        Stmt::While { .. } | Stmt::Loop { .. } => false,
         _ => false,
     }
 }
@@ -5337,17 +5357,45 @@ mod tests {
 
     #[test]
     fn rejects_missing_return_value_in_non_void_function() {
-        let source = r#"
-            fn answer() -> u8 {
-                let value: u8 = 1
-            }
+        let cases = [
+            r#"
+                fn answer() -> u8 {
+                    let value: u8 = 1
+                }
 
-            fn main() { test.pass() }
-        "#;
-        let program = parse_program(Path::new("game.ezra"), source).unwrap();
-        let error = emit_ez80_assembly(&program).unwrap_err();
+                fn main() { test.pass() }
+            "#,
+            r#"
+                fn answer() -> u8 {
+                    loop {
+                        break
+                        return 1
+                    }
+                }
 
-        assert_eq!(error.message, "missing return value in function `answer`");
+                fn main() { test.pass() }
+            "#,
+            r#"
+                fn answer(flag: bool) -> u8 {
+                    loop {
+                        if flag {
+                            break
+                        } else {
+                            return 1
+                        }
+                    }
+                }
+
+                fn main() { test.pass() }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "missing return value in function `answer`");
+        }
     }
 
     #[test]
@@ -5422,6 +5470,40 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_function_returning_from_loop() {
+        let source = r#"
+            fn answer() -> u8 {
+                loop {
+                    return 42
+                }
+            }
+
+            fn choose(flag: bool) -> u8 {
+                loop {
+                    if flag {
+                        return 7
+                    } else {
+                        return 9
+                    }
+                }
+            }
+
+            fn main() {
+                test.assert_eq_u8(answer(), 42, 1)
+                test.assert_eq_u8(choose(true), 7, 2)
+                test.assert_eq_u8(choose(false), 9, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
