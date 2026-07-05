@@ -8251,6 +8251,141 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_imported_sdk_style_game_frame() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_sdk_frame_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("sdk")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("sdk/input.ezra"),
+            r#"
+            pub const BTN_RIGHT: u16 = 0x0080
+            pub port PAD_LO: u8 = 0x01
+            pub port PAD_HI: u8 = 0x02
+
+            pub fn read_pad(index: u8) -> u16 {
+                let lo: u8 = in PAD_LO
+                let hi: u8 = in PAD_HI
+                let wide_hi: u16 = cast<u16>(hi) << 8
+                if index == 0 {
+                    return BTN_RIGHT | cast<u16>(lo) | wide_hi
+                }
+                return 0
+            }
+
+            pub fn pressed(pad: u16, button: u16) -> bool {
+                return (pad & button) != 0
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sdk/video.ezra"),
+            r#"
+            pub const VIDEO_PRESENT: u8 = 1
+            pub volatile mmio VRAM_BASE: ptr<u8> = 0x040180
+            pub port VIDEO_CMD: u8 = 0x09
+
+            pub fn present() {
+                out VIDEO_CMD, VIDEO_PRESENT
+            }
+
+            pub fn clear(value: u8) {
+                let i: u8 = 0
+                while i < 4 {
+                    *(VRAM_BASE + cast<u24>(i)) = value
+                    i += 1
+                }
+            }
+
+            pub fn poke(offset: u24, value: u8) {
+                *(VRAM_BASE + offset) = value
+            }
+
+            pub fn peek(offset: u24) -> u8 {
+                return *(VRAM_BASE + offset)
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sdk/math.ezra"),
+            r#"
+            pub const SUBPX_SHIFT: u8 = 8
+            pub const SUBPX_ONE: i24 = 256
+
+            pub fn subpx_from_int(v: i16) -> i24 {
+                return cast<i24>(v) * SUBPX_ONE
+            }
+
+            pub fn subpx_to_int(v: i24) -> i16 {
+                return cast<i16>(v / SUBPX_ONE)
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import sdk.input
+            import sdk.video
+            import sdk.math
+
+            alias pos = i24
+
+            global player_x: pos = 20 * SUBPX_ONE
+            global player_y: pos = 20 * SUBPX_ONE
+
+            fn update() {
+                let pad: u16 = input.read_pad(0)
+                if input.pressed(pad, BTN_RIGHT) {
+                    player_x += SUBPX_ONE
+                }
+            }
+
+            fn draw() {
+                let sx: u16 = cast<u16>(math.subpx_to_int(player_x))
+                let sy: u16 = cast<u16>(math.subpx_to_int(player_y))
+                let offset: u24 = cast<u24>(sy) * 32 + cast<u24>(sx)
+                video.poke(offset, 15)
+            }
+
+            fn main() {
+                video.clear(0)
+                update()
+                draw()
+                video.present()
+
+                test.assert_eq_u24(cast<u24>(player_x), 0x001500, 1)
+                test.assert_eq_u8(video.peek(661), 15, 2)
+                test.assert_eq_u8(video.peek(0), 0, 3)
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let program = load_program(&main_path).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 80_000).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(asm.contains("_input_read_pad:"), "{asm}");
+        assert!(asm.contains("_video_poke:"), "{asm}");
+        assert!(asm.contains("_math_subpx_to_int:"), "{asm}");
+        assert!(asm.contains("in0 a, (01h)"), "{asm}");
+        assert!(asm.contains("out0 (09h), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn rejects_inline_asm_missing_required_clobbers() {
         let cases = [
             (
