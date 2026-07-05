@@ -326,7 +326,7 @@ layout big_asset_cart {
 
 ## 7. Example Default Port Map
 
-All ports are 8-bit I/O ports. The following table is the default fantasy-console example map used by the scaffold and tests; other targets and SDKs may declare different port names and numbers with normal `port` declarations.
+All ports are 8-bit I/O ports. The following table is the fantasy-console example map used by the default scaffold and tests. It is not part of the core language. Tooling may expose these names by default for the fantasy target, but generic or target-specific builds may disable them and require SDKs or applications to declare their own names with normal `port` declarations.
 
 ```text
 0x01  IN    Controller 1 low byte
@@ -1551,7 +1551,7 @@ ezra.math
 ezra.test
 ```
 
-These modules are platform libraries built from normal EZRA features such as constants, `port` declarations, volatile MMIO declarations, functions, and inline assembly. They are not language intrinsics, and the compiler should not hardcode controller, video, or audio behavior into ordinary codegen.
+These modules are platform libraries built from normal EZRA features such as constants, `port` declarations, volatile MMIO declarations, functions, and inline assembly. They are not language intrinsics, and the compiler should not hardcode controller, video, or audio behavior into ordinary codegen. The default fantasy SDK symbols are a scaffold convenience and can be disabled for stricter target SDKs.
 
 Targets may provide different SDKs for hardware such as the TI-84 Plus CE or Agon Light. Those SDKs should follow the same rules: expose typed constants and functions over generic port/MMIO primitives, keep volatile operations visible in generated assembly, and use compiler intrinsics only for target-independent operations.
 
