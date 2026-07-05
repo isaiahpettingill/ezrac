@@ -1,7 +1,10 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
-    asm::{emit_ez80_assembly, emit_ez80_assembly_with_debug_comments},
+    asm::{
+        AssemblyOptions, emit_ez80_assembly, emit_ez80_assembly_with_debug_comments,
+        emit_ez80_assembly_with_options,
+    },
     cart::{CartridgeHeader, build_cartridge_with_layout_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
     layout::{Layout, parse_layout},
@@ -105,8 +108,6 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
 fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOutputs, String> {
     let source_path = PathBuf::from(&options.path);
     let program = load_program(&source_path).map_err(|error| error.to_string())?;
-    let assembly = emit_ez80_assembly_with_debug_comments(&program, options.debug_comments)
-        .map_err(|error| error.to_string())?;
     let layout = load_layout(options.layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
         let message = errors
@@ -116,6 +117,14 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
             .join("\n");
         return Err(format!("layout is invalid:\n{message}"));
     }
+    let assembly = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            debug_comments: options.debug_comments,
+            stack_top: layout.stack,
+        },
+    )
+    .map_err(|error| error.to_string())?;
 
     let stem = source_path
         .file_stem()
@@ -347,14 +356,14 @@ mod tests {
                 layout custom {
                     load 0x020000;
                     entry 0x020040;
-                    stack 0xF00000;
+                    stack 0xEFFF00;
 
                     region code 0x020000..0x02FFFF read execute;
                     section .text -> code align 16;
 
                     symbol EZRA_LOAD_ADDR = 0x020000;
                     symbol EZRA_ENTRY_ADDR = 0x020040;
-                    symbol EZRA_STACK_TOP = 0xF00000;
+                    symbol EZRA_STACK_TOP = 0xEFFF00;
                 }
             "#,
         )
@@ -368,15 +377,18 @@ mod tests {
         .unwrap();
 
         let map = std::fs::read_to_string(&outputs.map).unwrap();
+        let asm = std::fs::read_to_string(&outputs.asm).unwrap();
         let cart = std::fs::read(&outputs.cart).unwrap();
 
         assert!(map.contains(".text"));
+        assert!(asm.contains("    ld sp, EFFF00h"), "{asm}");
         assert_eq!(read_addr24(&cart, 0x08), 0x020040);
+        assert_eq!(read_addr24(&cart, 0x0B), 0xEFFF00);
         let layout_table = read_addr24(&cart, 0x1E);
         assert!(layout_table > 0x020040);
         let layout_offset = usize::try_from(layout_table - 0x020000).unwrap();
         assert!(cart[layout_offset..].starts_with(b"layout custom\n"));
-        assert_eq!(&cart[64..68], &[0x31, 0x00, 0x00, 0xF0]);
+        assert_eq!(&cart[64..68], &[0x31, 0x00, 0xFF, 0xEF]);
 
         let _ = std::fs::remove_dir_all(root);
     }

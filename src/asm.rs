@@ -10,17 +10,46 @@ use crate::{
         Function, Place, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::Diagnostic,
+    target::{Address24, EZRA_STACK_TOP},
 };
 
 const VAR_BASE: u32 = 0x04_0000;
 
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
-    emit_ez80_assembly_with_debug_comments(program, false)
+    emit_ez80_assembly_with_options(program, AssemblyOptions::default())
 }
 
 pub fn emit_ez80_assembly_with_debug_comments(
     program: &Program,
     debug_comments: bool,
+) -> Result<String, Diagnostic> {
+    emit_ez80_assembly_with_options(
+        program,
+        AssemblyOptions {
+            debug_comments,
+            ..AssemblyOptions::default()
+        },
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AssemblyOptions {
+    pub debug_comments: bool,
+    pub stack_top: Address24,
+}
+
+impl Default for AssemblyOptions {
+    fn default() -> Self {
+        Self {
+            debug_comments: false,
+            stack_top: EZRA_STACK_TOP,
+        }
+    }
+}
+
+pub fn emit_ez80_assembly_with_options(
+    program: &Program,
+    options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
     let symbols = Symbols::from_program(program)?;
     let main = program
@@ -31,7 +60,7 @@ pub fn emit_ez80_assembly_with_debug_comments(
     validate_no_recursive_calls(program, &symbols.functions)?;
     let emitted_functions = reachable_function_names(program, &symbols);
 
-    let mut emitter = Emitter::new(symbols, debug_comments);
+    let mut emitter = Emitter::new(symbols, options);
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
     emitter.emit_global_initializers(program)?;
@@ -1012,10 +1041,11 @@ struct Emitter {
     function_interrupt_stack: Vec<bool>,
     function_naked_stack: Vec<bool>,
     debug_comments: bool,
+    stack_top: Address24,
 }
 
 impl Emitter {
-    fn new(symbols: Symbols, debug_comments: bool) -> Self {
+    fn new(symbols: Symbols, options: AssemblyOptions) -> Self {
         Self {
             symbols,
             out: String::new(),
@@ -1030,7 +1060,8 @@ impl Emitter {
             function_frame_stack: Vec::new(),
             function_interrupt_stack: Vec::new(),
             function_naked_stack: Vec::new(),
-            debug_comments,
+            debug_comments: options.debug_comments,
+            stack_top: options.stack_top,
         }
     }
 
@@ -1039,7 +1070,7 @@ impl Emitter {
         self.line("; target: eZ80 ADL mode");
         self.line("section .text");
         self.line("__ezra_start:");
-        self.line("    ld sp, 0F00000h");
+        self.line(&format!("    ld sp, {:06X}h", self.stack_top.get()));
     }
 
     fn emit_required_sections(&mut self) {
@@ -4947,7 +4978,7 @@ fn validate_all_function_calls(
 }
 
 fn validate_all_function_bodies(program: &Program, symbols: Symbols) -> Result<(), Diagnostic> {
-    let mut emitter = Emitter::new(symbols, false);
+    let mut emitter = Emitter::new(symbols, AssemblyOptions::default());
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;
     }
