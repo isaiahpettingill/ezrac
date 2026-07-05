@@ -2369,6 +2369,7 @@ impl Emitter {
             }
             "test.fail" | "ezra.test.fail" => {
                 let expr = args.first().cloned().unwrap_or(Expr::Int(1));
+                self.validate_expr_assignable_to_type(&expr, &Type::Named("u8".to_owned()))?;
                 self.emit_expr_to_a(&expr)?;
                 self.emit_test_fail_call();
             }
@@ -2378,6 +2379,9 @@ impl Emitter {
                         "test.assert_eq_u8 requires three arguments",
                     ));
                 }
+                self.validate_expr_has_test_width(&args[0], ValueWidth::U8, true)?;
+                self.validate_expr_has_test_width(&args[1], ValueWidth::U8, true)?;
+                self.validate_expr_assignable_to_type(&args[2], &Type::Named("u8".to_owned()))?;
                 let ok = self.next_label("assert_ok");
                 self.emit_expr_to_a(&args[0])?;
                 self.line("    ld b, a");
@@ -2396,6 +2400,9 @@ impl Emitter {
                         "test.assert_eq_u16 requires three arguments",
                     ));
                 }
+                self.validate_expr_has_test_width(&args[0], ValueWidth::U16, false)?;
+                self.validate_expr_has_test_width(&args[1], ValueWidth::U16, false)?;
+                self.validate_expr_assignable_to_type(&args[2], &Type::Named("u8".to_owned()))?;
                 let ok = self.next_label("assert_ok");
                 self.emit_expr_to_hl(&args[0], ValueWidth::U16)?;
                 self.line("    push hl");
@@ -2414,6 +2421,9 @@ impl Emitter {
                         "test.assert_eq_u24 requires three arguments",
                     ));
                 }
+                self.validate_expr_has_test_width(&args[0], ValueWidth::U24, false)?;
+                self.validate_expr_has_test_width(&args[1], ValueWidth::U24, false)?;
+                self.validate_expr_assignable_to_type(&args[2], &Type::Named("u8".to_owned()))?;
                 let ok = self.next_label("assert_ok");
                 self.emit_expr_to_hl(&args[0], ValueWidth::U24)?;
                 self.line("    push hl");
@@ -5354,6 +5364,37 @@ impl Emitter {
         }
     }
 
+    fn validate_expr_has_test_width(
+        &self,
+        expr: &Expr,
+        width: ValueWidth,
+        allow_bool: bool,
+    ) -> Result<(), Diagnostic> {
+        let ty = self.symbols.resolved_type(&self.expr_type(expr)?)?;
+        if allow_bool && type_is_bool(&ty) {
+            return Ok(());
+        }
+        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_)) {
+            return Err(Diagnostic::new("type mismatch"));
+        }
+        let actual = self.symbols.type_width(&ty)?;
+        if actual == width {
+            return Ok(());
+        }
+        if let Ok(value) = self.symbols.eval_i64(expr) {
+            self.symbols
+                .wrap_value_for_type(value, &width_unsigned_type(width))?;
+            return Ok(());
+        }
+        if actual < width {
+            return Err(Diagnostic::new("widening without cast"));
+        }
+        if actual > width {
+            return Err(Diagnostic::new("narrowing without cast"));
+        }
+        Ok(())
+    }
+
     fn validate_type_assignable_to_type(
         &self,
         source: &Type,
@@ -8286,6 +8327,66 @@ mod tests {
                 }
                 "#,
                 "signed/unsigned mix without cast",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_test_builtin_argument_types() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    test.fail(0x0100)
+                }
+                "#,
+                "value 256 is outside u8 range",
+            ),
+            (
+                r#"
+                fn main() {
+                    let wide: u16 = 0x0012
+                    test.assert_eq_u8(wide, 0x12, 1)
+                    test.pass()
+                }
+                "#,
+                "narrowing without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let byte: u8 = 0x12
+                    test.assert_eq_u16(byte, 0x0012, 1)
+                    test.pass()
+                }
+                "#,
+                "widening without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let pointer: ptr<u8> = cast<ptr<u8>>(0x040000)
+                    test.assert_eq_u24(pointer, 0x040000, 1)
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
+            ),
+            (
+                r#"
+                fn main() {
+                    test.assert_eq_u8(true, true, 0x0100)
+                    test.pass()
+                }
+                "#,
+                "value 256 is outside u8 range",
             ),
         ];
 
