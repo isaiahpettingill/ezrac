@@ -2051,7 +2051,7 @@ stmt          = let_stmt
 
 let_stmt      = "let" ident ":" ty "=" expr
 assign_stmt   = place assign_op expr
-if_stmt       = "if" expr block ("else" block)?
+if_stmt       = "if" expr block ("else" (if_stmt | block))?
 while_stmt    = "while" expr block
 loop_stmt     = "loop" block
 break_stmt    = "break"
