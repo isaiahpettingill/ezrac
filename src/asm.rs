@@ -834,6 +834,7 @@ impl Emitter {
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
+        validate_function_attrs(function)?;
         let naked = has_attr(function, "naked");
         let interrupt = has_attr(function, "interrupt");
         if naked {
@@ -3840,6 +3841,19 @@ fn has_attr(function: &Function, attr: &str) -> bool {
     function.attrs.iter().any(|candidate| candidate == attr)
 }
 
+fn validate_function_attrs(function: &Function) -> Result<(), Diagnostic> {
+    let mut seen = HashSet::new();
+    for attr in &function.attrs {
+        if !seen.insert(attr.as_str()) {
+            return Err(Diagnostic::new(format!(
+                "duplicate attribute `{attr}` on function `{}`",
+                function.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn block_guarantees_value_return(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_guarantees_value_return)
 }
@@ -5230,6 +5244,71 @@ mod tests {
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"I", "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_naked_interrupt_functions() {
+        let source = r#"
+            naked interrupt fn raw_irq() {
+                asm volatile(clobber ports) {
+                    "ld a, 0x4E"
+                    "out0 (0Ch), a"
+                    "reti"
+                }
+            }
+
+            fn main() {
+                raw_irq()
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        let raw_irq = asm.split("_raw_irq:").nth(1).unwrap();
+        let raw_irq = raw_irq.split("_main:").next().unwrap();
+        assert!(!raw_irq.contains("    push af"), "{asm}");
+        assert!(raw_irq.contains("    reti"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"N", "{asm}");
+    }
+
+    #[test]
+    fn rejects_duplicate_function_attributes() {
+        let cases = [
+            (
+                r#"
+                inline inline fn invalid() {}
+                fn main() { test.pass() }
+                "#,
+                "duplicate attribute `inline` on function `invalid`",
+            ),
+            (
+                r#"
+                naked naked fn invalid() {
+                    asm { "ret" }
+                }
+                fn main() { test.pass() }
+                "#,
+                "duplicate attribute `naked` on function `invalid`",
+            ),
+            (
+                r#"
+                interrupt interrupt fn invalid() {}
+                fn main() { test.pass() }
+                "#,
+                "duplicate attribute `interrupt` on function `invalid`",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[test]
