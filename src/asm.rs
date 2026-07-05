@@ -376,6 +376,7 @@ impl Symbols {
                             type_display(&decl.ty)
                         )));
                     }
+                    symbols.ensure_const_dependencies_evaluated(&decl.value, program)?;
                     let value = symbols.eval_i64(&decl.value)?;
                     if !(0..=0xFF).contains(&value) {
                         return Err(Diagnostic::new(format!(
@@ -400,6 +401,7 @@ impl Symbols {
                             type_display(&decl.ty)
                         )));
                     }
+                    symbols.ensure_const_dependencies_evaluated(&decl.value, program)?;
                     let value = symbols.eval_i64(&decl.value)?;
                     if !(0..=0xFF_FFFF).contains(&value) {
                         return Err(Diagnostic::new(format!(
@@ -601,6 +603,7 @@ impl Symbols {
         if let Some(align) = &decl.align {
             self.ensure_const_dependencies_evaluated(align, program)?;
         }
+        self.ensure_embed_source_const_dependencies_evaluated(&decl.source, program)?;
         let align = decl
             .align
             .as_ref()
@@ -670,7 +673,33 @@ impl Symbols {
                 self.ensure_type_const_dependencies_evaluated(element, program)?;
                 self.ensure_const_dependencies_evaluated(len, program)
             }
-            Type::Named(_) => Ok(()),
+            Type::Named(name) => {
+                if let Some(alias) = self.aliases.get(name).cloned() {
+                    self.ensure_type_const_dependencies_evaluated(&alias, program)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn ensure_embed_source_const_dependencies_evaluated(
+        &mut self,
+        source: &EmbedSource,
+        program: &Program,
+    ) -> Result<(), Diagnostic> {
+        match source {
+            EmbedSource::Bytes(values) => {
+                for value in values {
+                    self.ensure_const_dependencies_evaluated(value, program)?;
+                }
+                Ok(())
+            }
+            EmbedSource::Repeat { value, len } => {
+                self.ensure_const_dependencies_evaluated(value, program)?;
+                self.ensure_const_dependencies_evaluated(len, program)
+            }
+            EmbedSource::File(_) | EmbedSource::Text(_) | EmbedSource::CStr(_) => Ok(()),
         }
     }
 
@@ -9704,6 +9733,61 @@ section .text
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_forward_constants_in_hardware_and_alias_declarations() {
+        let source = r#"
+            alias Row = [u8; ROW_LEN]
+
+            port INPUT: u8 = PORT_BASE + 1
+            port OUTPUT: u8 = PORT_BASE + 2
+            volatile mmio SCRATCH: ptr<u8> = MMIO_BASE + 0x20
+            embed header: bytes = bytes [FILL, FILL + 1] align ALIGN
+            embed blank: bytes = repeat(FILL, REPEAT_COUNT)
+            global row: Row = [0x11, 0x22, 0x33]
+
+            const ROW_LEN: u8 = 3
+            const PORT_BASE: u8 = 0x20
+            const MMIO_BASE: u24 = 0x040100
+            const FILL: u8 = 0x44
+            const ALIGN: u8 = 8
+            const REPEAT_COUNT: u8 = 2
+
+            fn main() {
+                let value: u8 = in INPUT
+                out OUTPUT, value + 1
+                mem.poke8(SCRATCH, cast<u8>(header.len + blank.len))
+                row[2] = value
+
+                test.assert_eq_u8(value, 0x5A, 1)
+                test.assert_eq_u8(mem.peek8(SCRATCH), 4, 2)
+                test.assert_eq_u8(row[2], 0x5A, 3)
+                test.assert_eq_u8(*(header.ptr + 0), 0x44, 4)
+                test.assert_eq_u8(*(header.ptr + 1), 0x45, 5)
+                test.assert_eq_u8(*(blank.ptr + 1), 0x44, 6)
+                test.assert_eq_u24(cast<u24>(header.ptr) & 7, 0, 7)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test_with_options(
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 20_000,
+                initial_ports: vec![(0x21, 0x5A)],
+                initial_memory: Vec::new(),
+                stack_top: EZRA_STACK_TOP.get(),
+            },
+        )
+        .unwrap();
+
+        assert!(asm.contains("in0 a, (21h)"), "{asm}");
+        assert!(asm.contains("out0 (22h), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.ports[0x22], 0x5B, "{asm}");
     }
 
     #[test]

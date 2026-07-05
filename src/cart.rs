@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use crate::{
     ast::{
@@ -614,21 +618,108 @@ fn collect_embed_constants(program: &Program) -> Result<HashMap<String, i64>, Di
     }
 
     let mut constants = HashMap::new();
+    let mut evaluating = HashSet::new();
     for declaration in &program.declarations {
         match declaration {
             Declaration::Const(decl) => {
-                let value = eval_embed_expr(&decl.value, &constants)?;
-                let value = wrap_embed_const_value(value, &decl.ty, &aliases)?;
-                constants.insert(decl.name.clone(), value);
+                evaluate_embed_constant(
+                    &decl.name,
+                    &decl.value,
+                    Some(&decl.ty),
+                    program,
+                    &aliases,
+                    &mut constants,
+                    &mut evaluating,
+                )?;
             }
             Declaration::Mmio(decl) => {
-                let value = eval_embed_expr(&decl.value, &constants)?;
-                constants.insert(decl.name.clone(), value);
+                evaluate_embed_constant(
+                    &decl.name,
+                    &decl.value,
+                    None,
+                    program,
+                    &aliases,
+                    &mut constants,
+                    &mut evaluating,
+                )?;
             }
             _ => {}
         }
     }
     Ok(constants)
+}
+
+fn evaluate_embed_constant(
+    name: &str,
+    value_expr: &Expr,
+    ty: Option<&Type>,
+    program: &Program,
+    aliases: &HashMap<String, Type>,
+    constants: &mut HashMap<String, i64>,
+    evaluating: &mut HashSet<String>,
+) -> Result<(), Diagnostic> {
+    if constants.contains_key(name) {
+        return Ok(());
+    }
+    if !evaluating.insert(name.to_owned()) {
+        return Err(Diagnostic::new(format!(
+            "circular constant reference involving `{name}`"
+        )));
+    }
+
+    let result = (|| {
+        ensure_embed_constant_dependencies_evaluated(
+            value_expr, program, aliases, constants, evaluating,
+        )?;
+        let value = eval_embed_expr(value_expr, constants)?;
+        let value = if let Some(ty) = ty {
+            wrap_embed_const_value(value, ty, aliases)?
+        } else {
+            value
+        };
+        constants.insert(name.to_owned(), value);
+        Ok(())
+    })();
+
+    evaluating.remove(name);
+    result
+}
+
+fn ensure_embed_constant_dependencies_evaluated(
+    expr: &Expr,
+    program: &Program,
+    aliases: &HashMap<String, Type>,
+    constants: &mut HashMap<String, i64>,
+    evaluating: &mut HashSet<String>,
+) -> Result<(), Diagnostic> {
+    let mut names = Vec::new();
+    collect_embed_constant_dependency_names(expr, &mut names);
+    for name in names {
+        if constants.contains_key(&name) {
+            continue;
+        }
+        let Some((value_expr, ty)) = find_embed_constant_declaration(program, &name) else {
+            continue;
+        };
+        evaluate_embed_constant(
+            &name, value_expr, ty, program, aliases, constants, evaluating,
+        )?;
+    }
+    Ok(())
+}
+
+fn find_embed_constant_declaration<'a>(
+    program: &'a Program,
+    name: &str,
+) -> Option<(&'a Expr, Option<&'a Type>)> {
+    program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Const(decl) if decl.name == name => Some((&decl.value, Some(&decl.ty))),
+            Declaration::Mmio(decl) if decl.name == name => Some((&decl.value, None)),
+            _ => None,
+        })
 }
 
 fn wrap_embed_const_value(
@@ -812,6 +903,62 @@ fn eval_embed_expr(expr: &Expr, constants: &HashMap<String, i64>) -> Result<i64,
         _ => Err(Diagnostic::new(
             "embed expressions must be integer constants",
         )),
+    }
+}
+
+fn collect_embed_constant_dependency_names(expr: &Expr, names: &mut Vec<String>) {
+    match expr {
+        Expr::Ident(name) => names.push(name.clone()),
+        Expr::Field { base, field } => names.push(format!("{base}.{field}")),
+        Expr::Access(path) => {
+            if let Ok(name) = const_access_name(path) {
+                names.push(name);
+            }
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_embed_constant_dependency_names(index, names);
+                }
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } | Expr::Deref(expr) => {
+            collect_embed_constant_dependency_names(expr, names)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_embed_constant_dependency_names(left, names);
+            collect_embed_constant_dependency_names(right, names);
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_embed_constant_dependency_names(value, names);
+            }
+        }
+        Expr::Index { index, .. } => collect_embed_constant_dependency_names(index, names),
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_embed_constant_dependency_names(value, names);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_embed_constant_dependency_names(arg, names);
+            }
+        }
+        Expr::AddressOfIndex { index, .. } => collect_embed_constant_dependency_names(index, names),
+        Expr::AddressOfAccess(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_embed_constant_dependency_names(index, names);
+                }
+            }
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::AddressOf(_)
+        | Expr::AddressOfField { .. }
+        | Expr::In(_) => {}
     }
 }
 
@@ -1134,6 +1281,37 @@ mod tests {
         assert_eq!(values_addr % 4, 0);
         assert_eq!(&image[values..values + 2], &[0xFF, 0x04]);
         assert_eq!(&image[repeated..repeated + 3], &[0x42, 0x42, 0x42]);
+    }
+
+    #[test]
+    fn cartridge_embed_expressions_can_use_forward_constants() {
+        let source = r#"
+            alias byte = u8
+
+            embed values: bytes = bytes [VALUE, DEVICE & 0xFF] section .assets align ALIGN
+            embed repeated: bytes = repeat(FILL, COUNT) section .assets align 1
+
+            const VALUE: byte = RAW_VALUE
+            volatile mmio DEVICE: ptr<u8> = BASE_ADDR + 0x23
+            const RAW_VALUE: u16 = 0x1FF
+            const BASE_ADDR: u24 = 0x040100
+            const COUNT: u8 = 2
+            const ALIGN: u8 = 8
+            const FILL: u8 = VALUE & 0x7F
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let image = build_cartridge(&program).unwrap();
+        let table = image_offset(read_addr24(&image, 0x21));
+        let values_addr = read_addr24(&image, table);
+        let repeated_addr = read_addr24(&image, table + ASSET_TABLE_ENTRY_SIZE);
+        let values = image_offset(values_addr);
+        let repeated = image_offset(repeated_addr);
+
+        assert_eq!(values_addr % 8, 0);
+        assert_eq!(&image[values..values + 2], &[0xFF, 0x23]);
+        assert_eq!(&image[repeated..repeated + 2], &[0x7F, 0x7F]);
     }
 
     #[test]
