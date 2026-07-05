@@ -115,8 +115,10 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "dec b"
             | "ld b, a"
             | "ld c, a"
+            | "ld d, a"
             | "ld a, b"
             | "ld a, c"
+            | "ld a, d"
             | "ld a, h"
             | "ld a, l"
             | "ld a, (hl)"
@@ -309,10 +311,14 @@ fn emit_instruction(
         bytes.push(0x47);
     } else if text == "ld c, a" {
         bytes.push(0x4F);
+    } else if text == "ld d, a" {
+        bytes.push(0x57);
     } else if text == "ld a, b" {
         bytes.push(0x78);
     } else if text == "ld a, c" {
         bytes.push(0x79);
+    } else if text == "ld a, d" {
+        bytes.push(0x7A);
     } else if text == "ld a, h" {
         bytes.push(0x7C);
     } else if text == "ld a, l" {

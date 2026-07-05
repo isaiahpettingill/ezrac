@@ -1043,6 +1043,17 @@ impl Emitter {
         self.line("    inc hl");
         self.line("    dec bc");
         self.line("    jp .L_memcpy_loop");
+        self.line("__ezra_memset:");
+        self.line("    ld d, a");
+        self.line(".L_memset_loop:");
+        self.line("    ld a, b");
+        self.line("    or c");
+        self.line("    ret z");
+        self.line("    ld a, d");
+        self.line("    ld (hl), a");
+        self.line("    inc hl");
+        self.line("    dec bc");
+        self.line("    jp .L_memset_loop");
     }
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
@@ -5123,6 +5134,31 @@ mod tests {
         let run = run_assembly_test(&asm, 3_000).unwrap();
 
         assert!(asm.contains("__ezra_memcpy:"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_memset_runtime_helper() {
+        let source = r#"
+            fn main() {
+                asm volatile(clobber a, clobber bc, clobber d, clobber hl, clobber memory) {
+                    "ld hl, 040320h"
+                    "ld a, 5Ah"
+                    "ld bc, 000003h"
+                    "call __ezra_memset"
+                }
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040320)), 0x5A, 1)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040321)), 0x5A, 2)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040322)), 0x5A, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 3_000).unwrap();
+
+        assert!(asm.contains("__ezra_memset:"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
