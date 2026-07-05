@@ -1192,11 +1192,19 @@ Arguments:
 arg1 u8/i8/bool     -> A
 arg1 u16/u24/ptr24  -> HL
 
+arg2 u8/i8/bool     -> B
 arg2 u16/u24/ptr24  -> DE
+
+arg3 u8/i8/bool     -> C
 arg3 u16/u24/ptr24  -> BC
 
 additional args     -> stack, right to left
 ```
+
+The register ABI cannot represent a byte second argument and a wide third
+argument in the same call, because the byte second argument uses `B` while the
+wide third argument uses `BC`. Use a wide second argument, reorder parameters,
+or pass one value indirectly for such routines.
 
 Caller-clobbered:
 
