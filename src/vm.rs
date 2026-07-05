@@ -275,6 +275,10 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         || text.starts_with("jp nz,")
         || text.starts_with("jp c,")
         || text.starts_with("jp nc,")
+        || text.starts_with("jp po,")
+        || text.starts_with("jp pe,")
+        || text.starts_with("jp p,")
+        || text.starts_with("jp m,")
         || text.starts_with("jp ")
     {
         Ok(4)
@@ -446,6 +450,18 @@ fn emit_instruction(
         push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jp nc,") {
         bytes.push(0xD2);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("jp po,") {
+        bytes.push(0xE2);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("jp pe,") {
+        bytes.push(0xEA);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("jp p,") {
+        bytes.push(0xF2);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
+    } else if let Some(target) = text.strip_prefix("jp m,") {
+        bytes.push(0xFA);
         push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jp ") {
         bytes.push(0xC3);
@@ -1995,6 +2011,32 @@ mod tests {
     }
 
     #[test]
+    fn assembles_all_absolute_conditional_jumps() {
+        let asm = r#"
+            jp nz, target
+            jp z, target
+            jp nc, target
+            jp c, target
+            jp po, target
+            jp pe, target
+            jp p, target
+            jp m, target
+        target:
+            ret
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xC2, 0x20, 0x00, 0x01, 0xCA, 0x20, 0x00, 0x01, 0xD2, 0x20, 0x00, 0x01, 0xDA, 0x20,
+                0x00, 0x01, 0xE2, 0x20, 0x00, 0x01, 0xEA, 0x20, 0x00, 0x01, 0xF2, 0x20, 0x00, 0x01,
+                0xFA, 0x20, 0x00, 0x01, 0xC9,
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_assembly_labels() {
         let asm = r#"
         again:
@@ -2205,6 +2247,38 @@ mod tests {
             ld a, 01h
             out0 (0Eh), a
         yes:
+            ld a, 00h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn runs_sign_conditional_absolute_jumps_on_ez80_vm() {
+        let asm = r#"
+            ld a, 80h
+            or a
+            jp m, negative
+            ld a, 10h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        negative:
+            ld a, 00h
+            or a
+            jp p, positive
+            ld a, 11h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        positive:
             ld a, 00h
             out0 (0Dh), a
             ld a, 01h
