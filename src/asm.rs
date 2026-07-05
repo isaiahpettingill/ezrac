@@ -2717,24 +2717,21 @@ impl Emitter {
                 self.invalidate_readonly_pointer_alias(name);
                 let variable = self.variable(name)?;
                 let ty = self.variable_type(name).cloned();
+                if op == AssignOp::Set {
+                    if let Some(ty) = ty.as_ref() {
+                        self.emit_storage_initializer(variable, ty, value)?;
+                        self.record_local_constant(name, ty, value);
+                        self.record_readonly_pointer_alias(name, value);
+                        return Ok(());
+                    }
+                }
                 let signed = self
                     .variable_type(name)
                     .map(|ty| self.type_is_signed(ty))
                     .transpose()?
                     .unwrap_or(false);
-                if op == AssignOp::Set {
-                    if let Some(ty) = ty.as_ref() {
-                        self.validate_expr_assignable_to_type(value, ty)?;
-                    }
-                }
                 self.emit_assignment_value(variable, op, value, signed)?;
                 self.emit_store_width(variable);
-                if op == AssignOp::Set {
-                    if let Some(ty) = ty {
-                        self.record_local_constant(name, &ty, value);
-                        self.record_readonly_pointer_alias(name, value);
-                    }
-                }
             }
             Place::Index { name, index } => {
                 self.emit_index_assignment(name, index, op, value)?;
@@ -2881,6 +2878,9 @@ impl Emitter {
         self.validate_expr_assignable_to_type(value, ty)?;
         if let Expr::Deref(ptr) = value {
             return self.emit_copy_pointed_storage_into(ptr, variable);
+        }
+        if let Some(source) = self.expr_storage_variable(value)? {
+            return self.emit_copy_storage_into(source, variable);
         }
         match self.symbols.resolved_type(ty)? {
             Type::Array { .. } => self.emit_array_initializer(variable, ty, value),
@@ -5220,14 +5220,70 @@ impl Emitter {
         }
     }
 
+    fn emit_copy_storage_into(
+        &mut self,
+        source: Variable,
+        target: Variable,
+    ) -> Result<(), Diagnostic> {
+        if source.size != target.size {
+            return Err(Diagnostic::new("type mismatch"));
+        }
+        if storage_ranges_overlap(source, target) {
+            let temp = self.alloc_var(source.size);
+            self.emit_copy_storage_bytes(source, temp);
+            self.emit_copy_storage_bytes(temp, target);
+        } else {
+            self.emit_copy_storage_bytes(source, target);
+        }
+        Ok(())
+    }
+
+    fn emit_copy_storage_bytes(&mut self, source: Variable, target: Variable) {
+        for offset in 0..source.size {
+            self.line(&format!("    ld a, ({:06X}h)", source.addr + offset as u32));
+            self.line(&format!("    ld ({:06X}h), a", target.addr + offset as u32));
+        }
+    }
+
     fn emit_copy_pointed_storage_into(
         &mut self,
         ptr: &Expr,
         variable: Variable,
     ) -> Result<(), Diagnostic> {
+        let temp = self.alloc_var(variable.size);
         self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
-        self.emit_load_pointed_width_into(variable);
+        self.emit_load_pointed_width_into(temp);
+        self.emit_copy_storage_bytes(temp, variable);
         Ok(())
+    }
+
+    fn expr_storage_variable(&self, expr: &Expr) -> Result<Option<Variable>, Diagnostic> {
+        match expr {
+            Expr::Ident(name) => Ok(self.variable_opt(name)),
+            Expr::Field { base, field } => {
+                if let Some(variable) = self.dotted_variable(base, field) {
+                    return Ok(Some(variable));
+                }
+                if self.variable_opt(base).is_some() {
+                    self.field_variable(base, field).map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+            Expr::Index { name, index } => self.const_array_element_variable(name, index),
+            Expr::Access(path) => {
+                let path = self.canonical_access_path(path);
+                if path.segments.is_empty() {
+                    return Ok(self.variable_opt(&path.root));
+                }
+                if self.variable_opt(&path.root).is_some() {
+                    self.const_access_variable(&path)
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     fn const_array_element_variable(
@@ -7332,10 +7388,18 @@ fn function_label(name: &str) -> String {
 fn scalar_var(addr: u32, size: u32) -> Variable {
     Variable {
         addr,
-        size: size as u32,
+        size,
         element_size: None,
         len: None,
     }
+}
+
+fn storage_ranges_overlap(left: Variable, right: Variable) -> bool {
+    let left_start = u64::from(left.addr);
+    let left_end = left_start + u64::from(left.size);
+    let right_start = u64::from(right.addr);
+    let right_end = right_start + u64::from(right.size);
+    left_start < right_end && right_start < left_end
 }
 
 fn declaration_name(declaration: &Declaration) -> Option<&str> {
@@ -14636,6 +14700,102 @@ section .text
                 let local_pair: Pair = *(pair_ptr)
                 test.assert_eq_u8(local_pair.left, 7, 3)
                 test.assert_eq_u16(local_pair.right, 0x0809, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_stored_aggregate_copies() {
+        let source = r#"
+            struct Pair {
+                left: u8
+                right: u16
+            }
+
+            struct Packet {
+                bytes: [u8; 3]
+                pair: Pair
+            }
+
+            global source_bytes: [u8; 3] = [1, 2, 3]
+            global target_bytes: [u8; 3] = [0, 0, 0]
+            global source_pair: Pair = Pair { left: 4, right: 0x0506 }
+            global target_pair: Pair = Pair { left: 0, right: 0 }
+            global packet: Packet = Packet {
+                bytes: [7, 8, 9],
+                pair: Pair { left: 10, right: 0x0B0C }
+            }
+
+            fn main() {
+                target_bytes = source_bytes
+                test.assert_eq_u8(target_bytes[0], 1, 1)
+                test.assert_eq_u8(target_bytes[2], 3, 2)
+
+                target_pair = source_pair
+                test.assert_eq_u8(target_pair.left, 4, 3)
+                test.assert_eq_u16(target_pair.right, 0x0506, 4)
+
+                let local_bytes: [u8; 3] = source_bytes
+                test.assert_eq_u8(local_bytes[1], 2, 5)
+
+                let local_pair: Pair = target_pair
+                test.assert_eq_u8(local_pair.left, 4, 6)
+                test.assert_eq_u16(local_pair.right, 0x0506, 7)
+
+                packet.bytes = target_bytes
+                test.assert_eq_u8(packet.bytes[0], 1, 8)
+                test.assert_eq_u8(packet.bytes[2], 3, 9)
+
+                packet.pair = source_pair
+                test.assert_eq_u8(packet.pair.left, 4, 10)
+                test.assert_eq_u16(packet.pair.right, 0x0506, 11)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 16_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_overlapping_stored_aggregate_copies() {
+        let source = r#"
+            struct Rows {
+                first: [u8; 3]
+                second: [u8; 3]
+            }
+
+            global rows: Rows = Rows {
+                first: [1, 2, 3],
+                second: [4, 5, 6]
+            }
+            global grid: [[u8; 3]; 2] = [
+                [7, 8, 9],
+                [10, 11, 12]
+            ]
+
+            fn main() {
+                rows.second = rows.first
+                test.assert_eq_u8(rows.second[0], 1, 1)
+                test.assert_eq_u8(rows.second[2], 3, 2)
+
+                rows.first = rows.first
+                test.assert_eq_u8(rows.first[0], 1, 3)
+                test.assert_eq_u8(rows.first[2], 3, 4)
+
+                grid[1] = grid[0]
+                test.assert_eq_u8(grid[1][0], 7, 5)
+                test.assert_eq_u8(grid[1][2], 9, 6)
                 test.pass()
             }
         "#;
