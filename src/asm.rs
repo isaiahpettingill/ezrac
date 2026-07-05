@@ -217,6 +217,12 @@ impl Symbols {
         }
 
         for declaration in &program.declarations {
+            if let Declaration::Alias(decl) = declaration {
+                symbols.validate_type_names(&decl.ty)?;
+            }
+        }
+
+        for declaration in &program.declarations {
             let (name, params, return_type, extern_asm) = match declaration {
                 Declaration::Function(function) => (
                     &function.name,
@@ -587,9 +593,7 @@ impl Symbols {
                     )));
                 }
                 let Some(alias) = self.aliases.get(name) else {
-                    return Err(Diagnostic::new(format!(
-                        "type `{name}` is parsed but not implemented in assembly codegen yet"
-                    )));
+                    return Err(Diagnostic::new(format!("unknown type `{name}`")));
                 };
                 self.type_width(alias)
             }
@@ -597,6 +601,33 @@ impl Symbols {
             Type::Array { .. } => Err(Diagnostic::new(
                 "array storage codegen is not implemented yet",
             )),
+        }
+    }
+
+    fn validate_type_names(&self, ty: &Type) -> Result<(), Diagnostic> {
+        match ty {
+            Type::Named(name)
+                if matches!(
+                    name.as_str(),
+                    "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "bool" | "ptr24"
+                ) =>
+            {
+                Ok(())
+            }
+            Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
+                Err(Diagnostic::new(format!(
+                    "type `{name}` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
+                )))
+            }
+            Type::Named(name) => {
+                if self.structs.contains_key(name) || self.aliases.contains_key(name) {
+                    Ok(())
+                } else {
+                    Err(Diagnostic::new(format!("unknown type `{name}`")))
+                }
+            }
+            Type::Ptr(inner) => self.validate_type_names(inner),
+            Type::Array { element, .. } => self.validate_type_names(element),
         }
     }
 
@@ -7163,6 +7194,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_struct_fields() {
+        let source = r#"
+            struct Pair {
+                value: u8
+                value: u16
+            }
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "duplicate struct field `value`");
+    }
+
+    #[test]
     fn rejects_array_and_struct_function_values() {
         let cases = [
             (
@@ -7349,6 +7395,41 @@ mod tests {
             error.message,
             "type `u32` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
         );
+    }
+
+    #[test]
+    fn rejects_unknown_types() {
+        let cases = [
+            r#"
+            global value: Missing = 0
+            fn main() { test.pass() }
+            "#,
+            r#"
+            fn takes_missing(value: Missing) {}
+            fn main() { test.pass() }
+            "#,
+            r#"
+            fn returns_missing() -> Missing {
+                return 0
+            }
+            fn main() { test.pass() }
+            "#,
+            r#"
+            alias MissingAlias = Missing
+            fn main() { test.pass() }
+            "#,
+            r#"
+            alias MissingPtr = ptr<Missing>
+            fn main() { test.pass() }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "unknown type `Missing`");
+        }
     }
 
     #[test]
