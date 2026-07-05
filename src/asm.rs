@@ -160,29 +160,34 @@ impl Symbols {
         }
 
         for declaration in &program.declarations {
-            if let Declaration::Function(function) = declaration {
-                for param in &function.params {
-                    symbols.type_width(&param.ty)?;
+            let (name, params, return_type) = match declaration {
+                Declaration::Function(function) => {
+                    (&function.name, &function.params, &function.return_type)
                 }
-                symbols.functions.insert(
-                    function.name.clone(),
-                    FunctionSig {
-                        arity: function.params.len(),
-                        params: function
-                            .params
-                            .iter()
-                            .map(|param| symbols.type_width(&param.ty))
-                            .collect::<Result<Vec<_>, _>>()?,
-                        return_width: function
-                            .return_type
-                            .as_ref()
-                            .map(|ty| symbols.type_width(ty))
-                            .transpose()?
-                            .unwrap_or(ValueWidth::U8),
-                        return_type: function.return_type.clone(),
-                    },
-                );
+                Declaration::ExternAsmFunction(function) => {
+                    (&function.name, &function.params, &function.return_type)
+                }
+                _ => continue,
+            };
+            for param in params {
+                symbols.type_width(&param.ty)?;
             }
+            symbols.functions.insert(
+                name.clone(),
+                FunctionSig {
+                    arity: params.len(),
+                    params: params
+                        .iter()
+                        .map(|param| symbols.type_width(&param.ty))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    return_width: return_type
+                        .as_ref()
+                        .map(|ty| symbols.type_width(ty))
+                        .transpose()?
+                        .unwrap_or(ValueWidth::U8),
+                    return_type: return_type.clone(),
+                },
+            );
         }
 
         for declaration in &program.declarations {
@@ -2995,6 +3000,24 @@ mod tests {
             error.message,
             "naked function `invalid` may contain only asm blocks"
         );
+    }
+
+    #[test]
+    fn emits_calls_to_extern_asm_functions_without_bodies() {
+        let source = r#"
+            extern asm fn raw_status(port: u8) -> u8
+
+            fn main() {
+                let value: u8 = raw_status(0x17)
+                debug.char(value)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+
+        assert!(asm.contains("    call _raw_status"), "{asm}");
+        assert!(!asm.contains("_raw_status:"), "{asm}");
     }
 
     #[test]

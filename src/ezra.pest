@@ -2,7 +2,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 program = { SOI ~ decl* ~ EOI }
-decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | fn_decl }
+decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | extern_decl | fn_decl }
 
 visibility = { "pub" }
 volatile_kw = { "volatile" }
@@ -24,6 +24,7 @@ section_name = @{ "."? ~ ident ~ ("." ~ ident)* }
 global_decl = { visibility? ~ "global" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 struct_decl = { visibility? ~ "struct" ~ ident ~ "{" ~ field_decl* ~ "}" }
 field_decl = { ident ~ ":" ~ ty ~ semi? }
+extern_decl = { visibility? ~ "extern" ~ "asm" ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ semi? }
 fn_decl = { attr* ~ visibility? ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ block }
 params = { param ~ ("," ~ param)* ~ ","? }
 param = { ident ~ ":" ~ ty }

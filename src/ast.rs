@@ -16,6 +16,7 @@ pub enum Declaration {
     Embed(EmbedDecl),
     Global(GlobalDecl),
     Struct(StructDecl),
+    ExternAsmFunction(ExternFunction),
     Function(Function),
 }
 
@@ -97,6 +98,14 @@ pub struct Function {
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     pub body: Vec<Stmt>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExternFunction {
+    pub public: bool,
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

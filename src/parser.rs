@@ -6,8 +6,8 @@ use pest_derive::Parser;
 use crate::{
     ast::{
         AliasDecl, AssignOp, BinaryOp, ConstDecl, Declaration, EmbedDecl, EmbedSource, Expr,
-        Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, Stmt, StructDecl, Type,
-        UnaryOp,
+        ExternFunction, Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, Stmt,
+        StructDecl, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -45,6 +45,7 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
         Rule::embed_decl => build_embed(pair).map(Declaration::Embed),
         Rule::global_decl => build_global(pair).map(Declaration::Global),
         Rule::struct_decl => build_struct(pair).map(Declaration::Struct),
+        Rule::extern_decl => build_extern(pair).map(Declaration::ExternAsmFunction),
         Rule::fn_decl => build_fn(pair).map(Declaration::Function),
         _ => unreachable!("unexpected decl rule {:?}", pair.as_rule()),
     }
@@ -272,6 +273,30 @@ fn build_fn(pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
         params,
         return_type,
         body: body.unwrap_or_default(),
+    })
+}
+
+fn build_extern(pair: Pair<'_, Rule>) -> Result<ExternFunction, Diagnostic> {
+    let mut public = false;
+    let mut name = None;
+    let mut params = Vec::new();
+    let mut return_type = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::visibility => public = true,
+            Rule::ident => name = Some(inner.as_str().to_owned()),
+            Rule::params => params = build_params(inner)?,
+            Rule::ret_ty => return_type = Some(build_type(inner.into_inner().next().unwrap())?),
+            _ => {}
+        }
+    }
+
+    Ok(ExternFunction {
+        public,
+        name: name.unwrap(),
+        params,
+        return_type,
     })
 }
 
@@ -771,6 +796,35 @@ mod tests {
                 volatile: true,
                 lines
             } if lines == &["ld a, 0x41", "out0 (0Ch), a"]
+        ));
+    }
+
+    #[test]
+    fn parses_extern_asm_function_declarations() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            pub extern asm fn memcpy_fast(dst: ptr<u8>, src: ptr<u8>, len: u24)
+            extern asm fn read_status() -> u8
+            fn main() {}
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &program.declarations[0],
+            Declaration::ExternAsmFunction(function)
+                if function.public
+                    && function.name == "memcpy_fast"
+                    && function.params.len() == 3
+                    && function.return_type.is_none()
+        ));
+        assert!(matches!(
+            &program.declarations[1],
+            Declaration::ExternAsmFunction(function)
+                if !function.public
+                    && function.name == "read_status"
+                    && function.return_type == Some(Type::Named("u8".to_owned()))
         ));
     }
 
