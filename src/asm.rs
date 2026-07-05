@@ -734,7 +734,11 @@ impl Symbols {
                     self.ensure_const_expr_is_bool(expr, "logical operand")?;
                 }
             }
-            Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            Expr::Cast { expr, ty } => {
+                self.validate_const_expr_arithmetic_compatibility(expr)?;
+                self.validate_const_cast(expr, ty)?;
+            }
+            Expr::Deref(expr) => {
                 self.validate_const_expr_arithmetic_compatibility(expr)?;
             }
             Expr::Array(values) => {
@@ -863,6 +867,23 @@ impl Symbols {
             | Expr::Call { .. } => Err(Diagnostic::new(
                 "expression is not supported in a constant declaration",
             )),
+        }
+    }
+
+    fn validate_const_cast(&self, expr: &Expr, target: &Type) -> Result<(), Diagnostic> {
+        let source_type = self.resolved_type(&self.const_expr_type(expr)?)?;
+        let target_type = self.resolved_type(target)?;
+        match (&source_type, &target_type) {
+            (Type::Ptr(_), Type::Ptr(_)) => Ok(()),
+            (Type::Ptr(_), Type::Named(name)) if name == "u24" => Ok(()),
+            (Type::Ptr(_), Type::Named(_)) => {
+                Err(Diagnostic::new("pointer-to-integer casts produce u24"))
+            }
+            (Type::Named(name), Type::Ptr(_)) if name == "u24" => Ok(()),
+            (Type::Named(_), Type::Ptr(_)) => {
+                Err(Diagnostic::new("integer-to-pointer casts require u24"))
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -1847,29 +1868,46 @@ impl Emitter {
             self.emit_cast_to_type(expr, ty)?;
             return Ok(());
         }
-        if let Ok(value) = self.symbols.eval_i64(expr) {
-            let value = self.value_for_type(value, ty, width)?;
-            match width {
-                ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
-                ValueWidth::U16 | ValueWidth::U24 => self.line(&format!("    ld hl, {value:06X}h")),
+        if !self.is_pointer_arithmetic_expr(expr)? {
+            if let Ok(value) = self.symbols.eval_i64(expr) {
+                let value = self.value_for_type(value, ty, width)?;
+                match width {
+                    ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
+                    ValueWidth::U16 | ValueWidth::U24 => {
+                        self.line(&format!("    ld hl, {value:06X}h"))
+                    }
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         self.emit_expr_to_width(expr, width)
+    }
+
+    fn is_pointer_arithmetic_expr(&self, expr: &Expr) -> Result<bool, Diagnostic> {
+        if let Expr::Binary { left, op, right } = expr {
+            return Ok(matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                && (self.pointer_pointee_size(left)?.is_some()
+                    || self.pointer_pointee_size(right)?.is_some()));
+        }
+        Ok(false)
     }
 
     fn emit_cast_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
         self.validate_cast(expr, ty)?;
         let width = self.symbols.type_width(ty)?;
-        if let Ok(value) = self.symbols.eval_i64(expr) {
-            let bits = u32::from(width.bytes()) * 8;
-            let mask = (1_i128 << bits) - 1;
-            let value = ((value as i128) & mask) as u32;
-            match width {
-                ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
-                ValueWidth::U16 | ValueWidth::U24 => self.line(&format!("    ld hl, {value:06X}h")),
+        if !self.is_pointer_arithmetic_expr(expr)? {
+            if let Ok(value) = self.symbols.eval_i64(expr) {
+                let bits = u32::from(width.bytes()) * 8;
+                let mask = (1_i128 << bits) - 1;
+                let value = ((value as i128) & mask) as u32;
+                match width {
+                    ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
+                    ValueWidth::U16 | ValueWidth::U24 => {
+                        self.line(&format!("    ld hl, {value:06X}h"))
+                    }
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         let source_width = self.expr_width(expr)?;
         match width {
@@ -3587,6 +3625,8 @@ impl Emitter {
             Expr::Ident(name) => {
                 if let Some(variable) = self.variable_opt(name) {
                     variable.width()
+                } else if let Some(ty) = self.named_value_type(name) {
+                    self.symbols.type_width(ty)
                 } else {
                     let value = self.symbols.eval_i64(expr)?;
                     if (0..=0xFF).contains(&value) {
@@ -5121,6 +5161,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_constant_pointer_casts() {
+        let cases = [
+            (
+                r#"
+                const VRAM_BASE: ptr<u8> = 0x040180
+                const RAW: u16 = cast<u16>(VRAM_BASE)
+
+                fn main() {
+                    test.pass()
+                }
+                "#,
+                "pointer-to-integer casts produce u24",
+            ),
+            (
+                r#"
+                const VRAM_BASE: ptr<u8> = cast<ptr<u8>>(0x1234)
+
+                fn main() {
+                    test.pass()
+                }
+                "#,
+                "integer-to-pointer casts require u24",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
     fn rejects_invalid_pointer_arithmetic() {
         let cases = [
             (
@@ -6579,6 +6653,37 @@ mod tests {
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_pointer_constants() {
+        let source = r#"
+            const TI_VRAM: ptr<u8> = 0x040180
+            const TI_VRAM_RAW: u24 = cast<u24>(TI_VRAM)
+            const AGON_VDP_BUFFER: ptr<u16> = 0x040190
+
+            fn main() {
+                *(TI_VRAM) = 0x42;
+                test.assert_eq_u8(*TI_VRAM, 0x42, 1);
+
+                let ti_next: ptr<u8> = TI_VRAM + 1;
+                *(ti_next) = 0x43;
+                test.assert_eq_u8(*(TI_VRAM + 1), 0x43, 2);
+                test.assert_eq_u24(TI_VRAM_RAW, 0x040180, 3);
+
+                let agon_next: ptr<u16> = AGON_VDP_BUFFER + 1;
+                *(agon_next) = 0x1234;
+                test.assert_eq_u16(*(AGON_VDP_BUFFER + 1), 0x1234, 4);
+                test.assert_eq_u24(cast<u24>(agon_next), cast<u24>(AGON_VDP_BUFFER) + 2, 5);
+                test.pass();
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 8_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
