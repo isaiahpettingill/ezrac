@@ -1019,14 +1019,14 @@ impl Symbols {
         let target_type = self.resolved_type(target)?;
         match (&source_type, &target_type) {
             (Type::Ptr(_), Type::Ptr(_)) => Ok(()),
-            (Type::Ptr(_), Type::Named(name)) if name == "u24" => Ok(()),
-            (Type::Ptr(_), Type::Named(_)) => {
-                Err(Diagnostic::new("pointer-to-integer casts produce u24"))
-            }
-            (Type::Named(name), Type::Ptr(_)) if name == "u24" => Ok(()),
-            (Type::Named(_), Type::Ptr(_)) => {
-                Err(Diagnostic::new("integer-to-pointer casts require u24"))
-            }
+            (Type::Ptr(_), Type::Named(name)) if is_raw_address_type(name) => Ok(()),
+            (Type::Ptr(_), Type::Named(_)) => Err(Diagnostic::new(
+                "pointer-to-integer casts produce u24 or ptr24",
+            )),
+            (Type::Named(name), Type::Ptr(_)) if is_raw_address_type(name) => Ok(()),
+            (Type::Named(_), Type::Ptr(_)) => Err(Diagnostic::new(
+                "integer-to-pointer casts require u24 or ptr24",
+            )),
             _ => Ok(()),
         }
     }
@@ -2695,14 +2695,14 @@ impl Emitter {
         let target_type = self.symbols.resolved_type(target)?;
         match (&source_type, &target_type) {
             (Type::Ptr(_), Type::Ptr(_)) => Ok(()),
-            (Type::Ptr(_), Type::Named(name)) if name == "u24" => Ok(()),
-            (Type::Ptr(_), Type::Named(_)) => {
-                Err(Diagnostic::new("pointer-to-integer casts produce u24"))
-            }
-            (Type::Named(name), Type::Ptr(_)) if name == "u24" => Ok(()),
-            (Type::Named(_), Type::Ptr(_)) => {
-                Err(Diagnostic::new("integer-to-pointer casts require u24"))
-            }
+            (Type::Ptr(_), Type::Named(name)) if is_raw_address_type(name) => Ok(()),
+            (Type::Ptr(_), Type::Named(_)) => Err(Diagnostic::new(
+                "pointer-to-integer casts produce u24 or ptr24",
+            )),
+            (Type::Named(name), Type::Ptr(_)) if is_raw_address_type(name) => Ok(()),
+            (Type::Named(_), Type::Ptr(_)) => Err(Diagnostic::new(
+                "integer-to-pointer casts require u24 or ptr24",
+            )),
             _ => Ok(()),
         }
     }
@@ -5942,6 +5942,10 @@ fn type_is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name == "bool")
 }
 
+fn is_raw_address_type(name: &str) -> bool {
+    matches!(name, "u24" | "ptr24")
+}
+
 fn validate_comparison_types<F>(
     left_type: &Type,
     op: BinaryOp,
@@ -7465,7 +7469,7 @@ mod tests {
                     test.pass()
                 }
                 "#,
-                "integer-to-pointer casts require u24",
+                "integer-to-pointer casts require u24 or ptr24",
             ),
             (
                 r#"
@@ -7476,7 +7480,7 @@ mod tests {
                     test.pass()
                 }
                 "#,
-                "pointer-to-integer casts produce u24",
+                "pointer-to-integer casts produce u24 or ptr24",
             ),
         ];
 
@@ -7486,6 +7490,32 @@ mod tests {
 
             assert_eq!(error.message, expected);
         }
+    }
+
+    #[test]
+    fn emits_and_runs_ptr24_pointer_casts() {
+        let source = r#"
+            volatile mmio SCRATCH: ptr24 = 0x040180
+
+            fn read_raw(raw: ptr24) -> u8 {
+                let p: ptr<u8> = cast<ptr<u8>>(raw)
+                return *p
+            }
+
+            fn main() {
+                let p: ptr<u8> = cast<ptr<u8>>(SCRATCH);
+                *(p) = 0x5A;
+                let raw: ptr24 = cast<ptr24>(p);
+                test.assert_eq_u8(read_raw(raw), 0x5A, 1);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
@@ -7500,7 +7530,7 @@ mod tests {
                     test.pass()
                 }
                 "#,
-                "pointer-to-integer casts produce u24",
+                "pointer-to-integer casts produce u24 or ptr24",
             ),
             (
                 r#"
@@ -7510,7 +7540,7 @@ mod tests {
                     test.pass()
                 }
                 "#,
-                "integer-to-pointer casts require u24",
+                "integer-to-pointer casts require u24 or ptr24",
             ),
         ];
 
@@ -7520,6 +7550,26 @@ mod tests {
 
             assert_eq!(error.message, expected);
         }
+    }
+
+    #[test]
+    fn emits_and_runs_constant_ptr24_pointer_casts() {
+        let source = r#"
+            const RAW: ptr24 = cast<ptr24>(cast<ptr<u8>>(0x040190))
+            const BYTE_PTR: ptr<u8> = cast<ptr<u8>>(RAW)
+
+            fn main() {
+                *BYTE_PTR = 0x6B;
+                test.assert_eq_u8(*BYTE_PTR, 0x6B, 1);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
