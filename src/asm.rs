@@ -827,12 +827,12 @@ impl Symbols {
             Expr::Int(value) | Expr::TypedInt(value, _) => Ok(*value),
             Expr::Char(value) => Ok(*value as i64),
             Expr::Bool(value) => Ok(i64::from(*value)),
-            Expr::Ident(name) => self
-                .constants
-                .get(name)
-                .copied()
-                .or_else(|| self.embed_property_value(name))
-                .ok_or_else(|| Diagnostic::new(format!("unknown constant `{name}`"))),
+            Expr::Ident(name) => self.const_value(name),
+            Expr::Field { base, field } => self.const_value(&format!("{base}.{field}")),
+            Expr::Access(path) => {
+                let name = const_access_name(path)?;
+                self.const_value(&name)
+            }
             Expr::Unary { op, expr } => {
                 let value = self.eval_i64(expr)?;
                 Ok(match op {
@@ -873,10 +873,8 @@ impl Symbols {
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
-            | Expr::Access(_)
             | Expr::AddressOfAccess(_)
             | Expr::AddressOf(_)
-            | Expr::Field { .. }
             | Expr::StructInit { .. }
             | Expr::Deref(_)
             | Expr::In(_)
@@ -885,6 +883,14 @@ impl Symbols {
                 "expression `{expr:?}` is not a compile-time integer"
             ))),
         }
+    }
+
+    fn const_value(&self, name: &str) -> Result<i64, Diagnostic> {
+        self.constants
+            .get(name)
+            .copied()
+            .or_else(|| self.embed_property_value(name))
+            .ok_or_else(|| Diagnostic::new(format!("unknown constant `{name}`")))
     }
 
     fn const_cast_value(&self, value: i64, ty: &Type) -> Result<i64, Diagnostic> {
@@ -1115,14 +1121,11 @@ impl Symbols {
 
     fn const_expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
         match expr {
-            Expr::Ident(name) => {
-                if let Some(ty) = self.constant_types.get(name) {
-                    Ok(ty.clone())
-                } else if let Some(value) = self.constants.get(name).copied() {
-                    Ok(int_value_type(value))
-                } else {
-                    Err(Diagnostic::new(format!("unknown constant `{name}`")))
-                }
+            Expr::Ident(name) => self.const_name_type(name),
+            Expr::Field { base, field } => self.const_name_type(&format!("{base}.{field}")),
+            Expr::Access(path) => {
+                let name = const_access_name(path)?;
+                self.const_name_type(&name)
             }
             Expr::Int(value) => Ok(int_value_type(*value)),
             Expr::TypedInt(_, ty) => Ok(ty.clone()),
@@ -1152,16 +1155,26 @@ impl Symbols {
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
-            | Expr::Access(_)
             | Expr::AddressOfAccess(_)
             | Expr::AddressOf(_)
-            | Expr::Field { .. }
             | Expr::StructInit { .. }
             | Expr::Deref(_)
             | Expr::In(_)
             | Expr::Call { .. } => Err(Diagnostic::new(
                 "expression is not supported in a constant declaration",
             )),
+        }
+    }
+
+    fn const_name_type(&self, name: &str) -> Result<Type, Diagnostic> {
+        if let Some(ty) = self.constant_types.get(name) {
+            Ok(ty.clone())
+        } else if let Some(value) = self.constants.get(name).copied() {
+            Ok(int_value_type(value))
+        } else if self.embed_property_value(name).is_some() {
+            Ok(Type::Named("u24".to_owned()))
+        } else {
+            Err(Diagnostic::new(format!("unknown constant `{name}`")))
         }
     }
 
@@ -6689,6 +6702,20 @@ fn access_path_summary(path: &AccessPath) -> String {
     out
 }
 
+fn const_access_name(path: &AccessPath) -> Result<String, Diagnostic> {
+    if path
+        .segments
+        .iter()
+        .all(|segment| matches!(segment, AccessSegment::Field(_)))
+    {
+        Ok(access_path_summary(path))
+    } else {
+        Err(Diagnostic::new(
+            "expression is not supported in a constant declaration",
+        ))
+    }
+}
+
 fn assign_op_summary(op: AssignOp) -> &'static str {
     match op {
         AssignOp::Set => "=",
@@ -10023,13 +10050,19 @@ section .text
         let main_path = root.join("game.ezra");
         std::fs::write(
             root.join("lib/state.ezra"),
-            "pub global bytes: [u8; 3] = [1, 2, 3]\n",
+            r#"
+            pub const LEN: u8 = 3
+            pub global bytes: [u8; LEN] = [1, 2, 3]
+            "#,
         )
         .unwrap();
         std::fs::write(
             &main_path,
             r#"
             import lib.state
+            global short_sized: [u8; state.LEN] = [4, 5, 6]
+            global full_sized: [u8; lib.state.LEN] = [7, 8, 9]
+
             fn main() {
                 test.assert_eq_u8(state.bytes[1], 2, 1)
                 state.bytes[2] = state.bytes[1] + 5
@@ -10038,6 +10071,8 @@ section .text
                 test.assert_eq_u8(*(ptr + 2), 7, 3)
                 lib.state.bytes[0] = lib.state.bytes[2] + 1
                 test.assert_eq_u8(state.bytes[0], 8, 4)
+                test.assert_eq_u8(short_sized[2], 6, 5)
+                test.assert_eq_u8(full_sized[2], 9, 6)
                 test.pass()
             }
             "#,
