@@ -1946,6 +1946,25 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_storage_initializer(
+        &mut self,
+        variable: Variable,
+        ty: &Type,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        match self.symbols.resolved_type(ty)? {
+            Type::Array { .. } => self.emit_array_initializer(variable, ty, value),
+            Type::Named(name) if self.symbols.structs.contains_key(&name) => {
+                self.emit_struct_initializer(variable, ty, value)
+            }
+            _ => {
+                self.emit_expr_to_width(value, variable.width()?)?;
+                self.emit_store_width(variable);
+                Ok(())
+            }
+        }
+    }
+
     fn emit_wide_assignment_op(
         &mut self,
         variable: Variable,
@@ -3784,11 +3803,14 @@ impl Emitter {
         op: AssignOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
+        let ty = self.array_element_type(name)?;
         if let Some(element) = self.const_array_element_variable(name, index)? {
             if op == AssignOp::Set {
-                let ty = self.array_element_type(name)?;
                 self.validate_expr_assignable_to_type(value, &ty)?;
+                self.emit_storage_initializer(element, &ty, value)?;
+                return Ok(());
             }
+            element.width()?;
             self.emit_assignment_value(element, op, value)?;
             self.emit_store_width(element);
             return Ok(());
@@ -3799,8 +3821,9 @@ impl Emitter {
         self.emit_array_element_address(name, index)?;
         self.emit_store_hl(addr);
 
-        let width = scalar_var(0, element_size).width()?;
+        let element = self.symbols.storage_at(0, &ty)?;
         if op != AssignOp::Set {
+            element.width()?;
             let current = self.symbols.alloc_var(element_size);
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
@@ -3813,12 +3836,10 @@ impl Emitter {
         }
 
         if op == AssignOp::Set {
-            let ty = self.array_element_type(name)?;
             self.validate_expr_assignable_to_type(value, &ty)?;
         }
-        let stored = self.symbols.alloc_var(element_size);
-        self.emit_expr_to_width(value, width)?;
-        self.emit_store_width(stored);
+        let stored = self.symbols.alloc_storage(&ty)?;
+        self.emit_storage_initializer(stored, &ty, value)?;
         self.emit_load_hl(addr);
         self.emit_store_var_to_pointed_width(stored);
         Ok(())
@@ -8433,6 +8454,16 @@ mod tests {
                 test.assert_eq_u8(mem.peek8(second + 0), 4, 17)
                 test.assert_eq_u8(mem.peek8(second + 1), 0x06, 18)
                 test.assert_eq_u8(mem.peek8(second + 2), 0x05, 19)
+
+                points[2] = Point { x: 9, y: 0x0A0B }
+                test.assert_eq_u8(mem.peek8(raw + 6), 9, 20)
+                test.assert_eq_u8(mem.peek8(raw + 7), 0x0B, 21)
+                test.assert_eq_u8(mem.peek8(raw + 8), 0x0A, 22)
+
+                points[i] = Point { x: 0x0C, y: 0x0D0E }
+                test.assert_eq_u8(mem.peek8(second + 0), 0x0C, 23)
+                test.assert_eq_u8(mem.peek8(second + 1), 0x0E, 24)
+                test.assert_eq_u8(mem.peek8(second + 2), 0x0D, 25)
                 test.pass()
             }
         "#;
