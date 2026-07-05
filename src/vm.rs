@@ -398,7 +398,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if parse_rst(text)?.is_some() {
         Ok(1)
-    } else if parse_bit_reg8(text)?.is_some() {
+    } else if parse_bit_operation_reg8(text)?.is_some() {
         Ok(2)
     } else if text == "sbc hl, bc"
         || text == "sbc hl, de"
@@ -699,7 +699,7 @@ fn emit_instruction(
         bytes.extend([0xED, opcode]);
     } else if let Some(opcode) = parse_rst(text)? {
         bytes.push(opcode);
-    } else if let Some(opcode) = parse_bit_reg8(text)? {
+    } else if let Some(opcode) = parse_bit_operation_reg8(text)? {
         bytes.extend([0xCB, opcode]);
     } else if text == "add ix, sp" {
         bytes.extend([0xDD, 0x39]);
@@ -955,12 +955,18 @@ fn parse_rst(text: &str) -> Result<Option<u8>, Diagnostic> {
     Ok(Some(0xC7 + target as u8))
 }
 
-fn parse_bit_reg8(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let Some(rest) = text.strip_prefix("bit ") else {
+fn parse_bit_operation_reg8(text: &str) -> Result<Option<u8>, Diagnostic> {
+    let (base, rest) = if let Some(rest) = text.strip_prefix("bit ") {
+        (0x40, rest)
+    } else if let Some(rest) = text.strip_prefix("res ") {
+        (0x80, rest)
+    } else if let Some(rest) = text.strip_prefix("set ") {
+        (0xC0, rest)
+    } else {
         return Ok(None);
     };
     let Some((bit, register)) = rest.split_once(',') else {
-        return Err(Diagnostic::new(format!("invalid bit syntax `{text}`")));
+        return Err(Diagnostic::new(format!("invalid bit operation syntax `{text}`")));
     };
     let bit = parse_number(bit.trim())?;
     if bit > 7 {
@@ -972,7 +978,7 @@ fn parse_bit_reg8(text: &str) -> Result<Option<u8>, Diagnostic> {
             register.trim()
         )));
     };
-    Ok(Some(0x40 + bit as u8 * 8 + register))
+    Ok(Some(base + bit as u8 * 8 + register))
 }
 
 fn reg8_code(register: &str) -> Option<u8> {
@@ -2169,13 +2175,15 @@ mod tests {
 
     #[test]
     fn assembles_bit_register_instructions() {
-        let asm = "bit 0, b\nbit 1, c\nbit 2, d\nbit 3, e\nbit 4, h\nbit 5, l\nbit 7, a\n";
+        let asm =
+            "bit 0, b\nbit 1, c\nbit 2, d\nbit 3, e\nbit 4, h\nbit 5, l\nbit 7, a\nres 0, b\nset 7, a\n";
         let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(
             bytes,
             [
-                0xCB, 0x40, 0xCB, 0x49, 0xCB, 0x52, 0xCB, 0x5B, 0xCB, 0x64, 0xCB, 0x6D, 0xCB, 0x7F
+                0xCB, 0x40, 0xCB, 0x49, 0xCB, 0x52, 0xCB, 0x5B, 0xCB, 0x64, 0xCB, 0x6D,
+                0xCB, 0x7F, 0xCB, 0x80, 0xCB, 0xFF,
             ]
         );
     }
@@ -2184,6 +2192,12 @@ mod tests {
     fn runs_bit_register_instructions_on_ez80_vm() {
         let asm = r#"
             ld a, 02h
+            set 0, a
+            cp 03h
+            jp nz, fail
+            res 0, a
+            cp 02h
+            jp nz, fail
             bit 1, a
             jp z, fail
             bit 0, a
@@ -2350,6 +2364,8 @@ mod tests {
         for (asm, expected) in [
             ("bit 8, a\n", "bit index 8 is outside 0..7"),
             ("bit 0, ix\n", "invalid bit register `ix`"),
+            ("set 8, a\n", "bit index 8 is outside 0..7"),
+            ("res 0, ix\n", "invalid bit register `ix`"),
         ] {
             let error = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap_err();
 

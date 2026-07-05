@@ -9057,6 +9057,7 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
         "sub" | "and" | "or" | "xor" | "cpl" | "daa" | "neg" | "rla" | "rlca" | "rra" | "rrca" => {
             vec!["a"]
         }
+        "res" | "set" => asm_second_operand(operands).and_then(asm_operand_register).into_iter().collect(),
         "ex" => asm_line_exchange_registers(operands),
         "exx" => vec!["bc", "de", "hl"],
         "call" | "rst" => vec!["af", "bc", "de", "hl"],
@@ -9146,6 +9147,10 @@ fn asm_first_operand(operands: &str) -> &str {
         .map(|(first, _)| first)
         .unwrap_or(operands)
         .trim()
+}
+
+fn asm_second_operand(operands: &str) -> Option<&str> {
+    operands.split_once(',').map(|(_, second)| second.trim())
 }
 
 fn asm_operand_register(operand: &str) -> Option<&'static str> {
@@ -14009,6 +14014,17 @@ section .text
             (
                 r#"
                 fn main() {
+                    asm volatile {
+                        "set 0, b"
+                    }
+                    test.pass()
+                }
+                "#,
+                "inline asm modifies `b` without declaring clobber `b`",
+            ),
+            (
+                r#"
+                fn main() {
                     asm volatile(clobber hl) {
                         "push hl"
                     }
@@ -14177,6 +14193,7 @@ section .text
             "asm volatile(clobber bc) { \"ld b, 11h\" \"ld c, 0Fh\" \"mlt bc\" }",
             "asm volatile(clobber d, clobber e) { \"ld d, 02h\" \"ld e, 03h\" \"mlt de\" }",
             "asm volatile(clobber h, clobber l) { \"ld h, 04h\" \"ld l, 05h\" \"mlt hl\" }",
+            "asm volatile(clobber b) { \"set 0, b\" \"res 0, b\" }",
         ];
 
         for asm_stmt in cases {
