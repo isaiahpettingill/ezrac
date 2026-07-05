@@ -22,7 +22,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
     validate_all_function_calls(program, &symbols.functions)?;
     validate_all_function_bodies(program, symbols.clone())?;
     validate_no_recursive_calls(program, &symbols.functions)?;
-    let emitted_functions = reachable_function_names(program, &symbols.functions);
+    let emitted_functions = reachable_function_names(program, &symbols);
 
     let mut emitter = Emitter::new(symbols);
     emitter.emit_prelude();
@@ -104,6 +104,7 @@ struct Symbols {
     globals: HashMap<String, Variable>,
     global_types: HashMap<String, Type>,
     functions: HashMap<String, FunctionSig>,
+    inline_functions: HashMap<String, Function>,
     next_addr: u32,
 }
 
@@ -151,6 +152,7 @@ impl Symbols {
             globals: HashMap::new(),
             global_types: HashMap::new(),
             functions: HashMap::new(),
+            inline_functions: HashMap::new(),
             next_addr: VAR_BASE,
         };
 
@@ -249,6 +251,13 @@ impl Symbols {
                     return_type: return_type.clone(),
                 },
             );
+            if let Declaration::Function(function) = declaration {
+                if has_attr(function, "inline") && inline_return_expr(function).is_some() {
+                    symbols
+                        .inline_functions
+                        .insert(function.name.clone(), function.clone());
+                }
+            }
         }
 
         for declaration in &program.declarations {
@@ -1898,6 +1907,12 @@ impl Emitter {
             temps.push(temp);
         }
 
+        if let Some(function) = self.symbols.inline_functions.get(name).cloned() {
+            if self.emit_inline_return_call(&function, &temps)? {
+                return Ok(());
+            }
+        }
+
         if sig.uses_arg_slots {
             for (temp, slot) in temps.iter().copied().zip(sig.arg_slots.iter().copied()) {
                 self.emit_load_width(temp);
@@ -1943,6 +1958,32 @@ impl Emitter {
             self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
         }
         Ok(())
+    }
+
+    fn emit_inline_return_call(
+        &mut self,
+        function: &Function,
+        temps: &[Variable],
+    ) -> Result<bool, Diagnostic> {
+        let Some(expr) = inline_return_expr(function) else {
+            return Ok(false);
+        };
+        let Some(return_type) = &function.return_type else {
+            return Ok(false);
+        };
+
+        self.scopes.push(HashMap::new());
+        self.scope_types.push(HashMap::new());
+        for (param, temp) in function.params.iter().zip(temps.iter().copied()) {
+            self.current_scope_mut().insert(param.name.clone(), temp);
+            self.current_scope_types_mut()
+                .insert(param.name.clone(), param.ty.clone());
+        }
+        let result = self.emit_expr_to_type(&expr, return_type);
+        self.scope_types.pop();
+        self.scopes.pop();
+        result?;
+        Ok(true)
     }
 
     fn emit_expr_to_width(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
@@ -4340,19 +4381,21 @@ fn builtin_arity_error(name: &str) -> String {
     }
 }
 
-fn reachable_function_names(
-    program: &Program,
-    functions: &HashMap<String, FunctionSig>,
-) -> HashSet<String> {
+fn inline_return_expr(function: &Function) -> Option<Expr> {
+    match function.body.as_slice() {
+        [Stmt::Return(Some(expr))] => Some(expr.clone()),
+        _ => None,
+    }
+}
+
+fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<String> {
     let mut graph = HashMap::new();
     let mut seeds = Vec::new();
     for declaration in &program.declarations {
         let Declaration::Function(function) = declaration else {
             continue;
         };
-        let mut calls = Vec::new();
-        collect_stmt_calls(&function.body, &mut calls);
-        calls.retain(|name| functions.contains_key(name));
+        let calls = reachable_calls_for_body(&function.body, symbols);
         graph.insert(function.name.clone(), calls);
         if function.name == "main"
             || function.public
@@ -4374,6 +4417,23 @@ fn reachable_function_names(
         }
     }
     reachable
+}
+
+fn reachable_calls_for_body(stmts: &[Stmt], symbols: &Symbols) -> Vec<String> {
+    let mut raw_calls = Vec::new();
+    collect_stmt_calls(stmts, &mut raw_calls);
+    let mut calls = Vec::new();
+    for name in raw_calls {
+        if !symbols.functions.contains_key(&name) {
+            continue;
+        }
+        if let Some(inline) = symbols.inline_functions.get(&name) {
+            calls.extend(reachable_calls_for_body(&inline.body, symbols));
+        } else {
+            calls.push(name);
+        }
+    }
+    calls
 }
 
 fn detect_recursive_call(
@@ -6102,6 +6162,58 @@ mod tests {
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_simple_inline_return_functions() {
+        let source = r#"
+            inline fn pressed(pad: u16, button: u16) -> bool {
+                return (pad & button) != 0
+            }
+
+            fn main() {
+                let pad: u16 = 0x0011
+                test.assert_eq_u8(pressed(pad, 0x0010), true, 1)
+                test.assert_eq_u8(pressed(pad, 0x0002), false, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 3_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(!asm.contains("call _pressed"), "{asm}");
+        assert!(!asm.contains("_pressed:"), "{asm}");
+    }
+
+    #[test]
+    fn inline_return_functions_keep_helper_calls_reachable() {
+        let source = r#"
+            fn add_one(value: u8) -> u8 {
+                return value + 1
+            }
+
+            inline fn add_two(value: u8) -> u8 {
+                return add_one(value) + 1
+            }
+
+            fn main() {
+                test.assert_eq_u8(add_two(5), 7, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(asm.contains("_add_one:"), "{asm}");
+        assert!(asm.contains("call _add_one"), "{asm}");
+        assert!(!asm.contains("_add_two:"), "{asm}");
+        assert!(!asm.contains("call _add_two"), "{asm}");
     }
 
     #[test]
