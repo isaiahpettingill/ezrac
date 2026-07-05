@@ -127,6 +127,7 @@ pub fn build_cartridge_with_layout_code_and_symbols(
     code: &[u8],
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<u8>, Diagnostic> {
+    validate_header_section_fit(layout)?;
     validate_text_section_fit(layout, code.len())?;
     let code_offset = layout
         .entry
@@ -292,6 +293,7 @@ pub fn cartridge_map_entries(
     code_len: usize,
     symbols: &[AssemblySymbol],
 ) -> Result<Vec<CartridgeMapEntry>, Diagnostic> {
+    validate_header_section_fit(layout)?;
     validate_text_section_fit(layout, code_len)?;
     let code_offset = layout
         .entry
@@ -514,6 +516,23 @@ fn validate_text_section_fit(layout: &Layout, code_len: usize) -> Result<(), Dia
     if !region.contains_range(layout.entry, end) {
         return Err(Diagnostic::new(format!(
             "section `.text` does not fit in region `{}`",
+            region.name
+        )));
+    }
+    Ok(())
+}
+
+fn validate_header_section_fit(layout: &Layout) -> Result<(), Diagnostic> {
+    let (region, _) = layout_section_placement(layout, ".header")?;
+    let end = layout
+        .load
+        .get()
+        .checked_add(u32::from(HEADER_SIZE) - 1)
+        .ok_or_else(|| Diagnostic::new("section `.header` exceeds 24-bit address space"))?;
+    let end = Address24::try_from(end).map_err(|error| Diagnostic::new(error.to_string()))?;
+    if !region.contains_range(layout.load, end) {
+        return Err(Diagnostic::new(format!(
+            "section `.header` does not fit in region `{}`",
             region.name
         )));
     }
@@ -864,6 +883,7 @@ mod tests {
                     region sprites 0x120000..0x1200FF read;
                     region fonts 0x130000..0x1300FF read;
 
+                    section .header -> code align 64;
                     section .text -> code align 16;
                     section .sprites -> sprites align 1;
                     section .fonts -> fonts align 1;
@@ -973,6 +993,7 @@ mod tests {
                     stack 0xF00000;
 
                     region code 0x020000..0x02FFFF read execute;
+                    section .header -> code align 64;
                     section .text -> code align 16;
                 }
             "#,
@@ -1005,6 +1026,7 @@ mod tests {
                     stack 0xF00000;
 
                     region code 0x020000..0x02FFFF read execute;
+                    section .header -> code align 64;
                     section .text -> code align 16;
                 }
             "#,
@@ -1031,6 +1053,7 @@ mod tests {
                     stack 0xF00000;
 
                     region code 0x020000..0x020043 read execute;
+                    section .header -> code align 64;
                     section .text -> code align 1;
                 }
             "#,
@@ -1057,6 +1080,7 @@ mod tests {
                     stack 0xF00000;
 
                     region code 0x020000..0x02007F read execute;
+                    section .header -> code align 64;
                     section .text -> code align 1;
                 }
             "#,
@@ -1113,6 +1137,7 @@ mod tests {
                     region code 0x010000..0x01FFFF read execute;
                     region assets 0x100000..0x100001 read;
 
+                    section .header -> code align 64;
                     section .text -> code align 16;
                     section .assets -> assets align 1;
                 }
@@ -1127,6 +1152,57 @@ mod tests {
         assert_eq!(
             error.message,
             "embed `too_big` exceeds section `.assets` region `assets`"
+        );
+    }
+
+    #[test]
+    fn cartridge_rejects_layout_without_header_section() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let layout = parse_layout(
+            r#"
+                layout missing_header {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xF00000;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    section .text -> code align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error =
+            build_cartridge_with_layout_code_and_symbols(&program, &layout, &[], &[]).unwrap_err();
+
+        assert_eq!(error.message, "layout has no section `.header`");
+    }
+
+    #[test]
+    fn cartridge_rejects_header_section_that_exceeds_region() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let layout = parse_layout(
+            r#"
+                layout tiny_header {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xF00000;
+
+                    region header 0x020000..0x02003E read;
+                    region code 0x020040..0x02FFFF read execute;
+                    section .header -> header align 64;
+                    section .text -> code align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error =
+            build_cartridge_with_layout_code_and_symbols(&program, &layout, &[], &[]).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "section `.header` does not fit in region `header`"
         );
     }
 

@@ -388,6 +388,7 @@ mod tests {
                     stack 0xEFFF00;
 
                     region code 0x020000..0x02FFFF read execute;
+                    section .header -> code align 64;
                     section .text -> code align 16;
 
                     symbol EZRA_LOAD_ADDR = 0x020000;
@@ -442,6 +443,7 @@ mod tests {
                     stack 0xEFFE00;
 
                     region code 0x020000..0x02FFFF read execute;
+                    section .header -> code align 64;
                     section .text -> code align 16;
                 }
             "#,
