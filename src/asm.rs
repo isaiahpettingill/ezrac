@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::{
     ast::{
-        AssignOp, BinaryOp, Declaration, Expr, FieldDecl, Function, Place, Program, Stmt, Type,
-        UnaryOp,
+        AssignOp, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl, Function, Place, Program,
+        Stmt, Type, UnaryOp,
     },
     diagnostic::Diagnostic,
 };
@@ -27,6 +27,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
         return_stack: Vec::new(),
     };
     emitter.emit_prelude();
+    emitter.emit_embed_initializers();
     emitter.emit_global_initializers(program)?;
     emitter.emit_start_tail();
     emitter.emit_function(main)?;
@@ -95,11 +96,18 @@ struct Symbols {
     constant_types: HashMap<String, Type>,
     aliases: HashMap<String, Type>,
     structs: HashMap<String, StructLayout>,
+    embeds: HashMap<String, EmbedObject>,
     ports: HashMap<String, u8>,
     globals: HashMap<String, Variable>,
     global_types: HashMap<String, Type>,
     functions: HashMap<String, FunctionSig>,
     next_addr: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EmbedObject {
+    variable: Variable,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -130,6 +138,7 @@ impl Symbols {
             constant_types: HashMap::new(),
             aliases: HashMap::new(),
             structs: HashMap::new(),
+            embeds: HashMap::new(),
             ports: sdk_ports(),
             globals: HashMap::new(),
             global_types: HashMap::new(),
@@ -209,6 +218,27 @@ impl Symbols {
                         .constant_types
                         .insert(decl.name.clone(), decl.ty.clone());
                 }
+                Declaration::Embed(decl) => {
+                    let align = decl
+                        .align
+                        .as_ref()
+                        .map(|expr| symbols.eval_i64(expr))
+                        .transpose()?
+                        .unwrap_or(1);
+                    if align <= 0 || (align & (align - 1)) != 0 {
+                        return Err(Diagnostic::new(format!(
+                            "embed `{}` alignment {align} is not a positive power of two",
+                            decl.name
+                        )));
+                    }
+                    let bytes = symbols.embed_bytes(&decl.source)?;
+                    symbols.align_next_addr(align as u32);
+                    let variable = symbols.alloc_array(ValueWidth::U8.bytes(), bytes.len() as u32);
+                    symbols.register_embed_properties(&decl.name, variable, bytes.len() as u32);
+                    symbols
+                        .embeds
+                        .insert(decl.name.clone(), EmbedObject { variable, bytes });
+                }
                 Declaration::Global(decl) => {
                     let variable = symbols.alloc_storage(&decl.ty)?;
                     symbols.globals.insert(decl.name.clone(), variable);
@@ -245,6 +275,67 @@ impl Symbols {
         };
         self.next_addr += size;
         variable
+    }
+
+    fn align_next_addr(&mut self, align: u32) {
+        if align <= 1 {
+            return;
+        }
+        self.next_addr = (self.next_addr + align - 1) & !(align - 1);
+    }
+
+    fn register_embed_properties(&mut self, name: &str, variable: Variable, len: u32) {
+        let ptr_ty = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        for (property, value, ty) in [
+            ("ptr", variable.addr as i64, ptr_ty.clone()),
+            ("len", len as i64, Type::Named("u24".to_owned())),
+            ("end", (variable.addr + len) as i64, ptr_ty),
+        ] {
+            let key = format!("{name}.{property}");
+            self.constants.insert(key.clone(), value);
+            self.constant_types.insert(key, ty);
+        }
+    }
+
+    fn embed_bytes(&self, source: &EmbedSource) -> Result<Vec<u8>, Diagnostic> {
+        match source {
+            EmbedSource::File(path) => Err(Diagnostic::new(format!(
+                "file embed `{path}` is parsed but not implemented in assembly codegen yet"
+            ))),
+            EmbedSource::Bytes(values) => values
+                .iter()
+                .map(|value| {
+                    let byte = self.eval_i64(value)?;
+                    if !(0..=0xFF).contains(&byte) {
+                        return Err(Diagnostic::new(format!(
+                            "embedded byte value {byte} is outside u8 range"
+                        )));
+                    }
+                    Ok(byte as u8)
+                })
+                .collect(),
+            EmbedSource::Text(text) => Ok(text.as_bytes().to_vec()),
+            EmbedSource::CStr(text) => {
+                let mut bytes = text.as_bytes().to_vec();
+                bytes.push(0);
+                Ok(bytes)
+            }
+            EmbedSource::Repeat { value, len } => {
+                let byte = self.eval_i64(value)?;
+                if !(0..=0xFF).contains(&byte) {
+                    return Err(Diagnostic::new(format!(
+                        "embedded repeat byte value {byte} is outside u8 range"
+                    )));
+                }
+                let len = self.eval_i64(len)?;
+                if !(0..=0xFF_FFFF).contains(&len) {
+                    return Err(Diagnostic::new(format!(
+                        "embedded repeat length {len} is outside u24 range"
+                    )));
+                }
+                Ok(vec![byte as u8; len as usize])
+            }
+        }
     }
 
     fn build_struct_layout(&self, fields: &[FieldDecl]) -> Result<StructLayout, Diagnostic> {
@@ -480,6 +571,19 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn emit_embed_initializers(&mut self) {
+        let embeds = self.symbols.embeds.values().cloned().collect::<Vec<_>>();
+        for embed in embeds {
+            for (offset, byte) in embed.bytes.into_iter().enumerate() {
+                self.line(&format!("    ld a, {byte:02X}h"));
+                self.emit_store_a(scalar_var(
+                    embed.variable.addr + offset as u32,
+                    ValueWidth::U8.bytes(),
+                ));
+            }
+        }
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
@@ -1090,6 +1194,9 @@ impl Emitter {
                 self.emit_deref_to_hl(ptr, width)?;
             }
             Expr::Field { base, field } => {
+                if self.emit_dotted_constant_to_hl(base, field, width)? {
+                    return Ok(());
+                }
                 let variable = self.field_variable(base, field)?;
                 self.emit_load_width(variable);
             }
@@ -1288,6 +1395,9 @@ impl Emitter {
                 self.emit_load_indexed_element_to_a(name, index)?;
             }
             Expr::Field { base, field } => {
+                if self.emit_dotted_constant_to_a(base, field)? {
+                    return Ok(());
+                }
                 let variable = self.field_variable(base, field)?;
                 if variable.size != 1 {
                     return Err(Diagnostic::new(format!(
@@ -1354,6 +1464,31 @@ impl Emitter {
         self.emit_load_a(value);
         self.line("    ld (hl), a");
         Ok(())
+    }
+
+    fn emit_dotted_constant_to_hl(
+        &mut self,
+        base: &str,
+        field: &str,
+        width: ValueWidth,
+    ) -> Result<bool, Diagnostic> {
+        let key = format!("{base}.{field}");
+        if !self.symbols.constants.contains_key(&key) {
+            return Ok(false);
+        }
+        let value = self.value_for_width(&Expr::Ident(key), width)?;
+        self.line(&format!("    ld hl, {value:06X}h"));
+        Ok(true)
+    }
+
+    fn emit_dotted_constant_to_a(&mut self, base: &str, field: &str) -> Result<bool, Diagnostic> {
+        let key = format!("{base}.{field}");
+        if !self.symbols.constants.contains_key(&key) {
+            return Ok(false);
+        }
+        let value = self.u8(&Expr::Ident(key))?;
+        self.line(&format!("    ld a, {value:02X}h"));
+        Ok(true)
     }
 
     fn emit_string_literal_address(&mut self, value: &str) -> Result<(), Diagnostic> {
@@ -2113,7 +2248,11 @@ impl Emitter {
             Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
             Expr::Array(_) => Err(Diagnostic::new("array literal does not have scalar type")),
             Expr::Index { name, .. } => self.array_element_type(name),
-            Expr::Field { base, field } => self.field_type(base, field),
+            Expr::Field { base, field } => self
+                .named_value_type(&format!("{base}.{field}"))
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| self.field_type(base, field)),
             Expr::AddressOfIndex { name, .. } => {
                 Ok(Type::Ptr(Box::new(self.array_element_type(name)?)))
             }
@@ -2205,7 +2344,14 @@ impl Emitter {
                 "struct `{ty}` literal does not have scalar width"
             ))),
             Expr::Index { name, .. } => self.array_element_width(name),
-            Expr::Field { base, field } => self.field_variable(base, field)?.width(),
+            Expr::Field { base, field } => {
+                let key = format!("{base}.{field}");
+                if let Some(ty) = self.named_value_type(&key) {
+                    self.symbols.type_width(ty)
+                } else {
+                    self.field_variable(base, field)?.width()
+                }
+            }
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
             Expr::AddressOf(_) => Ok(ValueWidth::U24),
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
@@ -3110,6 +3256,44 @@ mod tests {
                 test.assert_eq_u24(local.y, 0x020000, 8);
                 test.assert_eq_u8(local.sprite, 7, 9);
                 test.assert_eq_u8(local.flags, 0x80, 10);
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 12_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_inline_embedded_bytes() {
+        let source = r#"
+            embed palette: bytes = bytes [0x11, 0x22, 0x33] section .rodata align 16
+            embed title_text: bytes = text("HI")
+            embed title_cstr: bytes = cstr("OK")
+            embed blank: bytes = repeat(0x7E, 4)
+
+            global palette_ptr: ptr<u8> = palette.ptr
+
+            fn main() {
+                test.assert_eq_u24(palette.len, 3, 1);
+                test.assert_eq_u8(*palette_ptr, 0x11, 2);
+                test.assert_eq_u8(*(palette.ptr + 1), 0x22, 3);
+                test.assert_eq_u8(*(palette.end - 1), 0x33, 4);
+
+                test.assert_eq_u24(title_text.len, 2, 5);
+                test.assert_eq_u8(*(title_text.ptr + 0), 'H', 6);
+                test.assert_eq_u8(*(title_text.ptr + 1), 'I', 7);
+
+                test.assert_eq_u24(title_cstr.len, 3, 8);
+                test.assert_eq_u8(*(title_cstr.ptr + 0), 'O', 9);
+                test.assert_eq_u8(*(title_cstr.ptr + 1), 'K', 10);
+                test.assert_eq_u8(*(title_cstr.ptr + 2), 0, 11);
+
+                test.assert_eq_u24(blank.len, 4, 12);
+                test.assert_eq_u8(*(blank.ptr + 3), 0x7E, 13);
                 test.pass()
             }
         "#;

@@ -10,6 +10,7 @@ pub enum Declaration {
     Alias(AliasDecl),
     Port(PortDecl),
     Mmio(MmioDecl),
+    Embed(EmbedDecl),
     Global(GlobalDecl),
     Struct(StructDecl),
     Function(Function),
@@ -44,6 +45,24 @@ pub struct MmioDecl {
     pub name: String,
     pub ty: Type,
     pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbedDecl {
+    pub public: bool,
+    pub name: String,
+    pub source: EmbedSource,
+    pub section: Option<String>,
+    pub align: Option<Expr>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EmbedSource {
+    File(String),
+    Bytes(Vec<Expr>),
+    Text(String),
+    CStr(String),
+    Repeat { value: Expr, len: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq)]

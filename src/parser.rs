@@ -5,8 +5,9 @@ use pest_derive::Parser;
 
 use crate::{
     ast::{
-        AliasDecl, AssignOp, BinaryOp, ConstDecl, Declaration, Expr, Function, GlobalDecl,
-        MmioDecl, Param, Place, PortDecl, Program, Stmt, StructDecl, Type, UnaryOp,
+        AliasDecl, AssignOp, BinaryOp, ConstDecl, Declaration, EmbedDecl, EmbedSource, Expr,
+        Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, Stmt, StructDecl, Type,
+        UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -38,10 +39,74 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
         Rule::alias_decl => build_alias(pair).map(Declaration::Alias),
         Rule::port_decl => build_port(pair).map(Declaration::Port),
         Rule::mmio_decl => build_mmio(pair).map(Declaration::Mmio),
+        Rule::embed_decl => build_embed(pair).map(Declaration::Embed),
         Rule::global_decl => build_global(pair).map(Declaration::Global),
         Rule::struct_decl => build_struct(pair).map(Declaration::Struct),
         Rule::fn_decl => build_fn(pair).map(Declaration::Function),
         _ => unreachable!("unexpected decl rule {:?}", pair.as_rule()),
+    }
+}
+
+fn build_embed(pair: Pair<'_, Rule>) -> Result<EmbedDecl, Diagnostic> {
+    let mut public = false;
+    let mut name = None;
+    let mut source = None;
+    let mut section = None;
+    let mut align = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::visibility => public = true,
+            Rule::ident => name = Some(inner.as_str().to_owned()),
+            Rule::embed_source => source = Some(build_embed_source(inner)?),
+            Rule::embed_opts => {
+                for opt in inner.into_inner() {
+                    match opt.as_rule() {
+                        Rule::section_name => section = Some(opt.as_str().to_owned()),
+                        Rule::expr => align = Some(build_expr(opt)?),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(EmbedDecl {
+        public,
+        name: name.unwrap(),
+        source: source.unwrap(),
+        section,
+        align,
+    })
+}
+
+fn build_embed_source(pair: Pair<'_, Rule>) -> Result<EmbedSource, Diagnostic> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::file_embed => Ok(EmbedSource::File(parse_string(
+            inner.into_inner().next().unwrap().as_str(),
+        )?)),
+        Rule::bytes_embed => {
+            let bytes = inner
+                .into_inner()
+                .next()
+                .map(|args| args.into_inner().map(build_expr).collect())
+                .unwrap_or_else(|| Ok(Vec::new()))?;
+            Ok(EmbedSource::Bytes(bytes))
+        }
+        Rule::text_embed => Ok(EmbedSource::Text(parse_string(
+            inner.into_inner().next().unwrap().as_str(),
+        )?)),
+        Rule::cstr_embed => Ok(EmbedSource::CStr(parse_string(
+            inner.into_inner().next().unwrap().as_str(),
+        )?)),
+        Rule::repeat_embed => {
+            let mut parts = inner.into_inner();
+            Ok(EmbedSource::Repeat {
+                value: build_expr(parts.next().unwrap())?,
+                len: build_expr(parts.next().unwrap())?,
+            })
+        }
+        _ => unreachable!("unexpected embed source rule {:?}", inner.as_rule()),
     }
 }
 
@@ -694,6 +759,23 @@ mod tests {
         .unwrap();
 
         assert!(matches!(program.declarations[0], Declaration::Struct(_)));
+        assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_embed_byte_declarations() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            embed palette: bytes = bytes [0x11, 0x22] section .rodata align 16
+            embed title: bytes = cstr("OK")
+            embed blank: bytes = repeat(0, 4)
+            fn main() {}
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(program.declarations[0], Declaration::Embed(_)));
         assert!(program.main_function().is_some());
     }
 }

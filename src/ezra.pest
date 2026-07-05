@@ -2,7 +2,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 program = { SOI ~ decl* ~ EOI }
-decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | global_decl | struct_decl | fn_decl }
+decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | fn_decl }
 
 visibility = { "pub" }
 volatile_kw = { "volatile" }
@@ -12,6 +12,15 @@ const_decl = { visibility? ~ "const" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 alias_decl = { visibility? ~ "alias" ~ ident ~ "=" ~ ty ~ semi? }
 port_decl = { visibility? ~ "port" ~ ident ~ ":" ~ "u8" ~ "=" ~ expr ~ semi? }
 mmio_decl = { visibility? ~ volatile_kw? ~ "mmio" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
+embed_decl = { visibility? ~ "embed" ~ ident ~ ":" ~ "bytes" ~ "=" ~ embed_source ~ embed_opts? ~ semi? }
+embed_source = { file_embed | bytes_embed | text_embed | cstr_embed | repeat_embed }
+file_embed = { "file" ~ "(" ~ string_lit ~ ")" }
+bytes_embed = { "bytes" ~ "[" ~ args? ~ "]" }
+text_embed = { "text" ~ "(" ~ string_lit ~ ")" }
+cstr_embed = { "cstr" ~ "(" ~ string_lit ~ ")" }
+repeat_embed = { "repeat" ~ "(" ~ expr ~ "," ~ expr ~ ")" }
+embed_opts = { ("section" ~ section_name)? ~ ("align" ~ expr)? }
+section_name = @{ "."? ~ ident ~ ("." ~ ident)* }
 global_decl = { visibility? ~ "global" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 struct_decl = { visibility? ~ "struct" ~ ident ~ "{" ~ field_decl* ~ "}" }
 field_decl = { ident ~ ":" ~ ty ~ semi? }
