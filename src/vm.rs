@@ -7,7 +7,7 @@ use std::{
 use ez80::{Cpu, Machine, Reg16};
 
 use crate::diagnostic::Diagnostic;
-use crate::target::{EZRA_LOAD_ADDR, EZRA_STACK_TOP};
+use crate::target::{Address24, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestRun {
@@ -43,6 +43,7 @@ pub struct TestRunOptions {
     pub instruction_budget: u64,
     pub initial_ports: Vec<(u8, u8)>,
     pub initial_memory: Vec<(u32, u8)>,
+    pub stack_top: u32,
 }
 
 pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<TestRun, Diagnostic> {
@@ -52,6 +53,7 @@ pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<Test
             instruction_budget,
             initial_ports: Vec::new(),
             initial_memory: Vec::new(),
+            stack_top: EZRA_STACK_TOP.get(),
         },
     )
 }
@@ -68,6 +70,13 @@ pub fn run_assembly_test_with_options_at(
     options: &TestRunOptions,
     base_addr: u32,
 ) -> Result<TestRun, Diagnostic> {
+    if options.stack_top > Address24::MAX {
+        return Err(Diagnostic::new(format!(
+            "test stack top 0x{:X} is outside the 24-bit address space",
+            options.stack_top
+        )));
+    }
+
     let code = assemble_ez80_subset_at(assembly, base_addr)?;
     let code_start = base_addr;
     let code_end = code_start + code.len() as u32;
@@ -85,7 +94,7 @@ pub fn run_assembly_test_with_options_at(
     let mut cpu = Cpu::new_ez80();
     cpu.state.reg.adl = true;
     cpu.state.set_pc(base_addr);
-    cpu.state.reg.set24(Reg16::SP, EZRA_STACK_TOP.get());
+    cpu.state.reg.set24(Reg16::SP, options.stack_top);
     if std::env::var_os("EZRA_TRACE_VM").is_some() {
         cpu.set_trace(true);
     }
@@ -1003,6 +1012,51 @@ mod tests {
     }
 
     #[test]
+    fn run_options_set_initial_stack_top() {
+        let asm = r#"
+            call leaves_return_address
+            ld a, (0402FDh)
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        leaves_return_address:
+            ret
+        "#;
+        let run = run_assembly_test_with_options(
+            asm,
+            &TestRunOptions {
+                instruction_budget: 100,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x040300,
+            },
+        )
+        .unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0x04);
+    }
+
+    #[test]
+    fn rejects_stack_top_outside_address_space() {
+        let error = run_assembly_test_with_options(
+            "ret\n",
+            &TestRunOptions {
+                instruction_budget: 100,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x01_000000,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "test stack top 0x1000000 is outside the 24-bit address space"
+        );
+    }
+
+    #[test]
     fn assembles_interrupt_enable_and_disable_instructions() {
         let bytes = assemble_ez80_subset_at("di\nei\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
@@ -1519,6 +1573,7 @@ mod tests {
                 instruction_budget: 100,
                 initial_ports: vec![(0x01, 0x2A)],
                 initial_memory: Vec::new(),
+                stack_top: EZRA_STACK_TOP.get(),
             },
         )
         .unwrap();
@@ -1541,6 +1596,7 @@ mod tests {
                 instruction_budget: 100,
                 initial_ports: Vec::new(),
                 initial_memory: vec![(0x040123, 0x6C)],
+                stack_top: EZRA_STACK_TOP.get(),
             },
         )
         .unwrap();

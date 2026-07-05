@@ -211,6 +211,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
             instruction_budget: 1_000_000,
             initial_ports: metadata.initial_ports,
             initial_memory: metadata.initial_memory,
+            stack_top: layout.stack.get(),
         },
         layout.entry.get(),
     )
