@@ -112,6 +112,7 @@ fn resolve_program_imports(
 
     validate_private_import_access(&program)?;
 
+    let short_module_counts = direct_import_short_module_counts(&program);
     stack.push(path);
     let mut declarations = Vec::new();
     for declaration in &program.declarations {
@@ -126,7 +127,14 @@ fn resolve_program_imports(
             ))
         })?;
         let imported = parse_program(&import_path, &source)?;
-        let module_aliases = module_alias_declarations(import, &imported.declarations);
+        let short_module = import.rsplit('.').next().unwrap_or(import);
+        let include_short_aliases = short_module_counts
+            .get(short_module)
+            .copied()
+            .unwrap_or_default()
+            <= 1;
+        let module_aliases =
+            module_alias_declarations(import, &imported.declarations, include_short_aliases);
         let imported = resolve_program_imports(imported, stack, seen)?;
         declarations.extend(
             imported
@@ -174,12 +182,33 @@ fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn module_alias_declarations(import: &str, declarations: &[Declaration]) -> Vec<Declaration> {
+fn direct_import_short_module_counts(program: &Program) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for declaration in &program.declarations {
+        let Declaration::Import(import) = declaration else {
+            continue;
+        };
+        let short_module = import.rsplit('.').next().unwrap_or(import);
+        *counts.entry(short_module.to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn module_alias_declarations(
+    import: &str,
+    declarations: &[Declaration],
+    include_short_aliases: bool,
+) -> Vec<Declaration> {
     let Some(short_module) = import.rsplit('.').next() else {
         return Vec::new();
     };
-    let mut prefixes = vec![short_module.to_owned()];
+    let mut prefixes = Vec::new();
+    if include_short_aliases {
+        prefixes.push(short_module.to_owned());
+    }
     if short_module != import {
+        prefixes.push(import.to_owned());
+    } else if !include_short_aliases {
         prefixes.push(import.to_owned());
     }
     declarations
@@ -746,6 +775,94 @@ mod tests {
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "lib.math.add_one")
         }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_import_paths_disambiguate_colliding_short_module_names() {
+        let root = temp_root("colliding_short_modules");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir_all(root.join("sdk")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/math.ezra"),
+            "pub fn add(v: u8) -> u8 { return v + 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sdk/math.ezra"),
+            "pub fn sub(v: u8) -> u8 { return v - 1 }\n",
+        )
+        .unwrap();
+        let source = r#"
+            import lib.math
+            import sdk.math
+            fn main() {
+                let a: u8 = lib.math.add(4)
+                let b: u8 = sdk.math.sub(4)
+                test.pass()
+            }
+        "#;
+        std::fs::write(&main_path, source).unwrap();
+
+        let options = CompileOptions {
+            source: main_path.clone(),
+            debug_comments: false,
+        };
+        let report = check_source(source, &options).unwrap();
+        let program = load_program(&main_path).unwrap();
+
+        assert_eq!(report.imports, 2);
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "lib.math.add")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "sdk.math.sub")
+        }));
+        assert!(!program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "math.add")
+        }));
+        assert!(!program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "math.sub")
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_ambiguous_short_module_aliases() {
+        let root = temp_root("ambiguous_short_modules");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir_all(root.join("sdk")).unwrap();
+        let main_path = root.join("game.ezra");
+        std::fs::write(
+            root.join("lib/math.ezra"),
+            "pub fn add(v: u8) -> u8 { return v + 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sdk/math.ezra"),
+            "pub fn sub(v: u8) -> u8 { return v - 1 }\n",
+        )
+        .unwrap();
+        let source = r#"
+            import lib.math
+            import sdk.math
+            fn main() {
+                let a: u8 = math.add(4)
+                test.pass()
+            }
+        "#;
+        std::fs::write(&main_path, source).unwrap();
+
+        let options = CompileOptions {
+            source: main_path,
+            debug_comments: false,
+        };
+        let error = check_source(source, &options).unwrap_err();
+
+        assert_eq!(error.message, "unknown function `math.add`");
 
         let _ = std::fs::remove_dir_all(root);
     }
