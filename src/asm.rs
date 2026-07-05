@@ -211,6 +211,7 @@ impl Symbols {
         for declaration in &program.declarations {
             match declaration {
                 Declaration::Const(decl) => {
+                    symbols.validate_const_expr_arithmetic_compatibility(&decl.value)?;
                     let value = symbols.eval_i64(&decl.value)?;
                     symbols.validate_value_for_type(value, &decl.ty)?;
                     symbols.constants.insert(decl.name.clone(), value);
@@ -591,6 +592,113 @@ impl Symbols {
             | Expr::String(_) => Err(Diagnostic::new(format!(
                 "expression `{expr:?}` is not a compile-time integer"
             ))),
+        }
+    }
+
+    fn validate_const_expr_arithmetic_compatibility(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        match expr {
+            Expr::Binary { left, right, .. } => {
+                self.validate_const_expr_arithmetic_compatibility(left)?;
+                self.validate_const_expr_arithmetic_compatibility(right)?;
+                self.validate_const_binary_operand_types(left, right)?;
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+                self.validate_const_expr_arithmetic_compatibility(expr)?;
+            }
+            Expr::Array(values) => {
+                for value in values {
+                    self.validate_const_expr_arithmetic_compatibility(value)?;
+                }
+            }
+            Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+                self.validate_const_expr_arithmetic_compatibility(index)?;
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, value) in fields {
+                    self.validate_const_expr_arithmetic_compatibility(value)?;
+                }
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    self.validate_const_expr_arithmetic_compatibility(arg)?;
+                }
+            }
+            Expr::Int(_)
+            | Expr::Char(_)
+            | Expr::Bool(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::AddressOf(_)
+            | Expr::AddressOfField { .. }
+            | Expr::Field { .. }
+            | Expr::In(_) => {}
+        }
+        Ok(())
+    }
+
+    fn validate_const_binary_operand_types(
+        &self,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
+            return Ok(());
+        }
+
+        let left_type = self.resolved_type(&self.const_expr_type(left)?)?;
+        let right_type = self.resolved_type(&self.const_expr_type(right)?)?;
+        if type_is_bool(&left_type) || type_is_bool(&right_type) {
+            return Err(Diagnostic::new("type mismatch"));
+        }
+        if type_is_signed(&left_type) != type_is_signed(&right_type) {
+            return Err(Diagnostic::new("signed/unsigned mix without cast"));
+        }
+        Ok(())
+    }
+
+    fn const_expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
+        match expr {
+            Expr::Ident(name) => {
+                if let Some(ty) = self.constant_types.get(name) {
+                    Ok(ty.clone())
+                } else if let Some(value) = self.constants.get(name).copied() {
+                    Ok(int_value_type(value))
+                } else {
+                    Err(Diagnostic::new(format!("unknown constant `{name}`")))
+                }
+            }
+            Expr::Int(value) => Ok(int_value_type(*value)),
+            Expr::Char(_) => Ok(Type::Named("u8".to_owned())),
+            Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
+            Expr::Unary { expr, op } => match op {
+                UnaryOp::Not => Ok(Type::Named("bool".to_owned())),
+                UnaryOp::Neg | UnaryOp::BitNot => self.const_expr_type(expr),
+            },
+            Expr::Binary { left, op, right } => {
+                if is_comparison(*op) || matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    Ok(Type::Named("bool".to_owned()))
+                } else if self.type_width(&self.const_expr_type(left)?)?
+                    >= self.type_width(&self.const_expr_type(right)?)?
+                {
+                    self.const_expr_type(left)
+                } else {
+                    self.const_expr_type(right)
+                }
+            }
+            Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
+            Expr::Array(_)
+            | Expr::Index { .. }
+            | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOf(_)
+            | Expr::Field { .. }
+            | Expr::StructInit { .. }
+            | Expr::Deref(_)
+            | Expr::In(_)
+            | Expr::Call { .. } => Err(Diagnostic::new(
+                "expression is not supported in a constant declaration",
+            )),
         }
     }
 }
@@ -3508,6 +3616,16 @@ fn type_is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name == "bool")
 }
 
+fn int_value_type(value: i64) -> Type {
+    if (0..=0xFF).contains(&value) {
+        Type::Named("u8".to_owned())
+    } else if (0..=0xFFFF).contains(&value) {
+        Type::Named("u16".to_owned())
+    } else {
+        Type::Named("u24".to_owned())
+    }
+}
+
 fn expr_is_untyped_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) | Expr::Char(_) => true,
@@ -3796,6 +3914,37 @@ mod tests {
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, "signed/unsigned mix without cast");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_const_expression_operand_types() {
+        let cases = [
+            (
+                r#"
+                const SIGNED: i16 = -1
+                const UNSIGNED: u16 = 2
+                const MIXED: i16 = SIGNED + UNSIGNED
+                fn main() { test.pass() }
+                "#,
+                "signed/unsigned mix without cast",
+            ),
+            (
+                r#"
+                const FLAG: bool = true
+                const VALUE: u8 = 1
+                const BAD: u8 = FLAG + VALUE
+                fn main() { test.pass() }
+                "#,
+                "type mismatch",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
         }
     }
 
@@ -4849,6 +4998,9 @@ mod tests {
     #[test]
     fn emits_and_runs_explicit_integer_casts() {
         let source = r#"
+            const SMALL: u8 = 0x12
+            const WIDE: u16 = cast<u16>(SMALL) + 0x0100
+
             fn low_byte(v: u16) -> u8 {
                 return cast<u8>(v)
             }
@@ -4867,6 +5019,7 @@ mod tests {
                 test.assert_eq_u8(assigned, 0xFE, 3)
                 test.assert_eq_u8(low_byte(0xABCD), 0xCD, 4)
                 test.assert_eq_u16(widen(0x7A), 0x007A, 5)
+                test.assert_eq_u16(WIDE, 0x0112, 6)
                 test.pass()
             }
         "#;
