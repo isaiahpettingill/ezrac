@@ -885,6 +885,7 @@ fn eval_embed_expr_with_aliases(
             }
         }
         Expr::Binary { left, op, right } => {
+            let left_signed = embed_expr_is_signed(left, aliases);
             let left = eval_embed_expr_with_aliases(left, constants, aliases)?;
             let right = eval_embed_expr_with_aliases(right, constants, aliases)?;
             match op {
@@ -901,11 +902,7 @@ fn eval_embed_expr_with_aliases(
                 } else {
                     0
                 }),
-                BinaryOp::Shr => Ok(if (0..64).contains(&right) {
-                    left.wrapping_shr(right as u32)
-                } else {
-                    0
-                }),
+                BinaryOp::Shr => Ok(const_shr_or_zero_i64(left, right, left_signed)),
                 BinaryOp::Lt => Ok(i64::from(left < right)),
                 BinaryOp::Le => Ok(i64::from(left <= right)),
                 BinaryOp::Gt => Ok(i64::from(left > right)),
@@ -1000,6 +997,21 @@ fn const_access_name(path: &AccessPath) -> Result<String, Diagnostic> {
     Ok(out)
 }
 
+fn embed_expr_is_signed(expr: &Expr, aliases: &HashMap<String, Type>) -> bool {
+    match expr {
+        Expr::TypedInt(_, ty) | Expr::Cast { ty, .. } => {
+            resolve_embed_const_type(ty, aliases).is_ok_and(|ty| {
+                matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24"))
+            })
+        }
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => embed_expr_is_signed(expr, aliases),
+        _ => false,
+    }
+}
+
 fn trunc_div_or_zero_i64(left: i64, right: i64) -> i64 {
     if right == 0 {
         0
@@ -1013,6 +1025,23 @@ fn trunc_mod_or_zero_i64(left: i64, right: i64) -> i64 {
         0
     } else {
         ((left as i128) % (right as i128)) as i64
+    }
+}
+
+fn const_shr_or_zero_i64(left: i64, right: i64, signed: bool) -> i64 {
+    if right < 0 {
+        return 0;
+    }
+    if signed {
+        if right >= 64 {
+            if left < 0 { -1 } else { 0 }
+        } else {
+            left >> right as u32
+        }
+    } else if right >= 64 {
+        0
+    } else {
+        left.wrapping_shr(right as u32)
     }
 }
 
@@ -1263,6 +1292,7 @@ mod tests {
                 5 / 0,
                 5 % 0,
                 ((-8) >> 2) + 256,
+                ((-1i8) >> 64) + 256,
             ] section .assets align 1
 
             fn main() { test.pass() }
@@ -1273,7 +1303,7 @@ mod tests {
         let values_addr = read_addr24(&image, table);
         let values = image_offset(values_addr);
 
-        assert_eq!(&image[values..values + 4], &[0x11, 0x00, 0x00, 0xFE]);
+        assert_eq!(&image[values..values + 5], &[0x11, 0x00, 0x00, 0xFE, 0xFF]);
     }
 
     #[test]

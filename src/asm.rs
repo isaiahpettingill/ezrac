@@ -1205,6 +1205,8 @@ impl Symbols {
                 })
             }
             Expr::Binary { left, op, right } => {
+                let left_signed =
+                    type_is_signed(&self.resolved_type(&self.const_expr_type(left)?)?);
                 let left = self.eval_i64(left)?;
                 let right = self.eval_i64(right)?;
                 Ok(match op {
@@ -1214,7 +1216,7 @@ impl Symbols {
                     BinaryOp::Add => left.wrapping_add(right),
                     BinaryOp::Sub => left.wrapping_sub(right),
                     BinaryOp::Shl => const_shl_or_zero(left, right),
-                    BinaryOp::Shr => const_shr_or_zero(left, right),
+                    BinaryOp::Shr => const_shr_or_zero(left, right, left_signed),
                     BinaryOp::Lt => i64::from(left < right),
                     BinaryOp::Le => i64::from(left <= right),
                     BinaryOp::Gt => i64::from(left > right),
@@ -5727,6 +5729,7 @@ impl Emitter {
                 })
             }
             Expr::Binary { left, op, right } => {
+                let left_signed = self.expr_is_signed(left)?;
                 let left = self.eval_i64_with_local_constants(left)?;
                 let right = self.eval_i64_with_local_constants(right)?;
                 Ok(match op {
@@ -5736,7 +5739,7 @@ impl Emitter {
                     BinaryOp::Add => left.wrapping_add(right),
                     BinaryOp::Sub => left.wrapping_sub(right),
                     BinaryOp::Shl => const_shl_or_zero(left, right),
-                    BinaryOp::Shr => const_shr_or_zero(left, right),
+                    BinaryOp::Shr => const_shr_or_zero(left, right, left_signed),
                     BinaryOp::Lt => i64::from(left < right),
                     BinaryOp::Le => i64::from(left <= right),
                     BinaryOp::Gt => i64::from(left > right),
@@ -7120,8 +7123,17 @@ fn const_shl_or_zero(left: i64, right: i64) -> i64 {
     }
 }
 
-fn const_shr_or_zero(left: i64, right: i64) -> i64 {
-    if !(0..64).contains(&right) {
+fn const_shr_or_zero(left: i64, right: i64, signed: bool) -> i64 {
+    if right < 0 {
+        return 0;
+    }
+    if signed {
+        if right >= 64 {
+            if left < 0 { -1 } else { 0 }
+        } else {
+            left >> right as u32
+        }
+    } else if right >= 64 {
         0
     } else {
         left.wrapping_shr(right as u32)
@@ -12220,8 +12232,16 @@ section .text
         let expected_u16_assign = 0x00F0u16.wrapping_shl(4) >> 3;
         let expected_u24_expr = ((0x010203u32 << 4) & 0x00FF_FFFF) >> 3;
         let expected_u24_assign = ((0x000F00u32 << 5) & 0x00FF_FFFF) >> 2;
+        let expected_i16_const = ((-0x1234i16) >> 3) as u16;
+        let expected_i24_const = ((-0x012345i32) >> 5) & 0x00FF_FFFF;
         let source = format!(
             r#"
+            const SIGNED_WORD_SHIFT: i16 = (-0x1234i16) >> 3
+            const SIGNED_WIDE_SHIFT: i24 = (-0x012345i24) >> 5
+            const SIGNED_BYTE_BIG_SHIFT: i8 = (-1i8) >> 64
+            const SIGNED_WORD_BIG_SHIFT: i16 = (-1i16) >> 64
+            const SIGNED_WIDE_BIG_SHIFT: i24 = (-1i24) >> 64
+
             fn main() {{
                 let a: u8 = 0x12
                 a <<= 2
@@ -12244,6 +12264,11 @@ section .text
                 g <<= 5
                 g >>= 2
                 test.assert_eq_u24(g, 0x{expected_u24_assign:06X}, 6)
+                test.assert_eq_u16(cast<u16>(SIGNED_WORD_SHIFT), 0x{expected_i16_const:04X}, 7)
+                test.assert_eq_u24(cast<u24>(SIGNED_WIDE_SHIFT), 0x{expected_i24_const:06X}, 8)
+                test.assert_eq_u8(cast<u8>(SIGNED_BYTE_BIG_SHIFT), 0xFF, 9)
+                test.assert_eq_u16(cast<u16>(SIGNED_WORD_BIG_SHIFT), 0xFFFF, 10)
+                test.assert_eq_u24(cast<u24>(SIGNED_WIDE_BIG_SHIFT), 0xFFFFFF, 11)
                 test.pass()
             }}
             "#
@@ -12319,6 +12344,9 @@ section .text
                 test.assert_eq_u8((-1i8) >> 25, 0xFF, 7)
                 test.assert_eq_u16((-1i16) >> 25, 0xFFFF, 8)
                 test.assert_eq_u24((-1i24) >> 25, 0xFFFFFF, 9)
+                test.assert_eq_u8((-1i8) >> 64, 0xFF, 10)
+                test.assert_eq_u16((-1i16) >> 64, 0xFFFF, 11)
+                test.assert_eq_u24((-1i24) >> 64, 0xFFFFFF, 12)
                 test.pass()
             }
         "#;
