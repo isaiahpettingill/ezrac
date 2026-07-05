@@ -189,13 +189,20 @@ pub fn assemble_ez80_subset_with_symbols_at(
     for instruction in &instructions {
         match instruction {
             AsmLine::Label(name) => {
+                if pc > Address24::MAX {
+                    return Err(Diagnostic::new(format!(
+                        "assembly label `{name}` address 0x{pc:X} is outside the 24-bit address space"
+                    )));
+                }
                 if labels.insert(name.clone(), pc).is_some() {
                     return Err(Diagnostic::new(format!(
                         "duplicate assembly label `{name}`"
                     )));
                 }
             }
-            AsmLine::Instruction(text) => pc += instruction_len(text)? as u32,
+            AsmLine::Instruction(text) => {
+                pc = checked_assembly_pc_advance(pc, instruction_len(text)? as u32)?;
+            }
         }
     }
 
@@ -212,10 +219,22 @@ pub fn assemble_ez80_subset_with_symbols_at(
     for instruction in instructions {
         if let AsmLine::Instruction(text) = instruction {
             emit_instruction(&text, &labels, pc, &mut bytes)?;
-            pc = (pc + instruction_len(&text)? as u32) & 0xFF_FFFF;
+            pc = checked_assembly_pc_advance(pc, instruction_len(&text)? as u32)?;
         }
     }
     Ok(AssembledProgram { bytes, symbols })
+}
+
+fn checked_assembly_pc_advance(pc: u32, len: u32) -> Result<u32, Diagnostic> {
+    let end = pc
+        .checked_add(len)
+        .ok_or_else(|| Diagnostic::new("assembly exceeds the 24-bit address space"))?;
+    if end > Address24::MAX + 1 {
+        return Err(Diagnostic::new(format!(
+            "assembly instruction at 0x{pc:06X} with length 0x{len:X} exceeds the 24-bit address space"
+        )));
+    }
+    Ok(end)
 }
 
 fn checked_code_end(base_addr: u32, len: usize) -> Result<u32, Diagnostic> {
@@ -2232,7 +2251,27 @@ mod tests {
 
         assert_eq!(
             error.message,
-            "test program at 0xFFFFFF with length 0x2 exceeds the 24-bit address space"
+            "assembly instruction at 0x1000000 with length 0x1 exceeds the 24-bit address space"
+        );
+    }
+
+    #[test]
+    fn rejects_assembly_that_exceeds_address_space() {
+        let error = assemble_ez80_subset_at("nop\nnop\n", 0xFF_FFFF).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "assembly instruction at 0x1000000 with length 0x1 exceeds the 24-bit address space"
+        );
+    }
+
+    #[test]
+    fn rejects_assembly_labels_outside_address_space() {
+        let error = assemble_ez80_subset_at("nop\nend:\n", 0xFF_FFFF).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "assembly label `end` address 0x1000000 is outside the 24-bit address space"
         );
     }
 
