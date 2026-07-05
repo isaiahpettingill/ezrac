@@ -1035,7 +1035,10 @@ fn parse_addr(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32,
         return Ok(addr);
     }
     match parse_number(text) {
-        Ok(value) => Ok(value & 0xFF_FFFF),
+        Ok(value) if value <= Address24::MAX => Ok(value),
+        Ok(_) => Err(Diagnostic::new(format!(
+            "address operand `{text}` is outside the 24-bit address space"
+        ))),
         Err(_) if looks_like_label_ref(text) => {
             Err(Diagnostic::new(format!("unknown assembly label `{text}`")))
         }
@@ -1968,6 +1971,16 @@ mod tests {
         let error = assemble_ez80_subset_at("jp 0xBADHEX\n", EZRA_LOAD_ADDR.get()).unwrap_err();
 
         assert_eq!(error.message, "invalid numeric operand `0xBADHEX`");
+    }
+
+    #[test]
+    fn rejects_address_operands_outside_address_space() {
+        let error = assemble_ez80_subset_at("jp 0x1000000\n", EZRA_LOAD_ADDR.get()).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "address operand `0x1000000` is outside the 24-bit address space"
+        );
     }
 
     #[test]
