@@ -1678,7 +1678,14 @@ fn serialize_layout_table(layout: &Layout) -> Vec<u8> {
 
 fn serialize_symbol_table(symbols: &[AssemblySymbol]) -> Result<Vec<u8>, Diagnostic> {
     let mut out = Vec::new();
+    let mut names = HashSet::new();
     for symbol in symbols {
+        if !names.insert(symbol.name.as_str()) {
+            return Err(Diagnostic::new(format!(
+                "duplicate assembly symbol `{}`",
+                symbol.name
+            )));
+        }
         if symbol.addr > Address24::MAX {
             return Err(Diagnostic::new(format!(
                 "assembly symbol `{}` address 0x{:X} is outside the 24-bit address space",
@@ -2430,6 +2437,29 @@ mod tests {
             image_error.message,
             "assembly symbol `_bad` address 0x1000000 is outside the 24-bit address space"
         );
+        assert_eq!(map_error.message, image_error.message);
+    }
+
+    #[test]
+    fn cartridge_rejects_duplicate_symbols() {
+        let program = parse_program(Path::new("game.ezra"), "fn main() { test.pass() }").unwrap();
+        let symbols = [
+            AssemblySymbol {
+                name: "_main".to_owned(),
+                addr: EZRA_ENTRY_ADDR.get(),
+            },
+            AssemblySymbol {
+                name: "_main".to_owned(),
+                addr: EZRA_ENTRY_ADDR.get() + 4,
+            },
+        ];
+
+        let image_error =
+            build_cartridge_with_code_and_symbols(&program, &[], &symbols).unwrap_err();
+        let map_error =
+            build_cartridge_map(&program, &Layout::ezra_default(), 0, &symbols).unwrap_err();
+
+        assert_eq!(image_error.message, "duplicate assembly symbol `_main`");
         assert_eq!(map_error.message, image_error.message);
     }
 
