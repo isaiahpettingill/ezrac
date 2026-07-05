@@ -230,8 +230,8 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
             Some(ezra::vm::TestRunFailure::Timeout) | None => {
                 format!("test timed out after {} instructions", run.instructions)
             }
-            Some(ezra::vm::TestRunFailure::ExecutionOutsideLoadedProgram { pc }) => format!(
-                "test executed outside loaded program at 0x{pc:06X} after {} instructions",
+            Some(ezra::vm::TestRunFailure::ExecutionOutsideMappedMemory { pc }) => format!(
+                "test executed outside mapped memory at 0x{pc:06X} after {} instructions",
                 run.instructions
             ),
             Some(ezra::vm::TestRunFailure::IllegalInstruction { pc }) => format!(

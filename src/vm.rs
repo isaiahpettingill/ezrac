@@ -22,7 +22,7 @@ pub struct TestRun {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestRunFailure {
     Timeout,
-    ExecutionOutsideLoadedProgram { pc: u32 },
+    ExecutionOutsideMappedMemory { pc: u32 },
     IllegalInstruction { pc: u32 },
     StackOverflow { sp: u32 },
 }
@@ -118,7 +118,7 @@ pub fn run_assembly_test_with_options_at(
                 instructions: instruction,
                 debug_output: machine.debug_output,
                 ports: machine.ports,
-                failure: Some(TestRunFailure::ExecutionOutsideLoadedProgram { pc }),
+                failure: Some(TestRunFailure::ExecutionOutsideMappedMemory { pc }),
             });
         }
         if catch_unwind(AssertUnwindSafe(|| cpu.execute_instruction(&mut machine))).is_err() {
@@ -1084,14 +1084,14 @@ mod tests {
     }
 
     #[test]
-    fn reports_execution_outside_loaded_program() {
+    fn reports_execution_outside_mapped_memory() {
         let run = run_assembly_test("jp 020000h\n", 10).unwrap();
 
         assert!(!run.halted);
         assert_eq!(run.instructions, 1);
         assert_eq!(
             run.failure,
-            Some(TestRunFailure::ExecutionOutsideLoadedProgram { pc: 0x020000 })
+            Some(TestRunFailure::ExecutionOutsideMappedMemory { pc: 0x020000 })
         );
     }
 
