@@ -135,6 +135,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "dec bc"
             | "add hl, hl"
             | "add hl, bc"
+            | "add hl, de"
             | "add hl, sp"
             | "add a, a"
             | "add a, b"
@@ -350,6 +351,8 @@ fn emit_instruction(
         bytes.push(0x29);
     } else if text == "add hl, bc" {
         bytes.push(0x09);
+    } else if text == "add hl, de" {
+        bytes.push(0x19);
     } else if text == "add a, a" {
         bytes.push(0x87);
     } else if text == "sbc hl, bc" {

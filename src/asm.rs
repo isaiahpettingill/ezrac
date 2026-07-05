@@ -1069,6 +1069,16 @@ impl Emitter {
         self.line(".L_mul_u8_done:");
         self.line("    ld a, d");
         self.line("    ret");
+        self.line("__ezra_mul_u16:");
+        self.line("    ex de, hl");
+        self.line("    ld hl, 000000h");
+        self.line(".L_mul_u16_loop:");
+        self.line("    ld a, b");
+        self.line("    or c");
+        self.line("    ret z");
+        self.line("    add hl, de");
+        self.line("    dec bc");
+        self.line("    jp .L_mul_u16_loop");
         self.line("__ezra_div_u8:");
         self.line("    ld d, a");
         self.line("    xor a");
@@ -2841,6 +2851,16 @@ impl Emitter {
             self.line("    ld c, a");
             self.emit_load_a(left_var);
             self.line("    call __ezra_mul_u8");
+            return Ok(());
+        }
+        if width == ValueWidth::U16 {
+            self.emit_expr_to_hl(left, width)?;
+            self.line("    push hl");
+            self.emit_expr_to_hl(right, width)?;
+            self.line("    push hl");
+            self.line("    pop bc");
+            self.line("    pop hl");
+            self.line("    call __ezra_mul_u16");
             return Ok(());
         }
 
@@ -8092,6 +8112,7 @@ mod tests {
         let run = run_assembly_test(&asm, 120_000).unwrap();
 
         assert!(asm.contains("    call __ezra_mul_u8"), "{asm}");
+        assert!(asm.contains("    call __ezra_mul_u16"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
