@@ -570,10 +570,14 @@ fn embed_bytes(source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diag
                     .join(path)
             };
             fs::read(&resolved).map_err(|error| {
-                Diagnostic::new(format!(
-                    "failed to read embedded file `{}`: {error}",
-                    resolved.display()
-                ))
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Diagnostic::new(format!("embedded file `{}` not found", resolved.display()))
+                } else {
+                    Diagnostic::new(format!(
+                        "failed to read embedded file `{}`: {error}",
+                        resolved.display()
+                    ))
+                }
             })
         }
         EmbedSource::Bytes(values) => values
@@ -883,6 +887,33 @@ mod tests {
         assert_eq!(
             &image[image_offset(second_addr)..image_offset(second_addr) + 3],
             &[b'O', b'K', 0]
+        );
+    }
+
+    #[test]
+    fn cartridge_reports_missing_embedded_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_missing_cart_embed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("game.ezra");
+        let source = r#"
+            embed blob: bytes = file("assets/missing.bin")
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(&source_path, source).unwrap();
+        let error = build_cartridge(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            format!(
+                "embedded file `{}` not found",
+                root.join("assets/missing.bin").display()
+            )
         );
     }
 

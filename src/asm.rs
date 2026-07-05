@@ -491,10 +491,14 @@ impl Symbols {
                         .join(path)
                 };
                 fs::read(&resolved).map_err(|error| {
-                    Diagnostic::new(format!(
-                        "failed to read embedded file `{}`: {error}",
-                        resolved.display()
-                    ))
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Diagnostic::new(format!("embedded file `{}` not found", resolved.display()))
+                    } else {
+                        Diagnostic::new(format!(
+                            "failed to read embedded file `{}`: {error}",
+                            resolved.display()
+                        ))
+                    }
                 })
             }
             EmbedSource::Bytes(values) => values
@@ -11953,6 +11957,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn reports_missing_embedded_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ezra_missing_file_embed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("game.ezra");
+        let source = r#"
+            embed blob: bytes = file("assets/missing.bin")
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(&source_path, source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            format!(
+                "embedded file `{}` not found",
+                root.join("assets/missing.bin").display()
+            )
+        );
     }
 
     #[test]
