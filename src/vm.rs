@@ -206,7 +206,10 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     } else if matches!(
         text,
         "ret"
+            | "ret nz"
             | "ret z"
+            | "ret nc"
+            | "ret c"
             | "di"
             | "ei"
             | "or a"
@@ -430,8 +433,14 @@ fn emit_instruction(
         bytes.extend([0xED, 0x39, parse_u8(port)?]);
     } else if text == "ret" {
         bytes.push(0xC9);
+    } else if text == "ret nz" {
+        bytes.push(0xC0);
     } else if text == "ret z" {
         bytes.push(0xC8);
+    } else if text == "ret nc" {
+        bytes.push(0xD0);
+    } else if text == "ret c" {
+        bytes.push(0xD8);
     } else if text == "di" {
         bytes.push(0xF3);
     } else if text == "ei" {
@@ -1328,6 +1337,72 @@ mod tests {
             out0 (0Eh), a
         "#;
         let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+    }
+
+    #[test]
+    fn runs_conditional_returns_on_ez80_vm() {
+        let asm = r#"
+            ld a, 01h
+            or a
+            call check_nz
+
+            ld b, a
+            cp b
+            call check_z
+
+            ld a, 01h
+            or a
+            call check_nc
+
+            ld b, 01h
+            ld a, 00h
+            cp b
+            call check_c
+
+            ld a, 00h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        check_nz:
+            ret nz
+            ld a, 10h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        check_z:
+            ret z
+            ld a, 11h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        check_nc:
+            ret nc
+            ld a, 12h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+
+        check_c:
+            ret c
+            ld a, 13h
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert!(bytes.contains(&0xC0));
+        assert!(bytes.contains(&0xC8));
+        assert!(bytes.contains(&0xD0));
+        assert!(bytes.contains(&0xD8));
+
+        let run = run_assembly_test(asm, 200).unwrap();
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
