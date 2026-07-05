@@ -164,10 +164,21 @@ asset_base        = 0x100000
 header_size       = 0x0040
 ```
 
+All nonzero header pointer fields are absolute 24-bit eZ80 addresses, not file-relative offsets. A cart packer or loader can translate them to an image offset by subtracting `EZRA_LOAD_ADDR` for data stored directly in the cartridge image.
+
 Program code starts at:
 
 ```text
 0x010040
+```
+
+The current scaffold emits `layout_table_addr` and `symbol_table_addr` as newline-delimited ASCII tables for inspection and tests. Their binary encodings are not frozen yet.
+
+Example symbol table:
+
+```text
+symbol __ezra_start 0x010040
+symbol _main 0x010123
 ```
 
 ---
