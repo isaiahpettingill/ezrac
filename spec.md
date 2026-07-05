@@ -323,9 +323,9 @@ layout big_asset_cart {
 
 ---
 
-## 7. Port Map
+## 7. Example Default Port Map
 
-All ports are 8-bit I/O ports.
+All ports are 8-bit I/O ports. The following table is the default fantasy-console example map used by the scaffold and tests; other targets and SDKs may declare different port names and numbers with normal `port` declarations.
 
 ```text
 0x01  IN    Controller 1 low byte
@@ -1991,8 +1991,8 @@ import_decl   = "import" path
 
 const_decl    = visibility? "const" ident ":" ty "=" expr
 alias_decl    = visibility? "alias" ident "=" ty
-port_decl     = visibility? "port" ident ":" "u8" "=" int_lit
-mmio_decl     = visibility? "volatile"? "mmio" ident ":" ty "=" int_lit
+port_decl     = visibility? "port" ident ":" ty "=" expr
+mmio_decl     = visibility? "volatile"? "mmio" ident ":" ty "=" expr
 
 embed_decl    = visibility? "embed" ident ":" "bytes" "=" embed_source embed_opts?
 embed_source  = file_embed | bytes_embed | text_embed | cstr_embed | repeat_embed
