@@ -937,7 +937,9 @@ impl Symbols {
         left: &Expr,
         right: &Expr,
     ) -> Result<(), Diagnostic> {
-        if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
+        let left_is_literal = expr_is_untyped_literal(left);
+        let right_is_literal = expr_is_untyped_literal(right);
+        if left_is_literal && right_is_literal {
             return Ok(());
         }
 
@@ -946,8 +948,21 @@ impl Symbols {
         if type_is_bool(&left_type) || type_is_bool(&right_type) {
             return Err(Diagnostic::new("type mismatch"));
         }
+        if left_is_literal {
+            let value = self.eval_i64(left)?;
+            return self.validate_value_for_type(value, &right_type);
+        }
+        if right_is_literal {
+            let value = self.eval_i64(right)?;
+            return self.validate_value_for_type(value, &left_type);
+        }
         if type_is_signed(&left_type) != type_is_signed(&right_type) {
             return Err(Diagnostic::new("signed/unsigned mix without cast"));
+        }
+        if self.type_width(&left_type)? != self.type_width(&right_type)? {
+            return Err(Diagnostic::new(
+                "arithmetic operands must have same width without cast",
+            ));
         }
         Ok(())
     }
@@ -4918,7 +4933,9 @@ impl Emitter {
         if type_is_bool(&left_type) || type_is_bool(&right_type) {
             return Err(Diagnostic::new("type mismatch"));
         }
-        if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
+        let left_is_literal = expr_is_untyped_literal(left);
+        let right_is_literal = expr_is_untyped_literal(right);
+        if left_is_literal && right_is_literal {
             return Ok(());
         }
 
@@ -4926,8 +4943,22 @@ impl Emitter {
             return Err(Diagnostic::new("type mismatch"));
         }
 
+        if left_is_literal {
+            let value = self.symbols.eval_i64(left)?;
+            return self.symbols.validate_value_for_type(value, &right_type);
+        }
+        if right_is_literal {
+            let value = self.symbols.eval_i64(right)?;
+            return self.symbols.validate_value_for_type(value, &left_type);
+        }
+
         if type_is_signed(&left_type) != type_is_signed(&right_type) {
             return Err(Diagnostic::new("signed/unsigned mix without cast"));
+        }
+        if self.symbols.type_width(&left_type)? != self.symbols.type_width(&right_type)? {
+            return Err(Diagnostic::new(
+                "arithmetic operands must have same width without cast",
+            ));
         }
         Ok(())
     }
@@ -6944,6 +6975,85 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_arithmetic_with_fitting_untyped_literals() {
+        let source = r#"
+            const BASE: u16 = 0x0100
+            const SUM: u16 = BASE + 2
+
+            fn main() {
+                let word: u16 = 0x0100
+                let plus: u16 = word + 2
+                let minus: u16 = 0x0105 - word
+                let signed: i16 = -3
+                let bumped: i16 = signed + 2
+                let zero: i16 = bumped + 1
+                test.assert_eq_u24(cast<u24>(SUM), 0x000102, 1)
+                test.assert_eq_u24(cast<u24>(plus), 0x000102, 2)
+                test.assert_eq_u24(cast<u24>(minus), 0x000005, 3)
+                test.assert_eq_u24(cast<u24>(zero), 0, 4)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_arithmetic_width_mismatch_without_cast() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let byte: u8 = 1
+                    let word: u16 = 2
+                    let mixed: u16 = byte + word
+                    test.pass()
+                }
+                "#,
+                "arithmetic operands must have same width without cast",
+            ),
+            (
+                r#"
+                const BYTE: u8 = 1
+                const WORD: u16 = 2
+                const MIXED: u16 = BYTE + WORD
+                fn main() { test.pass() }
+                "#,
+                "arithmetic operands must have same width without cast",
+            ),
+            (
+                r#"
+                fn main() {
+                    let byte: u8 = 1
+                    let mixed: u16 = byte + 300
+                    test.pass()
+                }
+                "#,
+                "value 300 is outside u8 range",
+            ),
+            (
+                r#"
+                const BYTE: u8 = 1
+                const MIXED: u16 = BYTE + 300
+                fn main() { test.pass() }
+                "#,
+                "value 300 is outside u8 range",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
     fn rejects_invalid_comparison_operand_types() {
         let cases = [
             (
@@ -8091,7 +8201,7 @@ mod tests {
             }}
 
             fn add_count(base: u24, count: u8) -> u24 {{
-                return base + count
+                return base + cast<u24>(count)
             }}
 
             fn main() {{
@@ -8123,11 +8233,11 @@ mod tests {
             }}
 
             fn wide_third(a: u24, b: u8, c: u24) -> u24 {{
-                return a + b + c
+                return a + cast<u24>(b) + c
             }}
 
             fn wide_third_with_extra(a: u24, b: u8, c: u24, d: u8) -> u24 {{
-                return a + b + c + d
+                return a + cast<u24>(b) + c + cast<u24>(d)
             }}
 
             fn main() {{
