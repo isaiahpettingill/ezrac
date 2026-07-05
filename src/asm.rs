@@ -702,10 +702,15 @@ impl Symbols {
 
     fn validate_const_expr_arithmetic_compatibility(&self, expr: &Expr) -> Result<(), Diagnostic> {
         match expr {
-            Expr::Binary { left, right, .. } => {
+            Expr::Binary { left, op, right } => {
                 self.validate_const_expr_arithmetic_compatibility(left)?;
                 self.validate_const_expr_arithmetic_compatibility(right)?;
-                self.validate_const_binary_operand_types(left, right)?;
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    self.ensure_const_expr_is_bool(left, "logical operand")?;
+                    self.ensure_const_expr_is_bool(right, "logical operand")?;
+                } else {
+                    self.validate_const_binary_operand_types(left, right)?;
+                }
             }
             Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
                 self.validate_const_expr_arithmetic_compatibility(expr)?;
@@ -739,6 +744,15 @@ impl Symbols {
             | Expr::In(_) => {}
         }
         Ok(())
+    }
+
+    fn ensure_const_expr_is_bool(&self, expr: &Expr, context: &str) -> Result<(), Diagnostic> {
+        let ty = self.resolved_type(&self.const_expr_type(expr)?)?;
+        if type_is_bool(&ty) {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(format!("{context} must be bool")))
+        }
     }
 
     fn validate_const_binary_operand_types(
@@ -1090,6 +1104,7 @@ impl Emitter {
                 then_body,
                 else_body,
             } => {
+                self.ensure_expr_is_bool(condition, "if condition")?;
                 let else_label = self.next_label("else");
                 let end_label = self.next_label("endif");
                 self.emit_expr_to_a(condition)?;
@@ -1106,6 +1121,7 @@ impl Emitter {
                 self.line(&format!("{end_label}:"));
             }
             Stmt::While { condition, body } => {
+                self.ensure_expr_is_bool(condition, "while condition")?;
                 let start_label = self.next_label("while");
                 let end_label = self.next_label("endwhile");
                 self.loop_stack.push(LoopLabels {
@@ -2379,6 +2395,8 @@ impl Emitter {
         op: BinaryOp,
         right: &Expr,
     ) -> Result<(), Diagnostic> {
+        self.ensure_expr_is_bool(left, "logical operand")?;
+        self.ensure_expr_is_bool(right, "logical operand")?;
         let short_label = self.next_label("logical_short");
         let end_label = self.next_label("logical_end");
 
@@ -3652,7 +3670,10 @@ impl Emitter {
             Expr::Binary { left, op, right } => {
                 self.validate_expr_arithmetic_compatibility(left)?;
                 self.validate_expr_arithmetic_compatibility(right)?;
-                if matches!(
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    self.ensure_expr_is_bool(left, "logical operand")?;
+                    self.ensure_expr_is_bool(right, "logical operand")?;
+                } else if matches!(
                     op,
                     BinaryOp::Add
                         | BinaryOp::Sub
@@ -3698,6 +3719,15 @@ impl Emitter {
             | Expr::AddressOfField { .. } => {}
         }
         Ok(())
+    }
+
+    fn ensure_expr_is_bool(&self, expr: &Expr, context: &str) -> Result<(), Diagnostic> {
+        let ty = self.symbols.resolved_type(&self.expr_type(expr)?)?;
+        if type_is_bool(&ty) {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(format!("{context} must be bool")))
+        }
     }
 
     fn current_return_type(&self) -> &Type {
@@ -4614,6 +4644,56 @@ mod tests {
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, "type mismatch");
+        }
+    }
+
+    #[test]
+    fn rejects_non_bool_logical_operands_and_conditions() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let flag: bool = 1 && true
+                    test.pass()
+                }
+                "#,
+                "logical operand must be bool",
+            ),
+            (
+                r#"
+                const FLAG: bool = 1 || false
+                fn main() { test.pass() }
+                "#,
+                "logical operand must be bool",
+            ),
+            (
+                r#"
+                fn main() {
+                    if 1 {
+                        test.pass()
+                    }
+                }
+                "#,
+                "if condition must be bool",
+            ),
+            (
+                r#"
+                fn main() {
+                    while 1 {
+                        break
+                    }
+                    test.pass()
+                }
+                "#,
+                "while condition must be bool",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
         }
     }
 
@@ -5679,6 +5759,7 @@ mod tests {
     #[test]
     fn emits_and_runs_short_circuit_logical_ops() {
         let source = r#"
+            alias flag = bool
             global calls: u8 = 0
 
             fn bump(value: bool) -> bool {
@@ -5692,7 +5773,7 @@ mod tests {
                 test.assert_eq_u8(and_skip, false, 1)
                 test.assert_eq_u8(calls, 0, 2)
 
-                let or_skip: bool = true || bump(false)
+                let or_skip: flag = true || bump(false)
                 test.assert_eq_u8(or_skip, true, 3)
                 test.assert_eq_u8(calls, 0, 4)
 
