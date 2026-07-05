@@ -736,6 +736,7 @@ impl Symbols {
                 .constants
                 .get(name)
                 .copied()
+                .or_else(|| self.embed_property_value(name))
                 .ok_or_else(|| Diagnostic::new(format!("unknown constant `{name}`"))),
             Expr::Unary { op, expr } => {
                 let value = self.eval_i64(expr)?;
@@ -813,6 +814,19 @@ impl Symbols {
             }
         } else {
             Ok(unsigned as i64)
+        }
+    }
+
+    fn embed_property_value(&self, name: &str) -> Option<i64> {
+        let (embed_name, property) = name.rsplit_once('.')?;
+        let embed = self.embeds.get(embed_name).or_else(|| {
+            module_alias_original_name(embed_name).and_then(|original| self.embeds.get(original))
+        })?;
+        match property {
+            "ptr" => Some(embed.variable.addr as i64),
+            "len" => Some(embed.variable.len.unwrap_or(0) as i64),
+            "end" => Some((embed.variable.addr + embed.variable.len.unwrap_or(0)) as i64),
+            _ => None,
         }
     }
 
@@ -2757,7 +2771,8 @@ impl Emitter {
                 self.emit_field_address(base, field)?;
             }
             Expr::AddressOfAccess(path) => {
-                self.emit_access_address(path)?;
+                let path = self.canonical_access_path(path);
+                self.emit_access_address(&path)?;
             }
             Expr::AddressOf(name) => {
                 self.emit_variable_address(name)?;
@@ -2783,19 +2798,28 @@ impl Emitter {
                 self.emit_load_indexed_element_to_hl(name, index)?;
             }
             Expr::Access(path) => {
-                let ty = self.access_type(path)?;
+                let path = self.canonical_access_path(path);
+                if path.segments.is_empty()
+                    && (self.named_value_type(&path.root).is_some()
+                        || self.symbols.embed_property_value(&path.root).is_some())
+                {
+                    let value = self.value_for_width(&Expr::Ident(path.root.clone()), width)?;
+                    self.line(&format!("    ld hl, {:06X}h", value));
+                    return Ok(());
+                }
+                let ty = self.access_type(&path)?;
                 let size = self.symbols.type_size(&ty)?;
                 if size > 3 {
                     return Err(Diagnostic::new(format!(
                         "value `{}` is not scalar-sized",
-                        access_path_summary(path)
+                        access_path_summary(&path)
                     )));
                 }
-                if let Some(variable) = self.const_access_variable(path)? {
+                if let Some(variable) = self.const_access_variable(&path)? {
                     self.emit_load_width(variable);
                     return Ok(());
                 }
-                self.emit_access_address(path)?;
+                self.emit_access_address(&path)?;
                 let stored = self.alloc_var(size);
                 self.emit_load_pointed_width_into(stored);
                 self.emit_load_width(stored);
@@ -3056,19 +3080,28 @@ impl Emitter {
                 self.emit_load_a(variable);
             }
             Expr::Access(path) => {
-                let ty = self.access_type(path)?;
+                let path = self.canonical_access_path(path);
+                if path.segments.is_empty()
+                    && (self.named_value_type(&path.root).is_some()
+                        || self.symbols.embed_property_value(&path.root).is_some())
+                {
+                    let value = self.u8(&Expr::Ident(path.root.clone()))?;
+                    self.line(&format!("    ld a, {:02X}h", value));
+                    return Ok(());
+                }
+                let ty = self.access_type(&path)?;
                 let size = self.symbols.type_size(&ty)?;
                 if size != 1 {
                     return Err(Diagnostic::new(format!(
                         "value `{}` is not u8-sized",
-                        access_path_summary(path)
+                        access_path_summary(&path)
                     )));
                 }
-                if let Some(variable) = self.const_access_variable(path)? {
+                if let Some(variable) = self.const_access_variable(&path)? {
                     self.emit_load_a(variable);
                     return Ok(());
                 }
-                self.emit_access_address(path)?;
+                self.emit_access_address(&path)?;
                 self.line("    ld a, (hl)");
             }
             Expr::Deref(ptr) => {
@@ -4239,7 +4272,7 @@ impl Emitter {
 
     fn field_type(&self, base: &str, field: &str) -> Result<Type, Diagnostic> {
         let key = format!("{base}.{field}");
-        if let Some(ty) = self.variable_type(&key) {
+        if let Some(ty) = self.named_value_type(&key) {
             return Ok(ty.clone());
         }
         let base_type = self
@@ -4354,6 +4387,16 @@ impl Emitter {
     }
 
     fn emit_access_address(&mut self, path: &AccessPath) -> Result<(), Diagnostic> {
+        let path = self.canonical_access_path(path);
+        let path = &path;
+        if path.segments.is_empty()
+            && (self.named_value_type(&path.root).is_some()
+                || self.symbols.embed_property_value(&path.root).is_some())
+        {
+            let value = self.value_for_width(&Expr::Ident(path.root.clone()), ValueWidth::U24)?;
+            self.line(&format!("    ld hl, {value:06X}h"));
+            return Ok(());
+        }
         if let Some(variable) = self.const_access_variable(path)? {
             self.line(&format!("    ld hl, {:06X}h", variable.addr));
             return Ok(());
@@ -4622,8 +4665,9 @@ impl Emitter {
         op: AssignOp,
         value: &Expr,
     ) -> Result<(), Diagnostic> {
-        let ty = self.access_type(path)?;
-        if let Some(variable) = self.const_access_variable(path)? {
+        let path = self.canonical_access_path(path);
+        let ty = self.access_type(&path)?;
+        if let Some(variable) = self.const_access_variable(&path)? {
             if op == AssignOp::Set {
                 self.validate_expr_assignable_to_type(value, &ty)?;
                 self.emit_storage_initializer(variable, &ty, value)?;
@@ -4637,7 +4681,7 @@ impl Emitter {
 
         let size = self.symbols.type_size(&ty)?;
         let addr = self.alloc_var(ValueWidth::U24.bytes());
-        self.emit_access_address(path)?;
+        self.emit_access_address(&path)?;
         self.emit_store_hl(addr);
 
         if op != AssignOp::Set {
@@ -4733,14 +4777,25 @@ impl Emitter {
                 .cloned()
                 .map(Ok)
                 .unwrap_or_else(|| self.field_type(base, field)),
-            Expr::Access(path) => self.access_type(path),
+            Expr::Access(path) => {
+                let path = self.canonical_access_path(path);
+                if path.segments.is_empty() {
+                    if let Some(ty) = self.embed_property_type(&path.root) {
+                        return Ok(ty);
+                    }
+                }
+                self.access_type(&path)
+            }
             Expr::AddressOfIndex { name, .. } => {
                 Ok(Type::Ptr(Box::new(self.array_element_type(name)?)))
             }
             Expr::AddressOfField { base, field } => {
                 Ok(Type::Ptr(Box::new(self.field_type(base, field)?)))
             }
-            Expr::AddressOfAccess(path) => Ok(Type::Ptr(Box::new(self.access_type(path)?))),
+            Expr::AddressOfAccess(path) => {
+                let path = self.canonical_access_path(path);
+                Ok(Type::Ptr(Box::new(self.access_type(&path)?)))
+            }
             Expr::AddressOf(name) => {
                 let Some(ty) = self.variable_type(name) else {
                     return Err(Diagnostic::new(format!("unknown variable `{name}`")));
@@ -4833,10 +4888,19 @@ impl Emitter {
                 }
             }
             Expr::Access(path) => {
-                if let Some(variable) = self.const_access_variable(path)? {
+                let path = self.canonical_access_path(path);
+                if path.segments.is_empty() {
+                    if let Some(ty) = self.named_value_type(&path.root) {
+                        return self.symbols.type_width(ty);
+                    }
+                    if self.symbols.embed_property_value(&path.root).is_some() {
+                        return Ok(ValueWidth::U24);
+                    }
+                }
+                if let Some(variable) = self.const_access_variable(&path)? {
                     variable.width()
                 } else {
-                    self.symbols.type_width(&self.access_type(path)?)
+                    self.symbols.type_width(&self.access_type(&path)?)
                 }
             }
             Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
@@ -5238,6 +5302,53 @@ impl Emitter {
     fn named_value_type(&self, name: &str) -> Option<&Type> {
         self.variable_type(name)
             .or_else(|| self.symbols.constant_types.get(name))
+    }
+
+    fn embed_property_type(&self, name: &str) -> Option<Type> {
+        self.symbols.embed_property_value(name)?;
+        let (_, property) = name.rsplit_once('.')?;
+        match property {
+            "ptr" | "end" => Some(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
+            "len" => Some(Type::Named("u24".to_owned())),
+            _ => None,
+        }
+    }
+
+    fn canonical_access_path(&self, path: &AccessPath) -> AccessPath {
+        if self.named_value_type(&path.root).is_some() {
+            return path.clone();
+        }
+
+        let mut candidate = path.root.clone();
+        let mut best = None;
+        for (index, segment) in path.segments.iter().enumerate() {
+            let AccessSegment::Field(field) = segment else {
+                break;
+            };
+            candidate.push('.');
+            candidate.push_str(field);
+            if self.named_value_type(&candidate).is_some()
+                || self.symbols.embed_property_value(&candidate).is_some()
+            {
+                best = Some((candidate.clone(), index + 1));
+            }
+            if let Some((_, original)) = candidate.split_once('.') {
+                if self.named_value_type(original).is_some()
+                    || self.symbols.embed_property_value(original).is_some()
+                {
+                    best = Some((original.to_owned(), index + 1));
+                }
+            }
+        }
+
+        if let Some((root, consumed)) = best {
+            AccessPath {
+                root,
+                segments: path.segments[consumed..].to_vec(),
+            }
+        } else {
+            path.clone()
+        }
     }
 
     fn name_in_current_function(&self, name: &str) -> bool {
@@ -7510,6 +7621,72 @@ mod tests {
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, "type mismatch");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_struct_fields() {
+        let cases = [
+            (
+                r#"
+                struct Entity { x: u8 }
+                global player: Entity = Entity { x: 1 }
+                fn main() {
+                    let y: u8 = player.y
+                    test.pass()
+                }
+                "#,
+                "struct `Entity` has no field `y`",
+            ),
+            (
+                r#"
+                struct Entity { x: u8 }
+                global player: Entity = Entity { x: 1 }
+                fn main() {
+                    player.y = 2
+                    test.pass()
+                }
+                "#,
+                "struct `Entity` has no field `y`",
+            ),
+            (
+                r#"
+                struct Entity { x: u8 }
+                global player: Entity = Entity { x: 1 }
+                fn main() {
+                    let p: ptr<u8> = &player.y
+                    test.pass()
+                }
+                "#,
+                "struct `Entity` has no field `y`",
+            ),
+            (
+                r#"
+                struct Entity { x: u8 }
+                global player: Entity = Entity { x: 1, y: 2 }
+                fn main() { test.pass() }
+                "#,
+                "struct `Entity` has no field `y`",
+            ),
+            (
+                r#"
+                struct Inner { x: u8 }
+                struct Outer { inner: Inner }
+                global outer: Outer = Outer { inner: Inner { x: 1 } }
+                fn main() {
+                    let value: u8 = outer.inner.y
+                    test.pass()
+                }
+                "#,
+                "struct `Inner` has no field `y`",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
         }
     }
 

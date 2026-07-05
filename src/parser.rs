@@ -1317,6 +1317,8 @@ mod tests {
     fn parses_chained_access_paths() {
         EzraParser::parse(Rule::expr, "matrix[row][col]").unwrap();
         EzraParser::parse(Rule::expr, "points[i].x").unwrap();
+        EzraParser::parse(Rule::expr, "outer.inner.x").unwrap();
+        EzraParser::parse(Rule::expr, "&outer.inner.x").unwrap();
         EzraParser::parse(Rule::expr, "&packets[i].bytes[j]").unwrap();
         EzraParser::parse(Rule::stmt, "points[i].x += 1;").unwrap();
 
@@ -1327,6 +1329,27 @@ mod tests {
         .unwrap();
 
         assert!(program.main_function().is_some());
+
+        let program = parse_program(
+            Path::new("game.ezra"),
+            "struct Inner { x: u8 }\nstruct Outer { inner: Inner }\nglobal outer: Outer = Outer { inner: Inner { x: 1 } }\nfn main() { let x: u8 = outer.inner.x; let p: ptr<u8> = &outer.inner.x }",
+        )
+        .unwrap();
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Let {
+                value: Expr::Access(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &main.body[1],
+            Stmt::Let {
+                value: Expr::AddressOfAccess(_),
+                ..
+            }
+        ));
     }
 
     #[test]
