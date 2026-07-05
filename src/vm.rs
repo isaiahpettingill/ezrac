@@ -1012,11 +1012,25 @@ fn parse_addr(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32,
     if text == "$" {
         return Ok(pc & 0xFF_FFFF);
     }
-    labels
-        .get(text)
-        .copied()
-        .map(Ok)
-        .unwrap_or_else(|| parse_number(text).map(|value| value & 0xFF_FFFF))
+    if let Some(addr) = labels.get(text).copied() {
+        return Ok(addr);
+    }
+    match parse_number(text) {
+        Ok(value) => Ok(value & 0xFF_FFFF),
+        Err(_) if looks_like_label_ref(text) => {
+            Err(Diagnostic::new(format!("unknown assembly label `{text}`")))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn looks_like_label_ref(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '.' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
 }
 
 fn parse_u8(text: &str) -> Result<u8, Diagnostic> {
@@ -1920,6 +1934,21 @@ mod tests {
         let error = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap_err();
 
         assert_eq!(error.message, "duplicate assembly label `again`");
+    }
+
+    #[test]
+    fn rejects_unknown_assembly_labels() {
+        let error =
+            assemble_ez80_subset_at("jp missing_label\n", EZRA_LOAD_ADDR.get()).unwrap_err();
+
+        assert_eq!(error.message, "unknown assembly label `missing_label`");
+    }
+
+    #[test]
+    fn rejects_invalid_numeric_jump_operands() {
+        let error = assemble_ez80_subset_at("jp 0xBADHEX\n", EZRA_LOAD_ADDR.get()).unwrap_err();
+
+        assert_eq!(error.message, "invalid numeric operand `0xBADHEX`");
     }
 
     #[test]
