@@ -1019,11 +1019,11 @@ impl Emitter {
         self.line("    call _main");
         self.line("__ezra_exit:");
         self.line("    jp __ezra_exit");
-        self.emit_runtime_test_helpers();
+        self.emit_runtime_helpers();
         self.line("");
     }
 
-    fn emit_runtime_test_helpers(&mut self) {
+    fn emit_runtime_helpers(&mut self) {
         self.line("__ezra_pass:");
         self.emit_out(0x0D, 0);
         self.emit_out(0x0E, 1);
@@ -1032,6 +1032,17 @@ impl Emitter {
         self.emit_out_a(0x0D);
         self.emit_out(0x0E, 1);
         self.line("    ret");
+        self.line("__ezra_memcpy:");
+        self.line(".L_memcpy_loop:");
+        self.line("    ld a, b");
+        self.line("    or c");
+        self.line("    ret z");
+        self.line("    ld a, (de)");
+        self.line("    ld (hl), a");
+        self.line("    inc de");
+        self.line("    inc hl");
+        self.line("    dec bc");
+        self.line("    jp .L_memcpy_loop");
     }
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
@@ -5083,6 +5094,37 @@ mod tests {
         assert!(asm.contains("    call __ezra_fail"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 7, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_memcpy_runtime_helper() {
+        let source = r#"
+            fn main() {
+                asm volatile(clobber a, clobber bc, clobber de, clobber hl, clobber memory) {
+                    "ld a, 41h"
+                    "ld (040300h), a"
+                    "ld a, 42h"
+                    "ld (040301h), a"
+                    "ld a, 43h"
+                    "ld (040302h), a"
+                    "ld hl, 040310h"
+                    "ld de, 040300h"
+                    "ld bc, 000003h"
+                    "call __ezra_memcpy"
+                }
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040310)), 0x41, 1)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040311)), 0x42, 2)
+                test.assert_eq_u8(mem.peek8(cast<ptr<u8>>(0x040312)), 0x43, 3)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 3_000).unwrap();
+
+        assert!(asm.contains("__ezra_memcpy:"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]

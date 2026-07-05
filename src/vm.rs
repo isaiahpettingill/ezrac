@@ -99,6 +99,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     } else if matches!(
         text,
         "ret"
+            | "ret z"
             | "or a"
             | "ex de, hl"
             | "push af"
@@ -119,12 +120,15 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld a, h"
             | "ld a, l"
             | "ld a, (hl)"
+            | "ld a, (de)"
             | "ld h, b"
             | "ld h, a"
             | "ld l, c"
             | "ld l, a"
             | "ld (hl), a"
             | "inc hl"
+            | "inc de"
+            | "dec bc"
             | "add hl, hl"
             | "add hl, bc"
             | "add hl, sp"
@@ -160,7 +164,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(4)
     } else if text.starts_with("ld ix,") {
         Ok(5)
-    } else if text.starts_with("ld hl,") {
+    } else if text.starts_with("ld hl,") || text.starts_with("ld de,") || text.starts_with("ld bc,")
+    {
         Ok(4)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") || text.starts_with("in0 ") {
         Ok(2)
@@ -207,6 +212,8 @@ fn emit_instruction(
         bytes.extend([0xDD, 0x77, offset]);
     } else if text == "ld a, (hl)" {
         bytes.push(0x7E);
+    } else if text == "ld a, (de)" {
+        bytes.push(0x1A);
     } else if text == "ld (hl), a" {
         bytes.push(0x77);
     } else if let Some(rest) = text.strip_prefix("ld hl, (") {
@@ -234,6 +241,12 @@ fn emit_instruction(
     } else if let Some(value) = text.strip_prefix("ld hl,") {
         bytes.push(0x21);
         push24(bytes, parse_addr(value.trim(), labels)?);
+    } else if let Some(value) = text.strip_prefix("ld de,") {
+        bytes.push(0x11);
+        push24(bytes, parse_addr(value.trim(), labels)?);
+    } else if let Some(value) = text.strip_prefix("ld bc,") {
+        bytes.push(0x01);
+        push24(bytes, parse_addr(value.trim(), labels)?);
     } else if let Some(rest) = text.strip_prefix("in0 ") {
         let port = rest
             .trim()
@@ -251,6 +264,8 @@ fn emit_instruction(
         bytes.extend([0xED, 0x39, parse_u8(port)?]);
     } else if text == "ret" {
         bytes.push(0xC9);
+    } else if text == "ret z" {
+        bytes.push(0xC8);
     } else if text == "or a" {
         bytes.push(0xB7);
     } else if text == "ex de, hl" {
@@ -315,6 +330,10 @@ fn emit_instruction(
         bytes.push(0x69);
     } else if text == "inc hl" {
         bytes.push(0x23);
+    } else if text == "inc de" {
+        bytes.push(0x13);
+    } else if text == "dec bc" {
+        bytes.push(0x0B);
     } else if text == "add hl, hl" {
         bytes.push(0x29);
     } else if text == "add hl, bc" {
