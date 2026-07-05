@@ -9502,6 +9502,8 @@ mod tests {
                 test.assert_eq_u8(mem.peek8(hw.SCRATCH), 0x37, 1)
                 mem.poke8(lib.hw.SCRATCH, lib.hw.VALUE + 1)
                 test.assert_eq_u8(mem.peek8(hw.SCRATCH), 0x38, 2)
+                mem.poke8(lib.hw.SCRATCH + 1, lib.hw.VALUE + 2)
+                test.assert_eq_u8(mem.peek8(hw.SCRATCH + 1), 0x39, 3)
                 test.pass()
             }
             "#,
