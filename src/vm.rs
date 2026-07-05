@@ -372,43 +372,43 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if let Some(value) = text.strip_prefix("ld sp,") {
         bytes.push(0x31);
-        push24(bytes, parse_addr(value.trim(), labels)?);
+        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("call ") {
         bytes.push(0xCD);
-        push24(bytes, parse_addr(target.trim(), labels)?);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jp z,") {
         bytes.push(0xCA);
-        push24(bytes, parse_addr(target.trim(), labels)?);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jp nz,") {
         bytes.push(0xC2);
-        push24(bytes, parse_addr(target.trim(), labels)?);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jp c,") {
         bytes.push(0xDA);
-        push24(bytes, parse_addr(target.trim(), labels)?);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jp nc,") {
         bytes.push(0xD2);
-        push24(bytes, parse_addr(target.trim(), labels)?);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jp ") {
         bytes.push(0xC3);
-        push24(bytes, parse_addr(target.trim(), labels)?);
+        push24(bytes, parse_addr(target.trim(), labels, pc)?);
     } else if let Some(target) = text.strip_prefix("jr z,") {
         bytes.push(0x28);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
     } else if let Some(target) = text.strip_prefix("jr nz,") {
         bytes.push(0x20);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
     } else if let Some(target) = text.strip_prefix("jr c,") {
         bytes.push(0x38);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
     } else if let Some(target) = text.strip_prefix("jr nc,") {
         bytes.push(0x30);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
     } else if let Some(target) = text.strip_prefix("jr ") {
         bytes.push(0x18);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
     } else if let Some(target) = text.strip_prefix("djnz ") {
         bytes.push(0x10);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
     } else if let Some((index, offset)) = parse_index_byte_load(text)? {
         bytes.extend([index.prefix(), 0x7E, offset]);
     } else if let Some((index, offset)) = parse_index_byte_store(text)? {
@@ -430,41 +430,41 @@ fn emit_instruction(
         bytes.push(0x02);
     } else if let Some((register, addr)) = parse_ld_reg16_direct_load(text) {
         bytes.extend([0xED, ld_reg16_direct_load_opcode(register)]);
-        push24(bytes, parse_addr(addr, labels)?);
+        push24(bytes, parse_addr(addr, labels, pc)?);
     } else if let Some((addr, register)) = parse_ld_direct_reg16_store(text) {
         bytes.extend([0xED, ld_direct_reg16_store_opcode(register)]);
-        push24(bytes, parse_addr(addr, labels)?);
+        push24(bytes, parse_addr(addr, labels, pc)?);
     } else if let Some(rest) = text.strip_prefix("ld hl, (") {
         let addr = rest
             .strip_suffix(')')
             .ok_or_else(|| Diagnostic::new(format!("invalid load syntax `{text}`")))?;
         bytes.push(0x2A);
-        push24(bytes, parse_addr(addr, labels)?);
+        push24(bytes, parse_addr(addr, labels, pc)?);
     } else if let Some(rest) = text.strip_prefix("ld a, (") {
         let addr = rest
             .strip_suffix(')')
             .ok_or_else(|| Diagnostic::new(format!("invalid load syntax `{text}`")))?;
         bytes.push(0x3A);
-        push24(bytes, parse_addr(addr, labels)?);
+        push24(bytes, parse_addr(addr, labels, pc)?);
     } else if let Some(rest) = text.strip_prefix("ld (") {
         if let Some(addr) = rest.strip_suffix("), a") {
             bytes.push(0x32);
-            push24(bytes, parse_addr(addr, labels)?);
+            push24(bytes, parse_addr(addr, labels, pc)?);
         } else if let Some(addr) = rest.strip_suffix("), hl") {
             bytes.push(0x22);
-            push24(bytes, parse_addr(addr, labels)?);
+            push24(bytes, parse_addr(addr, labels, pc)?);
         } else {
             return Err(Diagnostic::new(format!("invalid store syntax `{text}`")));
         }
     } else if let Some(value) = text.strip_prefix("ld hl,") {
         bytes.push(0x21);
-        push24(bytes, parse_addr(value.trim(), labels)?);
+        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(value) = text.strip_prefix("ld de,") {
         bytes.push(0x11);
-        push24(bytes, parse_addr(value.trim(), labels)?);
+        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(value) = text.strip_prefix("ld bc,") {
         bytes.push(0x01);
-        push24(bytes, parse_addr(value.trim(), labels)?);
+        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some((dst, src)) = parse_ld_reg8_reg8(text) {
         bytes.push(0x40 + dst * 8 + src);
     } else if let Some((dst, value)) = parse_ld_reg8_imm(text)? {
@@ -556,10 +556,10 @@ fn emit_instruction(
         bytes.push(0x0D);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
         bytes.extend([0xDD, 0x21]);
-        push24(bytes, parse_addr(value.trim(), labels)?);
+        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(value) = text.strip_prefix("ld iy,") {
         bytes.extend([0xFD, 0x21]);
-        push24(bytes, parse_addr(value.trim(), labels)?);
+        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if text == "ld b, a" {
         bytes.push(0x47);
     } else if text == "ld c, a" {
@@ -963,7 +963,10 @@ fn parse_index_offset(text: &str) -> Result<u8, Diagnostic> {
     Ok(value as u8)
 }
 
-fn parse_addr(text: &str, labels: &HashMap<String, u32>) -> Result<u32, Diagnostic> {
+fn parse_addr(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, Diagnostic> {
+    if text == "$" {
+        return Ok(pc & 0xFF_FFFF);
+    }
     labels
         .get(text)
         .copied()
@@ -1077,6 +1080,15 @@ mod tests {
     #[test]
     fn reports_timeout_when_program_does_not_halt() {
         let run = run_assembly_test("spin:\n    jp spin\n", 3).unwrap();
+
+        assert!(!run.halted);
+        assert_eq!(run.instructions, 3);
+        assert_eq!(run.failure, Some(TestRunFailure::Timeout));
+    }
+
+    #[test]
+    fn runs_current_address_jump_on_ez80_vm() {
+        let run = run_assembly_test("jp $\n", 3).unwrap();
 
         assert!(!run.halted);
         assert_eq!(run.instructions, 3);
@@ -1613,6 +1625,17 @@ mod tests {
                 0x18, 0x01, 0xC9, 0x28, 0x06, 0x20, 0x04, 0x38, 0x02, 0x30, 0x00, 0x18, 0xF6,
             ]
         );
+    }
+
+    #[test]
+    fn assembles_current_address_jumps() {
+        let asm = r#"
+            jp $
+            jr $
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0xC3, 0x00, 0x00, 0x01, 0x18, 0xFE]);
     }
 
     #[test]
