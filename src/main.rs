@@ -1035,6 +1035,28 @@ mod tests {
     }
 
     #[test]
+    fn test_command_reports_nonzero_test_result_code() {
+        let root = temp_root("nonzero_test_result");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    test.fail(37)
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = test_source(source_path.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(error, "test failed with code 37");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_can_use_custom_layout_file() {
         let root = temp_root("custom_layout_build");
         std::fs::create_dir_all(&root).unwrap();
