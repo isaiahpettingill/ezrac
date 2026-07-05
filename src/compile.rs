@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    ast::{Declaration, Expr, Function, Place, Program, Stmt, Type},
+    ast::{Declaration, EmbedSource, Expr, Function, Place, Program, Stmt, Type},
     diagnostic::Diagnostic,
     parser::parse_program,
 };
@@ -178,6 +178,11 @@ fn validate_declaration_private_import_access(
             validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
         }
         Declaration::Embed(decl) => {
+            validate_embed_source_private_import_access(
+                &decl.source,
+                private_imports,
+                &HashSet::new(),
+            )?;
             if let Some(align) = &decl.align {
                 validate_expr_private_import_access(align, private_imports, &HashSet::new())?;
             }
@@ -278,13 +283,45 @@ fn validate_stmt_private_import_access(
         Stmt::Return(Some(expr)) | Stmt::Expr(expr) => {
             validate_expr_private_import_access(expr, private_imports, locals)?;
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        Stmt::Asm {
+            inputs, outputs, ..
+        } => {
+            for input in inputs {
+                validate_type_private_import_access(&input.ty, private_imports)?;
+                reject_private_import_name(&input.name, private_imports, locals)?;
+            }
+            for output in outputs {
+                validate_type_private_import_access(&output.ty, private_imports)?;
+                reject_private_import_name(&output.name, private_imports, locals)?;
+            }
+        }
         Stmt::Out { port, value } => {
             reject_private_import_name(port, private_imports, locals)?;
             validate_expr_private_import_access(value, private_imports, locals)?;
         }
     }
     Ok(())
+}
+
+fn validate_embed_source_private_import_access(
+    source: &EmbedSource,
+    private_imports: &HashMap<String, String>,
+    locals: &HashSet<String>,
+) -> Result<(), Diagnostic> {
+    match source {
+        EmbedSource::File(_) | EmbedSource::Text(_) | EmbedSource::CStr(_) => Ok(()),
+        EmbedSource::Bytes(values) => {
+            for value in values {
+                validate_expr_private_import_access(value, private_imports, locals)?;
+            }
+            Ok(())
+        }
+        EmbedSource::Repeat { value, len } => {
+            validate_expr_private_import_access(value, private_imports, locals)?;
+            validate_expr_private_import_access(len, private_imports, locals)
+        }
+    }
 }
 
 fn validate_place_private_import_access(
@@ -566,6 +603,102 @@ mod tests {
         assert_eq!(
             error.message,
             "declaration `Secret` from import `lib.types` is private"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_private_imported_declarations_in_embeds() {
+        let root = temp_root("private_embed_exprs");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/data.ezra");
+        std::fs::write(
+            &lib_path,
+            "const SECRET: u8 = 0x41\npub const SHOWN: u8 = 4\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            "import lib.data\nembed blob: bytes = bytes [SECRET]\nfn main() { test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `SECRET` from import `lib.data` is private"
+        );
+
+        std::fs::write(
+            &main_path,
+            "import lib.data\nembed blob: bytes = repeat(0, SECRET)\nfn main() { test.pass() }\n",
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `SECRET` from import `lib.data` is private"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_private_imported_declarations_in_inline_asm_operands() {
+        let root = temp_root("private_asm_operands");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/hw.ezra");
+        std::fs::write(
+            &lib_path,
+            "const SECRET: u8 = 0x41\nstruct Hidden { value: u8 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.hw
+            fn main() {
+                asm volatile(in SECRET: u8 as imm) {
+                    "ld a, {SECRET}"
+                }
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `SECRET` from import `lib.hw` is private"
+        );
+
+        std::fs::write(
+            &main_path,
+            r#"
+            import lib.hw
+            fn main() {
+                asm volatile(in ptr: ptr<Hidden> as reg24) {
+                    "ld hl, {ptr}"
+                }
+                test.pass()
+            }
+            "#,
+        )
+        .unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "declaration `Hidden` from import `lib.hw` is private"
         );
 
         let _ = std::fs::remove_dir_all(root);
