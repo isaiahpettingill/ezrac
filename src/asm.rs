@@ -1259,6 +1259,69 @@ impl Emitter {
         self.line("    push de");
         self.line("    pop hl");
         self.line("    ret");
+        self.emit_signed_i24_div_mod_helper("__ezra_div_i24", BinaryOp::Div);
+        self.emit_signed_i24_div_mod_helper("__ezra_mod_i24", BinaryOp::Mod);
+    }
+
+    fn emit_signed_i24_div_mod_helper(&mut self, label: &str, op: BinaryOp) {
+        let dividend = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let divisor = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let quotient = self.symbols.alloc_var(ValueWidth::U24.bytes());
+        let quotient_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let remainder_negative = self.symbols.alloc_var(ValueWidth::U8.bytes());
+        let loop_label = self.next_label("sdiv_i24_loop");
+        let zero_label = self.next_label("sdiv_i24_zero");
+        let done_label = self.next_label("sdiv_i24_done");
+        let quotient_positive_label = self.next_label("sdiv_i24_q_positive");
+        let remainder_positive_label = self.next_label("sdiv_i24_r_positive");
+
+        self.line(&format!("{label}:"));
+        self.emit_store_width(dividend);
+        self.line("    push bc");
+        self.line("    pop hl");
+        self.emit_store_width(divisor);
+        self.emit_zero_variable(quotient);
+        self.emit_zero_variable(quotient_negative);
+        self.emit_zero_variable(remainder_negative);
+        self.emit_jump_if_memory_zero(divisor, &zero_label);
+
+        self.emit_abs_signed_variable(dividend, Some(quotient_negative), Some(remainder_negative));
+        self.emit_abs_signed_variable(divisor, Some(quotient_negative), None);
+
+        self.line(&format!("{loop_label}:"));
+        self.emit_load_width(dividend);
+        self.line("    push hl");
+        self.emit_load_width(divisor);
+        self.line("    ex de, hl");
+        self.line("    pop hl");
+        self.line("    or a");
+        self.line("    sbc hl, de");
+        self.line(&format!("    jp c, {done_label}"));
+        self.emit_store_width(dividend);
+        self.emit_increment_memory(quotient);
+        self.line(&format!("    jp {loop_label}"));
+
+        self.line(&format!("{zero_label}:"));
+        self.emit_zero_variable(dividend);
+        self.emit_zero_variable(quotient);
+        self.line(&format!("{done_label}:"));
+        self.emit_load_a(quotient_negative);
+        self.line("    or a");
+        self.line(&format!("    jp z, {quotient_positive_label}"));
+        self.emit_negate_memory(quotient);
+        self.line(&format!("{quotient_positive_label}:"));
+        self.emit_load_a(remainder_negative);
+        self.line("    or a");
+        self.line(&format!("    jp z, {remainder_positive_label}"));
+        self.emit_negate_memory(dividend);
+        self.line(&format!("{remainder_positive_label}:"));
+
+        match op {
+            BinaryOp::Div => self.emit_load_width(quotient),
+            BinaryOp::Mod => self.emit_load_width(dividend),
+            _ => unreachable!("not a division op"),
+        }
+        self.line("    ret");
     }
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
@@ -3204,6 +3267,21 @@ impl Emitter {
         op: BinaryOp,
         width: ValueWidth,
     ) -> Result<(), Diagnostic> {
+        if width == ValueWidth::U24 {
+            self.emit_expr_to_hl(left, width)?;
+            self.line("    push hl");
+            self.emit_expr_to_hl(right, width)?;
+            self.line("    push hl");
+            self.line("    pop bc");
+            self.line("    pop hl");
+            match op {
+                BinaryOp::Div => self.line("    call __ezra_div_i24"),
+                BinaryOp::Mod => self.line("    call __ezra_mod_i24"),
+                _ => unreachable!("not a division op"),
+            }
+            return Ok(());
+        }
+
         let dividend = self.symbols.alloc_var(width.bytes());
         let divisor = self.symbols.alloc_var(width.bytes());
         let quotient = self.symbols.alloc_var(width.bytes());
@@ -3219,10 +3297,10 @@ impl Emitter {
         self.emit_store_width(dividend);
         self.emit_expr_to_width(right, width)?;
         self.emit_store_width(divisor);
-        self.emit_jump_if_memory_zero(divisor, &zero_label);
         self.emit_zero_variable(quotient);
         self.emit_zero_variable(quotient_negative);
         self.emit_zero_variable(remainder_negative);
+        self.emit_jump_if_memory_zero(divisor, &zero_label);
 
         self.emit_abs_signed_variable(dividend, Some(quotient_negative), Some(remainder_negative));
         self.emit_abs_signed_variable(divisor, Some(quotient_negative), None);
@@ -8415,6 +8493,10 @@ mod tests {
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 300_000).unwrap();
 
+        assert!(asm.contains("    call __ezra_div_i24"), "{asm}");
+        assert!(asm.contains("    call __ezra_mod_i24"), "{asm}");
+        assert!(asm.contains("__ezra_div_i24:"), "{asm}");
+        assert!(asm.contains("__ezra_mod_i24:"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
