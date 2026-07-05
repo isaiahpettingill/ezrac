@@ -38,6 +38,7 @@ stmt = _{
   | break_stmt
   | continue_stmt
   | return_stmt
+  | asm_stmt
   | out_stmt
   | expr_stmt
   | assign_stmt
@@ -55,6 +56,8 @@ loop_stmt = { "loop" ~ block }
 break_stmt = { "break" ~ semi? }
 continue_stmt = { "continue" ~ semi? }
 return_stmt = { "return" ~ expr? ~ semi? }
+asm_stmt = { "asm" ~ volatile_kw? ~ "{" ~ asm_line* ~ "}" }
+asm_line = { string_lit }
 out_stmt = { "out" ~ ident ~ "," ~ expr ~ semi? }
 expr_stmt = { expr ~ !(WHITESPACE* ~ assign_op) ~ semi? }
 assign_op = { "=" | "+=" | "-=" | "&=" | "|=" | "^=" | "<<=" | ">>=" }

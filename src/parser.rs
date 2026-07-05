@@ -339,6 +339,21 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
         Rule::return_stmt => Ok(Stmt::Return(
             pair.into_inner().next().map(build_expr).transpose()?,
         )),
+        Rule::asm_stmt => {
+            let mut volatile = false;
+            let mut lines = Vec::new();
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::volatile_kw => volatile = true,
+                    Rule::asm_line => {
+                        let line = inner.into_inner().next().unwrap();
+                        lines.push(parse_string(line.as_str())?);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Stmt::Asm { volatile, lines })
+        }
         Rule::out_stmt => {
             let mut inner = pair.into_inner();
             Ok(Stmt::Out {
@@ -732,6 +747,31 @@ mod tests {
         .unwrap();
 
         assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn parses_inline_asm_statements() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                asm volatile {
+                    "ld a, 0x41"
+                    "out0 (0Ch), a"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Asm {
+                volatile: true,
+                lines
+            } if lines == &["ld a, 0x41", "out0 (0Ch), a"]
+        ));
     }
 
     #[test]

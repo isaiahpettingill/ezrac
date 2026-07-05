@@ -132,6 +132,10 @@ pub enum Stmt {
     Break,
     Continue,
     Return(Option<Expr>),
+    Asm {
+        volatile: bool,
+        lines: Vec<String>,
+    },
     Out {
         port: String,
         value: Expr,

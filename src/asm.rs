@@ -769,6 +769,16 @@ impl Emitter {
                 self.emit_expr_to_width(expr, self.current_return_width())?;
                 self.line("    ret");
             }
+            Stmt::Asm { volatile, lines } => {
+                if *volatile {
+                    self.line("    ; asm volatile");
+                } else {
+                    self.line("    ; asm");
+                }
+                for line in lines {
+                    self.line(&format!("    {line}"));
+                }
+            }
         }
         Ok(())
     }
@@ -2899,6 +2909,28 @@ mod tests {
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_inline_asm_statements() {
+        let source = r#"
+            fn main() {
+                asm volatile {
+                    "ld a, 0x41"
+                    "out0 (0Ch), a"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    ; asm volatile"));
+        assert!(asm.contains("    ld a, 0x41"));
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"A", "{asm}");
     }
 
     #[test]
