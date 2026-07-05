@@ -886,34 +886,173 @@ impl Emitter {
                 outputs,
                 clobbers,
                 lines,
-            } => {
-                if *volatile {
-                    self.line("    ; asm volatile");
+            } => self.emit_inline_asm(*volatile, inputs, outputs, clobbers, lines)?,
+        }
+        Ok(())
+    }
+
+    fn emit_inline_asm(
+        &mut self,
+        volatile: bool,
+        inputs: &[crate::ast::AsmInput],
+        outputs: &[crate::ast::AsmOutput],
+        clobbers: &[String],
+        lines: &[String],
+    ) -> Result<(), Diagnostic> {
+        let mut operands = HashMap::new();
+
+        if volatile {
+            self.line("    ; asm volatile");
+        } else {
+            self.line("    ; asm");
+        }
+        for input in inputs {
+            if operands.contains_key(&input.name) {
+                return Err(Diagnostic::new(format!(
+                    "duplicate inline asm operand `{}`",
+                    input.name
+                )));
+            }
+            let binding = self.inline_asm_input_binding(input)?;
+            self.line(&format!(
+                "    ; in {}: {} as {}",
+                input.name,
+                type_display(&input.ty),
+                input.class
+            ));
+            operands.insert(input.name.clone(), binding);
+        }
+        for output in outputs {
+            if operands.contains_key(&output.name) {
+                return Err(Diagnostic::new(format!(
+                    "duplicate inline asm operand `{}`",
+                    output.name
+                )));
+            }
+            let binding = self.inline_asm_output_binding(output)?;
+            self.line(&format!(
+                "    ; out {}: {} as {}",
+                output.name,
+                type_display(&output.ty),
+                output.class
+            ));
+            operands.insert(output.name.clone(), binding);
+        }
+        if !clobbers.is_empty() {
+            self.line(&format!("    ; clobber {}", clobbers.join(", ")));
+        }
+
+        for input in inputs {
+            self.emit_inline_asm_input_load(input)?;
+        }
+        for line in lines {
+            self.line(&format!(
+                "    {}",
+                substitute_inline_asm_operands(line, &operands)?
+            ));
+        }
+        for output in outputs {
+            self.emit_inline_asm_output_store(output)?;
+        }
+        Ok(())
+    }
+
+    fn inline_asm_input_binding(&self, input: &crate::ast::AsmInput) -> Result<String, Diagnostic> {
+        match input.class.as_str() {
+            "reg8" => Ok("a".to_owned()),
+            "reg16" | "reg24" => Ok("hl".to_owned()),
+            "mem" => {
+                let variable = self.variable(&input.name)?;
+                Ok(format!("({:06X}h)", variable.addr))
+            }
+            "imm" => {
+                let width = self.symbols.type_width(&input.ty)?;
+                let value = self.symbols.eval_i64(&Expr::Ident(input.name.clone()))?;
+                Ok(format_immediate(value, width))
+            }
+            _ => Err(Diagnostic::new(format!(
+                "unsupported inline asm operand class `{}`",
+                input.class
+            ))),
+        }
+    }
+
+    fn inline_asm_output_binding(
+        &self,
+        output: &crate::ast::AsmOutput,
+    ) -> Result<String, Diagnostic> {
+        match output.class.as_str() {
+            "reg8" => Ok("a".to_owned()),
+            "reg16" | "reg24" => Ok("hl".to_owned()),
+            "mem" => {
+                let variable = self.variable(&output.name)?;
+                Ok(format!("({:06X}h)", variable.addr))
+            }
+            "imm" => Err(Diagnostic::new(format!(
+                "inline asm output `{}` cannot use imm class",
+                output.name
+            ))),
+            _ => Err(Diagnostic::new(format!(
+                "unsupported inline asm operand class `{}`",
+                output.class
+            ))),
+        }
+    }
+
+    fn emit_inline_asm_input_load(
+        &mut self,
+        input: &crate::ast::AsmInput,
+    ) -> Result<(), Diagnostic> {
+        match input.class.as_str() {
+            "reg8" => {
+                if let Some(variable) = self.variable_opt(&input.name) {
+                    self.emit_load_a(variable);
                 } else {
-                    self.line("    ; asm");
+                    let value = self.u8(&Expr::Ident(input.name.clone()))?;
+                    self.line(&format!("    ld a, {value:02X}h"));
                 }
-                for input in inputs {
-                    self.line(&format!(
-                        "    ; in {}: {} as {}",
-                        input.name,
-                        type_display(&input.ty),
-                        input.class
-                    ));
+            }
+            "reg16" | "reg24" => {
+                let width = self.symbols.type_width(&input.ty)?;
+                if let Some(variable) = self.variable_opt(&input.name) {
+                    self.emit_load_width(variable);
+                } else {
+                    let value = self.symbols.eval_i64(&Expr::Ident(input.name.clone()))?;
+                    self.line(&format!("    ld hl, {}", format_immediate(value, width)));
                 }
-                for output in outputs {
-                    self.line(&format!(
-                        "    ; out {}: {} as {}",
-                        output.name,
-                        type_display(&output.ty),
-                        output.class
-                    ));
-                }
-                if !clobbers.is_empty() {
-                    self.line(&format!("    ; clobber {}", clobbers.join(", ")));
-                }
-                for line in lines {
-                    self.line(&format!("    {line}"));
-                }
+            }
+            "mem" | "imm" => {}
+            _ => {
+                return Err(Diagnostic::new(format!(
+                    "unsupported inline asm operand class `{}`",
+                    input.class
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_inline_asm_output_store(
+        &mut self,
+        output: &crate::ast::AsmOutput,
+    ) -> Result<(), Diagnostic> {
+        match output.class.as_str() {
+            "reg8" | "reg16" | "reg24" => {
+                let variable = self.variable(&output.name)?;
+                self.emit_store_width(variable);
+            }
+            "mem" => {}
+            "imm" => {
+                return Err(Diagnostic::new(format!(
+                    "inline asm output `{}` cannot use imm class",
+                    output.name
+                )));
+            }
+            _ => {
+                return Err(Diagnostic::new(format!(
+                    "unsupported inline asm operand class `{}`",
+                    output.class
+                )));
             }
         }
         Ok(())
@@ -2953,6 +3092,46 @@ fn type_display(ty: &Type) -> String {
     }
 }
 
+fn format_immediate(value: i64, width: ValueWidth) -> String {
+    match width {
+        ValueWidth::U8 => format!("{:02X}h", (value as u64) & 0xFF),
+        ValueWidth::U16 => format!("{:04X}h", (value as u64) & 0xFFFF),
+        ValueWidth::U24 => format!("{:06X}h", (value as u64) & 0xFF_FFFF),
+    }
+}
+
+fn substitute_inline_asm_operands(
+    line: &str,
+    operands: &HashMap<String, String>,
+) -> Result<String, Diagnostic> {
+    let mut output = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('{') {
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            return Err(Diagnostic::new(format!(
+                "unterminated inline asm operand placeholder in `{line}`"
+            )));
+        };
+        let name = &after_start[..end];
+        let Some(binding) = operands.get(name) else {
+            return Err(Diagnostic::new(format!(
+                "unknown inline asm operand placeholder `{name}`"
+            )));
+        };
+        output.push_str(binding);
+        rest = &after_start[end + 1..];
+    }
+    if rest.contains('}') {
+        return Err(Diagnostic::new(format!(
+            "unmatched inline asm operand placeholder in `{line}`"
+        )));
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
 fn is_comparison(op: BinaryOp) -> bool {
     matches!(
         op,
@@ -3276,6 +3455,8 @@ mod tests {
     fn emits_and_runs_inline_asm_statements() {
         let source = r#"
             fn main() {
+                let ch: u8 = 0x41
+                let result: u8 = 0
                 asm volatile(in ch: u8 as reg8, out result: u8 as reg8, clobber a, clobber ports) {
                     "ld a, 0x41"
                     "out0 (0Ch), a"
@@ -3295,6 +3476,85 @@ mod tests {
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
         assert_eq!(run.debug_output, b"A", "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_inline_asm_reg8_and_imm_placeholders() {
+        let source = r#"
+            const DEBUG_PORT: u8 = 0x0C
+
+            fn main() {
+                let ch: u8 = 0x43
+                asm volatile(in DEBUG_PORT: u8 as imm, in ch: u8 as reg8, clobber ports) {
+                    "out0 ({DEBUG_PORT}), {ch}"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    out0 (0Ch), a"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert_eq!(run.debug_output, b"C", "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_inline_asm_output_writeback() {
+        let source = r#"
+            fn main() {
+                let result: u8 = 0
+                asm volatile(out result: u8 as reg8, clobber a) {
+                    "ld a, 07h"
+                }
+                test.assert_eq_u8(result, 7, 11)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn rejects_unknown_inline_asm_operand_placeholder() {
+        let source = r#"
+            fn main() {
+                asm volatile {
+                    "ld a, {missing}"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "unknown inline asm operand placeholder `missing`"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_inline_asm_operands() {
+        let source = r#"
+            fn main() {
+                let value: u8 = 0
+                asm volatile(in value: u8 as reg8, out value: u8 as reg8) {
+                    "ld a, 1"
+                }
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+
+        assert_eq!(error.message, "duplicate inline asm operand `value`");
     }
 
     #[test]
