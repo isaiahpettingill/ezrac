@@ -601,9 +601,17 @@ impl Symbols {
 
     fn type_size(&self, ty: &Type) -> Result<u8, Diagnostic> {
         match self.resolved_type(ty)? {
-            Type::Array { .. } => Err(Diagnostic::new(
-                "array value cannot be used where scalar storage size is required",
-            )),
+            Type::Array { element, len } => {
+                let element_size = self.type_size(&element)?;
+                let len = self.array_len(&len)?;
+                let size = u32::from(element_size) * len;
+                if size > u8::MAX as u32 {
+                    return Err(Diagnostic::new(format!(
+                        "array size {size} exceeds current storage limit"
+                    )));
+                }
+                Ok(size as u8)
+            }
             Type::Named(name) if self.structs.contains_key(&name) => {
                 let size = self.structs[&name].size;
                 if size > u8::MAX as u32 {
@@ -7262,6 +7270,28 @@ mod tests {
             fn main() {
                 test.assert_eq_u8(first(&bytes), 0x11, 1)
                 test.assert_eq_u8(second(&bytes), 0x22, 2)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 6_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_array_pointer_arithmetic_scale() {
+        let source = r#"
+            fn next_chunk(values: ptr<[u8; 3]>) -> ptr<[u8; 3]> {
+                return values + 1
+            }
+
+            fn main() {
+                let chunk: [u8; 3] = [1, 2, 3]
+                let next: ptr<[u8; 3]> = next_chunk(&chunk)
+                test.assert_eq_u24(cast<u24>(next), cast<u24>(&chunk[0]) + 3, 1)
                 test.pass()
             }
         "#;
