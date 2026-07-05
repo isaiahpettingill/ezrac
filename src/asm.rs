@@ -6681,23 +6681,23 @@ mod tests {
             volatile mmio AGON_VDP_BUFFER: ptr<u8> = 0x0C0000
 
             fn ti_write(value: u8) {
-                mem.poke8(TI_LCD_BUFFER, value)
+                *(TI_LCD_BUFFER) = value;
             }
 
             fn agon_write(value: u8) {
-                mem.poke8(AGON_VDP_BUFFER, value)
+                *(AGON_VDP_BUFFER) = value;
             }
 
             fn main() {
-                let ptr: ptr<u8> = cast<ptr<u8>>(0x040121)
-                mem.poke8(SCRATCH, 0x5A)
-                mem.poke8(ptr, mem.peek8(SCRATCH) + 1)
-                ti_write(mem.peek8(ptr))
-                agon_write(0xC3)
-                test.assert_eq_u8(mem.peek8(SCRATCH), 0x5A, 1)
-                test.assert_eq_u8(mem.peek8(ptr), 0x5B, 2)
-                test.assert_eq_u8(mem.peek8(TI_LCD_BUFFER), 0x5B, 3)
-                test.assert_eq_u8(mem.peek8(AGON_VDP_BUFFER), 0xC3, 4)
+                let ptr: ptr<u8> = cast<ptr<u8>>(0x040121);
+                *(SCRATCH) = 0x5A;
+                *ptr = *SCRATCH + 1;
+                ti_write(*ptr);
+                agon_write(0xC3);
+                test.assert_eq_u8(*SCRATCH, 0x5A, 1);
+                test.assert_eq_u8(*ptr, 0x5B, 2);
+                test.assert_eq_u8(*TI_LCD_BUFFER, 0x5B, 3);
+                test.assert_eq_u8(*AGON_VDP_BUFFER, 0xC3, 4);
                 test.pass()
             }
         "#;
