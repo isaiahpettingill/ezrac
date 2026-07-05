@@ -107,7 +107,7 @@ fn redundant_load_key(line: &str) -> Option<&str> {
     let target = target.trim();
     if !matches!(
         target,
-        "a" | "b" | "c" | "d" | "h" | "l" | "hl" | "de" | "bc" | "ix" | "sp"
+        "a" | "b" | "c" | "d" | "e" | "h" | "l" | "hl" | "de" | "bc" | "ix" | "iy" | "sp"
     ) {
         return None;
     }
@@ -7456,12 +7456,18 @@ section .text
     ld a, 01h
     ld hl, 040000h
     ld hl, 040000h
+    ld e, 02h
+    ld e, 02h
+    ld iy, 040000h
+    ld iy, 040000h
     ld b, a
 "#,
         );
 
         assert_eq!(asm.matches("    ld a, 01h").count(), 1, "{asm}");
         assert_eq!(asm.matches("    ld hl, 040000h").count(), 1, "{asm}");
+        assert_eq!(asm.matches("    ld e, 02h").count(), 1, "{asm}");
+        assert_eq!(asm.matches("    ld iy, 040000h").count(), 1, "{asm}");
         assert!(asm.contains("    ld b, a"), "{asm}");
     }
 
