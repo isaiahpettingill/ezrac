@@ -7497,6 +7497,30 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_wide_third_argument_after_byte_second_argument() {
+        let expected = 0x10u32 + 0x12 + 0x000345;
+        let source = format!(
+            r#"
+            fn mixed(first: u8, second: u8, third: u24) -> u24 {{
+                return cast<u24>(first) + cast<u24>(second) + third
+            }}
+
+            fn main() {{
+                test.assert_eq_u24(mixed(0x10, 0x12, 0x000345), 0x{expected:06X}, 1)
+                test.pass()
+            }}
+        "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+        assert!(asm.contains("call _mixed"), "{asm}");
+    }
+
+    #[test]
     fn emits_and_runs_user_function_calls_with_explicit_casts() {
         let source = r#"
             fn low(value: u8) -> u8 {
