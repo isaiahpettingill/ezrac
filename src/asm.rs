@@ -6319,6 +6319,25 @@ impl Emitter {
         if source_type == target_type {
             return Ok(());
         }
+        if let (
+            Type::Array {
+                element: source_element,
+                len: source_len,
+            },
+            Type::Array {
+                element: target_element,
+                len: target_len,
+            },
+        ) = (&source_type, &target_type)
+        {
+            if self.symbols.array_len(source_len)? != self.symbols.array_len(target_len)? {
+                return Err(Diagnostic::new("type mismatch"));
+            }
+            return self.validate_type_assignable_to_type(source_element, target_element);
+        }
+        if matches!(source_type, Type::Array { .. }) || matches!(target_type, Type::Array { .. }) {
+            return Err(Diagnostic::new("type mismatch"));
+        }
         if type_is_bool(&source_type) || type_is_bool(&target_type) {
             return Err(Diagnostic::new("type mismatch"));
         }
@@ -11925,6 +11944,8 @@ section .text
             import lib.state
             global short_sized: [u8; state.LEN] = [4, 5, 6]
             global full_sized: [u8; lib.state.LEN] = [7, 8, 9]
+            global copied_short: [u8; state.LEN] = state.bytes
+            global copied_full: [u8; lib.state.LEN] = lib.state.bytes
 
             fn main() {
                 test.assert_eq_u8(state.bytes[1], 2, 1)
@@ -11936,6 +11957,10 @@ section .text
                 test.assert_eq_u8(state.bytes[0], 8, 4)
                 test.assert_eq_u8(short_sized[2], 6, 5)
                 test.assert_eq_u8(full_sized[2], 9, 6)
+                test.assert_eq_u8(copied_short[0], 1, 7)
+                test.assert_eq_u8(copied_short[2], 3, 8)
+                test.assert_eq_u8(copied_full[0], 1, 9)
+                test.assert_eq_u8(copied_full[2], 3, 10)
                 test.pass()
             }
             "#,
@@ -14756,6 +14781,49 @@ section .text
                 packet.pair = source_pair
                 test.assert_eq_u8(packet.pair.left, 4, 10)
                 test.assert_eq_u16(packet.pair.right, 0x0506, 11)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 16_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_copied_aggregate_global_initializers() {
+        let source = r#"
+            struct Pair {
+                left: u8
+                right: u16
+            }
+
+            struct Packet {
+                bytes: [u8; 3]
+                pair: Pair
+            }
+
+            global source_bytes: [u8; 3] = [1, 2, 3]
+            global copied_bytes: [u8; 3] = source_bytes
+            global source_pair: Pair = Pair { left: 4, right: 0x0506 }
+            global copied_pair: Pair = source_pair
+            global source_packet: Packet = Packet {
+                bytes: [7, 8, 9],
+                pair: Pair { left: 10, right: 0x0B0C }
+            }
+            global copied_packet: Packet = source_packet
+
+            fn main() {
+                test.assert_eq_u8(copied_bytes[0], 1, 1)
+                test.assert_eq_u8(copied_bytes[2], 3, 2)
+                test.assert_eq_u8(copied_pair.left, 4, 3)
+                test.assert_eq_u16(copied_pair.right, 0x0506, 4)
+                test.assert_eq_u8(copied_packet.bytes[0], 7, 5)
+                test.assert_eq_u8(copied_packet.bytes[2], 9, 6)
+                test.assert_eq_u8(copied_packet.pair.left, 10, 7)
+                test.assert_eq_u16(copied_packet.pair.right, 0x0B0C, 8)
                 test.pass()
             }
         "#;
