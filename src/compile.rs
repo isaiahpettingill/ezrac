@@ -121,13 +121,7 @@ fn resolve_program_imports(
         let Declaration::Import(import) = declaration else {
             continue;
         };
-        let import_path = resolve_import_path(&program.source_path, import);
-        let source = fs::read_to_string(&import_path).map_err(|error| {
-            Diagnostic::new(format!(
-                "failed to read import `{import}` at `{}`: {error}",
-                import_path.display()
-            ))
-        })?;
+        let (import_path, source) = read_import_source(&program.source_path, import)?;
         let imported = parse_program(&import_path, &source)?;
         let short_module = import.rsplit('.').next().unwrap_or(import);
         let include_short_aliases = short_module_counts
@@ -175,9 +169,50 @@ fn is_entry_function(declaration: &Declaration) -> bool {
     matches!(declaration, Declaration::Function(function) if function.name == "main")
 }
 
-fn resolve_import_path(source_path: &Path, import: &str) -> PathBuf {
-    let base = source_path.parent().unwrap_or_else(|| Path::new("."));
-    base.join(import.replace('.', "/")).with_extension("ezra")
+fn read_import_source(source_path: &Path, import: &str) -> Result<(PathBuf, String), Diagnostic> {
+    let candidates = import_file_candidates(source_path, import);
+    let missing_path = candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(import.replace('.', "/")).with_extension("ezra"));
+    for candidate in candidates {
+        match fs::read_to_string(&candidate) {
+            Ok(source) => return Ok((candidate, source)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Diagnostic::new(format!(
+                    "failed to read import `{import}` at `{}`: {error}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    Err(Diagnostic::new(format!(
+        "failed to read import `{import}` at `{}`: not found",
+        missing_path.display()
+    )))
+}
+
+fn import_file_candidates(source_path: &Path, import: &str) -> Vec<PathBuf> {
+    let module_path = PathBuf::from(import.replace('.', "/")).with_extension("ezra");
+    let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut candidates = Vec::new();
+    push_unique_path(&mut candidates, source_dir.join(&module_path));
+
+    for ancestor in source_dir.ancestors().skip(1) {
+        push_unique_path(&mut candidates, ancestor.join(&module_path));
+    }
+
+    if let Ok(project_root) = std::env::current_dir() {
+        push_unique_path(&mut candidates, project_root.join(module_path));
+    }
+    candidates
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|candidate| candidate == &path) {
+        paths.push(path);
+    }
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -306,18 +341,11 @@ fn collect_private_imports(
     private_imports: &mut HashMap<String, String>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<(), Diagnostic> {
-    let import_path = resolve_import_path(source_path, import);
+    let (import_path, source) = read_import_source(source_path, import)?;
     let normalized = normalize_path(&import_path);
     if !seen.insert(normalized) {
         return Ok(());
     }
-
-    let source = fs::read_to_string(&import_path).map_err(|error| {
-        Diagnostic::new(format!(
-            "failed to read import `{import}` at `{}`: {error}",
-            import_path.display()
-        ))
-    })?;
     let imported = parse_program(&import_path, &source)?;
     let short_module = import.rsplit('.').next().unwrap_or(import);
     for declaration in &imported.declarations {
@@ -781,6 +809,39 @@ mod tests {
         }));
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "lib.math.add_one")
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_imports_from_project_root_ancestor() {
+        let root = temp_root("project_root_imports");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("sdk")).unwrap();
+        let main_path = root.join("src/game.ezra");
+        std::fs::write(
+            root.join("sdk/input.ezra"),
+            "pub const VALUE: u8 = 0x2A\npub fn read() -> u8 { return VALUE }\n",
+        )
+        .unwrap();
+        let source = "import sdk.input\nfn main() { let x: u8 = input.read(); test.pass() }\n";
+        std::fs::write(&main_path, source).unwrap();
+
+        let options = CompileOptions {
+            source: main_path.clone(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        };
+        let report = check_source(source, &options).unwrap();
+        let program = load_program(&main_path).unwrap();
+
+        assert_eq!(report.imports, 1);
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Const(decl) if decl.name == "input.VALUE")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "input.read")
         }));
 
         let _ = std::fs::remove_dir_all(root);

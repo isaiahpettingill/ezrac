@@ -444,6 +444,7 @@ Rules:
 
 ```text
 - one module per file
+- import paths are resolved relative to the importing source file first, then project-root candidates
 - declarations are private by default
 - public declarations use `pub`
 - cyclic imports are not allowed
