@@ -1,10 +1,7 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use ezra::{
-    asm::{
-        AssemblyOptions, emit_ez80_assembly, emit_ez80_assembly_with_debug_comments,
-        emit_ez80_assembly_with_options,
-    },
+    asm::{AssemblyOptions, emit_ez80_assembly, emit_ez80_assembly_with_options},
     cart::{CartridgeHeader, build_cartridge_with_layout_code_and_symbols},
     compile::{CompileOptions, check_source, load_program},
     layout::{Layout, parse_layout},
@@ -181,12 +178,31 @@ fn test_source(path: &str) -> Result<(), String> {
 }
 
 fn emit_asm(options: &CommandOptions) -> Result<(), String> {
-    let source_path = PathBuf::from(&options.path);
-    let program = load_program(&source_path).map_err(|error| error.to_string())?;
-    let assembly = emit_ez80_assembly_with_debug_comments(&program, options.debug_comments)
-        .map_err(|error| error.to_string())?;
+    let assembly = emit_assembly_with_command_options(options)?;
     print!("{assembly}");
     Ok(())
+}
+
+fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String, String> {
+    let source_path = PathBuf::from(&options.path);
+    let program = load_program(&source_path).map_err(|error| error.to_string())?;
+    let layout = load_layout(options.layout_path.as_deref())?;
+    if let Err(errors) = layout.validate() {
+        let message = errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("layout is invalid:\n{message}"));
+    }
+    emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            debug_comments: options.debug_comments,
+            stack_top: layout.stack,
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn check(path: &str) -> Result<(), String> {
@@ -255,7 +271,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] <file.ezra>\n                                       emit readable eZ80 assembly\n  test <file.ezra>                     emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check <file.ezra>                    parse and validate a source file\n  build [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test <file.ezra>                     emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -389,6 +405,40 @@ mod tests {
         let layout_offset = usize::try_from(layout_table - 0x020000).unwrap();
         assert!(cart[layout_offset..].starts_with(b"layout custom\n"));
         assert_eq!(&cart[64..68], &[0x31, 0x00, 0xFF, 0xEF]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn emit_asm_can_use_custom_layout_file() {
+        let root = temp_root("custom_layout_emit");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        let layout_path = root.join("game.ezralayout");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout custom {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xEFFE00;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    section .text -> code align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let asm = emit_assembly_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+
+        assert!(asm.contains("    ld sp, EFFE00h"), "{asm}");
 
         let _ = std::fs::remove_dir_all(root);
     }
