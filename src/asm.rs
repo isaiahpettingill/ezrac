@@ -12315,7 +12315,7 @@ section .text
                 let sx: u16 = cast<u16>(math.subpx_to_int(player_x))
                 let sy: u16 = cast<u16>(math.subpx_to_int(player_y))
                 let offset: u24 = cast<u24>(sy) * 32 + cast<u24>(sx)
-                let color: u8 = *(player_sprite.ptr)
+                let color: u8 = *player_sprite.ptr
                 video.poke(offset, color)
             }
 

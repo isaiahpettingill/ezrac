@@ -457,6 +457,7 @@ fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {
 fn build_deref_operand(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
     match pair.as_rule() {
         Rule::ident => Ok(Expr::Ident(pair.as_str().to_owned())),
+        Rule::deref_access_operand => Ok(Expr::Access(build_access_path(pair)?)),
         _ => build_expr(pair),
     }
 }
@@ -1025,13 +1026,16 @@ mod tests {
         EzraParser::parse(Rule::assign_stmt, "*p += 7").unwrap();
         EzraParser::parse(Rule::assign_stmt, "*(p + 1) ^= 7").unwrap();
         EzraParser::parse(Rule::assign_stmt, "*(SCRATCH) = 7").unwrap();
+        EzraParser::parse(Rule::assign_stmt, "*module.PTR = 7").unwrap();
+        EzraParser::parse(Rule::assign_stmt, "*pointers[0] = 7").unwrap();
         EzraParser::parse(Rule::assign_stmt, "*(byte_ptr) = [4, 5, 6]").unwrap();
         EzraParser::parse(Rule::stmt, "*p += 7").unwrap();
+        EzraParser::parse(Rule::stmt, "*module.PTR += 7").unwrap();
         EzraParser::parse(Rule::stmt, "*(byte_ptr) = [4, 5, 6]").unwrap();
         assert!(EzraParser::parse(Rule::expr_stmt, "*p = 7").is_err());
         let program = parse_program(
             Path::new("game.ezra"),
-            "global bytes: [u8; 2] = [0, 0]\nfn main() { let p: ptr<u8> = &bytes[0]; *p = 7; let x: u8 = *(p + 1) }",
+            "global bytes: [u8; 2] = [0, 0]\nconst PTR: ptr<u8> = &bytes[0]\nfn main() { let p: ptr<u8> = &bytes[0]; *p = 7; let x: u8 = *(p + 1); let y: u8 = *PTR }",
         )
         .unwrap();
 
