@@ -1487,6 +1487,7 @@ impl Emitter {
 
     fn emit_expr_to_type(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
         let width = self.symbols.type_width(ty)?;
+        self.validate_expr_arithmetic_compatibility(expr)?;
         if let Ok(value) = self.symbols.eval_i64(expr) {
             let value = self.value_for_type(value, ty, width)?;
             match width {
@@ -1562,6 +1563,7 @@ impl Emitter {
                 | BinaryOp::BitAnd
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor => {
+                    self.ensure_binary_arithmetic_operands_compatible(left, right)?;
                     if *op == BinaryOp::Mul {
                         self.emit_mul_to_width(left, right, width)?;
                         return Ok(());
@@ -1581,6 +1583,7 @@ impl Emitter {
                     self.emit_load_width(temp);
                 }
                 BinaryOp::Div | BinaryOp::Mod => {
+                    self.ensure_binary_arithmetic_operands_compatible(left, right)?;
                     if self.binary_operands_are_signed(left, right)? {
                         self.emit_signed_div_mod_to_width(left, right, *op, width)?;
                     } else {
@@ -1963,6 +1966,7 @@ impl Emitter {
             return Ok(());
         }
         if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+            self.ensure_binary_arithmetic_operands_compatible(left, right)?;
             if self.binary_operands_are_signed(left, right)? {
                 self.emit_signed_div_mod_to_width(left, right, op, ValueWidth::U8)?;
             } else {
@@ -1971,10 +1975,17 @@ impl Emitter {
             return Ok(());
         }
         if op == BinaryOp::Mul {
+            self.ensure_binary_arithmetic_operands_compatible(left, right)?;
             self.emit_mul_to_width(left, right, ValueWidth::U8)?;
             return Ok(());
         }
 
+        if matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+        ) {
+            self.ensure_binary_arithmetic_operands_compatible(left, right)?;
+        }
         self.emit_expr_to_a(left)?;
         self.line("    ld b, a");
         self.emit_expr_to_a(right)?;
@@ -3082,6 +3093,80 @@ impl Emitter {
         )
     }
 
+    fn ensure_binary_arithmetic_operands_compatible(
+        &self,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        if expr_is_untyped_literal(left) || expr_is_untyped_literal(right) {
+            return Ok(());
+        }
+
+        let left_type = self.symbols.resolved_type(&self.expr_type(left)?)?;
+        let right_type = self.symbols.resolved_type(&self.expr_type(right)?)?;
+        if matches!(left_type, Type::Ptr(_)) || matches!(right_type, Type::Ptr(_)) {
+            return Ok(());
+        }
+
+        if type_is_signed(&left_type) != type_is_signed(&right_type) {
+            return Err(Diagnostic::new("signed/unsigned mix without cast"));
+        }
+        Ok(())
+    }
+
+    fn validate_expr_arithmetic_compatibility(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        match expr {
+            Expr::Binary { left, op, right } => {
+                self.validate_expr_arithmetic_compatibility(left)?;
+                self.validate_expr_arithmetic_compatibility(right)?;
+                if matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                ) {
+                    self.ensure_binary_arithmetic_operands_compatible(left, right)?;
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+                self.validate_expr_arithmetic_compatibility(expr)?;
+            }
+            Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+                self.validate_expr_arithmetic_compatibility(index)?;
+            }
+            Expr::Array(values) => {
+                for value in values {
+                    self.validate_expr_arithmetic_compatibility(value)?;
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, value) in fields {
+                    self.validate_expr_arithmetic_compatibility(value)?;
+                }
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    self.validate_expr_arithmetic_compatibility(arg)?;
+                }
+            }
+            Expr::Int(_)
+            | Expr::Bool(_)
+            | Expr::Char(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::In(_)
+            | Expr::Field { .. }
+            | Expr::AddressOf(_)
+            | Expr::AddressOfField { .. } => {}
+        }
+        Ok(())
+    }
+
     fn current_return_type(&self) -> &Type {
         self.return_type_stack
             .last()
@@ -3279,6 +3364,17 @@ fn type_display(ty: &Type) -> String {
 
 fn type_is_signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24"))
+}
+
+fn expr_is_untyped_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Char(_) | Expr::Bool(_) => true,
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => matches!(expr.as_ref(), Expr::Int(_)),
+        _ => false,
+    }
 }
 
 fn format_immediate(value: i64, width: ValueWidth) -> String {
@@ -3480,6 +3576,35 @@ mod tests {
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_signed_unsigned_arithmetic_mix_without_cast() {
+        let cases = [
+            r#"
+            fn main() {
+                let signed: i8 = 1
+                let unsigned: u8 = 2
+                let mixed: i8 = signed + unsigned
+                test.pass()
+            }
+            "#,
+            r#"
+            const SIGNED: i16 = -1
+            const UNSIGNED: u16 = 2
+            fn main() {
+                let mixed: i16 = SIGNED + UNSIGNED
+                test.pass()
+            }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "signed/unsigned mix without cast");
         }
     }
 
@@ -4212,6 +4337,30 @@ mod tests {
             fn main() {{
                 test.assert_eq_u16(neg16(), 0x{expected_i16:04X}, 1)
                 test.assert_eq_u24(neg24(), 0x{expected_i24:06X}, 2)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_signed_arithmetic_with_untyped_literals() {
+        let expected_i8 = (-3i8).wrapping_add(1) as u8;
+        let expected_i16 = (-300i16).wrapping_add(1) as u16;
+        let source = format!(
+            r#"
+            fn main() {{
+                let a: i8 = -3
+                test.assert_eq_u8(a + 1, 0x{expected_i8:02X}, 1)
+
+                let b: i16 = -300
+                test.assert_eq_u16(b + 1, 0x{expected_i16:04X}, 2)
                 test.pass()
             }}
             "#
