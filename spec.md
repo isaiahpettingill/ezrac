@@ -522,6 +522,8 @@ Unsigned division is ordinary integer division. Signed division truncates toward
 
 Division or remainder by zero evaluates to zero.
 
+Right shift is logical for unsigned integers and arithmetic/sign-extending for signed integers.
+
 ---
 
 ## 13. Literals

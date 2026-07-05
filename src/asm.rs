@@ -1979,6 +1979,7 @@ impl Emitter {
         variable: Variable,
         op: AssignOp,
         value: &Expr,
+        signed: bool,
     ) -> Result<(), Diagnostic> {
         if variable.size == 2 {
             match op {
@@ -1994,8 +1995,12 @@ impl Emitter {
                 AssignOp::BitXor => {
                     self.emit_wide_assignment_op(variable, BinaryOp::BitXor, value)?
                 }
-                AssignOp::Shl => self.emit_wide_assignment_shift(variable, BinaryOp::Shl, value)?,
-                AssignOp::Shr => self.emit_wide_assignment_shift(variable, BinaryOp::Shr, value)?,
+                AssignOp::Shl => {
+                    self.emit_wide_assignment_shift(variable, BinaryOp::Shl, value, signed)?
+                }
+                AssignOp::Shr => {
+                    self.emit_wide_assignment_shift(variable, BinaryOp::Shr, value, signed)?
+                }
             }
             return Ok(());
         }
@@ -2013,8 +2018,12 @@ impl Emitter {
                 AssignOp::BitXor => {
                     self.emit_wide_assignment_op(variable, BinaryOp::BitXor, value)?
                 }
-                AssignOp::Shl => self.emit_wide_assignment_shift(variable, BinaryOp::Shl, value)?,
-                AssignOp::Shr => self.emit_wide_assignment_shift(variable, BinaryOp::Shr, value)?,
+                AssignOp::Shl => {
+                    self.emit_wide_assignment_shift(variable, BinaryOp::Shl, value, signed)?
+                }
+                AssignOp::Shr => {
+                    self.emit_wide_assignment_shift(variable, BinaryOp::Shr, value, signed)?
+                }
             }
             return Ok(());
         }
@@ -2055,11 +2064,11 @@ impl Emitter {
             }
             AssignOp::Shl => {
                 self.emit_load_a(variable);
-                self.emit_shift_a_by_expr(BinaryOp::Shl, value)?;
+                self.emit_shift_a_by_expr(BinaryOp::Shl, value, signed)?;
             }
             AssignOp::Shr => {
                 self.emit_load_a(variable);
-                self.emit_shift_a_by_expr(BinaryOp::Shr, value)?;
+                self.emit_shift_a_by_expr(BinaryOp::Shr, value, signed)?;
             }
         }
         Ok(())
@@ -2074,12 +2083,17 @@ impl Emitter {
         match target {
             Place::Ident(name) => {
                 let variable = self.variable(name)?;
+                let signed = self
+                    .variable_type(name)
+                    .map(|ty| self.type_is_signed(ty))
+                    .transpose()?
+                    .unwrap_or(false);
                 if op == AssignOp::Set {
                     if let Some(ty) = self.variable_type(name) {
                         self.validate_expr_assignable_to_type(value, ty)?;
                     }
                 }
-                self.emit_assignment_value(variable, op, value)?;
+                self.emit_assignment_value(variable, op, value, signed)?;
                 self.emit_store_width(variable);
             }
             Place::Index { name, index } => {
@@ -2094,7 +2108,8 @@ impl Emitter {
                     return Ok(());
                 }
                 variable.width()?;
-                self.emit_assignment_value(variable, op, value)?;
+                let signed = self.type_is_signed(&self.field_type(base, field)?)?;
+                self.emit_assignment_value(variable, op, value, signed)?;
                 self.emit_store_width(variable);
             }
             Place::Access(path) => {
@@ -2254,11 +2269,12 @@ impl Emitter {
         variable: Variable,
         op: BinaryOp,
         value: &Expr,
+        signed: bool,
     ) -> Result<(), Diagnostic> {
         let temp = self.alloc_var(variable.width()?.bytes());
         self.emit_load_width(variable);
         self.emit_store_width(temp);
-        self.emit_shift_memory_by_expr(temp, op, value)?;
+        self.emit_shift_memory_by_expr(temp, op, value, signed)?;
         self.emit_load_width(temp);
         Ok(())
     }
@@ -2873,9 +2889,10 @@ impl Emitter {
                 }
                 BinaryOp::Shl | BinaryOp::Shr => {
                     let temp = self.alloc_var(width.bytes());
+                    let signed = self.expr_is_signed(left)?;
                     self.emit_expr_to_hl(left, width)?;
                     self.emit_store_width(temp);
-                    self.emit_shift_memory_by_expr(temp, *op, right)?;
+                    self.emit_shift_memory_by_expr(temp, *op, right, signed)?;
                     self.emit_load_width(temp);
                 }
                 BinaryOp::Div | BinaryOp::Mod => {
@@ -3335,7 +3352,8 @@ impl Emitter {
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
             let stored = self.alloc_var(width.bytes());
-            self.emit_assignment_value(current, op, value)?;
+            let signed = self.type_is_signed(&pointee_type)?;
+            self.emit_assignment_value(current, op, value, signed)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
             self.emit_store_var_to_pointed_width(stored);
@@ -3370,8 +3388,9 @@ impl Emitter {
             }
         }
         if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+            let signed = self.expr_is_signed(left)?;
             self.emit_expr_to_a(left)?;
-            self.emit_shift_a_by_expr(op, right)?;
+            self.emit_shift_a_by_expr(op, right, signed)?;
             return Ok(());
         }
         if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
@@ -3855,10 +3874,11 @@ impl Emitter {
         self.line(&format!("{done_label}:"));
     }
 
-    fn emit_shift_a(&mut self, op: BinaryOp, count: u8) -> Result<(), Diagnostic> {
+    fn emit_shift_a(&mut self, op: BinaryOp, count: u8, signed: bool) -> Result<(), Diagnostic> {
         for _ in 0..count {
             match op {
                 BinaryOp::Shl => self.line("    add a, a"),
+                BinaryOp::Shr if signed => self.line("    sra a"),
                 BinaryOp::Shr => self.line("    srl a"),
                 _ => unreachable!("not a shift op"),
             }
@@ -3866,15 +3886,20 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_shift_a_by_expr(&mut self, op: BinaryOp, count: &Expr) -> Result<(), Diagnostic> {
+    fn emit_shift_a_by_expr(
+        &mut self,
+        op: BinaryOp,
+        count: &Expr,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
         if let Some(count) = self.maybe_const_shift_count(count)? {
-            return self.emit_shift_a(op, count);
+            return self.emit_shift_a(op, count, signed);
         }
         let temp = self.alloc_var(ValueWidth::U8.bytes());
         self.emit_store_a(temp);
         self.emit_expr_to_a(count)?;
         self.line("    ld b, a");
-        self.emit_shift_memory_dynamic(temp, op)?;
+        self.emit_shift_memory_dynamic(temp, op, signed)?;
         self.emit_load_a(temp);
         Ok(())
     }
@@ -3884,11 +3909,12 @@ impl Emitter {
         variable: Variable,
         op: BinaryOp,
         count: u8,
+        signed: bool,
     ) -> Result<(), Diagnostic> {
         for _ in 0..count {
             match op {
                 BinaryOp::Shl => self.emit_shift_memory_left_once(variable),
-                BinaryOp::Shr => self.emit_shift_memory_right_once(variable),
+                BinaryOp::Shr => self.emit_shift_memory_right_once(variable, signed),
                 _ => unreachable!("not a shift op"),
             }
         }
@@ -3900,19 +3926,21 @@ impl Emitter {
         variable: Variable,
         op: BinaryOp,
         count: &Expr,
+        signed: bool,
     ) -> Result<(), Diagnostic> {
         if let Some(count) = self.maybe_const_shift_count(count)? {
-            return self.emit_shift_memory(variable, op, count);
+            return self.emit_shift_memory(variable, op, count, signed);
         }
         self.emit_expr_to_a(count)?;
         self.line("    ld b, a");
-        self.emit_shift_memory_dynamic(variable, op)
+        self.emit_shift_memory_dynamic(variable, op, signed)
     }
 
     fn emit_shift_memory_dynamic(
         &mut self,
         variable: Variable,
         op: BinaryOp,
+        signed: bool,
     ) -> Result<(), Diagnostic> {
         let loop_label = self.next_label("shift_loop");
         let done_label = self.next_label("shift_done");
@@ -3922,7 +3950,7 @@ impl Emitter {
         self.line(&format!("    jp z, {done_label}"));
         match op {
             BinaryOp::Shl => self.emit_shift_memory_left_once(variable),
-            BinaryOp::Shr => self.emit_shift_memory_right_once(variable),
+            BinaryOp::Shr => self.emit_shift_memory_right_once(variable, signed),
             _ => unreachable!("not a shift op"),
         }
         self.line("    dec b");
@@ -3943,12 +3971,16 @@ impl Emitter {
         }
     }
 
-    fn emit_shift_memory_right_once(&mut self, variable: Variable) {
+    fn emit_shift_memory_right_once(&mut self, variable: Variable, signed: bool) {
         for offset in (0..variable.size).rev() {
             let addr = variable.addr + offset as u32;
             self.line(&format!("    ld a, ({addr:06X}h)"));
             if offset == variable.size - 1 {
-                self.line("    srl a");
+                if signed {
+                    self.line("    sra a");
+                } else {
+                    self.line("    srl a");
+                }
             } else {
                 self.line("    rr a");
             }
@@ -4633,7 +4665,8 @@ impl Emitter {
                 return Ok(());
             }
             element.width()?;
-            self.emit_assignment_value(element, op, value)?;
+            let signed = self.type_is_signed(&ty)?;
+            self.emit_assignment_value(element, op, value, signed)?;
             self.emit_store_width(element);
             return Ok(());
         }
@@ -4650,7 +4683,8 @@ impl Emitter {
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
             let stored = self.alloc_var(element_size);
-            self.emit_assignment_value(current, op, value)?;
+            let signed = self.type_is_signed(&ty)?;
+            self.emit_assignment_value(current, op, value, signed)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
             self.emit_store_var_to_pointed_width(stored);
@@ -4682,7 +4716,8 @@ impl Emitter {
                 return Ok(());
             }
             variable.width()?;
-            self.emit_assignment_value(variable, op, value)?;
+            let signed = self.type_is_signed(&ty)?;
+            self.emit_assignment_value(variable, op, value, signed)?;
             self.emit_store_width(variable);
             return Ok(());
         }
@@ -4698,7 +4733,8 @@ impl Emitter {
             self.emit_load_hl(addr);
             self.emit_load_pointed_width_into(current);
             let stored = self.alloc_var(size);
-            self.emit_assignment_value(current, op, value)?;
+            let signed = self.type_is_signed(&ty)?;
+            self.emit_assignment_value(current, op, value, signed)?;
             self.emit_store_width(stored);
             self.emit_load_hl(addr);
             self.emit_store_var_to_pointed_width(stored);
@@ -4757,6 +4793,14 @@ impl Emitter {
         let bits = u32::from(width.bytes()) * 8;
         let mask = (1_i128 << bits) - 1;
         Ok(((value as i128) & mask) as u32)
+    }
+
+    fn type_is_signed(&self, ty: &Type) -> Result<bool, Diagnostic> {
+        Ok(type_is_signed(&self.symbols.resolved_type(ty)?))
+    }
+
+    fn expr_is_signed(&self, expr: &Expr) -> Result<bool, Diagnostic> {
+        self.type_is_signed(&self.expr_type(expr)?)
     }
 
     fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
@@ -9781,6 +9825,65 @@ mod tests {
         let run = run_assembly_test(&asm, 40_000).unwrap();
 
         assert!(asm.contains("    dec b"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_signed_right_shifts() {
+        let expected_i8_expr = ((-4i8) >> 1) as u8;
+        let expected_i8_assign = ((-5i8) >> 2) as u8;
+        let expected_i16_expr = ((-0x1234i16) >> 3) as u16;
+        let expected_i16_assign = ((-0x2345i16) >> 4) as u16;
+        let expected_i24_expr = ((-0x012345i32) >> 5) & 0x00FF_FFFF;
+        let expected_i24_assign = ((-0x023456i32) >> 6) & 0x00FF_FFFF;
+        let source = format!(
+            r#"
+            fn shr8(value: i8, count: u8) -> i8 {{
+                return value >> count
+            }}
+
+            fn shr16(value: i16, count: u8) -> i16 {{
+                return value >> count
+            }}
+
+            fn shr24(value: i24, count: u8) -> i24 {{
+                return value >> count
+            }}
+
+            fn main() {{
+                let one: u8 = 1
+                test.assert_eq_u8(shr8(-4, one), 0x{expected_i8_expr:02X}, 1)
+
+                let byte: i8 = -5
+                let two: u8 = 2
+                byte >>= two
+                test.assert_eq_u8(byte, 0x{expected_i8_assign:02X}, 2)
+
+                let three: u8 = 3
+                test.assert_eq_u16(shr16(-0x1234, three), 0x{expected_i16_expr:04X}, 3)
+
+                let word: i16 = -0x2345
+                let four: u8 = 4
+                word >>= four
+                test.assert_eq_u16(word, 0x{expected_i16_assign:04X}, 4)
+
+                let five: u8 = 5
+                test.assert_eq_u24(shr24(-0x012345, five), 0x{expected_i24_expr:06X}, 5)
+
+                let wide: i24 = -0x023456
+                let six: u8 = 6
+                wide >>= six
+                test.assert_eq_u24(wide, 0x{expected_i24_assign:06X}, 6)
+                test.pass()
+            }}
+            "#
+        );
+        let program = parse_program(Path::new("game.ezra"), &source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 40_000).unwrap();
+
+        assert!(asm.contains("    sra a"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }

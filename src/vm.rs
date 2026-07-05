@@ -209,7 +209,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if matches!(
         text,
-        "reti" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix"
+        "reti" | "sra a" | "srl a" | "rl a" | "rr a" | "push ix" | "pop ix"
     ) {
         Ok(2)
     } else if text == "sbc hl, bc" || text == "sbc hl, de" || text == "add ix, sp" {
@@ -446,6 +446,8 @@ fn emit_instruction(
         bytes.push(0xB9);
     } else if text == "srl a" {
         bytes.extend([0xCB, 0x3F]);
+    } else if text == "sra a" {
+        bytes.extend([0xCB, 0x2F]);
     } else if text == "rl a" {
         bytes.extend([0xCB, 0x17]);
     } else if text == "rr a" {
@@ -621,6 +623,13 @@ mod tests {
         let bytes = assemble_ez80_subset_at("di\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0xF3, 0xC9]);
+    }
+
+    #[test]
+    fn assembles_arithmetic_shift_right_accumulator() {
+        let bytes = assemble_ez80_subset_at("sra a\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0xCB, 0x2F, 0xC9]);
     }
 
     #[test]
