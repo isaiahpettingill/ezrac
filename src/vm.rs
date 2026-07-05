@@ -314,6 +314,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ei"
             | "or a"
             | "ex de, hl"
+            | "exx"
             | "push af"
             | "push bc"
             | "push de"
@@ -629,6 +630,8 @@ fn emit_instruction(
         bytes.push(0xB7);
     } else if text == "ex de, hl" {
         bytes.push(0xEB);
+    } else if text == "exx" {
+        bytes.push(0xD9);
     } else if text == "push af" {
         bytes.push(0xF5);
     } else if text == "push bc" {
@@ -1396,6 +1399,13 @@ mod tests {
         let bytes = assemble_ez80_subset_at("nop\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0x00, 0xC9]);
+    }
+
+    #[test]
+    fn assembles_register_exchange_instructions() {
+        let bytes = assemble_ez80_subset_at("ex de, hl\nexx\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0xEB, 0xD9]);
     }
 
     #[test]
