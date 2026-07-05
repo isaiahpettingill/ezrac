@@ -4748,12 +4748,7 @@ impl Emitter {
             {
                 Ok(Type::Named("u8".to_owned()))
             }
-            Expr::Call { path, .. } => self
-                .symbols
-                .functions
-                .get(&path_text(path))
-                .and_then(|sig| sig.return_type.clone())
-                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path_text(path)))),
+            Expr::Call { path, .. } => self.call_return_type(path),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => {
                     self.ensure_expr_is_bool(expr, "logical operand")?;
@@ -4848,12 +4843,7 @@ impl Emitter {
             {
                 Ok(ValueWidth::U8)
             }
-            Expr::Call { path, .. } => self
-                .symbols
-                .functions
-                .get(&path_text(path))
-                .map(|sig| sig.return_width)
-                .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", path_text(path)))),
+            Expr::Call { path, .. } => self.call_return_width(path),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => Ok(ValueWidth::U8),
                 UnaryOp::Neg | UnaryOp::BitNot => self.expr_width(expr),
@@ -4866,6 +4856,33 @@ impl Emitter {
                 }
             }
         }
+    }
+
+    fn call_return_type(&self, path: &[String]) -> Result<Type, Diagnostic> {
+        let name = path_text(path);
+        let sig = self
+            .symbols
+            .functions
+            .get(&name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        sig.return_type
+            .clone()
+            .ok_or_else(|| Diagnostic::new(format!("function `{name}` does not return a value")))
+    }
+
+    fn call_return_width(&self, path: &[String]) -> Result<ValueWidth, Diagnostic> {
+        let name = path_text(path);
+        let sig = self
+            .symbols
+            .functions
+            .get(&name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if sig.return_type.is_none() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` does not return a value"
+            )));
+        }
+        Ok(sig.return_width)
     }
 
     fn maybe_const_shift_count(&self, expr: &Expr) -> Result<Option<u8>, Diagnostic> {
@@ -7744,6 +7761,37 @@ mod tests {
         let error = emit_ez80_assembly(&program).unwrap_err();
 
         assert_eq!(error.message, "void function `main` cannot return a value");
+    }
+
+    #[test]
+    fn rejects_void_function_calls_used_as_values() {
+        let cases = [
+            r#"
+                fn effect() {}
+
+                fn main() {
+                    let value: u8 = effect()
+                    test.pass()
+                }
+            "#,
+            r#"
+                fn effect() {}
+
+                fn main() {
+                    if effect() {
+                        test.pass()
+                    }
+                    test.pass()
+                }
+            "#,
+        ];
+
+        for source in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, "function `effect` does not return a value");
+        }
     }
 
     #[test]
