@@ -787,6 +787,35 @@ mod tests {
     }
 
     #[test]
+    fn test_command_reports_stack_overflow() {
+        let root = temp_root("stack_overflow_test");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                naked fn main() {
+                    asm volatile(clobber sp, clobber hl) {
+                        "ld sp, 0EF0000h"
+                        "ld hl, 012345h"
+                        "push hl"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = test_source(source_path.to_str().unwrap()).unwrap_err();
+
+        assert!(
+            error.contains("test stack overflowed into non-stack memory at SP=0xEEFFFD"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_can_use_custom_layout_file() {
         let root = temp_root("custom_layout_build");
         std::fs::create_dir_all(&root).unwrap();
