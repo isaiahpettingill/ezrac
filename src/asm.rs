@@ -2029,7 +2029,11 @@ impl Emitter {
         let left_scale = self.pointer_pointee_size(left)?;
         let right_scale = self.pointer_pointee_size(right)?;
         match (op, left_scale, right_scale) {
-            (BinaryOp::Add, Some(scale), _) => {
+            (BinaryOp::Add, Some(_), Some(_)) => Err(Diagnostic::new(
+                "pointer arithmetic requires exactly one pointer operand",
+            )),
+            (BinaryOp::Add, Some(scale), None) => {
+                self.ensure_pointer_offset_expr(right)?;
                 self.emit_expr_to_hl(left, ValueWidth::U24)?;
                 self.line("    push hl");
                 self.emit_scaled_offset_to_hl(right, scale)?;
@@ -2038,6 +2042,7 @@ impl Emitter {
                 Ok(true)
             }
             (BinaryOp::Add, None, Some(scale)) => {
+                self.ensure_pointer_offset_expr(left)?;
                 self.emit_expr_to_hl(right, ValueWidth::U24)?;
                 self.line("    push hl");
                 self.emit_scaled_offset_to_hl(left, scale)?;
@@ -2045,7 +2050,11 @@ impl Emitter {
                 self.line("    add hl, bc");
                 Ok(true)
             }
+            (BinaryOp::Sub, Some(_), Some(_)) => Err(Diagnostic::new(
+                "pointer subtraction between two pointers is not supported",
+            )),
             (BinaryOp::Sub, Some(scale), None) => {
+                self.ensure_pointer_offset_expr(right)?;
                 self.emit_expr_to_hl(left, ValueWidth::U24)?;
                 self.line("    push hl");
                 self.emit_scaled_offset_to_hl(right, scale)?;
@@ -2055,8 +2064,22 @@ impl Emitter {
                 self.line("    sbc hl, de");
                 Ok(true)
             }
+            (BinaryOp::Sub, None, Some(_)) => Err(Diagnostic::new(
+                "cannot subtract a pointer from a non-pointer value",
+            )),
             _ => Ok(false),
         }
+    }
+
+    fn ensure_pointer_offset_expr(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        let ty = self.symbols.resolved_type(&self.expr_type(expr)?)?;
+        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_)) {
+            return Err(Diagnostic::new(
+                "pointer arithmetic offset must be an integer",
+            ));
+        }
+        self.symbols.type_width(&ty)?;
+        Ok(())
     }
 
     fn emit_scaled_offset_to_hl(&mut self, expr: &Expr, scale: u8) -> Result<(), Diagnostic> {
@@ -3650,7 +3673,7 @@ impl Emitter {
         }
 
         if matches!(left_type, Type::Ptr(_)) || matches!(right_type, Type::Ptr(_)) {
-            return Ok(());
+            return Err(Diagnostic::new("type mismatch"));
         }
 
         if type_is_signed(&left_type) != type_is_signed(&right_type) {
@@ -3720,6 +3743,11 @@ impl Emitter {
                     self.ensure_expr_is_bool(right, "logical operand")?;
                 } else if is_comparison(*op) {
                     self.ensure_comparison_operands_compatible(left, *op, right)?;
+                } else if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                    && (self.pointer_pointee_size(left)?.is_some()
+                        || self.pointer_pointee_size(right)?.is_some())
+                {
+                    self.ensure_pointer_arithmetic_expr_compatible(left, *op, right)?;
                 } else if matches!(
                     op,
                     BinaryOp::Add
@@ -3772,6 +3800,31 @@ impl Emitter {
             | Expr::AddressOfField { .. } => {}
         }
         Ok(())
+    }
+
+    fn ensure_pointer_arithmetic_expr_compatible(
+        &self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let left_scale = self.pointer_pointee_size(left)?;
+        let right_scale = self.pointer_pointee_size(right)?;
+        match (op, left_scale, right_scale) {
+            (BinaryOp::Add, Some(_), Some(_)) => Err(Diagnostic::new(
+                "pointer arithmetic requires exactly one pointer operand",
+            )),
+            (BinaryOp::Add, Some(_), None) => self.ensure_pointer_offset_expr(right),
+            (BinaryOp::Add, None, Some(_)) => self.ensure_pointer_offset_expr(left),
+            (BinaryOp::Sub, Some(_), Some(_)) => Err(Diagnostic::new(
+                "pointer subtraction between two pointers is not supported",
+            )),
+            (BinaryOp::Sub, Some(_), None) => self.ensure_pointer_offset_expr(right),
+            (BinaryOp::Sub, None, Some(_)) => Err(Diagnostic::new(
+                "cannot subtract a pointer from a non-pointer value",
+            )),
+            _ => Ok(()),
+        }
     }
 
     fn ensure_comparison_operands_compatible(
@@ -4929,6 +4982,77 @@ mod tests {
                 }
                 "#,
                 "pointer-to-integer casts produce u24",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_pointer_arithmetic() {
+        let cases = [
+            (
+                r#"
+                global left: u8 = 0
+                global right: u8 = 0
+                fn main() {
+                    let lp: ptr<u8> = &left
+                    let rp: ptr<u8> = &right
+                    let bad: ptr<u8> = lp + rp
+                    test.pass()
+                }
+                "#,
+                "pointer arithmetic requires exactly one pointer operand",
+            ),
+            (
+                r#"
+                global byte: u8 = 0
+                fn main() {
+                    let p: ptr<u8> = &byte
+                    let bad: ptr<u8> = p - p
+                    test.pass()
+                }
+                "#,
+                "pointer subtraction between two pointers is not supported",
+            ),
+            (
+                r#"
+                global byte: u8 = 0
+                fn main() {
+                    let p: ptr<u8> = &byte
+                    let bad: ptr<u8> = 1 - p
+                    test.pass()
+                }
+                "#,
+                "cannot subtract a pointer from a non-pointer value",
+            ),
+            (
+                r#"
+                global byte: u8 = 0
+                fn main() {
+                    let p: ptr<u8> = &byte
+                    let flag: bool = true
+                    let bad: ptr<u8> = p + flag
+                    test.pass()
+                }
+                "#,
+                "pointer arithmetic offset must be an integer",
+            ),
+            (
+                r#"
+                global byte: u8 = 0
+                fn main() {
+                    let p: ptr<u8> = &byte
+                    let bad: u24 = p & 0x00FFFF
+                    test.pass()
+                }
+                "#,
+                "type mismatch",
             ),
         ];
 

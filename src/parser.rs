@@ -594,7 +594,7 @@ fn build_binary_chain(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
         let right = build_expr(inner.next().unwrap())?;
         expr = Expr::Binary {
             left: Box::new(expr),
-            op: build_binary_op(op.as_str()),
+            op: build_binary_op(op.as_str().trim()),
             right: Box::new(right),
         };
     }
