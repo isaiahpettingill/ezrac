@@ -15,6 +15,13 @@ use crate::{
 const VAR_BASE: u32 = 0x04_0000;
 
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
+    emit_ez80_assembly_with_debug_comments(program, false)
+}
+
+pub fn emit_ez80_assembly_with_debug_comments(
+    program: &Program,
+    debug_comments: bool,
+) -> Result<String, Diagnostic> {
     let symbols = Symbols::from_program(program)?;
     let main = program
         .main_function()
@@ -24,7 +31,7 @@ pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
     validate_no_recursive_calls(program, &symbols.functions)?;
     let emitted_functions = reachable_function_names(program, &symbols);
 
-    let mut emitter = Emitter::new(symbols);
+    let mut emitter = Emitter::new(symbols, debug_comments);
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
     emitter.emit_global_initializers(program)?;
@@ -971,10 +978,11 @@ struct Emitter {
     function_frame_stack: Vec<bool>,
     function_interrupt_stack: Vec<bool>,
     function_naked_stack: Vec<bool>,
+    debug_comments: bool,
 }
 
 impl Emitter {
-    fn new(symbols: Symbols) -> Self {
+    fn new(symbols: Symbols, debug_comments: bool) -> Self {
         Self {
             symbols,
             out: String::new(),
@@ -989,6 +997,7 @@ impl Emitter {
             function_frame_stack: Vec::new(),
             function_interrupt_stack: Vec::new(),
             function_naked_stack: Vec::new(),
+            debug_comments,
         }
     }
 
@@ -1226,6 +1235,9 @@ impl Emitter {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
+        if self.debug_comments {
+            self.line(&format!("    ; source: {}", stmt_summary(stmt)));
+        }
         match stmt {
             Stmt::Let { name, ty, value } => {
                 if self.name_in_current_function(name) {
@@ -4228,7 +4240,7 @@ fn validate_all_function_calls(
 }
 
 fn validate_all_function_bodies(program: &Program, symbols: Symbols) -> Result<(), Diagnostic> {
-    let mut emitter = Emitter::new(symbols);
+    let mut emitter = Emitter::new(symbols, false);
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;
     }
@@ -4674,6 +4686,137 @@ fn stmt_can_break_current_loop(stmt: &Stmt) -> bool {
     }
 }
 
+fn stmt_summary(stmt: &Stmt) -> String {
+    match stmt {
+        Stmt::Let { name, ty, value } => {
+            format!("let {name}: {} = {}", type_display(ty), expr_summary(value))
+        }
+        Stmt::Assign { target, op, value } => {
+            format!(
+                "{} {} {}",
+                place_summary(target),
+                assign_op_summary(*op),
+                expr_summary(value)
+            )
+        }
+        Stmt::If { condition, .. } => format!("if {}", expr_summary(condition)),
+        Stmt::While { condition, .. } => format!("while {}", expr_summary(condition)),
+        Stmt::Loop { .. } => "loop".to_owned(),
+        Stmt::Break => "break".to_owned(),
+        Stmt::Continue => "continue".to_owned(),
+        Stmt::Return(Some(expr)) => format!("return {}", expr_summary(expr)),
+        Stmt::Return(None) => "return".to_owned(),
+        Stmt::Asm { volatile, .. } => {
+            if *volatile {
+                "asm volatile".to_owned()
+            } else {
+                "asm".to_owned()
+            }
+        }
+        Stmt::Out { port, value } => format!("out {port}, {}", expr_summary(value)),
+        Stmt::Expr(expr) => expr_summary(expr),
+    }
+}
+
+fn place_summary(place: &Place) -> String {
+    match place {
+        Place::Ident(name) => name.clone(),
+        Place::Index { name, index } => format!("{name}[{}]", expr_summary(index)),
+        Place::Field { base, field } => format!("{base}.{field}"),
+        Place::Deref(expr) => format!("*{}", expr_summary(expr)),
+    }
+}
+
+fn expr_summary(expr: &Expr) -> String {
+    match expr {
+        Expr::Int(value) => value.to_string(),
+        Expr::Bool(value) => value.to_string(),
+        Expr::Char(value) => format!("'{}'", char::from(*value).escape_default()),
+        Expr::String(value) => format!("{value:?}"),
+        Expr::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(expr_summary)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Ident(name) => name.clone(),
+        Expr::In(port) => format!("in {port}"),
+        Expr::Index { name, index } => format!("{name}[{}]", expr_summary(index)),
+        Expr::Field { base, field } => format!("{base}.{field}"),
+        Expr::AddressOfIndex { name, index } => format!("&{name}[{}]", expr_summary(index)),
+        Expr::AddressOfField { base, field } => format!("&{base}.{field}"),
+        Expr::AddressOf(name) => format!("&{name}"),
+        Expr::StructInit { ty, fields } => format!(
+            "{ty} {{ {} }}",
+            fields
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", expr_summary(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Deref(expr) => format!("*{}", expr_summary(expr)),
+        Expr::Call { path, args } => format!(
+            "{}({})",
+            path_text(path),
+            args.iter().map(expr_summary).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::Unary { op, expr } => format!("{}{}", unary_op_summary(*op), expr_summary(expr)),
+        Expr::Binary { left, op, right } => format!(
+            "{} {} {}",
+            expr_summary(left),
+            binary_op_summary(*op),
+            expr_summary(right)
+        ),
+        Expr::Cast { ty, expr } => format!("cast<{}>({})", type_display(ty), expr_summary(expr)),
+    }
+}
+
+fn assign_op_summary(op: AssignOp) -> &'static str {
+    match op {
+        AssignOp::Set => "=",
+        AssignOp::Add => "+=",
+        AssignOp::Sub => "-=",
+        AssignOp::BitAnd => "&=",
+        AssignOp::BitOr => "|=",
+        AssignOp::BitXor => "^=",
+        AssignOp::Shl => "<<=",
+        AssignOp::Shr => ">>=",
+    }
+}
+
+fn unary_op_summary(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Neg => "-",
+        UnaryOp::BitNot => "~",
+        UnaryOp::Not => "!",
+    }
+}
+
+fn binary_op_summary(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitXor => "^",
+        BinaryOp::BitOr => "|",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+    }
+}
+
 fn type_display(ty: &Type) -> String {
     match ty {
         Type::Named(name) => name.clone(),
@@ -4929,6 +5072,32 @@ mod tests {
             assert!(asm.contains(section), "{asm}");
         }
         assert!(asm.starts_with("; generated by ezrac\n"), "{asm}");
+    }
+
+    #[test]
+    fn emits_source_comments_in_debug_mode() {
+        let source = r#"
+            fn main() {
+                let x: u8 = 4
+                x += 1
+                test.assert_eq_u8(x, 5, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let plain = emit_ez80_assembly(&program).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 1_000).unwrap();
+
+        assert!(!plain.contains("; source:"), "{plain}");
+        assert!(asm.contains("; source: let x: u8 = 4"), "{asm}");
+        assert!(asm.contains("; source: x += 1"), "{asm}");
+        assert!(
+            asm.contains("; source: test.assert_eq_u8(x, 5, 1)"),
+            "{asm}"
+        );
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
     }
 
     #[test]
