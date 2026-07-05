@@ -143,6 +143,7 @@ pub enum Stmt {
     Return(Option<Expr>),
     Asm {
         volatile: bool,
+        clobbers: Vec<String>,
         lines: Vec<String>,
     },
     Out {

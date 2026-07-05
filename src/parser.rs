@@ -366,10 +366,25 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
         )),
         Rule::asm_stmt => {
             let mut volatile = false;
+            let mut clobbers = Vec::new();
             let mut lines = Vec::new();
             for inner in pair.into_inner() {
                 match inner.as_rule() {
                     Rule::volatile_kw => volatile = true,
+                    Rule::asm_operands => {
+                        for operand in inner.into_inner().flat_map(|pair| pair.into_inner()) {
+                            if operand.as_rule() == Rule::asm_operand {
+                                let clobber_rule = operand.into_inner().next().unwrap();
+                                let clobber = clobber_rule.into_inner().next().unwrap().as_str();
+                                if !is_allowed_asm_clobber(clobber) {
+                                    return Err(Diagnostic::new(format!(
+                                        "unknown inline asm clobber `{clobber}`"
+                                    )));
+                                }
+                                clobbers.push(clobber.to_owned());
+                            }
+                        }
+                    }
                     Rule::asm_line => {
                         let line = inner.into_inner().next().unwrap();
                         lines.push(parse_string(line.as_str())?);
@@ -377,7 +392,11 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
                     _ => {}
                 }
             }
-            Ok(Stmt::Asm { volatile, lines })
+            Ok(Stmt::Asm {
+                volatile,
+                clobbers,
+                lines,
+            })
         }
         Rule::out_stmt => {
             let mut inner = pair.into_inner();
@@ -636,6 +655,29 @@ fn split_path(path: &str) -> Vec<String> {
     path.split('.').map(str::to_owned).collect()
 }
 
+fn is_allowed_asm_clobber(clobber: &str) -> bool {
+    matches!(
+        clobber,
+        "a" | "f"
+            | "af"
+            | "b"
+            | "c"
+            | "bc"
+            | "d"
+            | "e"
+            | "de"
+            | "h"
+            | "l"
+            | "hl"
+            | "ix"
+            | "iy"
+            | "sp"
+            | "memory"
+            | "ports"
+            | "flags"
+    )
+}
+
 fn parse_int(text: &str) -> Result<i64, Diagnostic> {
     let digits = text
         .trim_end_matches("u8")
@@ -797,9 +839,54 @@ mod tests {
             &main.body[0],
             Stmt::Asm {
                 volatile: true,
+                clobbers,
                 lines
             } if lines == &["ld a, 0x41", "out0 (0Ch), a"]
+                && clobbers.is_empty()
         ));
+    }
+
+    #[test]
+    fn parses_inline_asm_clobbers() {
+        let program = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                asm volatile(clobber a, clobber ports, clobber memory) {
+                    "ld a, 0x41"
+                    "out0 (0Ch), a"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let main = program.main_function().unwrap();
+        assert!(matches!(
+            &main.body[0],
+            Stmt::Asm {
+                volatile: true,
+                clobbers,
+                lines
+            } if clobbers == &["a", "ports", "memory"] && lines.len() == 2
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_inline_asm_clobbers() {
+        let error = parse_program(
+            Path::new("game.ezra"),
+            r#"
+            fn main() {
+                asm(clobber made_up) {
+                    "xor a"
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "unknown inline asm clobber `made_up`");
     }
 
     #[test]

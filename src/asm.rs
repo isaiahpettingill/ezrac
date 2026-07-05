@@ -849,11 +849,18 @@ impl Emitter {
                 self.emit_expr_to_width(expr, self.current_return_width())?;
                 self.line("    ret");
             }
-            Stmt::Asm { volatile, lines } => {
+            Stmt::Asm {
+                volatile,
+                clobbers,
+                lines,
+            } => {
                 if *volatile {
                     self.line("    ; asm volatile");
                 } else {
                     self.line("    ; asm");
+                }
+                if !clobbers.is_empty() {
+                    self.line(&format!("    ; clobber {}", clobbers.join(", ")));
                 }
                 for line in lines {
                     self.line(&format!("    {line}"));
@@ -3111,7 +3118,7 @@ mod tests {
     fn emits_and_runs_inline_asm_statements() {
         let source = r#"
             fn main() {
-                asm volatile {
+                asm volatile(clobber a, clobber ports) {
                     "ld a, 0x41"
                     "out0 (0Ch), a"
                 }
@@ -3123,6 +3130,7 @@ mod tests {
         let run = run_assembly_test(&asm, 4_000).unwrap();
 
         assert!(asm.contains("    ; asm volatile"));
+        assert!(asm.contains("    ; clobber a, ports"));
         assert!(asm.contains("    ld a, 0x41"));
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
