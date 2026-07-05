@@ -176,10 +176,19 @@ fn test_source(path: &str) -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     if !run.halted {
-        return Err(format!(
-            "test timed out after {} instructions",
-            run.instructions
-        ));
+        return Err(match run.failure {
+            Some(ezra::vm::TestRunFailure::Timeout) | None => {
+                format!("test timed out after {} instructions", run.instructions)
+            }
+            Some(ezra::vm::TestRunFailure::ExecutionOutsideLoadedProgram { pc }) => format!(
+                "test executed outside loaded program at 0x{pc:06X} after {} instructions",
+                run.instructions
+            ),
+            Some(ezra::vm::TestRunFailure::IllegalInstruction { pc }) => format!(
+                "test hit an illegal instruction at 0x{pc:06X} after {} instructions",
+                run.instructions
+            ),
+        });
     }
     if run.result_code != 0 {
         return Err(format!("test failed with code {}", run.result_code));

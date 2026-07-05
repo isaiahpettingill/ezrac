@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, HashMap},
+    panic::{AssertUnwindSafe, catch_unwind},
 };
 
 use ez80::{Cpu, Machine};
@@ -14,6 +15,14 @@ pub struct TestRun {
     pub result_code: u8,
     pub instructions: u64,
     pub debug_output: Vec<u8>,
+    pub failure: Option<TestRunFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TestRunFailure {
+    Timeout,
+    ExecutionOutsideLoadedProgram { pc: u32 },
+    IllegalInstruction { pc: u32 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,6 +58,8 @@ pub fn run_assembly_test_with_options(
     options: &TestRunOptions,
 ) -> Result<TestRun, Diagnostic> {
     let code = assemble_ez80_subset_at(assembly, EZRA_LOAD_ADDR.get())?;
+    let code_start = EZRA_LOAD_ADDR.get();
+    let code_end = code_start + code.len() as u32;
     let mut machine = TestMachine::new();
     for (port, value) in &options.initial_ports {
         machine.ports[*port as usize] = *value;
@@ -65,13 +76,32 @@ pub fn run_assembly_test_with_options(
     }
 
     for instruction in 0..options.instruction_budget {
-        cpu.execute_instruction(&mut machine);
+        let pc = cpu.state.pc();
+        if pc < code_start || pc >= code_end {
+            return Ok(TestRun {
+                halted: false,
+                result_code: machine.result_code,
+                instructions: instruction,
+                debug_output: machine.debug_output,
+                failure: Some(TestRunFailure::ExecutionOutsideLoadedProgram { pc }),
+            });
+        }
+        if catch_unwind(AssertUnwindSafe(|| cpu.execute_instruction(&mut machine))).is_err() {
+            return Ok(TestRun {
+                halted: false,
+                result_code: machine.result_code,
+                instructions: instruction,
+                debug_output: machine.debug_output,
+                failure: Some(TestRunFailure::IllegalInstruction { pc }),
+            });
+        }
         if machine.halted {
             return Ok(TestRun {
                 halted: true,
                 result_code: machine.result_code,
                 instructions: instruction + 1,
                 debug_output: machine.debug_output,
+                failure: None,
             });
         }
     }
@@ -81,6 +111,7 @@ pub fn run_assembly_test_with_options(
         result_code: machine.result_code,
         instructions: options.instruction_budget,
         debug_output: machine.debug_output,
+        failure: Some(TestRunFailure::Timeout),
     })
 }
 
@@ -619,6 +650,28 @@ mod tests {
 
         assert!(run.halted);
         assert_eq!(run.result_code, 0);
+        assert_eq!(run.failure, None);
+    }
+
+    #[test]
+    fn reports_timeout_when_program_does_not_halt() {
+        let run = run_assembly_test("spin:\n    jp spin\n", 3).unwrap();
+
+        assert!(!run.halted);
+        assert_eq!(run.instructions, 3);
+        assert_eq!(run.failure, Some(TestRunFailure::Timeout));
+    }
+
+    #[test]
+    fn reports_execution_outside_loaded_program() {
+        let run = run_assembly_test("jp 020000h\n", 10).unwrap();
+
+        assert!(!run.halted);
+        assert_eq!(run.instructions, 1);
+        assert_eq!(
+            run.failure,
+            Some(TestRunFailure::ExecutionOutsideLoadedProgram { pc: 0x020000 })
+        );
     }
 
     #[test]
