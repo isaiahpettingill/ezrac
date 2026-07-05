@@ -252,7 +252,7 @@ impl Symbols {
 
         for declaration in &program.declarations {
             if let Declaration::Struct(decl) = declaration {
-                let layout = symbols.build_struct_layout(&decl.fields)?;
+                let layout = symbols.build_struct_layout(&decl.fields, program)?;
                 symbols.structs.insert(decl.name.clone(), layout);
             }
         }
@@ -733,10 +733,15 @@ impl Symbols {
         }
     }
 
-    fn build_struct_layout(&self, fields: &[FieldDecl]) -> Result<StructLayout, Diagnostic> {
+    fn build_struct_layout(
+        &mut self,
+        fields: &[FieldDecl],
+        program: &Program,
+    ) -> Result<StructLayout, Diagnostic> {
         let mut offset = 0u32;
         let mut layout_fields = HashMap::new();
         for field in fields {
+            self.ensure_type_const_dependencies_evaluated(&field.ty, program)?;
             let size = self.type_size(&field.ty)?;
             if layout_fields
                 .insert(
@@ -13121,6 +13126,47 @@ section .text
         let program = parse_program(Path::new("game.ezra"), source).unwrap();
         let asm = emit_ez80_assembly(&program).unwrap();
         let run = run_assembly_test(&asm, 10_000).unwrap();
+
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn emits_and_runs_forward_constants_in_struct_array_fields() {
+        let source = r#"
+            struct Packet {
+                tag: u8
+                bytes: [u8; BYTE_LEN]
+                words: [u16; WORD_LEN + EXTRA_WORDS]
+            }
+
+            global packet: Packet = Packet {
+                tag: 0xAA,
+                bytes: [1, 2, 3, 4],
+                words: [0x0506, 0x0708, 0x090A]
+            }
+
+            const BYTE_LEN: u8 = BASE_LEN + 1
+            const BASE_LEN: u8 = 3
+            const WORD_LEN: u8 = 2
+            const EXTRA_WORDS: u8 = 1
+
+            fn main() {
+                let raw: ptr<u8> = cast<ptr<u8>>(&packet)
+                test.assert_eq_u8(mem.peek8(raw + 0), 0xAA, 1)
+                test.assert_eq_u8(mem.peek8(raw + 4), 4, 2)
+                test.assert_eq_u8(mem.peek8(raw + 5), 0x06, 3)
+                test.assert_eq_u8(mem.peek8(raw + 10), 0x09, 4)
+                packet.bytes[2] = 0x55
+                packet.words[2] = 0x1234
+                test.assert_eq_u8(packet.bytes[2], 0x55, 5)
+                test.assert_eq_u16(packet.words[2], 0x1234, 6)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 16_000).unwrap();
 
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
