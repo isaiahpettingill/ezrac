@@ -9789,6 +9789,32 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_inline_asm_mem_operands() {
+        let source = r#"
+            fn main() {
+                let source: u8 = 0x2A
+                let result: u8 = 0
+                asm volatile(in source: u8 as mem, out result: u8 as mem, clobber a, clobber flags, clobber memory) {
+                    "ld a, {source}"
+                    "add a, a"
+                    "ld {result}, a"
+                }
+                test.assert_eq_u8(result, 0x54, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    ; in source: u8 as mem"), "{asm}");
+        assert!(asm.contains("    ; out result: u8 as mem"), "{asm}");
+        assert!(asm.contains("    ; clobber a, flags, memory"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn accepts_inline_asm_operand_alias_types() {
         let source = r#"
             alias byte = u8
