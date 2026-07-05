@@ -1355,8 +1355,12 @@ impl Symbols {
             }
             Expr::Unary { expr, op } => {
                 self.validate_const_expr_arithmetic_compatibility(expr)?;
-                if *op == UnaryOp::Not {
-                    self.ensure_const_expr_is_bool(expr, "logical operand")?;
+                match op {
+                    UnaryOp::Not => self.ensure_const_expr_is_bool(expr, "logical operand")?,
+                    UnaryOp::Neg | UnaryOp::BitNot => {
+                        let ty = self.resolved_type(&self.const_expr_type(expr)?)?;
+                        validate_integer_unary_operand_type(&ty)?;
+                    }
                 }
             }
             Expr::Cast { expr, ty } => {
@@ -6304,8 +6308,12 @@ impl Emitter {
             }
             Expr::Unary { expr, op } => {
                 self.validate_expr_arithmetic_compatibility(expr)?;
-                if *op == UnaryOp::Not {
-                    self.ensure_expr_is_bool(expr, "logical operand")?;
+                match op {
+                    UnaryOp::Not => self.ensure_expr_is_bool(expr, "logical operand")?,
+                    UnaryOp::Neg | UnaryOp::BitNot => {
+                        let ty = self.symbols.resolved_type(&self.expr_type(expr)?)?;
+                        validate_integer_unary_operand_type(&ty)?;
+                    }
                 }
             }
             Expr::Cast { expr, .. } | Expr::Deref(expr) => {
@@ -7665,6 +7673,30 @@ fn signed_negative_one_bytes(width: ValueWidth) -> &'static [u8] {
 
 fn type_is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name == "bool")
+}
+
+fn validate_integer_unary_operand_type(ty: &Type) -> Result<(), Diagnostic> {
+    if type_is_bool(ty) || matches!(ty, Type::Ptr(_)) {
+        return Err(Diagnostic::new("unary operand must be an integer"));
+    }
+    match ty {
+        Type::Named(name)
+            if matches!(name.as_str(), "u8" | "i8" | "u16" | "i16" | "u24" | "i24") =>
+        {
+            Ok(())
+        }
+        Type::Named(name) if name == "ptr24" => {
+            Err(Diagnostic::new("unary operand must be an integer"))
+        }
+        Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
+            Err(Diagnostic::new(format!(
+                "type `{name}` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
+            )))
+        }
+        Type::Named(name) => Err(Diagnostic::new(format!("unknown type `{name}`"))),
+        Type::Array { .. } => Err(Diagnostic::new("unary operand must be an integer")),
+        Type::Ptr(_) => Err(Diagnostic::new("unary operand must be an integer")),
+    }
 }
 
 fn validate_shift_operand_type(ty: &Type) -> Result<(), Diagnostic> {
@@ -9598,6 +9630,65 @@ section .text
             let error = emit_ez80_assembly(&program).unwrap_err();
 
             assert_eq!(error.message, "type mismatch");
+        }
+    }
+
+    #[test]
+    fn rejects_non_integer_unary_operands() {
+        let cases = [
+            (
+                r#"
+                fn main() {
+                    let value: bool = ~true
+                    test.pass()
+                }
+                "#,
+                "unary operand must be an integer",
+            ),
+            (
+                r#"
+                fn main() {
+                    let value: bool = -false
+                    test.pass()
+                }
+                "#,
+                "unary operand must be an integer",
+            ),
+            (
+                r#"
+                const BAD: bool = ~true
+                fn main() { test.pass() }
+                "#,
+                "unary operand must be an integer",
+            ),
+            (
+                r#"
+                global byte: u8 = 1
+                fn main() {
+                    let ptr: ptr<u8> = &byte
+                    let value: u24 = ~ptr
+                    test.pass()
+                }
+                "#,
+                "unary operand must be an integer",
+            ),
+            (
+                r#"
+                fn main() {
+                    let raw: ptr24 = cast<ptr24>(0x040000)
+                    let value: ptr24 = -raw
+                    test.pass()
+                }
+                "#,
+                "unary operand must be an integer",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
         }
     }
 
