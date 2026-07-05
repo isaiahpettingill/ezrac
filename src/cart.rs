@@ -6,7 +6,8 @@ use std::{
 
 use crate::{
     ast::{
-        AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, Program, Type, UnaryOp,
+        AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, Program, StructDecl,
+        Type, UnaryOp,
     },
     diagnostic::Diagnostic,
     layout::{Layout, Region},
@@ -374,7 +375,7 @@ pub fn cartridge_map_entries(
         )?);
     }
 
-    append_layout_section_map_entries(&mut entries, layout, &assets)?;
+    append_layout_section_map_entries(&mut entries, program, layout, &assets)?;
 
     if assets.is_empty() {
         return Ok(entries);
@@ -434,17 +435,65 @@ pub fn cartridge_map_entries(
 
 fn append_layout_section_map_entries(
     entries: &mut Vec<CartridgeMapEntry>,
+    program: &Program,
     layout: &Layout,
     assets: &[AssetEntry],
 ) -> Result<(), Diagnostic> {
-    let usage = section_usage_from_assets(layout, assets)?;
+    let mut usage = section_usage_from_assets(layout, assets)?;
+    for (section, size) in section_usage_from_globals(program)? {
+        let total = usage
+            .get(&section)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(size)
+            .ok_or_else(|| {
+                Diagnostic::new(format!("section `{section}` exceeds 24-bit address space"))
+            })?;
+        usage.insert(section, total);
+    }
+
+    let mut region_cursors = Vec::<(String, u32)>::new();
     for section in &layout.sections {
         if matches!(section.name.as_str(), ".header" | ".text") {
             continue;
         }
-        let (region, _) = layout_section_placement(layout, &section.name)?;
+        let (region, section_align) = layout_section_placement(layout, &section.name)?;
         let size = usage.get(&section.name).copied().unwrap_or(0);
-        entries.push(map_entry(&section.name, region.start.get(), size)?);
+        let start = if matches!(section.name.as_str(), ".data" | ".bss") {
+            let cursor = section_cursor(&mut region_cursors, &region.name, region.start.get());
+            *cursor = align_addr(*cursor, section_align)?;
+            let start = *cursor;
+            if size > 0 {
+                let end = start.checked_add(size - 1).ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "section `{}` exceeds 24-bit address space",
+                        section.name
+                    ))
+                })?;
+                let end =
+                    Address24::try_from(end).map_err(|error| Diagnostic::new(error.to_string()))?;
+                if !region.contains_range(
+                    Address24::try_from(start)
+                        .map_err(|error| Diagnostic::new(error.to_string()))?,
+                    end,
+                ) {
+                    return Err(Diagnostic::new(format!(
+                        "section `{}` does not fit in region `{}`",
+                        section.name, region.name
+                    )));
+                }
+                *cursor = cursor.checked_add(size).ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "section `{}` exceeds 24-bit address space",
+                        section.name
+                    ))
+                })?;
+            }
+            start
+        } else {
+            region.start.get()
+        };
+        entries.push(map_entry(&section.name, start, size)?);
     }
     Ok(())
 }
@@ -487,6 +536,119 @@ fn section_usage_from_assets(
         );
     }
     Ok(usage)
+}
+
+fn section_usage_from_globals(program: &Program) -> Result<HashMap<String, u32>, Diagnostic> {
+    let aliases = collect_embed_aliases(program);
+    let constants = collect_embed_constants(program)?;
+    let structs = collect_structs(program);
+    let mut usage = HashMap::<String, u32>::new();
+
+    for declaration in &program.declarations {
+        let Declaration::Global(decl) = declaration else {
+            continue;
+        };
+        if module_alias_original_name(&decl.name).is_some() {
+            continue;
+        }
+        let size = cart_type_size(&decl.ty, &aliases, &structs, &constants)?;
+        let section = if global_initializer_is_zero(&decl.value, &constants, &aliases) {
+            ".bss"
+        } else {
+            ".data"
+        };
+        let total = usage
+            .get(section)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(size)
+            .ok_or_else(|| {
+                Diagnostic::new(format!("section `{section}` exceeds 24-bit address space"))
+            })?;
+        usage.insert(section.to_owned(), total);
+    }
+
+    Ok(usage)
+}
+
+fn collect_structs(program: &Program) -> HashMap<String, &StructDecl> {
+    let mut structs = HashMap::new();
+    for declaration in &program.declarations {
+        if let Declaration::Struct(decl) = declaration {
+            structs.insert(decl.name.clone(), decl);
+        }
+    }
+    structs
+}
+
+fn cart_type_size(
+    ty: &Type,
+    aliases: &HashMap<String, Type>,
+    structs: &HashMap<String, &StructDecl>,
+    constants: &HashMap<String, i64>,
+) -> Result<u32, Diagnostic> {
+    match resolve_embed_const_type(ty, aliases)? {
+        Type::Array { element, len } => {
+            let element_size = cart_type_size(&element, aliases, structs, constants)?;
+            let len = eval_embed_expr_with_aliases(&len, constants, aliases)?;
+            if !(0..=0xFF_FFFF).contains(&len) {
+                return Err(Diagnostic::new(format!(
+                    "array length {len} is outside u24 range"
+                )));
+            }
+            let size = element_size
+                .checked_mul(len as u32)
+                .ok_or_else(|| Diagnostic::new("array size exceeds 24-bit address space"))?;
+            if size > 0xFF_FFFF {
+                return Err(Diagnostic::new(format!(
+                    "array size {size} exceeds 24-bit address space"
+                )));
+            }
+            Ok(size)
+        }
+        Type::Named(name) if structs.contains_key(&name) => {
+            let decl = structs[&name];
+            let mut size = 0u32;
+            for field in &decl.fields {
+                size = size
+                    .checked_add(cart_type_size(&field.ty, aliases, structs, constants)?)
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "struct `{name}` size exceeds 24-bit address space"
+                        ))
+                    })?;
+            }
+            if size > 0xFF_FFFF {
+                return Err(Diagnostic::new(format!(
+                    "struct `{name}` size {size} exceeds 24-bit address space"
+                )));
+            }
+            Ok(size)
+        }
+        Type::Named(name) => match name.as_str() {
+            "bool" | "u8" | "i8" => Ok(1),
+            "u16" | "i16" => Ok(2),
+            "u24" | "i24" | "ptr24" => Ok(3),
+            _ => Err(Diagnostic::new(format!("unknown storage type `{name}`"))),
+        },
+        Type::Ptr(_) => Ok(3),
+    }
+}
+
+fn global_initializer_is_zero(
+    expr: &Expr,
+    constants: &HashMap<String, i64>,
+    aliases: &HashMap<String, Type>,
+) -> bool {
+    match expr {
+        Expr::Array(values) => values
+            .iter()
+            .all(|value| global_initializer_is_zero(value, constants, aliases)),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .all(|(_, value)| global_initializer_is_zero(value, constants, aliases)),
+        _ => eval_embed_expr_with_aliases(expr, constants, aliases).is_ok_and(|value| value == 0),
+    }
 }
 
 fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
@@ -1670,6 +1832,36 @@ mod tests {
         );
         assert!(
             map.contains(".rodata:title 0x020000 0x020002 0x000003"),
+            "{map}"
+        );
+    }
+
+    #[test]
+    fn cartridge_map_reports_global_ram_usage() {
+        let source = r#"
+            alias byte = u8
+            const COUNT: u8 = 3
+
+            struct Pair {
+                lo: u8
+                hi: u16
+            }
+
+            global score: byte = COUNT + 4
+            global coords: [u8; COUNT] = [0, 0, 0]
+            global origin: Pair = Pair { lo: 0, hi: 0 }
+
+            fn main() { test.pass() }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let map = build_cartridge_map(&program, &Layout::ezra_default(), 4, &[]).unwrap();
+
+        assert!(
+            map.contains(".data        0x040000 0x040000 0x000001"),
+            "{map}"
+        );
+        assert!(
+            map.contains(".bss         0x040010 0x040015 0x000006"),
             "{map}"
         );
     }
