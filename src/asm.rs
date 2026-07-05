@@ -279,6 +279,19 @@ impl Symbols {
                 }
                 Declaration::Mmio(decl) => {
                     symbols.type_width(&decl.ty)?;
+                    let resolved = symbols.resolved_type(&decl.ty)?;
+                    let is_pointer = match &resolved {
+                        Type::Ptr(_) => true,
+                        Type::Named(name) if name == "ptr24" => true,
+                        _ => false,
+                    };
+                    if !is_pointer {
+                        return Err(Diagnostic::new(format!(
+                            "mmio `{}` type `{}` must be a pointer type",
+                            decl.name,
+                            type_display(&decl.ty)
+                        )));
+                    }
                     let value = symbols.eval_i64(&decl.value)?;
                     if !(0..=0xFF_FFFF).contains(&value) {
                         return Err(Diagnostic::new(format!(
@@ -4247,6 +4260,34 @@ mod tests {
                 fn main() { test.pass() }
                 "#,
                 "value 2 is outside bool range",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let program = parse_program(Path::new("game.ezra"), source).unwrap();
+            let error = emit_ez80_assembly(&program).unwrap_err();
+
+            assert_eq!(error.message, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_non_pointer_mmio_types() {
+        let cases = [
+            (
+                r#"
+                volatile mmio STATUS: u8 = 0x080000
+                fn main() { test.pass() }
+                "#,
+                "mmio `STATUS` type `u8` must be a pointer type",
+            ),
+            (
+                r#"
+                alias byte = u8
+                volatile mmio STATUS: byte = 0x080000
+                fn main() { test.pass() }
+                "#,
+                "mmio `STATUS` type `byte` must be a pointer type",
             ),
         ];
 
