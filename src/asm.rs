@@ -2336,11 +2336,47 @@ impl Emitter {
     fn emit_block(&mut self, body: &[Stmt]) -> Result<(), Diagnostic> {
         for stmt in body {
             self.emit_stmt(stmt)?;
-            if self.eliminate_dead_code && stmt_terminates_current_block(stmt) {
+            if self.eliminate_dead_code && self.stmt_terminates_current_block(stmt) {
                 break;
             }
         }
         Ok(())
+    }
+
+    fn block_terminates_current_block(&self, body: &[Stmt]) -> bool {
+        body.iter()
+            .any(|stmt| self.stmt_terminates_current_block(stmt))
+    }
+
+    fn stmt_terminates_current_block(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                if let Ok(value) = self.eval_i64_with_local_constants(condition) {
+                    if value == 0 {
+                        return self.block_terminates_current_block(else_body);
+                    }
+                    return self.block_terminates_current_block(then_body);
+                }
+                !else_body.is_empty()
+                    && self.block_terminates_current_block(then_body)
+                    && self.block_terminates_current_block(else_body)
+            }
+            Stmt::Loop { body } => {
+                !block_can_break_current_loop(body) && self.block_terminates_current_block(body)
+            }
+            Stmt::While { condition, body } => {
+                self.eval_i64_with_local_constants(condition)
+                    .is_ok_and(|value| value != 0)
+                    && !block_can_break_current_loop(body)
+                    && self.block_terminates_current_block(body)
+            }
+            _ => false,
+        }
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
@@ -9337,6 +9373,43 @@ section .text
 
         assert!(!while_body.contains("    jp z, .L_endwhile"), "{asm}");
         assert!(while_body.contains("    jp .L_while"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
+    fn omits_unreachable_statements_after_const_true_while_return() {
+        let source = r#"
+            const KEEP_RUNNING: bool = true
+
+            fn done() {
+                while KEEP_RUNNING {
+                    return
+                }
+                test.fail(7)
+            }
+
+            fn choose() -> u8 {
+                if KEEP_RUNNING {
+                    return 5
+                }
+                test.fail(8)
+                return 9
+            }
+
+            fn main() {
+                done()
+                test.assert_eq_u8(choose(), 5, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(!asm.contains("; source: test.fail(7)"), "{asm}");
+        assert!(!asm.contains("; source: test.fail(8)"), "{asm}");
+        assert!(!asm.contains("; source: return 9"), "{asm}");
         assert!(run.halted, "{asm}");
         assert_eq!(run.result_code, 0, "{asm}");
     }
