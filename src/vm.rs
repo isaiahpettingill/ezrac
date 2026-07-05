@@ -726,7 +726,9 @@ fn inc_dec_reg8_opcode(inc: bool, register: u8) -> u8 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AccumulatorAluOp {
     Add,
+    Adc,
     Sub,
+    Sbc,
     And,
     Or,
     Xor,
@@ -736,6 +738,12 @@ enum AccumulatorAluOp {
 fn parse_accumulator_alu_reg8(text: &str) -> Option<(AccumulatorAluOp, u8)> {
     if let Some(src) = text.strip_prefix("add a,") {
         return Some((AccumulatorAluOp::Add, reg8_code(src.trim())?));
+    }
+    if let Some(src) = text.strip_prefix("adc a,") {
+        return Some((AccumulatorAluOp::Adc, reg8_code(src.trim())?));
+    }
+    if let Some(src) = text.strip_prefix("sbc a,") {
+        return Some((AccumulatorAluOp::Sbc, reg8_code(src.trim())?));
     }
     for (prefix, op) in [
         ("sub ", AccumulatorAluOp::Sub),
@@ -759,6 +767,20 @@ fn parse_accumulator_alu_imm(text: &str) -> Result<Option<(AccumulatorAluOp, u8)
         }
         return Ok(Some((AccumulatorAluOp::Add, parse_u8(src)?)));
     }
+    if let Some(src) = text.strip_prefix("adc a,") {
+        let src = src.trim();
+        if reg8_code(src).is_some() {
+            return Ok(None);
+        }
+        return Ok(Some((AccumulatorAluOp::Adc, parse_u8(src)?)));
+    }
+    if let Some(src) = text.strip_prefix("sbc a,") {
+        let src = src.trim();
+        if reg8_code(src).is_some() {
+            return Ok(None);
+        }
+        return Ok(Some((AccumulatorAluOp::Sbc, parse_u8(src)?)));
+    }
     for (prefix, op) in [
         ("sub ", AccumulatorAluOp::Sub),
         ("and ", AccumulatorAluOp::And),
@@ -780,7 +802,9 @@ fn parse_accumulator_alu_imm(text: &str) -> Result<Option<(AccumulatorAluOp, u8)
 fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
     let base = match op {
         AccumulatorAluOp::Add => 0x80,
+        AccumulatorAluOp::Adc => 0x88,
         AccumulatorAluOp::Sub => 0x90,
+        AccumulatorAluOp::Sbc => 0x98,
         AccumulatorAluOp::And => 0xA0,
         AccumulatorAluOp::Xor => 0xA8,
         AccumulatorAluOp::Or => 0xB0,
@@ -792,7 +816,9 @@ fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
 fn accumulator_alu_imm_opcode(op: AccumulatorAluOp) -> u8 {
     match op {
         AccumulatorAluOp::Add => 0xC6,
+        AccumulatorAluOp::Adc => 0xCE,
         AccumulatorAluOp::Sub => 0xD6,
+        AccumulatorAluOp::Sbc => 0xDE,
         AccumulatorAluOp::And => 0xE6,
         AccumulatorAluOp::Xor => 0xEE,
         AccumulatorAluOp::Or => 0xF6,
@@ -1293,8 +1319,12 @@ mod tests {
         let asm = r#"
             add a, b
             add a, e
+            adc a, c
+            adc a, h
             sub d
             sub l
+            sbc a, b
+            sbc a, e
             and h
             or e
             xor l
@@ -1305,7 +1335,9 @@ mod tests {
 
         assert_eq!(
             bytes,
-            [0x80, 0x83, 0x92, 0x95, 0xA4, 0xB3, 0xAD, 0xBA, 0xBF]
+            [
+                0x80, 0x83, 0x89, 0x8C, 0x92, 0x95, 0x98, 0x9B, 0xA4, 0xB3, 0xAD, 0xBA, 0xBF,
+            ]
         );
     }
 
@@ -1315,6 +1347,12 @@ mod tests {
             ld a, 40h
             ld e, 04h
             add a, e
+            cp 45h
+            ld e, 00h
+            adc a, e
+            cp 46h
+            ld e, 01h
+            sbc a, e
             ld d, 01h
             sub d
             ld l, 03h
@@ -1341,7 +1379,9 @@ mod tests {
     fn assembles_8_bit_accumulator_alu_immediate_forms() {
         let asm = r#"
             add a, 01h
+            adc a, 02h
             sub 02h
+            sbc a, 03h
             and 03h
             xor 04h
             or 05h
@@ -1352,7 +1392,8 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0xC6, 0x01, 0xD6, 0x02, 0xE6, 0x03, 0xEE, 0x04, 0xF6, 0x05, 0xFE, 0x06
+                0xC6, 0x01, 0xCE, 0x02, 0xD6, 0x02, 0xDE, 0x03, 0xE6, 0x03, 0xEE, 0x04, 0xF6,
+                0x05, 0xFE, 0x06,
             ]
         );
     }
@@ -1362,6 +1403,10 @@ mod tests {
         let asm = r#"
             ld a, 40h
             add a, 04h
+            cp 45h
+            adc a, 00h
+            cp 46h
+            sbc a, 01h
             sub 01h
             or 03h
             and 7Fh

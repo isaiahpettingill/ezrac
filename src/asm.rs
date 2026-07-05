@@ -9750,6 +9750,32 @@ section .text
     }
 
     #[test]
+    fn emits_and_runs_inline_asm_adc_and_sbc() {
+        let source = r#"
+            fn main() {
+                let base: u8 = 0x40
+                let result: u8 = 0
+                asm volatile(in base: u8 as reg8, out result: u8 as reg8, clobber a, clobber flags) {
+                    "cp 41h"
+                    "adc a, 01h"
+                    "cp 43h"
+                    "sbc a, 00h"
+                }
+                test.assert_eq_u8(result, 0x41, 1)
+                test.pass()
+            }
+        "#;
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly(&program).unwrap();
+        let run = run_assembly_test(&asm, 4_000).unwrap();
+
+        assert!(asm.contains("    adc a, 01h"), "{asm}");
+        assert!(asm.contains("    sbc a, 00h"), "{asm}");
+        assert!(run.halted, "{asm}");
+        assert_eq!(run.result_code, 0, "{asm}");
+    }
+
+    #[test]
     fn rejects_runtime_values_as_inline_asm_immediates() {
         let source = r#"
             fn main() {
