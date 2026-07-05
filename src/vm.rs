@@ -266,6 +266,10 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if is_ix_byte_load_or_store(text) {
         Ok(3)
+    } else if parse_ld_reg8_reg8(text).is_some() {
+        Ok(1)
+    } else if parse_ld_reg8_imm(text)?.is_some() {
+        Ok(2)
     } else if text.starts_with("ld hl, (")
         || text.starts_with("ld a, (")
         || text.starts_with("ld (")
@@ -375,6 +379,11 @@ fn emit_instruction(
     } else if let Some(value) = text.strip_prefix("ld bc,") {
         bytes.push(0x01);
         push24(bytes, parse_addr(value.trim(), labels)?);
+    } else if let Some((dst, src)) = parse_ld_reg8_reg8(text) {
+        bytes.push(0x40 + dst * 8 + src);
+    } else if let Some((dst, value)) = parse_ld_reg8_imm(text)? {
+        bytes.push(ld_reg8_imm_opcode(dst));
+        bytes.push(value);
     } else if let Some(rest) = text.strip_prefix("in0 ") {
         let port = rest
             .trim()
@@ -543,6 +552,56 @@ fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
         )));
     }
     Ok((offset as i8) as u8)
+}
+
+fn parse_ld_reg8_reg8(text: &str) -> Option<(u8, u8)> {
+    let (dst, src) = parse_ld_operands(text)?;
+    Some((reg8_code(dst)?, reg8_code(src)?))
+}
+
+fn parse_ld_reg8_imm(text: &str) -> Result<Option<(u8, u8)>, Diagnostic> {
+    let Some((dst, value)) = parse_ld_operands(text) else {
+        return Ok(None);
+    };
+    let Some(dst) = reg8_code(dst) else {
+        return Ok(None);
+    };
+    if reg8_code(value).is_some() || value.starts_with('(') {
+        return Ok(None);
+    }
+    Ok(Some((dst, parse_u8(value)?)))
+}
+
+fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("ld ")?;
+    let (dst, src) = rest.split_once(',')?;
+    Some((dst.trim(), src.trim()))
+}
+
+fn reg8_code(register: &str) -> Option<u8> {
+    match register {
+        "b" => Some(0),
+        "c" => Some(1),
+        "d" => Some(2),
+        "e" => Some(3),
+        "h" => Some(4),
+        "l" => Some(5),
+        "a" => Some(7),
+        _ => None,
+    }
+}
+
+fn ld_reg8_imm_opcode(register: u8) -> u8 {
+    match register {
+        0 => 0x06,
+        1 => 0x0E,
+        2 => 0x16,
+        3 => 0x1E,
+        4 => 0x26,
+        5 => 0x2E,
+        7 => 0x3E,
+        _ => unreachable!("invalid 8-bit register code {register}"),
+    }
 }
 
 fn is_ix_byte_load_or_store(text: &str) -> bool {
@@ -734,6 +793,51 @@ mod tests {
         let bytes = assemble_ez80_subset_at("sra a\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0xCB, 0x2F, 0xC9]);
+    }
+
+    #[test]
+    fn assembles_8_bit_register_loads() {
+        let asm = r#"
+            ld b, 12h
+            ld c, 34h
+            ld d, 56h
+            ld e, 78h
+            ld h, 9Ah
+            ld l, 0BCh
+            ld a, 0DEh
+            ld e, a
+            ld a, e
+            ld l, b
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x06, 0x12, 0x0E, 0x34, 0x16, 0x56, 0x1E, 0x78, 0x26, 0x9A, 0x2E, 0xBC, 0x3E, 0xDE,
+                0x5F, 0x7B, 0x68,
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_8_bit_register_loads_on_ez80_vm() {
+        let asm = r#"
+            ld e, 00h
+            ld a, 43h
+            ld e, a
+            ld a, e
+            out0 (0Ch), a
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"C");
     }
 
     #[test]
