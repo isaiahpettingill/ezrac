@@ -153,9 +153,11 @@ pub fn assemble_ez80_subset_with_symbols_at(
         .collect();
     let labels = labels.into_iter().collect::<HashMap<_, _>>();
     let mut bytes = Vec::new();
+    let mut pc = base_addr & 0xFF_FFFF;
     for instruction in instructions {
         if let AsmLine::Instruction(text) = instruction {
-            emit_instruction(&text, &labels, &mut bytes)?;
+            emit_instruction(&text, &labels, pc, &mut bytes)?;
+            pc = (pc + instruction_len(&text)? as u32) & 0xFF_FFFF;
         }
     }
     Ok(AssembledProgram { bytes, symbols })
@@ -188,6 +190,13 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         || text.starts_with("jp ")
     {
         Ok(4)
+    } else if text.starts_with("jr z,")
+        || text.starts_with("jr nz,")
+        || text.starts_with("jr c,")
+        || text.starts_with("jr nc,")
+        || text.starts_with("jr ")
+    {
+        Ok(2)
     } else if matches!(
         text,
         "ret"
@@ -282,6 +291,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
 fn emit_instruction(
     text: &str,
     labels: &HashMap<String, u32>,
+    pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
     if let Some(value) = text.strip_prefix("ld sp,") {
@@ -305,6 +315,21 @@ fn emit_instruction(
     } else if let Some(target) = text.strip_prefix("jp ") {
         bytes.push(0xC3);
         push24(bytes, parse_addr(target.trim(), labels)?);
+    } else if let Some(target) = text.strip_prefix("jr z,") {
+        bytes.push(0x28);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+    } else if let Some(target) = text.strip_prefix("jr nz,") {
+        bytes.push(0x20);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+    } else if let Some(target) = text.strip_prefix("jr c,") {
+        bytes.push(0x38);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+    } else if let Some(target) = text.strip_prefix("jr nc,") {
+        bytes.push(0x30);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
+    } else if let Some(target) = text.strip_prefix("jr ") {
+        bytes.push(0x18);
+        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels)?)?);
     } else if let Some(offset) = parse_ix_byte_load(text)? {
         bytes.extend([0xDD, 0x7E, offset]);
     } else if let Some(offset) = parse_ix_byte_store(text)? {
@@ -505,6 +530,17 @@ fn emit_instruction(
     Ok(())
 }
 
+fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
+    let next_pc = (pc + 2) & 0xFF_FFFF;
+    let offset = target as i64 - next_pc as i64;
+    if !(-128..=127).contains(&offset) {
+        return Err(Diagnostic::new(format!(
+            "relative jump target 0x{target:06X} is out of range from 0x{pc:06X}"
+        )));
+    }
+    Ok((offset as i8) as u8)
+}
+
 fn is_ix_byte_load_or_store(text: &str) -> bool {
     parse_ix_byte_load(text).is_ok_and(|offset| offset.is_some())
         || parse_ix_byte_store(text).is_ok_and(|offset| offset.is_some())
@@ -694,6 +730,62 @@ mod tests {
         let bytes = assemble_ez80_subset_at("sra a\nret\n", EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0xCB, 0x2F, 0xC9]);
+    }
+
+    #[test]
+    fn assembles_relative_jumps() {
+        let asm = r#"
+            jr next
+            ret
+        next:
+            jr z, done
+            jr nz, done
+            jr c, done
+            jr nc, done
+        done:
+            jr next
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x18, 0x01, 0xC9, 0x28, 0x06, 0x20, 0x04, 0x38, 0x02, 0x30, 0x00, 0x18, 0xF6,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_relative_jumps_outside_signed_byte_range() {
+        let padding = "ret\n".repeat(128);
+        let asm = format!("jr far\n{padding}far:\nret\n");
+        let error = assemble_ez80_subset_at(&asm, EZRA_LOAD_ADDR.get()).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "relative jump target 0x010082 is out of range from 0x010000"
+        );
+    }
+
+    #[test]
+    fn runs_relative_jump_loop_on_ez80_vm() {
+        let asm = r#"
+            ld a, 03h
+            ld b, a
+        loop:
+            dec b
+            jr z, done
+            jr loop
+        done:
+            xor a
+            out0 (0Dh), a
+            ld a, 01h
+            out0 (0Eh), a
+        "#;
+        let run = run_assembly_test(asm, 100).unwrap();
+
+        assert!(run.halted);
+        assert_eq!(run.result_code, 0);
     }
 
     #[test]
