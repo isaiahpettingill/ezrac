@@ -97,6 +97,18 @@ Recent VM assembler coverage includes:
    - rebuild the eZ80 emitter on top of that IR first, then use it as the reference for any m68k backend
    - add target-specific assembler or golden-output tests before claiming support
 
+7. Add a classic Z80 target mode that deliberately excludes eZ80 ADL-only features.
+
+   This should be a separate target profile, not a compatibility promise for the current eZ80 backend. Define and enforce the smaller machine model before implementation:
+
+   - 16-bit address space and 16-bit pointers only
+   - no `u24`/`i24` pointer-sized assumptions in the target ABI
+   - no eZ80 ADL register, stack, or instruction forms
+   - no default memory layout regions above `0xFFFF`
+   - target-specific cartridge/header expectations for classic Z80 carts
+   - diagnostics when code, layouts, inline asm, embeds, or SDK symbols require eZ80/ADL features
+   - golden assembly and VM/emulator tests that prove classic Z80 output is independent from the eZ80 path
+
 ## Medium-Priority Work
 
 - Add a machine-readable spec coverage table, possibly `SPEC_COVERAGE.md`.
