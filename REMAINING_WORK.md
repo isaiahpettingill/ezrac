@@ -5,6 +5,7 @@ This is a handoff checklist for continuing toward the full EZRA language goal:
 - Implement the complete language specification in `spec.md`.
 - Keep all tests passing.
 - Compile full programs to readable eZ80 ADL 24-bit assembly.
+- Build a real target-neutral IR before treating non-eZ80 backends as supported.
 - Run generated programs on the ez80-backed VM test path.
 - Preserve defined behavior: no undefined arithmetic behavior, divide/remainder by zero produce zero, and signed division truncates toward zero.
 
@@ -22,7 +23,7 @@ Recent VM assembler coverage includes:
 - accumulator rotate shorthands: `RLCA`, `RLA`, `RRCA`, `RRA`
 - `BIT`, `SET`, and `RES` register forms
 
-The working tree may contain an untracked `optimizations.md`; it was intentionally left alone.
+`optimizations.md` contains phase-2 optimization candidates and IR notes. Treat it as remaining design work to evaluate, not an accepted implementation plan.
 
 ## High-Priority Remaining Work
 
@@ -84,6 +85,18 @@ The working tree may contain an untracked `optimizations.md`; it was intentional
    - replace it with a real assembler integration,
    - or formalize the subset as only a test fixture while separately validating emitted assembly with a fuller tool.
 
+6. Introduce a target-neutral middle IR before adding additional CPU backends.
+
+   The current implementation effectively lowers the AST and semantic information directly into eZ80-specific assembly. `src/asm.rs` owns eZ80 register choices, stack layout, helper routines, calling convention details, and assembly syntax. That is workable for the current scaffold, but it is not a reusable backend boundary.
+
+   To make a target such as m68k realistic:
+
+   - lower checked EZRA into typed basic blocks with explicit locals, globals, loads, stores, calls, branches, widths, signedness, and side effects
+   - model volatile memory, port I/O, inline asm, memory clobbers, and port clobbers as explicit ordering barriers
+   - define target traits for pointer width, endian behavior, integer lowering, register classes, calling convention, stack alignment, section layout, and runtime helper ABI
+   - rebuild the eZ80 emitter on top of that IR first, then use it as the reference for any m68k backend
+   - add target-specific assembler or golden-output tests before claiming support
+
 ## Medium-Priority Work
 
 - Add a machine-readable spec coverage table, possibly `SPEC_COVERAGE.md`.
@@ -91,6 +104,7 @@ The working tree may contain an untracked `optimizations.md`; it was intentional
 - Add negative tests for duplicate or colliding declarations across module imports.
 - Add more target-SDK style tests for TI-84 Plus CE and Agon Light hardware abstractions.
 - Keep hardware support generic: SDK modules should be ordinary EZRA code over ports/MMIO, not hardcoded compiler behavior.
+- Evaluate `optimizations.md`; keep only optimizations that can be proven safe for volatile memory, port I/O, inline asm, and emulator-backed tests.
 - Review `spec.md` examples periodically so they remain valid as implementation rules tighten.
 
 ## Verification Expectations
