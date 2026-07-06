@@ -3,13 +3,15 @@
 
 ## 1. Purpose
 
-**EZRA** is a small compiled language for eZ80 ADL-mode game cartridges.
+**EZRA** is a small compiled language for explicit, low-level game and hobby-computer targets.
 
 It is designed for:
 
 ```text
-- eZ80 ADL fantasy-console games
-- 24-bit memory
+- eZ80 ADL games and cartridges
+- classic Z80 systems
+- future non-Z80 targets with explicit machine profiles
+- target-defined address spaces
 - explicit integer sizes
 - direct port I/O
 - direct memory access
@@ -27,6 +29,7 @@ Recommended tool names:
 Language:       EZRA
 Source files:   .ezra
 Compiler:       ezrac
+Project files:  Ezra.toml
 Layout files:   .ezralayout
 Runtime prefix: __ezra_*
 SDK namespace:  ezra.*
@@ -35,9 +38,35 @@ Cart magic:     "EZRA"
 
 ---
 
-## 2. CPU Model
+## 2. Target and CPU Model
 
-EZRA enhanced cartridges run in **eZ80 ADL mode**.
+EZRA code is compiled for an explicit target triple. The target defines the CPU family, pointer width, memory layout, cartridge or binary format, available SDK modules, and emulator/test-runner contract.
+
+Target triples use this shape:
+
+```text
+vendor-platform-cpu[-version]
+```
+
+Examples:
+
+```text
+agonlight-mos-ez80-2.3
+agonlight-vdp-ez80-1.0
+agonlight-console8-ez80-1.0
+ti84plusce-ez80
+customthing-whatever-ez80
+cpm-2.2-z80
+zxspectrum-z80
+sega-genesis-m68k
+appleii-m68k
+```
+
+The compiler must not hard-code platform behavior into ordinary codegen. Target-specific hardware behavior belongs in target profiles, target-owned layouts, and toolchain-provided SDK modules.
+
+### 2.1 eZ80 ADL Profile
+
+The current primary profile is **eZ80 ADL mode**.
 
 Assumptions:
 
@@ -52,7 +81,37 @@ Assumptions:
 - interrupts disabled at startup unless explicitly enabled
 ```
 
-EZRA does not target classic Z80 mode. Classic Z80 carts should use a separate target/toolchain.
+### 2.2 Classic Z80 Profile
+
+Classic Z80 targets are specified as a separate target profile from eZ80 ADL.
+
+Assumptions:
+
+```text
+- 16-bit address space
+- 16-bit PC
+- 16-bit SP
+- 16-bit HL / DE / BC / IX / IY
+- 8-bit accumulator A
+- 8-bit I/O ports where the target exposes port I/O
+- little-endian memory layout
+```
+
+Classic Z80 targets must reject eZ80 ADL-only features unless a target profile explicitly provides a compatible lowering. In particular:
+
+```text
+- pointers are 16-bit, not 24-bit
+- default layouts may not place memory above 0xFFFF
+- eZ80 ADL register, stack, and instruction forms are unavailable
+- eZ80 cartridge headers are not implied
+- `u24` and `i24` remain explicit integer types, but they are not pointer-sized types on Z80
+```
+
+Examples of future classic Z80 targets include `cpm-2.2-z80` and `zxspectrum-z80`.
+
+### 2.3 Future CPU Profiles
+
+Non-Z80 targets, such as `sega-genesis-m68k` or `appleii-m68k`, require a target-neutral middle IR and target-specific backends before they are considered supported. Their SDKs and layouts follow the same target-profile model.
 
 ---
 
@@ -71,7 +130,7 @@ EZRA eZ80 cart:
   - EZRA compiler/runtime
 ```
 
-This document defines the **EZRA eZ80 cartridge**.
+This document defines the language-level rules and the current eZ80 cartridge model. Other targets may define different output formats while preserving the same source-language model where practical.
 
 ---
 
@@ -185,7 +244,7 @@ symbol _main 0x010123
 
 ## 6. Layout Definition Format
 
-EZRA uses a simple external memory layout file.
+EZRA uses target-defined memory layouts. A target profile provides a default layout, and projects may override it with a simple external memory layout file.
 
 File extension:
 
@@ -193,7 +252,7 @@ File extension:
 .ezralayout
 ```
 
-The layout file tells the compiler/cart packer where sections, assets, RAM, stack, video memory, and audio memory live.
+The layout tells the compiler/cart packer where sections, assets, RAM, stack, video memory, audio memory, and target-specific hardware regions live. Target triples include a default layout as part of the target profile. A project may select that default layout implicitly through `Ezra.toml`, or override it with an explicit `.ezralayout` file.
 
 ### 6.1 Default layout file
 
@@ -326,9 +385,133 @@ layout big_asset_cart {
 
 Custom layouts must define the standard sections used by the compiler and cartridge packer: `.header`, `.text`, `.rodata`, `.data`, `.bss`, `.assets`, and `.scratch`. Additional target- or game-specific sections may be added when needed.
 
+### 6.5 Target-Owned Layouts
+
+Each target profile must provide a default layout appropriate for its machine model.
+
+Rules:
+
+```text
+- eZ80 ADL targets may use 24-bit addresses and regions above 0xFFFF.
+- classic Z80 targets must keep all default layout addresses within 0x0000..0xFFFF.
+- target SDK symbols such as screen, audio, ROM, RAM, and I/O bases come from the target layout or SDK modules.
+- custom project layouts may override target defaults but must still satisfy the target machine model.
+- the compiler must report diagnostics when a layout uses addresses or sections that the selected target cannot support.
+```
+
+Target-owned layouts are part of the installed EZRA toolchain target data, not hardcoded compiler behavior.
+
 ---
 
-## 7. Example Default Port Map
+## 7. Project Configuration
+
+An EZRA project may contain an `Ezra.toml` file at the project root. The project file selects the target triple, optional layout override, and optional SDK search paths.
+
+Example:
+
+```toml
+[project]
+name = "demo"
+
+[build]
+target = "agonlight-console8-ez80-1.0"
+
+[layout]
+# Omit this to use the selected target's default layout.
+file = "layouts/demo.ezralayout"
+
+[sdk]
+# Project-local or external SDK roots. These supplement, but do not replace,
+# the selected target's toolchain SDK unless disabled by target/tool options.
+paths = ["sdk", "../shared-ezra-sdk"]
+```
+
+Rules:
+
+```text
+- `build.target` selects the target triple.
+- the target triple selects the CPU profile, pointer width, default layout, output format, SDK set, and test-runner profile.
+- a layout file in `Ezra.toml` overrides the target default layout.
+- SDK search paths in `Ezra.toml` are ordinary source roots and may provide custom modules.
+- command-line `--target` and `--layout` options may override project settings for one build.
+- the compiler must report an error when no target can be resolved.
+```
+
+The compiler should resolve target configuration in this order:
+
+```text
+1. explicit CLI option
+2. nearest `Ezra.toml` walking upward from the input source
+3. toolchain default target, if configured
+```
+
+### 7.1 Initial Targets
+
+The initial target set should include:
+
+```text
+agonlight-mos-ez80-<version>
+agonlight-vdp-ez80-<version>
+agonlight-console8-ez80-<version>
+ti84plusce-ez80
+custom-unknown-ez80
+```
+
+Target intent:
+
+```text
+- `agonlight-mos-ez80-*` targets Agon Light MOS-style applications.
+- `agonlight-vdp-ez80-*` targets Agon Light graphical/VDP-oriented programs.
+- `agonlight-console8-ez80-*` targets an 8-bit console-style Agon Light profile.
+- `ti84plusce-ez80` targets TI-84 Plus CE style eZ80 programs.
+- `custom-unknown-ez80` starts with no hardware SDK beyond target-independent core/test modules and expects project SDK declarations.
+```
+
+Future targets may include classic Z80 systems such as `cpm-2.2-z80` and `zxspectrum-z80`, and non-Z80 systems such as `sega-genesis-m68k`.
+
+### 7.2 Toolchain SDK Resolution
+
+Target SDKs are distributed with the EZRA toolchain or an installed target package. They are not vendored into each project and are not hardcoded into the compiler.
+
+For `import foo.bar`, module resolution should search:
+
+```text
+1. source-relative paths
+2. project SDK paths from `Ezra.toml`
+3. selected target's toolchain SDK roots
+4. target-independent standard SDK roots
+```
+
+SDK modules must be normal EZRA modules unless they require explicit target intrinsics. Hardware-facing SDKs should expose typed constants and functions over ports, MMIO, volatile memory, inline assembly, and target layout symbols.
+
+### 7.3 Project Scaffolding CLI
+
+The CLI should support project scaffolding.
+
+Required commands:
+
+```text
+ezrac new NAME --target TARGET
+ezrac init --target TARGET
+```
+
+`new` creates a project directory. `init` creates project files in an existing directory.
+
+Scaffolding should create:
+
+```text
+Ezra.toml
+src/main.ezra
+sdk/                 optional, for custom project SDK modules
+layouts/             optional, only when using a custom layout template
+assets/              optional, for embedded files
+```
+
+Scaffolded projects must use the selected target's toolchain SDK by default without copying target SDK files into the project. A custom target or custom SDK template may create empty project-local SDK modules as examples.
+
+---
+
+## 8. Example Default Port Map
 
 All ports are 8-bit I/O ports. The following table is the fantasy-console example map used by the default scaffold and tests. It is not part of the core language. Tooling may expose these names by default for the fantasy target, but generic or target-specific builds may disable them and require SDKs or applications to declare their own names with normal `port` declarations.
 
@@ -366,7 +549,7 @@ The compiler must never delete, merge, or reorder port operations across other v
 
 ---
 
-## 8. Controller Layout
+## 9. Controller Layout
 
 Each controller uses two bytes.
 
@@ -405,7 +588,7 @@ Button bits are active-high:
 
 ---
 
-## 9. Source File Shape
+## 10. Source File Shape
 
 EZRA source files use `.ezra`.
 
@@ -434,7 +617,7 @@ fn main() {
 
 ---
 
-## 10. Modules
+## 11. Modules
 
 Modules are file-based.
 
@@ -464,7 +647,7 @@ pub fn present() {
 
 ---
 
-## 11. Primitive Types
+## 12. Primitive Types
 
 Supported primitive types:
 
@@ -505,7 +688,7 @@ Large math is done with explicit helper functions or assembly routines.
 
 ---
 
-## 12. Integer Ranges
+## 13. Integer Ranges
 
 ```text
 u8:    0 to 255
@@ -532,7 +715,7 @@ Right shift is logical for unsigned integers and arithmetic/sign-extending for s
 
 ---
 
-## 13. Literals
+## 14. Literals
 
 Integer literals:
 
@@ -585,7 +768,7 @@ ptr<u8>
 
 ---
 
-## 14. Constants
+## 15. Constants
 
 Constants are compile-time evaluated.
 
@@ -625,7 +808,7 @@ Constant evaluation uses the same arithmetic rules as runtime evaluation. Consta
 
 ---
 
-## 15. Type Aliases
+## 16. Type Aliases
 
 Type aliases are supported.
 
@@ -649,7 +832,7 @@ const SUBPX_ONE: subpx = 256
 
 ---
 
-## 16. Embedded Bytes
+## 17. Embedded Bytes
 
 EZRA has a built-in embedded byte asset feature.
 
@@ -754,7 +937,7 @@ The asset table is optional for runtime use but useful for debugging, inspection
 
 ---
 
-## 17. Variables
+## 18. Variables
 
 Global variables:
 
@@ -782,7 +965,7 @@ Rules:
 
 ---
 
-## 18. Arrays
+## 19. Arrays
 
 Static arrays are supported.
 
@@ -820,7 +1003,7 @@ let p: ptr<u8> = &palette[0]
 
 ---
 
-## 19. Structs
+## 20. Structs
 
 Structs are supported.
 
@@ -864,7 +1047,7 @@ Structs are passed by pointer. Passing structs by value is not supported.
 
 ---
 
-## 20. Pointers
+## 21. Pointers
 
 Pointer type:
 
@@ -906,7 +1089,7 @@ let first: u8 = *p
 
 ---
 
-## 21. Volatile Memory
+## 22. Volatile Memory
 
 Volatile memory declarations are supported.
 
@@ -932,7 +1115,7 @@ let px: u8 = *(FRAMEBUFFER + 0)
 
 ---
 
-## 22. Ports
+## 23. Ports
 
 Ports are named hardware resources. The examples below use the default fantasy-console port map, but applications and SDKs may declare any target-specific 8-bit I/O ports needed by the hardware.
 
@@ -968,7 +1151,7 @@ Rules:
 
 ---
 
-## 23. Operators
+## 24. Operators
 
 Arithmetic:
 
@@ -1048,7 +1231,7 @@ Runtime multiplication/division are supported by compiler-emitted runtime helper
 
 ---
 
-## 24. Casts
+## 25. Casts
 
 Cast syntax:
 
@@ -1079,7 +1262,7 @@ let raw: ptr24 = cast<ptr24>(fb)
 
 ---
 
-## 25. Control Flow
+## 26. Control Flow
 
 If:
 
@@ -1133,7 +1316,7 @@ if (pad & BTN_A) != 0 {
 
 ---
 
-## 26. Functions
+## 27. Functions
 
 Function syntax:
 
@@ -1182,7 +1365,7 @@ inline fn pressed(pad: u16, button: u16) -> bool {
 
 ---
 
-## 27. Calling Convention
+## 28. Calling Convention
 
 Internal EZRA calling convention:
 
@@ -1241,7 +1424,7 @@ Rules:
 
 ---
 
-## 28. Stack Frames
+## 29. Stack Frames
 
 IX is the frame pointer for functions that need stack locals or stack arguments.
 
@@ -1279,7 +1462,7 @@ Exact final assembly syntax depends on the selected assembler and verified emula
 
 ---
 
-## 29. Inline Assembly
+## 30. Inline Assembly
 
 Inline assembly is part of EZRA.
 
@@ -1448,7 +1631,7 @@ They use the EZRA calling convention.
 
 ---
 
-## 30. Interrupts
+## 31. Interrupts
 
 Interrupt functions are supported.
 
@@ -1484,7 +1667,7 @@ naked interrupt fn raw_irq() {
 
 ---
 
-## 31. Video Runtime
+## 32. Video Runtime
 
 Default symbols:
 
@@ -1524,7 +1707,7 @@ The compiler does not hardcode a video mode. Video mode is SDK/runtime-defined.
 
 ---
 
-## 32. Audio Runtime
+## 33. Audio Runtime
 
 Default symbols:
 
@@ -1555,7 +1738,7 @@ fn peek_audio(offset: u24) -> u8
 
 ---
 
-## 33. Standard SDK Modules
+## 34. Standard SDK Modules
 
 Example SDK modules:
 
@@ -1572,9 +1755,11 @@ ezra.test
 
 These modules are platform libraries built from normal EZRA features such as constants, `port` declarations, volatile MMIO declarations, functions, and inline assembly. They are not language intrinsics, and the compiler should not hardcode controller, video, or audio behavior into ordinary codegen. The default fantasy SDK symbols are a scaffold convenience and can be disabled for stricter target SDKs.
 
-Targets may provide different SDKs for hardware such as the TI-84 Plus CE or Agon Light. Those SDKs should follow the same rules: expose typed constants and functions over generic port/MMIO primitives, keep volatile operations visible in generated assembly, and use compiler intrinsics only for target-independent operations.
+Targets provide different SDKs for hardware such as Agon Light MOS, Agon Light VDP/graphical profiles, Agon Light console8, TI-84 Plus CE, and custom project-defined machines. Those SDKs should follow the same rules: expose typed constants and functions over generic port/MMIO primitives, keep volatile operations visible in generated assembly, and use compiler intrinsics only for target-independent operations.
 
-### 33.1 ezra.input Example
+Target SDKs are selected by the target triple and resolved from the installed toolchain target data. Projects should not vendor target SDK files by default. Custom SDK modules may still live in project SDK paths when a target is project-specific or when an application needs additional libraries.
+
+### 34.1 ezra.input Example
 
 ```text
 pub const BTN_B: u16      = 0x0001
@@ -1594,7 +1779,7 @@ pub fn read_pad(index: u8) -> u16
 pub fn pressed(pad: u16, button: u16) -> bool
 ```
 
-### 33.2 ezra.video Example
+### 34.2 ezra.video Example
 
 ```text
 pub const VRAM_BASE: ptr<u8> = 0x080000
@@ -1606,7 +1791,7 @@ pub fn peek(offset: u24) -> u8
 pub fn blit(dst: ptr<u8>, src: ptr<u8>, len: u24)
 ```
 
-### 33.3 ezra.audio Example
+### 34.3 ezra.audio Example
 
 ```text
 pub const AUDIO_BASE: ptr<u8> = 0x0C0000
@@ -1616,7 +1801,7 @@ pub fn stop()
 pub fn poke(offset: u24, value: u8)
 ```
 
-### 33.4 ezra.debug
+### 34.4 ezra.debug
 
 ```text
 pub fn char(ch: u8)
@@ -1626,7 +1811,7 @@ pub fn hex_u16(v: u16)
 pub fn hex_u24(v: u24)
 ```
 
-### 33.5 ezra.mem
+### 34.5 ezra.mem
 
 ```text
 pub fn memcpy(dst: ptr<u8>, src: ptr<u8>, len: u24)
@@ -1635,7 +1820,7 @@ pub fn peek8(addr: ptr<u8>) -> u8
 pub fn poke8(addr: ptr<u8>, value: u8)
 ```
 
-### 33.6 ezra.math
+### 34.6 ezra.math
 
 No floating point.
 
@@ -1653,7 +1838,7 @@ pub fn sin_u8(angle: u8) -> i16
 pub fn cos_u8(angle: u8) -> i16
 ```
 
-### 33.7 ezra.test
+### 34.7 ezra.test
 
 ```text
 pub fn pass()
@@ -1665,7 +1850,7 @@ pub fn assert_eq_u24(a: u24, b: u24, code: u8)
 
 ---
 
-## 34. Program Entry
+## 35. Program Entry
 
 Every cartridge must define:
 
@@ -1697,7 +1882,7 @@ fn main() {
 
 ---
 
-## 35. Example Game
+## 36. Example Game
 
 ```text
 import ezra.input
@@ -1756,7 +1941,7 @@ fn main() {
 
 ---
 
-## 36. Runtime Assembly Helpers
+## 37. Runtime Assembly Helpers
 
 The runtime must provide:
 
@@ -1791,9 +1976,9 @@ Helpers use the EZRA calling convention unless declared otherwise.
 
 ---
 
-## 37. Assembly Output Requirements
+## 38. Assembly Output Requirements
 
-The compiler emits readable eZ80 ADL assembly.
+The compiler emits readable target assembly for the selected CPU profile.
 
 Generated assembly should include source comments in debug mode.
 
@@ -1815,6 +2000,8 @@ game.map       section/symbol map
 game.ezra.cart final cartridge image
 ```
 
+The exact final artifact extension may vary by target. eZ80 cartridge targets use `.ezra.cart`; classic Z80 and future targets may define target-specific binary, tape, disk, ROM, or cartridge formats.
+
 Required sections:
 
 ```text
@@ -1829,9 +2016,9 @@ Required sections:
 
 ---
 
-## 38. Test Runner Contract
+## 39. Test Runner Contract
 
-The test runner loads assembled code at:
+The test runner follows the selected target profile. For the default eZ80 ADL profile, it loads assembled code at:
 
 ```text
 0x010000
@@ -1842,11 +2029,13 @@ Initial machine state:
 ```text
 PC = 0x010000
 SP = value from layout, default 0xF00000
-ADL mode enabled
+ADL mode enabled for eZ80 ADL targets
 interrupts disabled
 RAM initialized to 0 unless test overrides it
 ports initialized to 0 unless test overrides them
 ```
+
+Classic Z80 targets must use 16-bit PC/SP state, no ADL mode, and the selected target's default load address and layout.
 
 A test passes when the program writes:
 
@@ -1921,7 +2110,7 @@ mem 0x040123 = 0x6C
 
 ---
 
-## 39. Compiler Pipeline
+## 40. Compiler Pipeline
 
 Required compiler pipeline:
 
@@ -1933,11 +2122,42 @@ source
   -> type checking
   -> typed IR
   -> simple optimization
-  -> eZ80 ADL assembly
+  -> target assembly
   -> assembler
-  -> cartridge packer
+  -> target packer
   -> emulator test runner
 ```
+
+The current implementation may lower directly toward eZ80 ADL assembly, but the specification requires a target-neutral lowering boundary before additional CPU families are considered production targets.
+
+### 40.1 Future Retro IR
+
+EZRA should define a retro-oriented intermediate language as future work. This IR is not fully specified yet, but it should be designed for small machines rather than assuming a modern SSA-only architecture.
+
+Goals:
+
+```text
+- support Z80, eZ80, 8080, and adjacent 8-bit CPU families as priority targets
+- support m68k as a desired future target
+- model 8-bit, 16-bit, and 24-bit addressing directly
+- allow 32-bit addressing as a future extension without forcing it on smaller targets
+- keep volatile memory, port I/O, inline assembly, and target SDK calls explicit
+- preserve predictable lowering to readable target assembly
+```
+
+The IR should make target differences explicit:
+
+```text
+- pointer width and address-space width
+- register classes and accumulator constraints
+- flags/clobbers and condition-code behavior
+- stack width, return-address width, and calling convention
+- endian behavior
+- memory spaces, MMIO regions, port spaces, and banked memory if a target needs it
+- helper/runtime ABI for operations that the CPU cannot lower directly
+```
+
+This IR remains to be specced. Until it exists, non-eZ80 targets should be treated as design targets, experimental prototypes, or golden-output experiments rather than fully supported backends.
 
 Required optimizations:
 
@@ -1962,7 +2182,7 @@ The optimizer must respect:
 
 ---
 
-## 40. Diagnostics
+## 41. Diagnostics
 
 Compiler errors must include:
 
@@ -1993,11 +2213,17 @@ Required compile-time errors:
 - embedded asset exceeds target section/region
 - layout region overlap
 - section does not fit in region
+- unknown or unavailable target triple
+- missing target selection when no default target exists
+- SDK module not found in project, target, or standard SDK roots
+- layout address outside the selected target address space
+- eZ80/ADL-only feature used on a classic Z80 target
+- target SDK requires a different CPU profile than the selected target
 ```
 
 ---
 
-## 41. Grammar Sketch
+## 42. Grammar Sketch
 
 ```text
 program       = decl*
@@ -2084,7 +2310,7 @@ Function modifiers may appear in any order before `fn`, but each modifier may ap
 
 ---
 
-## 42. Design Rules
+## 43. Design Rules
 
 EZRA follows these rules:
 

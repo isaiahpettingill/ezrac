@@ -89,6 +89,8 @@ Recent VM assembler coverage includes:
 
    The current implementation effectively lowers the AST and semantic information directly into eZ80-specific assembly. `src/asm.rs` owns eZ80 register choices, stack layout, helper routines, calling convention details, and assembly syntax. That is workable for the current scaffold, but it is not a reusable backend boundary.
 
+   This IR should be retro-oriented and still needs a dedicated spec. Prioritize Z80, eZ80, 8080, and adjacent 8-bit CPU families, while keeping m68k as a desired future target. It should model 8-bit, 16-bit, and 24-bit addressing directly, leave room for 32-bit addressing as a later extension, and make volatile memory, port I/O, inline asm, memory spaces, register classes, flags, calling conventions, and runtime helper ABI explicit.
+
    To make a target such as m68k realistic:
 
    - lower checked EZRA into typed basic blocks with explicit locals, globals, loads, stores, calls, branches, widths, signedness, and side effects
