@@ -2159,6 +2159,22 @@ The IR should make target differences explicit:
 
 This IR remains to be specced. Until it exists, non-eZ80 targets should be treated as design targets, experimental prototypes, or golden-output experiments rather than fully supported backends.
 
+### 40.2 Future Conditional Compilation
+
+EZRA should define conditional compilation as future work so shared code and SDK modules can support multiple targets from one source tree. The syntax and exact evaluation rules are not yet specified.
+
+Goals:
+
+```text
+- include or exclude declarations, imports, constants, embeds, functions, and inline asm by target triple
+- allow conditions over CPU family, vendor/platform, pointer width, address-space width, target features, SDK features, and user-defined build features
+- allow target SDKs to share most code while specializing ports, MMIO addresses, layouts, startup code, and inline assembly
+- ensure disabled code is not type-checked or emitted for targets where its symbols or instructions are invalid
+- produce clear diagnostics for unknown condition keys, impossible target combinations, and missing active implementations
+```
+
+Conditional compilation must run early enough that target-incompatible imports and declarations can be excluded before name resolution and type checking. It must also preserve deterministic builds: the active target triple, target features, and user build features must be visible in build metadata and map output.
+
 Required optimizations:
 
 ```text

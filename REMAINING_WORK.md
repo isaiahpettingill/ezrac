@@ -111,6 +111,10 @@ Recent VM assembler coverage includes:
    - diagnostics when code, layouts, inline asm, embeds, or SDK symbols require eZ80/ADL features
    - golden assembly and VM/emulator tests that prove classic Z80 output is independent from the eZ80 path
 
+8. Specify and implement conditional compilation for multi-target shared code.
+
+   This should allow target SDKs and applications to share modules while selecting declarations, imports, constants, embeds, functions, layouts/startup glue, and inline asm by target triple, CPU family, pointer width, target features, SDK features, and user build features. Disabled code should be excluded before name resolution and type checking, and builds should record the active target/features for reproducibility.
+
 ## Medium-Priority Work
 
 - Add a machine-readable spec coverage table, possibly `SPEC_COVERAGE.md`.
