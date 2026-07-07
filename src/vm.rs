@@ -274,8 +274,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(len)
     } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
         Ok(2)
-    } else if parse_index_cb_operation(text)?.is_some() {
-        Ok(4)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") {
         Ok(2)
     } else if text.starts_with("xor ") {
@@ -308,8 +306,6 @@ fn emit_instruction(
             asm_meta::BranchWidth::Relative8 => bytes.push(relative_offset(pc, target)?),
             asm_meta::BranchWidth::Absolute24 => push24(bytes, target),
         }
-    } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
-        bytes.extend([index.prefix(), 0xCB, offset, opcode]);
     } else if let Some(value) = text.strip_prefix("ld h,") {
         bytes.push(0x26);
         bytes.push(parse_u8(value.trim())?);
@@ -333,112 +329,6 @@ fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
         )));
     }
     Ok((offset as i8) as u8)
-}
-
-fn parse_wrapped_indirect(text: &str) -> Option<&str> {
-    text.strip_prefix('(')?.strip_suffix(')')
-}
-
-fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
-    if let Some(register) = text.strip_prefix("rlc ") {
-        Some((0x00, register))
-    } else if let Some(register) = text.strip_prefix("rrc ") {
-        Some((0x08, register))
-    } else if let Some(register) = text.strip_prefix("rl ") {
-        Some((0x10, register))
-    } else if let Some(register) = text.strip_prefix("rr ") {
-        Some((0x18, register))
-    } else if let Some(register) = text.strip_prefix("sla ") {
-        Some((0x20, register))
-    } else if let Some(register) = text.strip_prefix("sra ") {
-        Some((0x28, register))
-    } else if let Some(register) = text.strip_prefix("srl ") {
-        Some((0x38, register))
-    } else {
-        None
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IndexRegister {
-    Ix,
-    Iy,
-}
-
-impl IndexRegister {
-    fn prefix(self) -> u8 {
-        match self {
-            IndexRegister::Ix => 0xDD,
-            IndexRegister::Iy => 0xFD,
-        }
-    }
-}
-
-fn parse_index_cb_operation(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
-    if let Some((base, operand)) = parse_cb_operation_operand(text) {
-        let Some((index, offset)) = parse_index_indirect(operand.trim())? else {
-            return Ok(None);
-        };
-        return Ok(Some((index, offset, base + 6)));
-    }
-    let (base, rest) = if let Some(rest) = text.strip_prefix("bit ") {
-        (0x40, rest)
-    } else if let Some(rest) = text.strip_prefix("res ") {
-        (0x80, rest)
-    } else if let Some(rest) = text.strip_prefix("set ") {
-        (0xC0, rest)
-    } else {
-        return Ok(None);
-    };
-    let Some((bit, operand)) = rest.split_once(',') else {
-        return Err(Diagnostic::new(format!(
-            "invalid bit operation syntax `{text}`"
-        )));
-    };
-    let bit = parse_number(bit.trim())?;
-    if bit > 7 {
-        return Err(Diagnostic::new(format!("bit index {bit} is outside 0..7")));
-    }
-    let Some((index, offset)) = parse_index_indirect(operand.trim())? else {
-        return Ok(None);
-    };
-    Ok(Some((index, offset, base + bit as u8 * 8 + 6)))
-}
-
-fn parse_index_indirect(text: &str) -> Result<Option<(IndexRegister, u8)>, Diagnostic> {
-    let Some(inner) = parse_wrapped_indirect(text) else {
-        return Ok(None);
-    };
-    if let Some(rest) = inner.strip_prefix("ix") {
-        return parse_index_offset(rest).map(|offset| Some((IndexRegister::Ix, offset)));
-    }
-    if let Some(rest) = inner.strip_prefix("iy") {
-        return parse_index_offset(rest).map(|offset| Some((IndexRegister::Iy, offset)));
-    }
-    Ok(None)
-}
-
-fn parse_index_offset(text: &str) -> Result<u8, Diagnostic> {
-    let text = text.trim();
-    let text = text.strip_suffix(')').unwrap_or(text);
-    if text.is_empty() {
-        return Ok(0);
-    }
-    let (sign, digits) = text.split_at(1);
-    let magnitude = parse_number(digits.trim())?;
-    if magnitude > 0x7F {
-        return Err(Diagnostic::new(format!(
-            "index displacement `{text}` is outside signed 8-bit range"
-        )));
-    }
-    let value = match sign {
-        "+" => magnitude as i8,
-        "-" => -(magnitude as i8),
-        _ => {
-            return Err(Diagnostic::new(format!("invalid ix displacement `{text}`")));
-        }
-    };
-    Ok(value as u8)
 }
 
 fn parse_addr(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, Diagnostic> {

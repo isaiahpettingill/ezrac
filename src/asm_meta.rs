@@ -193,6 +193,9 @@ pub fn encode_generated_instruction(
     if let Some(bytes) = parse_index_instruction(text)? {
         return Ok(Some(bytes));
     }
+    if let Some(bytes) = parse_index_cb_instruction(text)? {
+        return Ok(Some(bytes));
+    }
     if let Some(opcode) = parse_bit_operation_reg8_or_hl(text)? {
         return Ok(Some(vec![0xCB, opcode]));
     }
@@ -647,6 +650,37 @@ fn parse_index_offset(text: &str) -> Result<u8, Diagnostic> {
     Ok(value as u8)
 }
 
+fn parse_index_cb_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if let Some((base, operand)) = parse_cb_operation_operand(text) {
+        let Some((prefix, offset)) = parse_index_indirect(operand.trim())? else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![prefix, 0xCB, offset, base + 6]));
+    }
+    let (base, rest) = if let Some(rest) = text.strip_prefix("bit ") {
+        (0x40, rest)
+    } else if let Some(rest) = text.strip_prefix("res ") {
+        (0x80, rest)
+    } else if let Some(rest) = text.strip_prefix("set ") {
+        (0xC0, rest)
+    } else {
+        return Ok(None);
+    };
+    let Some((bit, operand)) = rest.split_once(',') else {
+        return Err(Diagnostic::new(format!(
+            "invalid bit operation syntax `{text}`"
+        )));
+    };
+    let bit = parse_u8(bit.trim())?;
+    if bit > 7 {
+        return Err(Diagnostic::new(format!("bit index {bit} is outside 0..7")));
+    }
+    let Some((prefix, offset)) = parse_index_indirect(operand.trim())? else {
+        return Ok(None);
+    };
+    Ok(Some(vec![prefix, 0xCB, offset, base + bit * 8 + 6]))
+}
+
 fn parse_bit_operation_reg8_or_hl(text: &str) -> Result<Option<u8>, Diagnostic> {
     for (prefix, base) in [("bit ", 0x40), ("res ", 0x80), ("set ", 0xC0)] {
         let Some(rest) = text.strip_prefix(prefix) else {
@@ -995,6 +1029,26 @@ mod tests {
         assert_eq!(
             encode_generated_instruction(CpuFamily::Ez80, "xor (iy+0)").unwrap(),
             Some(vec![0xFD, 0xAE, 0x00])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "rlc (ix+1)").unwrap(),
+            Some(vec![0xDD, 0xCB, 0x01, 0x06])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "rr (iy-2)").unwrap(),
+            Some(vec![0xFD, 0xCB, 0xFE, 0x1E])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "bit 3, (ix+4)").unwrap(),
+            Some(vec![0xDD, 0xCB, 0x04, 0x5E])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "res 2, (iy+5)").unwrap(),
+            Some(vec![0xFD, 0xCB, 0x05, 0x96])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "set 7, (ix-6)").unwrap(),
+            Some(vec![0xDD, 0xCB, 0xFA, 0xFE])
         );
     }
 
