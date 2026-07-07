@@ -227,6 +227,62 @@ impl Layout {
         }
     }
 
+    pub fn z80_default() -> Self {
+        Self {
+            name: "z80_default".to_owned(),
+            load: Address24::new(0x0000),
+            entry: Address24::new(0x0040),
+            stack: Address24::new(0xFF00),
+            regions: vec![
+                region("header", 0x0000, 0x003F, &[RegionFlags::READ]),
+                region(
+                    "code",
+                    0x0040,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x8000, 0x9FFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xA000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xC000, 0xDFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xE000,
+                    0xEFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xF000,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "header", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0040)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0040)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xFF00)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x8000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
+            ],
+        }
+    }
+
     pub fn validate(&self) -> Result<(), Vec<Diagnostic>> {
         let mut diagnostics = Vec::new();
         let mut region_names = HashSet::new();
@@ -769,6 +825,28 @@ mod tests {
     #[test]
     fn default_layout_validates() {
         assert_eq!(Layout::ezra_default().validate(), Ok(()));
+    }
+
+    #[test]
+    fn z80_default_layout_validates_and_stays_in_16_bit_address_space() {
+        let layout = Layout::z80_default();
+
+        assert_eq!(layout.validate(), Ok(()));
+        assert!(layout.load.get() <= 0xFFFF);
+        assert!(layout.entry.get() <= 0xFFFF);
+        assert!(layout.stack.get() <= 0xFFFF);
+        assert!(
+            layout
+                .regions
+                .iter()
+                .all(|region| region.end.get() <= 0xFFFF)
+        );
+        assert!(
+            layout
+                .symbols
+                .iter()
+                .all(|symbol| symbol.value.get() <= 0xFFFF)
+        );
     }
 
     #[test]

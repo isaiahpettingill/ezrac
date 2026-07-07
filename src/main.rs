@@ -14,8 +14,8 @@ use ezra::{
     parser::parse_program,
     project::load_nearest_project_config,
     target::{
-        Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
-        EZRA_VRAM_BASE, OutputFormat, parse_output_format, resolve_target_profile,
+        Address24, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
+        EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format, resolve_target_profile,
     },
     tbir::TbirProgram,
     vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
@@ -227,7 +227,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildSettings {
     sdk: SdkResolver,
-    target: String,
+    target: TargetProfile,
     output_format: OutputFormat,
     layout: Layout,
     layout_path: Option<PathBuf>,
@@ -281,7 +281,7 @@ fn resolve_build_settings(
 
     Ok(BuildSettings {
         sdk,
-        target: target.triple.value,
+        target,
         output_format,
         layout,
         layout_path,
@@ -289,6 +289,61 @@ fn resolve_build_settings(
         output_root,
         executable_name,
     })
+}
+
+fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
+    if settings.target.triple.cpu == CpuFamily::Ez80 {
+        return Ok(());
+    }
+
+    Err(format!(
+        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL; use `assemble` for hand-written assembly or an eZ80 target",
+        settings.target.triple.value,
+        settings.target.triple.cpu.as_str()
+    ))
+}
+
+fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
+    let max_addr = if settings.target.memory.address_width_bits >= 24 {
+        Address24::MAX
+    } else {
+        (1u32 << settings.target.memory.address_width_bits) - 1
+    };
+    let mut violations = Vec::new();
+    if settings.layout.load.get() > max_addr {
+        violations.push(format!("load address {}", settings.layout.load));
+    }
+    if settings.layout.entry.get() > max_addr {
+        violations.push(format!("entry address {}", settings.layout.entry));
+    }
+    if settings.layout.stack.get() > max_addr {
+        violations.push(format!("stack address {}", settings.layout.stack));
+    }
+    for region in &settings.layout.regions {
+        if region.start.get() > max_addr || region.end.get() > max_addr {
+            violations.push(format!(
+                "region `{}` range {}..{}",
+                region.name, region.start, region.end
+            ));
+        }
+    }
+    for symbol in &settings.layout.symbols {
+        if symbol.value.get() > max_addr {
+            violations.push(format!("symbol `{}` value {}", symbol.name, symbol.value));
+        }
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "layout `{}` requires addresses outside the {}-bit address space for target `{}`: {}",
+        settings.layout.name,
+        settings.target.memory.address_width_bits,
+        settings.target.triple.value,
+        violations.join(", ")
+    ))
 }
 
 fn build(options: &CommandOptions) -> Result<(), String> {
@@ -335,6 +390,8 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
+    validate_layout_for_target(&settings)?;
+    ensure_ez80_codegen_supported(&settings)?;
     let assembly = emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
@@ -406,13 +463,18 @@ fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Resul
         .unwrap_or(source_parent);
     Ok(settings
         .output_root
-        .join(&settings.target)
+        .join(&settings.target.triple.value)
         .join(relative_parent)
         .join(source_stem))
 }
 
 fn build_executable_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
-    if settings.target.starts_with("agonlight-mos-ez80") {
+    if settings
+        .target
+        .triple
+        .value
+        .starts_with("agonlight-mos-ez80")
+    {
         return build_agon_mos_executable(settings.layout.entry.get(), code);
     }
     Ok(code.to_vec())
@@ -464,6 +526,8 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
+    validate_layout_for_target(&settings)?;
+    ensure_ez80_codegen_supported(&settings)?;
     let assembly = emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
@@ -620,6 +684,8 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
     match options.stage {
         IrStage::Hir => print!("{}", hir.dump_text()),
         IrStage::Tbir => {
+            validate_layout_for_target(&settings)?;
+            ensure_ez80_codegen_supported(&settings)?;
             let tbir = TbirProgram::for_ez80(
                 &hir,
                 &program,
@@ -650,6 +716,8 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
+    validate_layout_for_target(&settings)?;
+    ensure_ez80_codegen_supported(&settings)?;
     emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
@@ -691,6 +759,8 @@ fn check_source_with_layout(
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
+    validate_layout_for_target(&settings)?;
+    ensure_ez80_codegen_supported(&settings)?;
     emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
@@ -746,6 +816,8 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 fn default_layout_for_target(target: &str) -> Layout {
     if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
+    } else if target.split('-').any(|part| part == "z80") {
+        Layout::z80_default()
     } else {
         Layout::ezra_default()
     }
@@ -1168,6 +1240,131 @@ mod tests {
     }
 
     #[test]
+    fn z80_target_uses_16_bit_default_layout() {
+        let root = temp_root("z80_default_layout");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let settings = resolve_build_settings(
+            &CommandOptions {
+                path: source_path.to_string_lossy().into_owned(),
+                debug_comments: false,
+                default_sdk_symbols: true,
+                layout_path: None,
+                target: Some("zxspectrum-z80".to_owned()),
+            },
+            &source_path,
+        )
+        .unwrap();
+
+        assert_eq!(settings.target.triple.cpu, CpuFamily::Z80);
+        assert_eq!(settings.target.memory.pointer_width_bits, 16);
+        assert_eq!(settings.target.memory.address_width_bits, 16);
+        assert_eq!(settings.layout.name, "z80_default");
+        assert!(
+            settings
+                .layout
+                .regions
+                .iter()
+                .all(|region| region.end.get() <= 0xFFFF)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn z80_source_build_reaches_clear_codegen_diagnostic_after_cfg() {
+        let root = temp_root("z80_codegen_diagnostic");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                @cfg(pointer_width(16))
+                fn main() {}
+            "#,
+        )
+        .unwrap();
+
+        let error = check(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("zxspectrum-z80".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("EZRA source codegen is only implemented for eZ80 ADL"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn z80_target_rejects_layout_addresses_above_16_bit_space() {
+        let root = temp_root("z80_layout_diagnostic");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        let layout_path = root.join("game.ezralayout");
+        std::fs::write(
+            &source_path,
+            r#"
+                @cfg(cpu("z80"))
+                fn main() {}
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout too_large {
+                    load 0x010000;
+                    entry 0x010040;
+                    stack 0x01FF00;
+
+                    region header 0x010000..0x01003F read;
+                    region code 0x010040..0x017FFF read execute;
+                    region rodata 0x018000..0x019FFF read;
+                    region ram 0x01A000..0x01BFFF read write;
+                    region assets 0x01C000..0x01DFFF read;
+                    region scratch 0x01E000..0x01EFFF read write;
+                    region stack 0x01F000..0x01FFFF read write reserved;
+
+                    section .header -> header align 1;
+                    section .text -> code align 16;
+                    section .rodata -> rodata align 16;
+                    section .data -> ram align 16;
+                    section .bss -> ram align 16;
+                    section .assets -> assets align 256;
+                    section .scratch -> scratch align 16;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = check(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: Some("zxspectrum-z80".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("requires addresses outside the 16-bit address space"),
+            "{error}"
+        );
+        assert!(error.contains("load address 0x010000"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn parses_test_port_metadata() {
         let metadata = parse_test_metadata(
             r#"
@@ -1529,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_reject_non_ez80_targets_for_now() {
+    fn commands_reject_non_ez80_source_codegen_for_now() {
         let root = temp_root("unsupported_target");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("game.ezra");
@@ -1545,7 +1742,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            error.contains("only eZ80 codegen is implemented"),
+            error.contains("EZRA source codegen is only implemented for eZ80 ADL"),
             "{error}"
         );
 

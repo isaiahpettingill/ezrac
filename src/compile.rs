@@ -12,7 +12,7 @@ use crate::{
     },
     diagnostic::{Diagnostic, SourceLocation},
     parser::parse_program,
-    target::{DEFAULT_TARGET_TRIPLE, parse_target_triple},
+    target::{DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -260,6 +260,9 @@ impl CfgContext {
             .filter(|part| *part != cpu)
             .map(str::to_owned)
             .collect();
+        let memory = memory_model_for_cpu(triple.cpu).ok_or_else(|| {
+            Diagnostic::new(format!("no target profile is implemented for CPU `{cpu}`"))
+        })?;
         Ok(Self {
             target: target.to_owned(),
             cpu,
@@ -267,8 +270,8 @@ impl CfgContext {
             vendor,
             os,
             features,
-            pointer_width: 24,
-            address_width: 24,
+            pointer_width: memory.pointer_width_bits,
+            address_width: memory.address_width_bits,
             debug: cfg!(debug_assertions),
         })
     }

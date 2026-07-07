@@ -45,8 +45,15 @@ pub struct TargetTriple {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetProfile {
     pub triple: TargetTriple,
+    pub memory: TargetMemoryModel,
     pub default_sdk_symbols: bool,
     pub output_format: OutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TargetMemoryModel {
+    pub pointer_width_bits: u16,
+    pub address_width_bits: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,18 +73,33 @@ pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
 
 pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, String> {
     let triple = parse_target_triple(target.unwrap_or(DEFAULT_TARGET_TRIPLE))?;
-    if triple.cpu != CpuFamily::Ez80 {
+    let Some(memory) = memory_model_for_cpu(triple.cpu) else {
         return Err(format!(
-            "target `{}` uses CPU `{}`, but only eZ80 codegen is implemented",
+            "target `{}` uses CPU `{}`, but no target profile is implemented",
             triple.value,
             triple.cpu.as_str()
         ));
-    }
+    };
     Ok(TargetProfile {
         triple,
+        memory,
         default_sdk_symbols: true,
         output_format: OutputFormat::RawBin,
     })
+}
+
+pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
+    match cpu {
+        CpuFamily::Ez80 => Some(TargetMemoryModel {
+            pointer_width_bits: 24,
+            address_width_bits: 24,
+        }),
+        CpuFamily::Z80 => Some(TargetMemoryModel {
+            pointer_width_bits: 16,
+            address_width_bits: 16,
+        }),
+        CpuFamily::M68k | CpuFamily::I8080 => None,
+    }
 }
 
 pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
@@ -200,11 +222,20 @@ mod tests {
     }
 
     #[test]
-    fn only_ez80_targets_have_codegen_for_now() {
+    fn resolves_z80_and_ez80_target_profiles() {
         assert!(resolve_target_profile(Some("ti84plusce-ez80")).is_ok());
-        let error = resolve_target_profile(Some("zxspectrum-z80")).unwrap_err();
+        let z80 = resolve_target_profile(Some("zxspectrum-z80")).unwrap();
+
+        assert_eq!(z80.triple.cpu, CpuFamily::Z80);
+        assert_eq!(z80.memory.pointer_width_bits, 16);
+        assert_eq!(z80.memory.address_width_bits, 16);
+    }
+
+    #[test]
+    fn rejects_cpus_without_target_profiles_for_now() {
+        let error = resolve_target_profile(Some("sega-genesis-m68k")).unwrap_err();
         assert!(
-            error.contains("only eZ80 codegen is implemented"),
+            error.contains("no target profile is implemented"),
             "{error}"
         );
     }
