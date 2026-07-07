@@ -6,6 +6,7 @@ use crate::diagnostic::Diagnostic;
 pub struct ProjectConfig {
     pub path: PathBuf,
     pub root: PathBuf,
+    pub input: Option<PathBuf>,
     pub target: Option<String>,
     pub output: Option<String>,
     pub input_kind: Option<String>,
@@ -56,6 +57,13 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(required_string("build.target"))
         .transpose()?;
 
+    let input = value
+        .get("build")
+        .and_then(|build| build.get("input"))
+        .map(required_string("build.input"))
+        .transpose()?
+        .map(|input| root.join(input));
+
     let output = value
         .get("build")
         .and_then(|build| build.get("output"))
@@ -102,6 +110,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
     Ok(ProjectConfig {
         path: path.to_path_buf(),
         root,
+        input,
         target,
         output,
         input_kind,
@@ -157,6 +166,7 @@ mod tests {
                 name = "demo"
 
                 [build]
+                input = "src/main.ezra"
                 target = "agonlight-console8-ez80-1.0"
                 output = "bin"
                 input_kind = "ezra"
@@ -181,6 +191,7 @@ mod tests {
         );
         assert_eq!(config.output.as_deref(), Some("bin"));
         assert_eq!(config.input_kind.as_deref(), Some("ezra"));
+        assert_eq!(config.input, Some(PathBuf::from("/project/src/main.ezra")));
         assert_eq!(config.executable.as_deref(), Some("demo"));
         assert_eq!(
             config.layout_file,

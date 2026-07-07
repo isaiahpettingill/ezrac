@@ -13,7 +13,7 @@ use ezra::{
     hir::HirProgram,
     layout::{Layout, parse_layout},
     parser::parse_program,
-    project::load_nearest_project_config,
+    project::{load_nearest_project_config, load_project_config},
     target::{
         Address24, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
         EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format, resolve_target_profile,
@@ -40,7 +40,7 @@ fn run() -> Result<(), String> {
             check(&options)
         }
         Some("build") => {
-            let options = CommandOptions::parse(&args[1..])?;
+            let options = BuildCommandOptions::parse(&args[1..])?;
             build(&options)
         }
         Some("emit-asm") => {
@@ -66,6 +66,80 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         Some(command) => Err(format!("unknown command `{command}`\n{}", usage())),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BuildCommandOptions {
+    path: Option<String>,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+    layout_path: Option<String>,
+    target: Option<String>,
+}
+
+impl BuildCommandOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut path = None;
+        let mut debug_comments = false;
+        let mut default_sdk_symbols = true;
+        let mut layout_path = None;
+        let mut target = None;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--debug-comments" => debug_comments = true,
+                "--no-default-sdk-symbols" => default_sdk_symbols = false,
+                "--layout" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    layout_path = Some(value.clone());
+                }
+                "--target" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    target = Some(value.clone());
+                }
+                _ if path.is_none() => path = Some(arg.clone()),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(Self {
+            path,
+            debug_comments,
+            default_sdk_symbols,
+            layout_path,
+            target,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_path(path: String, debug_comments: bool) -> Self {
+        Self {
+            path: Some(path),
+            debug_comments,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: None,
+        }
+    }
+}
+
+trait BuildOptionsView {
+    fn default_sdk_symbols(&self) -> bool;
+    fn layout_path(&self) -> Option<&String>;
+    fn target(&self) -> Option<&String>;
+}
+
+impl BuildOptionsView for BuildCommandOptions {
+    fn default_sdk_symbols(&self) -> bool {
+        self.default_sdk_symbols
+    }
+
+    fn layout_path(&self) -> Option<&String> {
+        self.layout_path.as_ref()
+    }
+
+    fn target(&self) -> Option<&String> {
+        self.target.as_ref()
     }
 }
 
@@ -109,6 +183,20 @@ impl CommandOptions {
             layout_path,
             target,
         })
+    }
+}
+
+impl BuildOptionsView for CommandOptions {
+    fn default_sdk_symbols(&self) -> bool {
+        self.default_sdk_symbols
+    }
+
+    fn layout_path(&self) -> Option<&String> {
+        self.layout_path.as_ref()
+    }
+
+    fn target(&self) -> Option<&String> {
+        self.target.as_ref()
     }
 }
 
@@ -271,11 +359,11 @@ impl InputKind {
 }
 
 fn resolve_build_settings(
-    options: &CommandOptions,
+    options: &impl BuildOptionsView,
     source_path: &Path,
 ) -> Result<BuildSettings, String> {
     let project = load_nearest_project_config(source_path).map_err(|error| error.to_string())?;
-    let target_name = options.target.as_deref().or_else(|| {
+    let target_name = options.target().map(String::as_str).or_else(|| {
         project
             .as_ref()
             .and_then(|project| project.target.as_deref())
@@ -292,7 +380,7 @@ fn resolve_build_settings(
         .and_then(|project| project.input_kind.as_deref())
         .map(InputKind::parse)
         .transpose()?;
-    let layout_path = options.layout_path.as_ref().map(PathBuf::from).or_else(|| {
+    let layout_path = options.layout_path().map(PathBuf::from).or_else(|| {
         project
             .as_ref()
             .and_then(|project| project.layout_file.clone())
@@ -325,7 +413,7 @@ fn resolve_build_settings(
         input_kind,
         layout,
         layout_path,
-        default_sdk_symbols: options.default_sdk_symbols,
+        default_sdk_symbols: options.default_sdk_symbols(),
         output_root,
         executable_name,
     })
@@ -386,8 +474,8 @@ fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
     ))
 }
 
-fn build(options: &CommandOptions) -> Result<(), String> {
-    let outputs = build_source_with_command_options(options)?;
+fn build(options: &BuildCommandOptions) -> Result<(), String> {
+    let outputs = build_source_with_build_options(options)?;
     println!("wrote {}", outputs.asm.display());
     println!("wrote {}", outputs.map.display());
     println!("wrote {}", outputs.executable.display());
@@ -408,17 +496,25 @@ fn build_source(path: &str) -> Result<BuildOutputs, String> {
 
 #[cfg(test)]
 fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOutputs, String> {
-    build_source_with_command_options(&CommandOptions {
-        path: path.to_owned(),
+    build_source_with_build_options(&BuildCommandOptions::with_path(
+        path.to_owned(),
         debug_comments,
-        default_sdk_symbols: true,
-        layout_path: None,
-        target: None,
+    ))
+}
+
+#[cfg(test)]
+fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOutputs, String> {
+    build_source_with_build_options(&BuildCommandOptions {
+        path: Some(options.path.clone()),
+        debug_comments: options.debug_comments,
+        default_sdk_symbols: options.default_sdk_symbols,
+        layout_path: options.layout_path.clone(),
+        target: options.target.clone(),
     })
 }
 
-fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOutputs, String> {
-    let source_path = PathBuf::from(&options.path);
+fn build_source_with_build_options(options: &BuildCommandOptions) -> Result<BuildOutputs, String> {
+    let source_path = resolve_build_source_path(options)?;
     let source_location = command_source_start_location(&source_path);
     let settings = resolve_build_settings(options, &source_path)?;
     validate_build_layout(&settings)?;
@@ -426,6 +522,23 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         InputKind::Ezra => build_ezra_source(&source_path, source_location, &settings, options),
         InputKind::Assembly => build_assembly_source(&source_path, source_location, &settings),
     }
+}
+
+fn resolve_build_source_path(options: &BuildCommandOptions) -> Result<PathBuf, String> {
+    if let Some(path) = &options.path {
+        return Ok(PathBuf::from(path));
+    }
+
+    let cwd =
+        env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?;
+    let project_path = cwd.join("Ezra.toml");
+    let project = load_project_config(&project_path).map_err(|error| error.to_string())?;
+    project.input.ok_or_else(|| {
+        format!(
+            "build requires a source path or `{}` must define `build.input`",
+            project_path.display()
+        )
+    })
 }
 
 fn validate_build_layout(settings: &BuildSettings) -> Result<(), String> {
@@ -457,7 +570,7 @@ fn build_ezra_source(
     source_path: &Path,
     source_location: SourceLocation,
     settings: &BuildSettings,
-    options: &CommandOptions,
+    options: &BuildCommandOptions,
 ) -> Result<BuildOutputs, String> {
     let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
         error
@@ -1063,12 +1176,32 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra|file.asm>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn switch_to(path: &Path) -> Self {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { previous }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).unwrap();
+        }
+    }
 
     fn temp_root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1388,6 +1521,58 @@ mod tests {
             [0x0E, 0x00, 0xCD, 0x05, 0x00]
         );
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_uses_project_input_when_path_is_omitted() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let root = temp_root("build_project_input");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+            [project]
+            name = "asm-demo"
+
+            [build]
+            input = "src/main.asm"
+            target = "cpm-2.2-z80"
+            input_kind = "assembly"
+            executable = "demo"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.asm"),
+            r#"
+            start:
+                ld c, 00h
+                call 0005h
+            "#,
+        )
+        .unwrap();
+
+        let _cwd = CurrentDirGuard::switch_to(&root);
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: None,
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: None,
+        })
+        .unwrap();
+        let expected_base = root.join("target/cpm-2.2-z80/src/demo");
+
+        assert_eq!(outputs.asm, expected_base.with_extension("asm"));
+        assert_eq!(outputs.map, expected_base.with_extension("map"));
+        assert_eq!(outputs.executable, expected_base.with_extension("com"));
+        assert_eq!(
+            std::fs::read(outputs.executable).unwrap(),
+            [0x0E, 0x00, 0xCD, 0x05, 0x00]
+        );
+
+        drop(_cwd);
         let _ = std::fs::remove_dir_all(root);
     }
 
