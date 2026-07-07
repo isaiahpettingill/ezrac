@@ -9072,7 +9072,10 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
         "sub" | "and" | "or" | "xor" | "cpl" | "daa" | "neg" | "rla" | "rlca" | "rra" | "rrca" => {
             vec!["a"]
         }
-        "res" | "set" => asm_second_operand(operands).and_then(asm_operand_register).into_iter().collect(),
+        "res" | "set" => asm_second_operand(operands)
+            .and_then(asm_operand_register)
+            .into_iter()
+            .collect(),
         "ex" => asm_line_exchange_registers(operands),
         "exx" => vec!["bc", "de", "hl"],
         "call" | "rst" => vec!["af", "bc", "de", "hl"],

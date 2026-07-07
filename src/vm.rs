@@ -269,7 +269,7 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 }
 
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    if matches!(text, "ld sp, hl" | "jp (hl)" | "ex (sp), hl") {
+    if matches!(text, "ld sp, hl" | "jp (hl)" | "ex (sp), hl" | "ex af, af'") {
         Ok(1)
     } else if matches!(
         text,
@@ -277,6 +277,16 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld sp, iy"
             | "jp (ix)"
             | "jp (iy)"
+            | "inc ix"
+            | "inc iy"
+            | "dec ix"
+            | "dec iy"
+            | "add ix, bc"
+            | "add ix, de"
+            | "add ix, ix"
+            | "add iy, bc"
+            | "add iy, de"
+            | "add iy, iy"
             | "ld i, a"
             | "ld r, a"
             | "ld a, i"
@@ -430,6 +440,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if let Some(rst) = parse_rst(text)? {
         Ok(rst.len())
+    } else if parse_index_cb_operation(text)?.is_some() {
+        Ok(4)
     } else if parse_bit_operation_reg8(text)?.is_some() {
         Ok(2)
     } else if parse_cb_reg8_or_hl_operation(text)?.is_some() {
@@ -446,8 +458,20 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         || text == "add iy, sp"
     {
         Ok(2)
-    } else if is_index_byte_load_or_store(text) {
+    } else if parse_direct_index_load_or_store(text)?.is_some() {
+        Ok(5)
+    } else if parse_io_instruction(text)?.is_some() {
+        Ok(2)
+    } else if parse_index_byte_load(text)?.is_some()
+        || parse_index_byte_store(text)?.is_some()
+        || parse_index_reg8_load(text)?.is_some()
+        || parse_index_reg8_store(text)?.is_some()
+        || parse_index_inc_dec(text)?.is_some()
+        || parse_index_alu(text)?.is_some()
+    {
         Ok(3)
+    } else if parse_index_imm_store(text)?.is_some() {
+        Ok(4)
     } else if parse_ld_reg8_from_hl(text).is_some() || parse_ld_hl_from_reg8(text).is_some() {
         Ok(1)
     } else if parse_ld_hl_imm(text)?.is_some() {
@@ -519,6 +543,9 @@ fn emit_instruction(
         bytes.extend([0xED, 0x57]);
     } else if text == "ld a, r" {
         bytes.extend([0xED, 0x5F]);
+    } else if let Some((load, index, addr)) = parse_direct_index_load_or_store(text)? {
+        bytes.extend([index.prefix(), if load { 0x2A } else { 0x22 }]);
+        push24(bytes, parse_addr(addr, labels, pc)?);
     } else if let Some(value) = text.strip_prefix("ld sp,") {
         bytes.push(0x31);
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
@@ -598,6 +625,16 @@ fn emit_instruction(
         bytes.extend([index.prefix(), 0x7E, offset]);
     } else if let Some((index, offset)) = parse_index_byte_store(text)? {
         bytes.extend([index.prefix(), 0x77, offset]);
+    } else if let Some((index, dst, offset)) = parse_index_reg8_load(text)? {
+        bytes.extend([index.prefix(), 0x46 + dst * 8, offset]);
+    } else if let Some((index, offset, src)) = parse_index_reg8_store(text)? {
+        bytes.extend([index.prefix(), 0x70 + src, offset]);
+    } else if let Some((index, offset, value)) = parse_index_imm_store(text)? {
+        bytes.extend([index.prefix(), 0x36, offset, value]);
+    } else if let Some((inc, index, offset)) = parse_index_inc_dec(text)? {
+        bytes.extend([index.prefix(), if inc { 0x34 } else { 0x35 }, offset]);
+    } else if let Some((op, index, offset)) = parse_index_alu(text)? {
+        bytes.extend([index.prefix(), accumulator_alu_reg8_opcode(op, 6), offset]);
     } else if let Some(register) = parse_ld_reg8_from_hl(text) {
         bytes.push(0x46 + register * 8);
     } else if let Some(register) = parse_ld_hl_from_reg8(text) {
@@ -727,6 +764,8 @@ fn emit_instruction(
         bytes.push(0x1F);
     } else if text == "ex de, hl" {
         bytes.push(0xEB);
+    } else if text == "ex af, af'" {
+        bytes.push(0x08);
     } else if text == "ex (sp), hl" {
         bytes.push(0xE3);
     } else if text == "ex (sp), ix" {
@@ -785,6 +824,8 @@ fn emit_instruction(
         bytes.extend([0xED, opcode]);
     } else if let Some(rst) = parse_rst(text)? {
         rst.write_to(bytes);
+    } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
+        bytes.extend([index.prefix(), 0xCB, offset, opcode]);
     } else if let Some(opcode) = parse_bit_operation_reg8(text)? {
         bytes.extend([0xCB, opcode]);
     } else if let Some(opcode) = parse_cb_reg8_or_hl_operation(text)? {
@@ -793,6 +834,10 @@ fn emit_instruction(
         bytes.extend([0xDD, 0x39]);
     } else if text == "add iy, sp" {
         bytes.extend([0xFD, 0x39]);
+    } else if let Some(opcode) = parse_index_reg16_operation(text) {
+        bytes.extend(opcode);
+    } else if let Some(io) = parse_io_instruction(text)? {
+        io.write_to(bytes);
     } else if text == "add hl, sp" {
         bytes.push(0x39);
     } else if text == "inc b" {
@@ -848,7 +893,10 @@ fn emit_instruction(
         bytes.push(0x19);
     } else if text == "add a, a" {
         bytes.push(0x87);
-    } else if let Some(register) = text.strip_prefix("adc hl,").and_then(|r| reg16_code(r.trim())) {
+    } else if let Some(register) = text
+        .strip_prefix("adc hl,")
+        .and_then(|r| reg16_code(r.trim()))
+    {
         bytes.extend([0xED, 0x4A + register * 0x10]);
     } else if text == "sbc hl, bc" {
         bytes.extend([0xED, 0x42]);
@@ -983,6 +1031,30 @@ fn parse_ld_direct_reg16_store(text: &str) -> Option<(&str, &str)> {
     Some((parse_wrapped_indirect(dst)?, src))
 }
 
+fn parse_direct_index_load_or_store(
+    text: &str,
+) -> Result<Option<(bool, IndexRegister, &str)>, Diagnostic> {
+    let Some((dst, src)) = parse_ld_operands(text) else {
+        return Ok(None);
+    };
+    let index = match dst {
+        "ix" => Some((true, IndexRegister::Ix, parse_wrapped_indirect(src))),
+        "iy" => Some((true, IndexRegister::Iy, parse_wrapped_indirect(src))),
+        _ => None,
+    };
+    if let Some((load, index, Some(addr))) = index {
+        return Ok(Some((load, index, addr)));
+    }
+    let Some(addr) = parse_wrapped_indirect(dst) else {
+        return Ok(None);
+    };
+    match src {
+        "ix" => Ok(Some((false, IndexRegister::Ix, addr))),
+        "iy" => Ok(Some((false, IndexRegister::Iy, addr))),
+        _ => Ok(None),
+    }
+}
+
 fn parse_wrapped_indirect(text: &str) -> Option<&str> {
     text.strip_prefix('(')?.strip_suffix(')')
 }
@@ -1036,6 +1108,105 @@ fn parse_mlt_reg16(text: &str) -> Option<u8> {
     }
 }
 
+fn parse_index_reg16_operation(text: &str) -> Option<[u8; 2]> {
+    match text {
+        "inc ix" => Some([0xDD, 0x23]),
+        "inc iy" => Some([0xFD, 0x23]),
+        "dec ix" => Some([0xDD, 0x2B]),
+        "dec iy" => Some([0xFD, 0x2B]),
+        "add ix, bc" => Some([0xDD, 0x09]),
+        "add ix, de" => Some([0xDD, 0x19]),
+        "add ix, ix" => Some([0xDD, 0x29]),
+        "add iy, bc" => Some([0xFD, 0x09]),
+        "add iy, de" => Some([0xFD, 0x19]),
+        "add iy, iy" => Some([0xFD, 0x29]),
+        _ => None,
+    }
+}
+
+struct IoInstruction {
+    prefix: bool,
+    opcode: u8,
+    immediate: Option<u8>,
+}
+
+impl IoInstruction {
+    fn write_to(self, bytes: &mut Vec<u8>) {
+        if self.prefix {
+            bytes.push(0xED);
+        }
+        bytes.push(self.opcode);
+        if let Some(value) = self.immediate {
+            bytes.push(value);
+        }
+    }
+}
+
+fn parse_io_instruction(text: &str) -> Result<Option<IoInstruction>, Diagnostic> {
+    if let Some(port) = text
+        .strip_prefix("in a, (")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        if port.trim() == "c" {
+            return Ok(Some(IoInstruction {
+                prefix: true,
+                opcode: 0x78,
+                immediate: None,
+            }));
+        }
+        return Ok(Some(IoInstruction {
+            prefix: false,
+            opcode: 0xDB,
+            immediate: Some(parse_u8(port.trim())?),
+        }));
+    }
+    if let Some(rest) = text.strip_prefix("in ") {
+        let Some((register, port)) = rest.split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid in syntax `{text}`")));
+        };
+        let Some(register) = reg8_code(register.trim()) else {
+            return Ok(None);
+        };
+        if port.trim() != "(c)" {
+            return Ok(None);
+        }
+        return Ok(Some(IoInstruction {
+            prefix: true,
+            opcode: 0x40 + register * 8,
+            immediate: None,
+        }));
+    }
+    if let Some(rest) = text.strip_prefix("out ") {
+        let Some((port, register)) = rest.split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid out syntax `{text}`")));
+        };
+        let port = port.trim();
+        let register = register.trim();
+        if port == "(c)" {
+            let Some(register) = reg8_code(register) else {
+                return Ok(None);
+            };
+            return Ok(Some(IoInstruction {
+                prefix: true,
+                opcode: 0x41 + register * 8,
+                immediate: None,
+            }));
+        }
+        let Some(port) = parse_wrapped_indirect(port) else {
+            return Ok(None);
+        };
+        if register != "a" {
+            return Ok(None);
+        }
+        return Ok(Some(IoInstruction {
+            prefix: false,
+            opcode: 0xD3,
+            immediate: Some(parse_u8(port)?),
+        }));
+    }
+    Ok(None)
+}
+
 struct RstInstruction {
     lis: bool,
     opcode: u8,
@@ -1085,7 +1256,9 @@ fn parse_bit_operation_reg8(text: &str) -> Result<Option<u8>, Diagnostic> {
         return Ok(None);
     };
     let Some((bit, register)) = rest.split_once(',') else {
-        return Err(Diagnostic::new(format!("invalid bit operation syntax `{text}`")));
+        return Err(Diagnostic::new(format!(
+            "invalid bit operation syntax `{text}`"
+        )));
     };
     let bit = parse_number(bit.trim())?;
     if bit > 7 {
@@ -1101,21 +1274,7 @@ fn parse_bit_operation_reg8(text: &str) -> Result<Option<u8>, Diagnostic> {
 }
 
 fn parse_cb_reg8_or_hl_operation(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let (base, register) = if let Some(register) = text.strip_prefix("rlc ") {
-        (0x00, register)
-    } else if let Some(register) = text.strip_prefix("rrc ") {
-        (0x08, register)
-    } else if let Some(register) = text.strip_prefix("rl ") {
-        (0x10, register)
-    } else if let Some(register) = text.strip_prefix("rr ") {
-        (0x18, register)
-    } else if let Some(register) = text.strip_prefix("sla ") {
-        (0x20, register)
-    } else if let Some(register) = text.strip_prefix("sra ") {
-        (0x28, register)
-    } else if let Some(register) = text.strip_prefix("srl ") {
-        (0x38, register)
-    } else {
+    let Some((base, register)) = parse_cb_operation_operand(text) else {
         return Ok(None);
     };
     let Some(register) = reg8_or_hl_code(register.trim()) else {
@@ -1125,6 +1284,26 @@ fn parse_cb_reg8_or_hl_operation(text: &str) -> Result<Option<u8>, Diagnostic> {
         )));
     };
     Ok(Some(base + register))
+}
+
+fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
+    if let Some(register) = text.strip_prefix("rlc ") {
+        Some((0x00, register))
+    } else if let Some(register) = text.strip_prefix("rrc ") {
+        Some((0x08, register))
+    } else if let Some(register) = text.strip_prefix("rl ") {
+        Some((0x10, register))
+    } else if let Some(register) = text.strip_prefix("rr ") {
+        Some((0x18, register))
+    } else if let Some(register) = text.strip_prefix("sla ") {
+        Some((0x20, register))
+    } else if let Some(register) = text.strip_prefix("sra ") {
+        Some((0x28, register))
+    } else if let Some(register) = text.strip_prefix("srl ") {
+        Some((0x38, register))
+    } else {
+        None
+    }
 }
 
 fn reg8_code(register: &str) -> Option<u8> {
@@ -1326,11 +1505,6 @@ impl IndexRegister {
     }
 }
 
-fn is_index_byte_load_or_store(text: &str) -> bool {
-    parse_index_byte_load(text).is_ok_and(|offset| offset.is_some())
-        || parse_index_byte_store(text).is_ok_and(|offset| offset.is_some())
-}
-
 fn parse_index_byte_load(text: &str) -> Result<Option<(IndexRegister, u8)>, Diagnostic> {
     for (prefix, register) in [
         ("ld a, (ix", IndexRegister::Ix),
@@ -1353,6 +1527,145 @@ fn parse_index_byte_store(text: &str) -> Result<Option<(IndexRegister, u8)>, Dia
             return Ok(None);
         };
         return parse_index_offset(rest).map(|offset| Some((register, offset)));
+    }
+    Ok(None)
+}
+
+fn parse_index_reg8_load(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
+    let Some((dst, src)) = parse_ld_operands(text) else {
+        return Ok(None);
+    };
+    if dst == "a" {
+        return Ok(None);
+    }
+    let Some(dst) = reg8_code(dst) else {
+        return Ok(None);
+    };
+    let Some((index, offset)) = parse_index_indirect(src)? else {
+        return Ok(None);
+    };
+    Ok(Some((index, dst, offset)))
+}
+
+fn parse_index_reg8_store(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
+    let Some((dst, src)) = parse_ld_operands(text) else {
+        return Ok(None);
+    };
+    let Some((index, offset)) = parse_index_indirect(dst)? else {
+        return Ok(None);
+    };
+    if src == "a" {
+        return Ok(None);
+    }
+    let Some(src) = reg8_code(src) else {
+        return Ok(None);
+    };
+    Ok(Some((index, offset, src)))
+}
+
+fn parse_index_imm_store(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
+    let Some((dst, src)) = parse_ld_operands(text) else {
+        return Ok(None);
+    };
+    let Some((index, offset)) = parse_index_indirect(dst)? else {
+        return Ok(None);
+    };
+    if reg8_code(src).is_some() || parse_index_indirect(src)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some((index, offset, parse_u8(src)?)))
+}
+
+fn parse_index_inc_dec(text: &str) -> Result<Option<(bool, IndexRegister, u8)>, Diagnostic> {
+    let (inc, operand) = if let Some(operand) = text.strip_prefix("inc ") {
+        (true, operand)
+    } else if let Some(operand) = text.strip_prefix("dec ") {
+        (false, operand)
+    } else {
+        return Ok(None);
+    };
+    let Some((index, offset)) = parse_index_indirect(operand.trim())? else {
+        return Ok(None);
+    };
+    Ok(Some((inc, index, offset)))
+}
+
+fn parse_index_alu(
+    text: &str,
+) -> Result<Option<(AccumulatorAluOp, IndexRegister, u8)>, Diagnostic> {
+    if let Some(src) = text.strip_prefix("add a,") {
+        return parse_index_alu_operand(AccumulatorAluOp::Add, src.trim());
+    }
+    if let Some(src) = text.strip_prefix("adc a,") {
+        return parse_index_alu_operand(AccumulatorAluOp::Adc, src.trim());
+    }
+    if let Some(src) = text.strip_prefix("sbc a,") {
+        return parse_index_alu_operand(AccumulatorAluOp::Sbc, src.trim());
+    }
+    for (prefix, op) in [
+        ("sub ", AccumulatorAluOp::Sub),
+        ("and ", AccumulatorAluOp::And),
+        ("or ", AccumulatorAluOp::Or),
+        ("xor ", AccumulatorAluOp::Xor),
+        ("cp ", AccumulatorAluOp::Cp),
+    ] {
+        if let Some(src) = text.strip_prefix(prefix) {
+            return parse_index_alu_operand(op, src.trim());
+        }
+    }
+    Ok(None)
+}
+
+fn parse_index_alu_operand(
+    op: AccumulatorAluOp,
+    operand: &str,
+) -> Result<Option<(AccumulatorAluOp, IndexRegister, u8)>, Diagnostic> {
+    let Some((index, offset)) = parse_index_indirect(operand)? else {
+        return Ok(None);
+    };
+    Ok(Some((op, index, offset)))
+}
+
+fn parse_index_cb_operation(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
+    if let Some((base, operand)) = parse_cb_operation_operand(text) {
+        let Some((index, offset)) = parse_index_indirect(operand.trim())? else {
+            return Ok(None);
+        };
+        return Ok(Some((index, offset, base + 6)));
+    }
+    let (base, rest) = if let Some(rest) = text.strip_prefix("bit ") {
+        (0x40, rest)
+    } else if let Some(rest) = text.strip_prefix("res ") {
+        (0x80, rest)
+    } else if let Some(rest) = text.strip_prefix("set ") {
+        (0xC0, rest)
+    } else {
+        return Ok(None);
+    };
+    let Some((bit, operand)) = rest.split_once(',') else {
+        return Err(Diagnostic::new(format!(
+            "invalid bit operation syntax `{text}`"
+        )));
+    };
+    let bit = parse_number(bit.trim())?;
+    if bit > 7 {
+        return Err(Diagnostic::new(format!("bit index {bit} is outside 0..7")));
+    }
+    let Some((index, offset)) = parse_index_indirect(operand.trim())? else {
+        return Ok(None);
+    };
+    Ok(Some((index, offset, base + bit as u8 * 8 + 6)))
+}
+
+fn parse_index_indirect(text: &str) -> Result<Option<(IndexRegister, u8)>, Diagnostic> {
+    let Some(inner) = parse_wrapped_indirect(text) else {
+        return Ok(None);
+    };
+    if let Some(rest) = inner.strip_prefix("ix") {
+        return parse_index_offset(rest).map(|offset| Some((IndexRegister::Ix, offset)));
+    }
+    if let Some(rest) = inner.strip_prefix("iy") {
+        return parse_index_offset(rest).map(|offset| Some((IndexRegister::Iy, offset)));
     }
     Ok(None)
 }
@@ -1692,8 +2005,8 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0x76, 0xED, 0x46, 0xED, 0x56, 0xED, 0x5E, 0xED, 0x6F, 0xED, 0x67, 0xED, 0x47,
-                0xED, 0x4F, 0xED, 0x57, 0xED, 0x5F,
+                0x76, 0xED, 0x46, 0xED, 0x56, 0xED, 0x5E, 0xED, 0x6F, 0xED, 0x67, 0xED, 0x47, 0xED,
+                0x4F, 0xED, 0x57, 0xED, 0x5F,
             ]
         );
     }
@@ -1730,9 +2043,9 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0x03, 0x13, 0x23, 0x33, 0x0B, 0x1B, 0x2B, 0x3B, 0xED, 0x4A, 0xED, 0x5A, 0xED,
-                0x6A, 0xED, 0x7A, 0xED, 0x62, 0xED, 0x72, 0xF9, 0xDD, 0xF9, 0xFD, 0xF9, 0xE3,
-                0xDD, 0xE3, 0xFD, 0xE3, 0xE9, 0xDD, 0xE9, 0xFD, 0xE9,
+                0x03, 0x13, 0x23, 0x33, 0x0B, 0x1B, 0x2B, 0x3B, 0xED, 0x4A, 0xED, 0x5A, 0xED, 0x6A,
+                0xED, 0x7A, 0xED, 0x62, 0xED, 0x72, 0xF9, 0xDD, 0xF9, 0xFD, 0xF9, 0xE3, 0xDD, 0xE3,
+                0xFD, 0xE3, 0xE9, 0xDD, 0xE9, 0xFD, 0xE9,
             ]
         );
     }
@@ -1766,9 +2079,123 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0x86, 0x8E, 0x96, 0x9E, 0xA6, 0xAE, 0xB6, 0xBE, 0x34, 0x35, 0xCB, 0x06, 0xCB,
-                0x0E, 0xCB, 0x16, 0xCB, 0x1E, 0xCB, 0x26, 0xCB, 0x2E, 0xCB, 0x3E, 0xCB, 0x46,
-                0xCB, 0x8E, 0xCB, 0xFE,
+                0x86, 0x8E, 0x96, 0x9E, 0xA6, 0xAE, 0xB6, 0xBE, 0x34, 0x35, 0xCB, 0x06, 0xCB, 0x0E,
+                0xCB, 0x16, 0xCB, 0x1E, 0xCB, 0x26, 0xCB, 0x2E, 0xCB, 0x3E, 0xCB, 0x46, 0xCB, 0x8E,
+                0xCB, 0xFE,
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_ix_iy_indexed_load_store_and_alu_forms() {
+        let asm = r#"
+            ld b, (ix+1)
+            ld c, (iy-2)
+            ld (ix+3), d
+            ld (iy-4), e
+            ld (ix+5), 7Fh
+            inc (iy+6)
+            dec (ix-7)
+            add a, (ix+8)
+            adc a, (iy+9)
+            sub (ix+10)
+            sbc a, (iy+11)
+            and (ix+12)
+            xor (iy+13)
+            or (ix+14)
+            cp (iy+15)
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xDD, 0x46, 0x01, 0xFD, 0x4E, 0xFE, 0xDD, 0x72, 0x03, 0xFD, 0x73, 0xFC, 0xDD, 0x36,
+                0x05, 0x7F, 0xFD, 0x34, 0x06, 0xDD, 0x35, 0xF9, 0xDD, 0x86, 0x08, 0xFD, 0x8E, 0x09,
+                0xDD, 0x96, 0x0A, 0xFD, 0x9E, 0x0B, 0xDD, 0xA6, 0x0C, 0xFD, 0xAE, 0x0D, 0xDD, 0xB6,
+                0x0E, 0xFD, 0xBE, 0x0F,
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_ix_iy_indexed_cb_forms() {
+        let asm = r#"
+            rlc (ix+1)
+            rr (iy-2)
+            bit 3, (ix+4)
+            res 2, (iy+5)
+            set 7, (ix-6)
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xDD, 0xCB, 0x01, 0x06, 0xFD, 0xCB, 0xFE, 0x1E, 0xDD, 0xCB, 0x04, 0x5E, 0xFD, 0xCB,
+                0x05, 0x96, 0xDD, 0xCB, 0xFA, 0xFE,
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_more_ix_iy_16_bit_forms() {
+        let asm = r#"
+            inc ix
+            inc iy
+            dec ix
+            dec iy
+            add ix, bc
+            add ix, de
+            add ix, ix
+            add iy, bc
+            add iy, de
+            add iy, iy
+            ld ix, (040000h)
+            ld iy, (040003h)
+            ld (040006h), ix
+            ld (040009h), iy
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xDD, 0x23, 0xFD, 0x23, 0xDD, 0x2B, 0xFD, 0x2B, 0xDD, 0x09, 0xDD, 0x19, 0xDD, 0x29,
+                0xFD, 0x09, 0xFD, 0x19, 0xFD, 0x29, 0xDD, 0x2A, 0x00, 0x00, 0x04, 0xFD, 0x2A, 0x03,
+                0x00, 0x04, 0xDD, 0x22, 0x06, 0x00, 0x04, 0xFD, 0x22, 0x09, 0x00, 0x04,
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_standard_io_instructions() {
+        let asm = r#"
+            in a, (12h)
+            out (34h), a
+            in b, (c)
+            in c, (c)
+            in d, (c)
+            in e, (c)
+            in h, (c)
+            in l, (c)
+            in a, (c)
+            out (c), b
+            out (c), c
+            out (c), d
+            out (c), e
+            out (c), h
+            out (c), l
+            out (c), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xDB, 0x12, 0xD3, 0x34, 0xED, 0x40, 0xED, 0x48, 0xED, 0x50, 0xED, 0x58, 0xED, 0x60,
+                0xED, 0x68, 0xED, 0x78, 0xED, 0x41, 0xED, 0x49, 0xED, 0x51, 0xED, 0x59, 0xED, 0x61,
+                0xED, 0x69, 0xED, 0x79,
             ]
         );
     }
@@ -1895,8 +2322,8 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0xED, 0x4B, 0x00, 0x01, 0x04, 0xED, 0x5B, 0x03, 0x01, 0x04, 0xED, 0x43, 0x06,
-                0x01, 0x04, 0xED, 0x53, 0x09, 0x01, 0x04,
+                0xED, 0x4B, 0x00, 0x01, 0x04, 0xED, 0x5B, 0x03, 0x01, 0x04, 0xED, 0x43, 0x06, 0x01,
+                0x04, 0xED, 0x53, 0x09, 0x01, 0x04,
             ]
         );
     }
@@ -2355,8 +2782,8 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0xC6, 0x01, 0xCE, 0x02, 0xD6, 0x02, 0xDE, 0x03, 0xE6, 0x03, 0xEE, 0x04, 0xF6,
-                0x05, 0xFE, 0x06,
+                0xC6, 0x01, 0xCE, 0x02, 0xD6, 0x02, 0xDE, 0x03, 0xE6, 0x03, 0xEE, 0x04, 0xF6, 0x05,
+                0xFE, 0x06,
             ]
         );
     }
@@ -2468,15 +2895,14 @@ mod tests {
 
     #[test]
     fn assembles_bit_register_instructions() {
-        let asm =
-            "bit 0, b\nbit 1, c\nbit 2, d\nbit 3, e\nbit 4, h\nbit 5, l\nbit 7, a\nres 0, b\nset 7, a\n";
+        let asm = "bit 0, b\nbit 1, c\nbit 2, d\nbit 3, e\nbit 4, h\nbit 5, l\nbit 7, a\nres 0, b\nset 7, a\n";
         let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(
             bytes,
             [
-                0xCB, 0x40, 0xCB, 0x49, 0xCB, 0x52, 0xCB, 0x5B, 0xCB, 0x64, 0xCB, 0x6D,
-                0xCB, 0x7F, 0xCB, 0x80, 0xCB, 0xFF,
+                0xCB, 0x40, 0xCB, 0x49, 0xCB, 0x52, 0xCB, 0x5B, 0xCB, 0x64, 0xCB, 0x6D, 0xCB, 0x7F,
+                0xCB, 0x80, 0xCB, 0xFF,
             ]
         );
     }

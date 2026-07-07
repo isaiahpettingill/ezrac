@@ -48,6 +48,10 @@ fn run() -> Result<(), String> {
             let options = CommandOptions::parse(&args[1..])?;
             test_source_with_command_options(&options)
         }
+        Some("assemble") => {
+            let options = AssembleOptions::parse(&args[1..])?;
+            assemble_file(&options)
+        }
         Some("layout") => print_layout(args.get(1).map(String::as_str)),
         Some("header") => print_header(),
         Some("-h" | "--help") | None => {
@@ -99,6 +103,75 @@ impl CommandOptions {
             target,
         })
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AssembleOptions {
+    path: String,
+    output: Option<String>,
+    base_addr: u32,
+}
+
+impl AssembleOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut path = None;
+        let mut output = None;
+        let mut base_addr = 0x01_0000;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--output" | "-o" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    output = Some(value.clone());
+                }
+                "--base" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    base_addr = parse_cli_u24(value)?;
+                }
+                _ if path.is_none() => path = Some(arg.clone()),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(Self {
+            path: path.ok_or_else(usage)?,
+            output,
+            base_addr,
+        })
+    }
+}
+
+fn parse_cli_u24(text: &str) -> Result<u32, String> {
+    let value = if let Some(hex) = text.strip_suffix('h') {
+        u32::from_str_radix(hex, 16)
+    } else if let Some(hex) = text.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16)
+    } else {
+        text.parse()
+    }
+    .map_err(|_| format!("invalid numeric operand `{text}`"))?;
+    if value > Address24::MAX {
+        return Err(format!(
+            "address operand `{text}` is outside the 24-bit address space"
+        ));
+    }
+    Ok(value)
+}
+
+fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
+    let source_path = PathBuf::from(&options.path);
+    let source = fs::read_to_string(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+    let assembled = assemble_ez80_subset_with_symbols_at(&source, options.base_addr)
+        .map_err(|error| error.to_string())?;
+    let output_path = options
+        .output
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| source_path.with_extension("bin"));
+    fs::write(&output_path, &assembled.bytes)
+        .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
+    println!("wrote {}", output_path.display());
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -639,7 +712,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble eZ80 assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -655,6 +728,54 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn assemble_options_parse_base_and_output() {
+        let options = AssembleOptions::parse(&[
+            "--base".to_owned(),
+            "040000h".to_owned(),
+            "-o".to_owned(),
+            "out.bin".to_owned(),
+            "main.asm".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.path, "main.asm");
+        assert_eq!(options.output, Some("out.bin".to_owned()));
+        assert_eq!(options.base_addr, 0x04_0000);
+    }
+
+    #[test]
+    fn assemble_file_writes_raw_binary() {
+        let root = temp_root("assemble_file");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.asm");
+        let output_path = root.join("main.bin");
+        std::fs::write(
+            &source_path,
+            r#"
+                start:
+                    ld a, 42h
+                    rst.lis 10h
+                    ret
+            "#,
+        )
+        .unwrap();
+
+        assemble_file(&AssembleOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            output: Some(output_path.to_string_lossy().into_owned()),
+            base_addr: 0x04_0000,
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            [0x3E, 0x42, 0x49, 0xD7, 0xC9]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
