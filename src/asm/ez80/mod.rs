@@ -1,6 +1,13 @@
 use crate::diagnostic::Diagnostic;
 use crate::target::CpuFamily;
 
+pub mod emitter;
+
+pub use emitter::{
+    AssemblyOptions, CheckedEz80Program, emit_ez80_assembly, emit_ez80_assembly_from_checked,
+    emit_ez80_assembly_with_debug_comments, emit_ez80_assembly_with_options,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InstructionSpec {
     pub syntax: &'static str,
