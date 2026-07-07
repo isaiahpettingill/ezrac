@@ -272,15 +272,9 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     if let Some(len) = asm_meta::generated_instruction_len(CpuFamily::Ez80, text)? {
         Ok(len)
-    } else if matches!(text, "ld sp, hl" | "jp (hl)" | "ex (sp), hl" | "ex af, af'") {
-        Ok(1)
     } else if matches!(
         text,
-        "ld sp, ix"
-            | "ld sp, iy"
-            | "jp (ix)"
-            | "jp (iy)"
-            | "inc ix"
+        "inc ix"
             | "inc iy"
             | "dec ix"
             | "dec iy"
@@ -290,118 +284,23 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "add iy, bc"
             | "add iy, de"
             | "add iy, iy"
-            | "ld i, a"
-            | "ld r, a"
-            | "ld a, i"
-            | "ld a, r"
     ) {
         Ok(2)
     } else if text.starts_with("ld sp,") {
         Ok(4)
     } else if matches!(
         text,
-        "ret"
-            | "ret nz"
-            | "ret z"
-            | "ret nc"
-            | "ret c"
-            | "ret po"
-            | "ret pe"
-            | "ret p"
-            | "ret m"
-            | "nop"
-            | "di"
-            | "ei"
-            | "or a"
-            | "scf"
-            | "ccf"
-            | "cpl"
-            | "daa"
-            | "halt"
-            | "rlca"
-            | "rla"
-            | "rrca"
-            | "rra"
-            | "ex de, hl"
-            | "exx"
-            | "ld sp, hl"
-            | "push af"
-            | "push bc"
-            | "push de"
-            | "push hl"
-            | "pop af"
-            | "pop bc"
-            | "pop de"
-            | "pop hl"
-            | "dec sp"
+        "dec sp"
             | "inc sp"
-            | "inc b"
-            | "dec b"
-            | "dec c"
-            | "ld b, a"
-            | "ld c, a"
-            | "ld d, a"
-            | "ld a, b"
-            | "ld a, c"
-            | "ld a, d"
-            | "ld a, h"
-            | "ld a, l"
             | "ld a, (bc)"
             | "ld a, (hl)"
             | "ld a, (de)"
             | "ld (bc), a"
             | "ld (de), a"
-            | "ld h, b"
-            | "ld h, a"
-            | "ld l, c"
-            | "ld l, a"
             | "ld (hl), a"
-            | "add a, a"
-            | "add a, b"
-            | "add a, c"
-            | "sub b"
-            | "sub c"
-            | "and b"
-            | "and c"
-            | "or b"
-            | "or c"
-            | "xor b"
-            | "xor c"
-            | "xor a"
-            | "cp b"
-            | "cp c"
     ) {
         Ok(1)
-    } else if matches!(
-        text,
-        "reti"
-            | "retn"
-            | "neg"
-            | "rld"
-            | "rrd"
-            | "im 0"
-            | "im 1"
-            | "im 2"
-            | "ld i, a"
-            | "ld r, a"
-            | "ld a, i"
-            | "ld a, r"
-            | "ld sp, ix"
-            | "ld sp, iy"
-            | "ex (sp), ix"
-            | "ex (sp), iy"
-            | "jp (hl)"
-            | "jp (ix)"
-            | "jp (iy)"
-            | "sra a"
-            | "srl a"
-            | "rl a"
-            | "rr a"
-            | "push ix"
-            | "pop ix"
-            | "push iy"
-            | "pop iy"
-    ) {
+    } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
         Ok(2)
     } else if parse_block_operation(text).is_some() {
         Ok(2)
@@ -591,19 +490,8 @@ fn emit_instruction(
     } else if let Some(value) = text.strip_prefix("ld bc,") {
         bytes.push(0x01);
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
-    } else if let Some((dst, src)) = parse_ld_reg8_reg8(text) {
-        bytes.push(0x40 + dst * 8 + src);
-    } else if let Some((dst, value)) = parse_ld_reg8_imm(text)? {
-        bytes.push(ld_reg8_imm_opcode(dst));
-        bytes.push(value);
-    } else if let Some((inc, register)) = parse_inc_dec_reg8(text) {
-        bytes.push(inc_dec_reg8_opcode(inc, register));
     } else if let Some(inc) = parse_inc_dec_hl_indirect(text) {
         bytes.push(if inc { 0x34 } else { 0x35 });
-    } else if let Some((inc, register)) = parse_inc_dec_reg16(text) {
-        bytes.push(inc_dec_reg16_opcode(inc, register));
-    } else if let Some((op, register)) = parse_accumulator_alu_reg8_or_hl(text) {
-        bytes.push(accumulator_alu_reg8_opcode(op, register));
     } else if let Some((op, value)) = parse_accumulator_alu_imm(text)? {
         bytes.push(accumulator_alu_imm_opcode(op));
         bytes.push(value);
@@ -622,106 +510,10 @@ fn emit_instruction(
             .ok_or_else(|| Diagnostic::new(format!("invalid out0 syntax `{text}`")))?
             .0;
         bytes.extend([0xED, 0x39, parse_u8(port)?]);
-    } else if text == "ret" {
-        bytes.push(0xC9);
-    } else if text == "ret nz" {
-        bytes.push(0xC0);
-    } else if text == "ret z" {
-        bytes.push(0xC8);
-    } else if text == "ret nc" {
-        bytes.push(0xD0);
-    } else if text == "ret c" {
-        bytes.push(0xD8);
-    } else if text == "ret po" {
-        bytes.push(0xE0);
-    } else if text == "ret pe" {
-        bytes.push(0xE8);
-    } else if text == "ret p" {
-        bytes.push(0xF0);
-    } else if text == "ret m" {
-        bytes.push(0xF8);
-    } else if text == "nop" {
-        bytes.push(0x00);
-    } else if text == "di" {
-        bytes.push(0xF3);
-    } else if text == "ei" {
-        bytes.push(0xFB);
-    } else if text == "or a" {
-        bytes.push(0xB7);
-    } else if text == "scf" {
-        bytes.push(0x37);
-    } else if text == "ccf" {
-        bytes.push(0x3F);
-    } else if text == "cpl" {
-        bytes.push(0x2F);
-    } else if text == "daa" {
-        bytes.push(0x27);
-    } else if text == "halt" {
-        bytes.push(0x76);
-    } else if text == "rlca" {
-        bytes.push(0x07);
-    } else if text == "rla" {
-        bytes.push(0x17);
-    } else if text == "rrca" {
-        bytes.push(0x0F);
-    } else if text == "rra" {
-        bytes.push(0x1F);
-    } else if text == "ex de, hl" {
-        bytes.push(0xEB);
-    } else if text == "ex af, af'" {
-        bytes.push(0x08);
-    } else if text == "ex (sp), hl" {
-        bytes.push(0xE3);
-    } else if text == "ex (sp), ix" {
-        bytes.extend([0xDD, 0xE3]);
-    } else if text == "ex (sp), iy" {
-        bytes.extend([0xFD, 0xE3]);
-    } else if text == "exx" {
-        bytes.push(0xD9);
-    } else if text == "push af" {
-        bytes.push(0xF5);
-    } else if text == "push bc" {
-        bytes.push(0xC5);
-    } else if text == "push de" {
-        bytes.push(0xD5);
-    } else if text == "push hl" {
-        bytes.push(0xE5);
-    } else if text == "push ix" {
-        bytes.extend([0xDD, 0xE5]);
-    } else if text == "push iy" {
-        bytes.extend([0xFD, 0xE5]);
-    } else if text == "pop af" {
-        bytes.push(0xF1);
-    } else if text == "pop bc" {
-        bytes.push(0xC1);
-    } else if text == "pop de" {
-        bytes.push(0xD1);
-    } else if text == "pop hl" {
-        bytes.push(0xE1);
     } else if text == "dec sp" {
         bytes.push(0x3B);
     } else if text == "inc sp" {
         bytes.push(0x33);
-    } else if text == "pop ix" {
-        bytes.extend([0xDD, 0xE1]);
-    } else if text == "pop iy" {
-        bytes.extend([0xFD, 0xE1]);
-    } else if text == "reti" {
-        bytes.extend([0xED, 0x4D]);
-    } else if text == "retn" {
-        bytes.extend([0xED, 0x45]);
-    } else if text == "neg" {
-        bytes.extend([0xED, 0x44]);
-    } else if text == "rld" {
-        bytes.extend([0xED, 0x6F]);
-    } else if text == "rrd" {
-        bytes.extend([0xED, 0x67]);
-    } else if text == "im 0" {
-        bytes.extend([0xED, 0x46]);
-    } else if text == "im 1" {
-        bytes.extend([0xED, 0x56]);
-    } else if text == "im 2" {
-        bytes.extend([0xED, 0x5E]);
     } else if let Some(opcode) = parse_block_operation(text) {
         bytes.extend([0xED, opcode]);
     } else if let Some(opcode) = parse_mlt_reg16(text) {
@@ -742,47 +534,15 @@ fn emit_instruction(
         bytes.extend(opcode);
     } else if let Some(io) = parse_io_instruction(text)? {
         io.write_to(bytes);
-    } else if text == "inc b" {
-        bytes.push(0x04);
-    } else if text == "dec b" {
-        bytes.push(0x05);
-    } else if text == "dec c" {
-        bytes.push(0x0D);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
         bytes.extend([0xDD, 0x21]);
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(value) = text.strip_prefix("ld iy,") {
         bytes.extend([0xFD, 0x21]);
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
-    } else if text == "ld b, a" {
-        bytes.push(0x47);
-    } else if text == "ld c, a" {
-        bytes.push(0x4F);
-    } else if text == "ld d, a" {
-        bytes.push(0x57);
-    } else if text == "ld a, b" {
-        bytes.push(0x78);
-    } else if text == "ld a, c" {
-        bytes.push(0x79);
-    } else if text == "ld a, d" {
-        bytes.push(0x7A);
-    } else if text == "ld a, h" {
-        bytes.push(0x7C);
-    } else if text == "ld a, l" {
-        bytes.push(0x7D);
-    } else if text == "ld h, b" {
-        bytes.push(0x60);
-    } else if text == "ld h, a" {
-        bytes.push(0x67);
     } else if let Some(value) = text.strip_prefix("ld h,") {
         bytes.push(0x26);
         bytes.push(parse_u8(value.trim())?);
-    } else if text == "ld l, a" {
-        bytes.push(0x6F);
-    } else if text == "ld l, c" {
-        bytes.push(0x69);
-    } else if text == "add a, a" {
-        bytes.push(0x87);
     } else if let Some(register) = text
         .strip_prefix("adc hl,")
         .and_then(|r| reg16_code(r.trim()))
@@ -796,35 +556,9 @@ fn emit_instruction(
         bytes.extend([0xED, 0x62]);
     } else if text == "sbc hl, sp" {
         bytes.extend([0xED, 0x72]);
-    } else if text == "add a, b" {
-        bytes.push(0x80);
-    } else if text == "add a, c" {
-        bytes.push(0x81);
-    } else if text == "sub b" {
-        bytes.push(0x90);
-    } else if text == "sub c" {
-        bytes.push(0x91);
-    } else if text == "and b" {
-        bytes.push(0xA0);
-    } else if text == "and c" {
-        bytes.push(0xA1);
-    } else if text == "or b" {
-        bytes.push(0xB0);
-    } else if text == "or c" {
-        bytes.push(0xB1);
-    } else if text == "xor b" {
-        bytes.push(0xA8);
-    } else if text == "xor c" {
-        bytes.push(0xA9);
-    } else if text == "xor a" {
-        bytes.push(0xAF);
     } else if let Some(value) = text.strip_prefix("xor ") {
         bytes.push(0xEE);
         bytes.push(parse_u8(value.trim())?);
-    } else if text == "cp b" {
-        bytes.push(0xB8);
-    } else if text == "cp c" {
-        bytes.push(0xB9);
     } else if text == "srl a" {
         bytes.extend([0xCB, 0x3F]);
     } else if text == "sra a" {
@@ -1226,19 +960,6 @@ fn reg16_code(register: &str) -> Option<u8> {
     }
 }
 
-fn ld_reg8_imm_opcode(register: u8) -> u8 {
-    match register {
-        0 => 0x06,
-        1 => 0x0E,
-        2 => 0x16,
-        3 => 0x1E,
-        4 => 0x26,
-        5 => 0x2E,
-        7 => 0x3E,
-        _ => unreachable!("invalid 8-bit register code {register}"),
-    }
-}
-
 fn parse_inc_dec_reg8(text: &str) -> Option<(bool, u8)> {
     if let Some(register) = text.strip_prefix("inc ") {
         return Some((true, reg8_code(register.trim())?));
@@ -1255,26 +976,6 @@ fn parse_inc_dec_hl_indirect(text: &str) -> Option<bool> {
         "dec (hl)" => Some(false),
         _ => None,
     }
-}
-
-fn parse_inc_dec_reg16(text: &str) -> Option<(bool, u8)> {
-    if let Some(register) = text.strip_prefix("inc ") {
-        return Some((true, reg16_code(register.trim())?));
-    }
-    if let Some(register) = text.strip_prefix("dec ") {
-        return Some((false, reg16_code(register.trim())?));
-    }
-    None
-}
-
-fn inc_dec_reg16_opcode(inc: bool, register: u8) -> u8 {
-    let base = if inc { 0x03 } else { 0x0B };
-    base + register * 0x10
-}
-
-fn inc_dec_reg8_opcode(inc: bool, register: u8) -> u8 {
-    let base = if inc { 0x04 } else { 0x05 };
-    base + register * 8
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
