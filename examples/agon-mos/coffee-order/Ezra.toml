@@ -4,3 +4,4 @@ name = "agon-mos-coffee-order"
 [build]
 target = "agonlight-mos-ez80"
 output = "bin"
+executable = "coffee-order"

@@ -24,6 +24,17 @@ pub fn getkey() -> u8 {
     return result
 }
 
+pub fn clear_key_state() {
+    asm volatile(clobber af, clobber ix, clobber flags, clobber memory) {
+        "ld a, 08h"
+        "rst.lis 08h"
+        "xor a"
+        "ld (ix+05h), a"
+        "ld (ix+18h), a"
+        "ld (ix+19h), a"
+    }
+}
+
 pub fn exit(code: u8) {
     out EMULATOR_EXIT_PORT, code
 }

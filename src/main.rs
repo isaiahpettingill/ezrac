@@ -182,6 +182,8 @@ struct BuildSettings {
     layout: Layout,
     layout_path: Option<PathBuf>,
     default_sdk_symbols: bool,
+    output_root: PathBuf,
+    executable_name: Option<String>,
 }
 
 fn resolve_build_settings(
@@ -214,6 +216,16 @@ fn resolve_build_settings(
             .map(|project| project.sdk_paths.clone())
             .unwrap_or_default(),
     };
+    let output_root = project
+        .as_ref()
+        .map(|project| project.root.join("target"))
+        .unwrap_or_else(|| {
+            source_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("target")
+        });
+    let executable_name = project.as_ref().and_then(|project| project.executable.clone());
 
     Ok(BuildSettings {
         sdk,
@@ -222,6 +234,8 @@ fn resolve_build_settings(
         layout,
         layout_path,
         default_sdk_symbols: options.default_sdk_symbols,
+        output_root,
+        executable_name,
     })
 }
 
@@ -284,16 +298,10 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
             .to_string()
     })?;
 
-    let stem = source_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| format!("source path `{}` has no file stem", source_path.display()))?;
-    let dir = source_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let asm_path = dir.join(format!("{stem}.asm"));
-    let map_path = dir.join(format!("{stem}.map"));
-    let executable_path = dir.join(format!("{stem}.{}", settings.output_format.extension()));
+    let output_base = build_output_base_path(&settings, &source_path)?;
+    let asm_path = output_base.with_extension("asm");
+    let map_path = output_base.with_extension("map");
+    let executable_path = output_base.with_extension(settings.output_format.extension());
 
     let assembled = assemble_ez80_subset_with_symbols_at(&assembly, settings.layout.entry.get())
         .map_err(|error| error.to_string())?;
@@ -308,6 +316,10 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
+    if let Some(parent) = output_base.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
     fs::write(&asm_path, &assembly)
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
@@ -321,6 +333,25 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         map: map_path,
         executable: executable_path,
     })
+}
+
+fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Result<PathBuf, String> {
+    let source_parent = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let source_stem = match settings.executable_name.as_deref() {
+        Some(name) => name,
+        None => source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| format!("source path `{}` has no file stem", source_path.display()))?,
+    };
+    let relative_parent = source_parent
+        .strip_prefix(settings.output_root.parent().unwrap_or_else(|| Path::new(".")))
+        .unwrap_or(source_parent);
+    Ok(settings
+        .output_root
+        .join(&settings.target)
+        .join(relative_parent)
+        .join(source_stem))
 }
 
 fn build_executable_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {

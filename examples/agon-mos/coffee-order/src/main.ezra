@@ -49,6 +49,7 @@ fn main() {
     print_title()
     print_menu()
 
+    mos.clear_key_state()
     let choice: u8 = mos.getkey()
     mos.putc(choice)
     print_order_prefix()

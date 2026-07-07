@@ -8,6 +8,7 @@ pub struct ProjectConfig {
     pub root: PathBuf,
     pub target: Option<String>,
     pub output: Option<String>,
+    pub executable: Option<String>,
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
     pub sdk_paths: Vec<PathBuf>,
@@ -60,6 +61,12 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(required_string("build.output"))
         .transpose()?;
 
+    let executable = value
+        .get("build")
+        .and_then(|build| build.get("executable"))
+        .map(required_string("build.executable"))
+        .transpose()?;
+
     let layout_file = value
         .get("layout")
         .and_then(|layout| layout.get("file"))
@@ -90,6 +97,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         root,
         target,
         output,
+        executable,
         layout_file,
         cartridge,
         sdk_paths,
@@ -143,6 +151,7 @@ mod tests {
                 [build]
                 target = "agonlight-console8-ez80-1.0"
                 output = "bin"
+                executable = "demo"
 
                 [layout]
                 file = "layouts/demo.ezralayout"
@@ -162,6 +171,7 @@ mod tests {
             Some("agonlight-console8-ez80-1.0")
         );
         assert_eq!(config.output.as_deref(), Some("bin"));
+        assert_eq!(config.executable.as_deref(), Some("demo"));
         assert_eq!(
             config.layout_file,
             Some(PathBuf::from("/project/layouts/demo.ezralayout"))

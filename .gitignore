@@ -1,4 +1,5 @@
 /target
+/examples/**/target
 /examples/**/*.asm
 /examples/**/*.map
 /examples/**/*.bin
