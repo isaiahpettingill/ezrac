@@ -366,6 +366,16 @@ mod tests {
     }
 
     #[test]
+    fn cpm_8085_targets_default_to_com_output() {
+        let cpm = resolve_target_profile(Some("cpm-2.2-i8085")).unwrap();
+
+        assert_eq!(cpm.triple.cpu, CpuFamily::I8085);
+        assert_eq!(cpm.output_format, OutputFormat::CpmCom);
+        assert_eq!(cpm.output_format.extension(), "com");
+        assert_eq!(cpm.memory.address_width_bits, 16);
+    }
+
+    #[test]
     fn resolves_bare_targets_without_default_sdk_symbols() {
         let target = resolve_target_profile(Some("bare-z180")).unwrap();
 

@@ -1362,6 +1362,34 @@ mod tests {
     }
 
     #[test]
+    fn cpm_8085_target_uses_builtin_console_sdk() {
+        let source = r#"
+            import cpm.console
+
+            fn main() {
+                console.write(65)
+                console.exit()
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("cpm-2.2-i8085".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "console.write")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "cpm.console.exit")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
+        }));
+    }
+
+    #[test]
     fn resolves_imported_declarations() {
         let root = temp_root("imports");
         std::fs::create_dir_all(root.join("lib")).unwrap();
