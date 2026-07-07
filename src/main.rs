@@ -3940,6 +3940,48 @@ mod tests {
     }
 
     #[test]
+    fn cpm_8080_source_build_uses_sdk_and_writes_com_binary() {
+        let root = temp_root("cpm_8080_source_build");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                import cpm.bdos
+
+                fn main() {
+                    bdos.console_output(65)
+                    bdos.exit()
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: false,
+            layout_path: None,
+            target: Some("cpm-2.2-i8080".to_owned()),
+        })
+        .unwrap();
+
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let com = std::fs::read(&outputs.executable).unwrap();
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("com")
+        );
+        assert!(asm.contains("; target: i8080"), "{asm}");
+        assert!(asm.contains("    call 0005h"), "{asm}");
+        assert!(asm.contains("    mov c,"), "{asm}");
+        assert!(!asm.contains("    ld "), "{asm}");
+        assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cli_target_overrides_project_target() {
         let root = temp_root("target_override");
         std::fs::create_dir_all(&root).unwrap();

@@ -174,7 +174,7 @@ fn is_bare_target(triple: &TargetTriple) -> bool {
 fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
     if matches!(
         triple.cpu,
-        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180
+        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::I8080 | CpuFamily::I8085
     ) && triple.value.split('-').any(|part| part == "cpm")
     {
         OutputFormat::CpmCom
@@ -353,6 +353,16 @@ mod tests {
 
         assert_eq!(cpm.output_format, OutputFormat::CpmCom);
         assert_eq!(cpm.output_format.extension(), "com");
+    }
+
+    #[test]
+    fn cpm_8080_targets_default_to_com_output() {
+        let cpm = resolve_target_profile(Some("cpm-2.2-i8080")).unwrap();
+
+        assert_eq!(cpm.triple.cpu, CpuFamily::I8080);
+        assert_eq!(cpm.output_format, OutputFormat::CpmCom);
+        assert_eq!(cpm.output_format.extension(), "com");
+        assert_eq!(cpm.memory.address_width_bits, 16);
     }
 
     #[test]

@@ -182,12 +182,24 @@ fn translate_8080_line(line: &str) -> Result<String, Diagnostic> {
         return Ok(line.to_owned());
     }
     let translated = translate_8080_instruction(trimmed)?.unwrap_or_else(|| trimmed.to_owned());
-    let mut out = format!("{indent}{translated}");
+    let mut out = indent_8080_translation(indent, &translated);
     if !comment.is_empty() {
         out.push_str(" ;");
         out.push_str(comment);
     }
     Ok(out)
+}
+
+fn indent_8080_translation(indent: &str, translated: &str) -> String {
+    let mut out = String::new();
+    for (index, line) in translated.lines().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(indent);
+        out.push_str(line);
+    }
+    out
 }
 
 fn translate_8080_instruction(text: &str) -> Result<Option<String>, Diagnostic> {
@@ -339,6 +351,9 @@ fn translate_8080_exact(text: &str) -> Result<Option<String>, Diagnostic> {
 fn translate_8080_ld(dst: &str, src: &str) -> Result<String, Diagnostic> {
     let dst = dst.trim();
     let src = src.trim();
+    if let Some(move_pair) = translate_8080_register_pair_move(dst, src) {
+        return Ok(move_pair);
+    }
     if let Some(register) = intel_8080_reg(dst) {
         if let Some(src) = intel_8080_reg_or_m(src) {
             return Ok(format!("mov {register}, {src}"));
@@ -391,6 +406,24 @@ fn translate_8080_ld(dst: &str, src: &str) -> Result<String, Diagnostic> {
     Err(Diagnostic::new(format!(
         "8080 source codegen cannot translate instruction `ld {dst}, {src}`"
     )))
+}
+
+fn translate_8080_register_pair_move(dst: &str, src: &str) -> Option<String> {
+    let (dst_hi, dst_lo) = intel_8080_rp_bytes(dst)?;
+    let (src_hi, src_lo) = intel_8080_rp_bytes(src)?;
+    if dst == src {
+        return Some("nop".to_owned());
+    }
+    Some(format!("mov {dst_hi}, {src_hi}\nmov {dst_lo}, {src_lo}"))
+}
+
+fn intel_8080_rp_bytes(register: &str) -> Option<(&'static str, &'static str)> {
+    match register.trim() {
+        "bc" => Some(("b", "c")),
+        "de" => Some(("d", "e")),
+        "hl" => Some(("h", "l")),
+        _ => None,
+    }
 }
 
 fn reject_z80_only_8080_instruction(text: &str) -> Result<(), Diagnostic> {
