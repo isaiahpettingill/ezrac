@@ -998,6 +998,23 @@ mod tests {
         ))
     }
 
+    fn copy_fixture(root: &Path, name: &str) -> PathBuf {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("harness")
+            .join(name);
+        let destination = root.join(name);
+        std::fs::copy(&source, &destination).unwrap_or_else(|error| {
+            panic!(
+                "failed to copy fixture {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        });
+        destination
+    }
+
     #[test]
     fn assemble_options_parse_base_and_output() {
         let options = AssembleOptions::parse(&[
@@ -1707,6 +1724,103 @@ mod tests {
             target: Some("ezra-test-flat-ez80".to_owned()),
         })
         .unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_flat_harness_runs_complex_sdk_fixture_and_raw_artifacts() {
+        let root = temp_root("flat_complex_fixture");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = copy_fixture(&root, "flat_complex.ezra");
+
+        let options = CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-flat-ez80".to_owned()),
+        };
+        let run = run_source_with_command_options(&options).unwrap();
+        assert_eq!(run.result_code, 0, "{run:?}");
+        assert_eq!(run.debug_output, b"FLAT");
+        assert_eq!(run.ports[0x0D], 0);
+        assert_eq!(run.ports[0x0E], 1);
+
+        let outputs = build_source_with_command_options(&options).unwrap();
+        assert_eq!(outputs.executable.extension().unwrap(), "bin");
+        let executable = std::fs::read(&outputs.executable).unwrap();
+        assert!(!executable.starts_with(b"MOS"), "{executable:02X?}");
+        let map = std::fs::read_to_string(outputs.map).unwrap();
+        assert!(map.contains(".text        0x010040"), "{map}");
+        assert!(map.contains(".data        0x050000"), "{map}");
+        assert!(map.contains(".assets      0x0C0000"), "{map}");
+        assert!(map.contains("banner"), "{map}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_split_harness_runs_complex_sdk_fixture_and_split_artifacts() {
+        let root = temp_root("split_complex_fixture");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = copy_fixture(&root, "split_complex.ezra");
+
+        let options = CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-split-ez80".to_owned()),
+        };
+        let run = run_source_with_command_options(&options).unwrap();
+        assert_eq!(run.result_code, 0, "{run:?}");
+        assert_eq!(run.debug_output, b"SPLIT");
+
+        let outputs = build_source_with_command_options(&options).unwrap();
+        assert_eq!(outputs.executable.extension().unwrap(), "bin");
+        let map = std::fs::read_to_string(outputs.map).unwrap();
+        assert!(map.contains(".text        0x020040"), "{map}");
+        assert!(map.contains(".data        0x100000"), "{map}");
+        assert!(map.contains(".assets      0x180000"), "{map}");
+        assert!(map.contains("palette"), "{map}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cpm_z80_harness_runs_complex_assembly_fixture_and_com_format() {
+        let root = temp_root("cpm_complex_fixture");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = copy_fixture(&root, "z80_cpm_complex.asm");
+        let output_path = root.join("z80_cpm_complex.com");
+
+        assemble_file(&AssembleOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            output: Some(output_path.to_string_lossy().into_owned()),
+            base_addr: 0x0100,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap();
+        let bytes = std::fs::read(&output_path).unwrap();
+        assert_eq!(output_path.extension().unwrap(), "com");
+        assert!(bytes.len() > 12, "{bytes:02X?}");
+
+        let assembly = std::fs::read_to_string(&source_path).unwrap();
+        let run = ezra::vm::run_assembly_test_with_cpu_options_at(
+            CpuFamily::Z80,
+            &assembly,
+            &TestRunOptions {
+                instruction_budget: 4_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0xFF00,
+            },
+            0x0100,
+        )
+        .unwrap();
+        assert!(run.halted, "{run:?}");
+        assert_eq!(run.debug_output, b"Z80");
 
         let _ = std::fs::remove_dir_all(root);
     }

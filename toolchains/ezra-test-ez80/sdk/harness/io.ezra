@@ -1,0 +1,35 @@
+pub port PAD1: u8 = 0x01
+pub port PAD2: u8 = 0x02
+pub port DEBUG_CHAR: u8 = 0x0C
+pub port TEST_RESULT: u8 = 0x0D
+pub port TEST_HALT: u8 = 0x0E
+
+pub fn read_pad1() -> u8 {
+    return in PAD1
+}
+
+pub fn read_pad2() -> u8 {
+    return in PAD2
+}
+
+pub fn debug_char(ch: u8) {
+    out DEBUG_CHAR, ch
+}
+
+pub fn result(code: u8) {
+    out TEST_RESULT, code
+}
+
+pub fn halt() {
+    out TEST_HALT, 1
+}
+
+pub fn pass() {
+    result(0)
+    halt()
+}
+
+pub fn fail(code: u8) {
+    result(code)
+    halt()
+}

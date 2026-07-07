@@ -1,0 +1,31 @@
+pub volatile mmio FLAT_DEVICE: ptr<u8> = 0x050020
+pub volatile mmio SPLIT_DEVICE: ptr<u8> = 0x100020
+
+pub fn load8(address: ptr<u8>) -> u8 {
+    return *address
+}
+
+pub fn store8(address: ptr<u8>, value: u8) {
+    *address = value
+}
+
+pub fn add8(address: ptr<u8>, value: u8) -> u8 {
+    *address = *address + value
+    return *address
+}
+
+pub fn write_flat_device(value: u8) {
+    *FLAT_DEVICE = value
+}
+
+pub fn read_flat_device() -> u8 {
+    return *FLAT_DEVICE
+}
+
+pub fn write_split_device(value: u8) {
+    *SPLIT_DEVICE = value
+}
+
+pub fn read_split_device() -> u8 {
+    return *SPLIT_DEVICE
+}

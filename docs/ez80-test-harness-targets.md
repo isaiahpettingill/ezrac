@@ -33,3 +33,18 @@ in-repo `ez80` emulator test runner.
 The harness intentionally traps execution outside the compiled image. Tests use
 this to catch bad jumps and startup/entry regressions without depending on MOS
 wrappers or an external emulator.
+
+## Built-In Harness SDK
+
+The `ezra-test-*` targets expose a small built-in SDK for integration fixtures:
+
+- `harness.io`: deterministic input ports, debug output, test result, and halt
+  helpers.
+- `harness.memory`: pointer and volatile-MMIO helpers for flat and split RAM
+  addresses.
+- `harness.layout`: assertions for the flat and split target layout symbols.
+
+Complex regression fixtures live under `tests/fixtures/harness` and are executed
+through the normal CLI build/test paths. They intentionally cover broad target
+families and executable formats: eZ80 ADL raw binaries with flat and split memory
+layouts, and classic Z80 CP/M `.com` assembly through the same in-repo VM path.
