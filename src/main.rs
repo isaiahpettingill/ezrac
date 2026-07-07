@@ -2250,9 +2250,9 @@ mod tests {
                 import agon.vdp
 
                 fn main() {
-                    vdp.clear()
-                    vdp.write(65)
-                    vdp.emulator_exit(0)
+                    vdp.clear_screen()
+                    vdp.vdu(65)
+                    vdp.vdp_exit_emulator(0)
                 }
             "#,
         )
@@ -2267,6 +2267,55 @@ mod tests {
         assert!(asm.contains("rst.lis 10h"), "{asm}");
         assert!(asm.contains("out0 (00h), a"), "{asm}");
         assert_eq!(&bin[0..4], &[0xC3, 0x45, 0x00, 0x04]);
+        assert_eq!(&bin[64..69], b"MOS\0\x01");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agon_mos_target_uses_expanded_builtin_sdk_modules() {
+        let root = temp_root("agon_expanded_sdk");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let source_path = root.join("src/main.ezra");
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+                [build]
+                target = "agonlight-mos-ez80"
+                executable = "expanded-sdk"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &source_path,
+            r#"
+                import agon.console
+                import agon.gpio
+                import agon.keyboard
+                import agon.mouse
+                import agon.vdp
+
+                fn main() {
+                    console.color(vdp.COLOR_GREEN)
+                    console.background(vdp.COLOR_BLACK)
+                    console.print_line("SDK")
+                    vdp.line(0, 0, 16, 16)
+                    mouse.enable()
+                    let key: u8 = keyboard.ascii()
+                    gpio.set_port_b_direction(gpio.ALL_OUTPUTS)
+                    gpio.write_port_b(key)
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+        let asm = std::fs::read_to_string(&outputs.asm).unwrap();
+        let bin = std::fs::read(&outputs.executable).unwrap();
+
+        assert!(asm.contains("rst.lis 08h"), "{asm}");
+        assert!(asm.contains("rst.lis 10h"), "{asm}");
+        assert!(asm.contains("out0 (9Ah), a"), "{asm}");
         assert_eq!(&bin[64..69], b"MOS\0\x01");
 
         let _ = std::fs::remove_dir_all(root);

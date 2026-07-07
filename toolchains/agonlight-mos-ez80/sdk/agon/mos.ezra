@@ -1,5 +1,38 @@
 pub port EMULATOR_EXIT_PORT: u8 = 0x00
 
+pub const I2C_57600: u8 = 1
+pub const I2C_115200: u8 = 2
+pub const I2C_230400: u8 = 3
+
+pub const I2C_OK: u8 = 0
+pub const I2C_NO_RESPONSE: u8 = 1
+pub const I2C_DATA_NACK: u8 = 2
+pub const I2C_ARBITRATION_LOST: u8 = 4
+pub const I2C_BUS_ERROR: u8 = 8
+
+pub const SYSVAR_TIME: u8 = 0x00
+pub const SYSVAR_VDP_FLAGS: u8 = 0x04
+pub const SYSVAR_KEY_ASCII: u8 = 0x05
+pub const SYSVAR_KEY_MODS: u8 = 0x06
+pub const SYSVAR_CURSOR_X: u8 = 0x07
+pub const SYSVAR_CURSOR_Y: u8 = 0x08
+pub const SYSVAR_VKEY_CODE: u8 = 0x17
+pub const SYSVAR_VKEY_DOWN: u8 = 0x18
+pub const SYSVAR_MOUSE_X: u8 = 0x29
+pub const SYSVAR_MOUSE_Y: u8 = 0x2B
+pub const SYSVAR_MOUSE_BUTTONS: u8 = 0x2D
+pub const SYSVAR_MOUSE_WHEEL: u8 = 0x2E
+pub const SYSVAR_MOUSE_X_DELTA: u8 = 0x2F
+pub const SYSVAR_MOUSE_Y_DELTA: u8 = 0x31
+
+pub const VDP_FLAG_CURSOR: u8 = 0x01
+pub const VDP_FLAG_SCRCHAR: u8 = 0x02
+pub const VDP_FLAG_POINT: u8 = 0x04
+pub const VDP_FLAG_AUDIO: u8 = 0x08
+pub const VDP_FLAG_MODE: u8 = 0x10
+pub const VDP_FLAG_RTC: u8 = 0x20
+pub const VDP_FLAG_MOUSE: u8 = 0x40
+
 pub fn putc(ch: u8) {
     asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
         "ld a, {ch}"
@@ -19,6 +52,86 @@ pub fn getkey() -> u8 {
     let result: u8 = 0
     asm volatile(out result: u8 as reg8, clobber a, clobber bc, clobber de, clobber hl, clobber flags) {
         "ld a, 00h"
+        "rst.lis 08h"
+    }
+    return result
+}
+
+pub fn sysvars() -> ptr<u8> {
+    let result: ptr<u8> = 0
+    asm volatile(out result: ptr<u8> as reg24, clobber a, clobber hl, clobber ix) {
+        "ld a, 08h"
+        "rst.lis 08h"
+        "lea hl, ix+0"
+    }
+    return result
+}
+
+pub fn sysvar_u8(offset: u8) -> u8 {
+    return *(sysvars() + offset)
+}
+
+pub fn sysvar_u16(offset: u8) -> u16 {
+    let base: ptr<u8> = sysvars() + offset
+    return cast<u16>(*base) | (cast<u16>(*(base + 1)) << 8)
+}
+
+pub fn clear_vdp_flags(mask: u8) {
+    asm volatile(in mask: u8 as reg8, clobber a, clobber c, clobber af, clobber flags, clobber memory) {
+        "ld c, a"
+        "ld a, 40h"
+        "rst.lis 08h"
+    }
+}
+
+pub fn wait_for_vdp_flags(mask: u8) {
+    asm volatile(in mask: u8 as reg8, clobber a, clobber c, clobber af, clobber flags, clobber memory) {
+        "ld c, a"
+        "ld a, 41h"
+        "rst.lis 08h"
+    }
+}
+
+pub fn i2c_open(speed: u8) -> u8 {
+    let result: u8 = 0
+    asm volatile(in speed: u8 as reg8, out result: u8 as reg8, clobber a, clobber c, clobber bc, clobber flags) {
+        "ld c, a"
+        "ld a, 1Fh"
+        "rst.lis 08h"
+    }
+    return result
+}
+
+pub fn i2c_close() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as reg8, clobber a, clobber flags) {
+        "ld a, 20h"
+        "rst.lis 08h"
+    }
+    return result
+}
+
+pub fn i2c_write(address: u8, buffer: ptr<u8>, len: u8) -> u8 {
+    let result: u8 = 0
+    asm volatile(in address: u8 as mem, in len: u8 as mem, in buffer: ptr<u8> as reg24, out result: u8 as reg8, clobber a, clobber b, clobber c, clobber bc, clobber flags, clobber memory) {
+        "ld a, {address}"
+        "ld c, a"
+        "ld a, {len}"
+        "ld b, a"
+        "ld a, 21h"
+        "rst.lis 08h"
+    }
+    return result
+}
+
+pub fn i2c_read(address: u8, buffer: ptr<u8>, len: u8) -> u8 {
+    let result: u8 = 0
+    asm volatile(in address: u8 as mem, in len: u8 as mem, in buffer: ptr<u8> as reg24, out result: u8 as reg8, clobber a, clobber b, clobber c, clobber bc, clobber flags, clobber memory) {
+        "ld a, {address}"
+        "ld c, a"
+        "ld a, {len}"
+        "ld b, a"
+        "ld a, 22h"
         "rst.lis 08h"
     }
     return result

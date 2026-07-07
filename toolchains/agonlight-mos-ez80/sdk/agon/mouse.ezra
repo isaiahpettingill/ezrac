@@ -1,0 +1,114 @@
+pub const BUTTON_LEFT: u8 = 1
+pub const BUTTON_RIGHT: u8 = 2
+pub const BUTTON_MIDDLE: u8 = 4
+const SYSVAR_MOUSE_X: u8 = 0x29
+const SYSVAR_MOUSE_Y: u8 = 0x2B
+const SYSVAR_MOUSE_BUTTONS: u8 = 0x2D
+const SYSVAR_MOUSE_WHEEL: u8 = 0x2E
+const SYSVAR_MOUSE_X_DELTA: u8 = 0x2F
+const SYSVAR_MOUSE_Y_DELTA: u8 = 0x31
+
+fn mouse_write_vdu(ch: u8) {
+    asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld a, {ch}"
+        "rst.lis 10h"
+    }
+}
+
+fn mouse_write_u16(value: u16) {
+    mouse_write_vdu(cast<u8>(value))
+    mouse_write_vdu(cast<u8>(value >> 8))
+}
+
+fn mouse_sysvars() -> ptr<u8> {
+    let result: ptr<u8> = 0
+    asm volatile(out result: ptr<u8> as reg24, clobber a, clobber hl, clobber ix) {
+        "ld a, 08h"
+        "rst.lis 08h"
+        "lea hl, ix+0"
+    }
+    return result
+}
+
+fn mouse_sysvar_u8(offset: u8) -> u8 {
+    return *(mouse_sysvars() + offset)
+}
+
+fn mouse_sysvar_u16(offset: u8) -> u16 {
+    let base: ptr<u8> = mouse_sysvars() + offset
+    return cast<u16>(*base) | (cast<u16>(*(base + 1)) << 8)
+}
+
+fn command(cmd: u8) {
+    mouse_write_vdu(23)
+    mouse_write_vdu(0)
+    mouse_write_vdu(0x89)
+    mouse_write_vdu(cmd)
+}
+
+pub fn enable() {
+    command(0)
+}
+
+pub fn disable() {
+    command(1)
+}
+
+pub fn reset() {
+    command(2)
+}
+
+pub fn set_cursor(cursor_id: u16) {
+    command(3)
+    mouse_write_u16(cursor_id)
+}
+
+pub fn set_position(x: u16, y: u16) {
+    command(4)
+    mouse_write_u16(x)
+    mouse_write_u16(y)
+}
+
+pub fn set_sample_rate(rate: u8) {
+    command(6)
+    mouse_write_vdu(rate)
+}
+
+pub fn set_resolution(resolution: u8) {
+    command(7)
+    mouse_write_vdu(resolution)
+}
+
+pub fn set_scaling(scaling: u8) {
+    command(8)
+    mouse_write_vdu(scaling)
+}
+
+pub fn set_acceleration(acceleration: u16) {
+    command(9)
+    mouse_write_u16(acceleration)
+}
+
+pub fn mouse_x() -> u16 {
+    return mouse_sysvar_u16(SYSVAR_MOUSE_X)
+}
+
+pub fn mouse_y() -> u16 {
+    return mouse_sysvar_u16(SYSVAR_MOUSE_Y)
+}
+
+pub fn buttons() -> u8 {
+    return mouse_sysvar_u8(SYSVAR_MOUSE_BUTTONS)
+}
+
+pub fn wheel() -> u8 {
+    return mouse_sysvar_u8(SYSVAR_MOUSE_WHEEL)
+}
+
+pub fn x_delta() -> u16 {
+    return mouse_sysvar_u16(SYSVAR_MOUSE_X_DELTA)
+}
+
+pub fn y_delta() -> u16 {
+    return mouse_sysvar_u16(SYSVAR_MOUSE_Y_DELTA)
+}

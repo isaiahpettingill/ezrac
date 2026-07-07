@@ -1,11 +1,11 @@
 import agon.vdp
 
 fn main() {
-    vdp.clear()
-    vdp.write(72)
-    vdp.write(69)
-    vdp.write(76)
-    vdp.write(76)
-    vdp.write(79)
-    vdp.newline()
+    vdp.clear_screen()
+    vdp.vdu(72)
+    vdp.vdu(69)
+    vdp.vdu(76)
+    vdp.vdu(76)
+    vdp.vdu(79)
+    vdp.vdu_newline()
 }

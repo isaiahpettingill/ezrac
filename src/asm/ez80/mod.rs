@@ -234,6 +234,9 @@ pub fn encode_generated_instruction(
     if let Some(opcode) = parse_cb_reg8_or_hl_operation(text)? {
         return Ok(Some(vec![0xCB, opcode]));
     }
+    if let Some(bytes) = parse_lea_instruction(cpu, text)? {
+        return Ok(Some(bytes));
+    }
     if let Some(bytes) = parse_io_instruction(text)? {
         return Ok(Some(bytes));
     }
@@ -1052,6 +1055,28 @@ fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
     } else {
         None
     }
+}
+
+fn parse_lea_instruction(cpu: CpuFamily, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if cpu != CpuFamily::Ez80 {
+        return Ok(None);
+    }
+    let Some(rest) = text.strip_prefix("lea ") else {
+        return Ok(None);
+    };
+    let Some((dst, src)) = rest.split_once(',') else {
+        return Err(Diagnostic::new(format!("invalid lea syntax `{text}`")));
+    };
+    if dst.trim() != "hl" {
+        return Ok(None);
+    }
+    let Some(rest) = src.trim().strip_prefix("ix") else {
+        return Ok(None);
+    };
+    if !is_index_displacement(rest) {
+        return Ok(None);
+    }
+    Ok(Some(vec![0xED, 0x22, parse_index_offset(rest)?]))
 }
 
 fn parse_io_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {

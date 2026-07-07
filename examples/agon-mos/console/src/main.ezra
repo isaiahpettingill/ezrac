@@ -1,0 +1,9 @@
+import agon.console
+
+fn main() {
+    console.clear()
+    console.print("EZRA console SDK")
+    console.newline()
+    console.write('>')
+    console.write(' ')
+}

@@ -371,9 +371,25 @@ fn builtin_sdk_path(import: &str) -> PathBuf {
 fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
     if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {
         match import {
+            "agon.console" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/console.ezra"),
+                "agon.console",
+            )),
             "agon.mos" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/mos.ezra"),
                 "agon.mos",
+            )),
+            "agon.gpio" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/gpio.ezra"),
+                "agon.gpio",
+            )),
+            "agon.keyboard" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/keyboard.ezra"),
+                "agon.keyboard",
+            )),
+            "agon.mouse" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/mouse.ezra"),
+                "agon.mouse",
             )),
             "agon.vdp" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/vdp.ezra"),

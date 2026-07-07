@@ -1,0 +1,3 @@
+[build]
+target = "agonlight-mos-ez80"
+executable = "console"

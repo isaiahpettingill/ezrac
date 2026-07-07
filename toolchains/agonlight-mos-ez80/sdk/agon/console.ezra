@@ -1,0 +1,93 @@
+pub const LF: u8 = 10
+pub const CR: u8 = 13
+pub const BELL: u8 = 7
+pub const CLEAR: u8 = 12
+pub port CONSOLE_EMULATOR_EXIT_PORT: u8 = 0x00
+
+pub fn write(ch: u8) {
+    asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld a, {ch}"
+        "rst.lis 10h"
+    }
+}
+
+pub fn print(text: ptr<u8>) {
+    asm volatile(in text: ptr<u8> as reg24, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld bc, 000000h"
+        "ld a, 00h"
+        "rst.lis 18h"
+    }
+}
+
+pub fn print_line(text: ptr<u8>) {
+    print(text)
+    newline()
+}
+
+pub fn newline() {
+    write(CR)
+    write(LF)
+}
+
+pub fn clear() {
+    write(CLEAR)
+}
+
+pub fn bell() {
+    write(BELL)
+}
+
+pub fn home() {
+    write(30)
+}
+
+pub fn tab(x: u8, y: u8) {
+    write(31)
+    write(x)
+    write(y)
+}
+
+pub fn color(value: u8) {
+    write(17)
+    write(value)
+}
+
+pub fn background(value: u8) {
+    write(17)
+    write(value + 128)
+}
+
+pub fn mode(number: u8) {
+    write(22)
+    write(number)
+}
+
+pub fn cursor_enable(enabled: u8) {
+    write(23)
+    write(1)
+    write(enabled)
+}
+
+pub fn read_key() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as reg8, clobber a, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld a, 00h"
+        "rst.lis 08h"
+    }
+    return result
+}
+
+pub fn clear_keyboard_state() {
+    asm volatile(clobber af, clobber ix, clobber flags, clobber memory) {
+        "ld a, 08h"
+        "rst.lis 08h"
+        "xor a"
+        "ld (ix+05h), a"
+        "ld (ix+18h), a"
+        "ld (ix+19h), a"
+    }
+}
+
+pub fn exit_emulator(code: u8) {
+    out CONSOLE_EMULATOR_EXIT_PORT, code
+}
