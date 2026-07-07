@@ -415,6 +415,8 @@ name = "demo"
 
 [build]
 target = "agonlight-console8-ez80-1.0"
+# Omit this to use the selected target's default output format.
+output = "bin"
 
 [layout]
 # Omit this to use the selected target's default layout.
@@ -431,6 +433,7 @@ Rules:
 ```text
 - `build.target` selects the target triple.
 - the target triple selects the CPU profile, pointer width, default layout, output format, SDK set, and test-runner profile.
+- `build.output` may override the target's default output format.
 - a layout file in `Ezra.toml` overrides the target default layout.
 - SDK search paths in `Ezra.toml` are ordinary source roots and may provide custom modules.
 - command-line `--target` and `--layout` options may override project settings for one build.
@@ -1997,10 +2000,10 @@ Required output files:
 ```text
 game.asm       generated assembly
 game.map       section/symbol map
-game.ezra.cart final cartridge image
+game.bin       default raw target executable
 ```
 
-The exact final artifact extension may vary by target. eZ80 cartridge targets use `.ezra.cart`; classic Z80 and future targets may define target-specific binary, tape, disk, ROM, or cartridge formats.
+The exact final artifact extension may vary by target and `Ezra.toml` output settings. The default output format is raw `.bin`. Targets may later define target-specific binary, tape, disk, ROM, hex, calculator package, or cartridge formats.
 
 Required sections:
 

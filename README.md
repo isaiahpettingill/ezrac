@@ -17,7 +17,7 @@ cargo run -- layout
 cargo run -- header
 ```
 
-`build` writes `.asm`, `.map`, and `.ezra.cart` files next to the source file.
+`build` writes `.asm`, `.map`, and a target executable next to the source file. The default executable format is raw `.bin`.
 
 ## Project Notes
 

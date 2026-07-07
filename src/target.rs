@@ -46,6 +46,20 @@ pub struct TargetTriple {
 pub struct TargetProfile {
     pub triple: TargetTriple,
     pub default_sdk_symbols: bool,
+    pub output_format: OutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputFormat {
+    RawBin,
+}
+
+impl OutputFormat {
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::RawBin => "bin",
+        }
+    }
 }
 
 pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
@@ -62,7 +76,17 @@ pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, Str
     Ok(TargetProfile {
         triple,
         default_sdk_symbols: true,
+        output_format: OutputFormat::RawBin,
     })
+}
+
+pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
+    match value {
+        "bin" => Ok(OutputFormat::RawBin),
+        _ => Err(format!(
+            "unsupported output format `{value}`; only `bin` is implemented"
+        )),
+    }
 }
 
 pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
@@ -183,5 +207,12 @@ mod tests {
             error.contains("only eZ80 codegen is implemented"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn raw_bin_is_the_only_implemented_output_format_for_now() {
+        assert_eq!(parse_output_format("bin"), Ok(OutputFormat::RawBin));
+        let error = parse_output_format("hex").unwrap_err();
+        assert!(error.contains("only `bin` is implemented"), "{error}");
     }
 }

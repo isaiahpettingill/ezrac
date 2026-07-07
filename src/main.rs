@@ -6,10 +6,7 @@ use std::{
 
 use ezra::{
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
-    cart::{
-        CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols,
-        layout_section_bases,
-    },
+    cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
     compile::load_program,
     diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
@@ -17,7 +14,7 @@ use ezra::{
     project::load_nearest_project_config,
     target::{
         Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
-        EZRA_VRAM_BASE, TargetProfile, resolve_target_profile,
+        EZRA_VRAM_BASE, OutputFormat, parse_output_format, resolve_target_profile,
     },
     vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
 };
@@ -106,7 +103,7 @@ impl CommandOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildSettings {
-    target: TargetProfile,
+    output_format: OutputFormat,
     layout: Layout,
     layout_path: Option<PathBuf>,
     default_sdk_symbols: bool,
@@ -123,6 +120,12 @@ fn resolve_build_settings(
             .and_then(|project| project.target.as_deref())
     });
     let target = resolve_target_profile(target_name)?;
+    let output_format = project
+        .as_ref()
+        .and_then(|project| project.output.as_deref())
+        .map(parse_output_format)
+        .transpose()?
+        .unwrap_or(target.output_format);
     let layout_path = options
         .layout_path
         .as_ref()
@@ -131,7 +134,7 @@ fn resolve_build_settings(
     let layout = load_layout(layout_path.as_deref())?;
 
     Ok(BuildSettings {
-        target,
+        output_format,
         layout,
         layout_path,
         default_sdk_symbols: options.default_sdk_symbols,
@@ -142,7 +145,7 @@ fn build(options: &CommandOptions) -> Result<(), String> {
     let outputs = build_source_with_command_options(options)?;
     println!("wrote {}", outputs.asm.display());
     println!("wrote {}", outputs.map.display());
-    println!("wrote {}", outputs.cart.display());
+    println!("wrote {}", outputs.executable.display());
     Ok(())
 }
 
@@ -150,7 +153,7 @@ fn build(options: &CommandOptions) -> Result<(), String> {
 struct BuildOutputs {
     asm: PathBuf,
     map: PathBuf,
-    cart: PathBuf,
+    executable: PathBuf,
 }
 
 #[cfg(test)]
@@ -206,7 +209,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         .unwrap_or_else(|| std::path::Path::new("."));
     let asm_path = dir.join(format!("{stem}.asm"));
     let map_path = dir.join(format!("{stem}.map"));
-    let cart_path = dir.join(format!("{stem}.ezra.cart"));
+    let executable_path = dir.join(format!("{stem}.{}", settings.output_format.extension()));
 
     let assembled = assemble_ez80_subset_with_symbols_at(&assembly, settings.layout.entry.get())
         .map_err(|error| error.to_string())?;
@@ -221,25 +224,17 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let cart = build_cartridge_with_layout_code_and_symbols(
-        &program,
-        &settings.layout,
-        &assembled.bytes,
-        &assembled.symbols,
-    )
-    .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
-
     fs::write(&asm_path, &assembly)
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    fs::write(&cart_path, cart)
-        .map_err(|error| format!("failed to write {}: {error}", cart_path.display()))?;
+    fs::write(&executable_path, &assembled.bytes)
+        .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
     Ok(BuildOutputs {
         asm: asm_path,
         map: map_path,
-        cart: cart_path,
+        executable: executable_path,
     })
 }
 
@@ -597,13 +592,12 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ezra::target::{EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR};
 
     fn temp_root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -656,7 +650,7 @@ mod tests {
         let outputs = build_source(source_path.to_str().unwrap()).unwrap();
         let asm = std::fs::read_to_string(&outputs.asm).unwrap();
         let map = std::fs::read_to_string(&outputs.map).unwrap();
-        let cart = std::fs::read(&outputs.cart).unwrap();
+        let bin = std::fs::read(&outputs.executable).unwrap();
 
         assert!(asm.contains("__ezra_start:"));
         assert!(asm.contains("_add_one:"));
@@ -677,29 +671,12 @@ mod tests {
             map.contains(".assets:blob 0x100100 0x100102 0x000003"),
             "{map}"
         );
-        assert_eq!(&cart[0..4], b"EZRA");
-        assert_eq!(read_addr24(&cart, 0x08), EZRA_ENTRY_ADDR.get());
-        assert_eq!(&cart[64..69], &[0xF3, 0x31, 0x00, 0x00, 0xF0]);
-        let layout_table = read_addr24(&cart, 0x1E);
-        assert!(layout_table > EZRA_ENTRY_ADDR.get());
-        let symbol_table = read_addr24(&cart, 0x24);
-        assert!(symbol_table > layout_table);
-        let symbol_offset = usize::try_from(symbol_table - EZRA_LOAD_ADDR.get()).unwrap();
-        let symbols = std::str::from_utf8(&cart[symbol_offset..]).unwrap();
-        assert!(
-            symbols.contains("symbol __ezra_start 0x010040"),
-            "{symbols}"
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("bin")
         );
-        assert!(symbols.contains("symbol _main"), "{symbols}");
-        assert!(read_addr24(&cart, 0x21) > read_addr24(&cart, 0x1E));
-        assert!(cart.len() > 64);
-        let asset_table = usize::try_from(read_addr24(&cart, 0x21) - EZRA_LOAD_ADDR.get()).unwrap();
-        let palette =
-            usize::try_from(read_addr24(&cart, asset_table) - EZRA_LOAD_ADDR.get()).unwrap();
-        let blob =
-            usize::try_from(read_addr24(&cart, asset_table + 10) - EZRA_LOAD_ADDR.get()).unwrap();
-        assert_eq!(&cart[palette..palette + 2], &[0x11, 0x22]);
-        assert_eq!(&cart[blob..blob + 3], &[0x5A, 0x5A, 0x5A]);
+        assert_eq!(&bin[0..5], &[0xF3, 0x31, 0x00, 0x00, 0xF0]);
+        assert!(bin.len() > 5);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1250,6 +1227,28 @@ mod tests {
     }
 
     #[test]
+    fn commands_reject_unimplemented_output_formats() {
+        let root = temp_root("unsupported_output");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+                [build]
+                target = "agonlight-console8-ez80"
+                output = "hex"
+            "#,
+        )
+        .unwrap();
+
+        let error = build_source(source_path.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("only `bin` is implemented"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_command_reports_stack_overflow() {
         let root = temp_root("stack_overflow_test");
         std::fs::create_dir_all(&root).unwrap();
@@ -1390,7 +1389,7 @@ mod tests {
 
         let map = std::fs::read_to_string(&outputs.map).unwrap();
         let asm = std::fs::read_to_string(&outputs.asm).unwrap();
-        let cart = std::fs::read(&outputs.cart).unwrap();
+        let bin = std::fs::read(&outputs.executable).unwrap();
 
         assert!(
             map.starts_with("section      start      end        size\n"),
@@ -1400,14 +1399,11 @@ mod tests {
         assert!(asm.contains("    ld sp, EFFF00h"), "{asm}");
         assert!(asm.contains("    ld (030000h), a"), "{asm}");
         assert!(!asm.contains("    ld (040000h), a"), "{asm}");
-        assert_eq!(read_addr24(&cart, 0x08), 0x020040);
-        assert_eq!(read_addr24(&cart, 0x0B), 0xEFFF00);
-        assert_eq!(read_addr24(&cart, 0x0E), 0x030000);
-        let layout_table = read_addr24(&cart, 0x1E);
-        assert!(layout_table > 0x020040);
-        let layout_offset = usize::try_from(layout_table - 0x020000).unwrap();
-        assert!(cart[layout_offset..].starts_with(b"layout custom\n"));
-        assert_eq!(&cart[64..69], &[0xF3, 0x31, 0x00, 0xFF, 0xEF]);
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("bin")
+        );
+        assert_eq!(&bin[0..5], &[0xF3, 0x31, 0x00, 0xFF, 0xEF]);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1456,11 +1452,5 @@ mod tests {
         assert!(asm.contains("    ld sp, EFFE00h"), "{asm}");
 
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    fn read_addr24(bytes: &[u8], offset: usize) -> u32 {
-        u32::from(bytes[offset])
-            | (u32::from(bytes[offset + 1]) << 8)
-            | (u32::from(bytes[offset + 2]) << 16)
     }
 }
