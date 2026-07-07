@@ -7,6 +7,23 @@ pub fn putc(ch: u8) {
     }
 }
 
+pub fn puts(text: ptr<u8>) {
+    asm volatile(in text: ptr<u8> as reg24, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld bc, 000000h"
+        "ld a, 00h"
+        "rst.lis 18h"
+    }
+}
+
+pub fn getkey() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as reg8, clobber a, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld a, 00h"
+        "rst.lis 08h"
+    }
+    return result
+}
+
 pub fn exit(code: u8) {
     out EMULATOR_EXIT_PORT, code
 }

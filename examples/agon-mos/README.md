@@ -10,6 +10,14 @@ cargo run -- build examples/agon-mos/hello/src/main.ezra
 
 This writes `main.asm`, `main.map`, and `main.bin` next to the source file.
 
+Build the interactive coffee order example:
+
+```sh
+cargo run -- build examples/agon-mos/coffee-order/src/main.ezra
+```
+
+It uses `agon.mos.getkey()` to read one key from MOS and lets you order `Coffee`, `Latte`, or `Monster`.
+
 The example is a normal MOS executable: after `main` returns, control returns to MOS. The SDK exposes `vdp.emulator_exit` for CLI-emulator automation, but normal programs should not call it.
 
 ## Fab Agon Emulator

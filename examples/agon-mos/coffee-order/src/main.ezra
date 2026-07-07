@@ -1,0 +1,75 @@
+import agon.mos
+
+const VDU_CLEAR: u8 = 12
+
+fn clear() {
+    mos.putc(VDU_CLEAR)
+}
+
+fn print_title() {
+    mos.puts("EZRA CAFE\n\n")
+}
+
+fn print_menu() {
+    mos.puts("1) ")
+    print_word_coffee()
+    mos.puts("\n2) ")
+    print_word_latte()
+    mos.puts("\n3) ")
+    print_word_monster()
+    mos.puts("\n\nPick 1-3: ")
+}
+
+fn print_word_coffee() {
+    mos.puts("Coffee")
+}
+
+fn print_word_latte() {
+    mos.puts("Latte")
+}
+
+fn print_word_monster() {
+    mos.puts("Monster")
+}
+
+fn print_order_prefix() {
+    mos.puts("\n\nOrder: ")
+}
+
+fn print_ready() {
+    mos.puts("\nReady!\n")
+}
+
+fn print_try_again() {
+    mos.puts("\n\nNope. Try 1, 2, or 3.\n")
+}
+
+fn main() {
+    clear()
+    print_title()
+    print_menu()
+
+    let choice: u8 = mos.getkey()
+    mos.putc(choice)
+    print_order_prefix()
+
+    if choice == '1' {
+        print_word_coffee()
+        print_ready()
+        return
+    }
+
+    if choice == '2' {
+        print_word_latte()
+        print_ready()
+        return
+    }
+
+    if choice == '3' {
+        print_word_monster()
+        print_ready()
+        return
+    }
+
+    print_try_again()
+}
