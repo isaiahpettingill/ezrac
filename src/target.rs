@@ -25,6 +25,72 @@ pub enum CpuFamily {
     I8080,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssemblerCpu {
+    I8080,
+    I8085,
+    Z80,
+    Z80N,
+    Z180,
+    Ez80,
+}
+
+impl AssemblerCpu {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "i8080" | "8080" => Ok(Self::I8080),
+            "i8085" | "8085" => Ok(Self::I8085),
+            "z80" => Ok(Self::Z80),
+            "z80n" => Ok(Self::Z80N),
+            "z180" => Ok(Self::Z180),
+            "ez80" => Ok(Self::Ez80),
+            _ => Err(format!(
+                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, or ez80"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::I8080 => "i8080",
+            Self::I8085 => "i8085",
+            Self::Z80 => "z80",
+            Self::Z80N => "z80n",
+            Self::Z180 => "z180",
+            Self::Ez80 => "ez80",
+        }
+    }
+
+    pub fn encoding_family(self) -> Option<CpuFamily> {
+        match self {
+            Self::Z80 => Some(CpuFamily::Z80),
+            Self::Z80N => Some(CpuFamily::Z80),
+            Self::Z180 => Some(CpuFamily::Z80),
+            Self::Ez80 => Some(CpuFamily::Ez80),
+            Self::I8080 | Self::I8085 => None,
+        }
+    }
+
+    pub fn supports_z80_syntax(self) -> bool {
+        matches!(self, Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80)
+    }
+
+    pub fn supports_ez80_syntax(self) -> bool {
+        self == Self::Ez80
+    }
+}
+
+impl From<CpuFamily> for AssemblerCpu {
+    fn from(cpu: CpuFamily) -> Self {
+        match cpu {
+            CpuFamily::Ez80 => Self::Ez80,
+            CpuFamily::Z80 => Self::Z80,
+            CpuFamily::I8080 => Self::I8080,
+            CpuFamily::M68k => Self::Ez80,
+        }
+    }
+}
+
 impl CpuFamily {
     pub fn as_str(self) -> &'static str {
         match self {

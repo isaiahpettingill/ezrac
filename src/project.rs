@@ -10,6 +10,7 @@ pub struct ProjectConfig {
     pub target: Option<String>,
     pub output: Option<String>,
     pub input_kind: Option<String>,
+    pub assembler_cpu: Option<String>,
     pub executable: Option<String>,
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
@@ -76,6 +77,12 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(required_string("build.input_kind"))
         .transpose()?;
 
+    let assembler_cpu = value
+        .get("build")
+        .and_then(|build| build.get("assembler_cpu"))
+        .map(required_string("build.assembler_cpu"))
+        .transpose()?;
+
     let executable = value
         .get("build")
         .and_then(|build| build.get("executable"))
@@ -114,6 +121,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         target,
         output,
         input_kind,
+        assembler_cpu,
         executable,
         layout_file,
         cartridge,
@@ -170,6 +178,7 @@ mod tests {
                 target = "agonlight-console8-ez80-1.0"
                 output = "bin"
                 input_kind = "ezra"
+                assembler_cpu = "ez80"
                 executable = "demo"
 
                 [layout]
@@ -191,6 +200,7 @@ mod tests {
         );
         assert_eq!(config.output.as_deref(), Some("bin"));
         assert_eq!(config.input_kind.as_deref(), Some("ezra"));
+        assert_eq!(config.assembler_cpu.as_deref(), Some("ez80"));
         assert_eq!(config.input, Some(PathBuf::from("/project/src/main.ezra")));
         assert_eq!(config.executable.as_deref(), Some("demo"));
         assert_eq!(

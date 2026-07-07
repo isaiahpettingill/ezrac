@@ -9,7 +9,7 @@ use ez80::{Cpu, Machine, Reg8, Reg16};
 
 use crate::asm::ez80 as asm_meta;
 use crate::diagnostic::{Diagnostic, SourceLocation};
-use crate::target::{Address24, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
+use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestRun {
@@ -242,7 +242,7 @@ pub fn assemble_ez80_subset_with_symbols_at(
     assembly: &str,
     base_addr: u32,
 ) -> Result<AssembledProgram, Diagnostic> {
-    assemble_subset_with_symbols_at(CpuFamily::Ez80, assembly, base_addr)
+    assemble_subset_with_symbols_at(AssemblerCpu::Ez80, assembly, base_addr)
 }
 
 pub fn assemble_subset_at(
@@ -250,24 +250,19 @@ pub fn assemble_subset_at(
     assembly: &str,
     base_addr: u32,
 ) -> Result<Vec<u8>, Diagnostic> {
-    Ok(assemble_subset_with_symbols_at(cpu_family, assembly, base_addr)?.bytes)
+    Ok(assemble_subset_with_symbols_at(AssemblerCpu::from(cpu_family), assembly, base_addr)?.bytes)
 }
 
 pub fn assemble_subset_with_symbols_at(
-    cpu_family: CpuFamily,
+    cpu: AssemblerCpu,
     assembly: &str,
     base_addr: u32,
 ) -> Result<AssembledProgram, Diagnostic> {
-    assemble_subset_with_options_at(
-        cpu_family,
-        assembly,
-        base_addr,
-        &AssemblerSourceOptions::default(),
-    )
+    assemble_subset_with_options_at(cpu, assembly, base_addr, &AssemblerSourceOptions::default())
 }
 
 pub fn assemble_subset_with_options_at(
-    cpu_family: CpuFamily,
+    cpu: AssemblerCpu,
     assembly: &str,
     base_addr: u32,
     options: &AssemblerSourceOptions,
@@ -332,7 +327,7 @@ pub fn assemble_subset_with_options_at(
                 })?;
             }
             AsmLine::Instruction(text) => {
-                let len = instruction_len(cpu_family, text).map_err(|error| {
+                let len = instruction_len(cpu, text).map_err(|error| {
                     error.with_location_if_missing(line_location(instruction, options))
                 })?;
                 pc = checked_assembly_pc_advance(pc, len as u32).map_err(|error| {
@@ -373,10 +368,10 @@ pub fn assemble_subset_with_options_at(
                 })?;
             }
             AsmLine::Instruction(text) => {
-                emit_instruction(cpu_family, text, &labels, pc, &mut bytes).map_err(|error| {
+                emit_instruction(cpu, text, &labels, pc, &mut bytes).map_err(|error| {
                     error.with_location_if_missing(line_location(&instruction, options))
                 })?;
-                let len = instruction_len(cpu_family, text).map_err(|error| {
+                let len = instruction_len(cpu, text).map_err(|error| {
                     error.with_location_if_missing(line_location(&instruction, options))
                 })?;
                 pc = checked_assembly_pc_advance(pc, len as u32).map_err(|error| {
@@ -651,9 +646,13 @@ fn eval_atom(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, 
     parse_number(text)
 }
 
-fn instruction_len(cpu_family: CpuFamily, text: &str) -> Result<usize, Diagnostic> {
-    if let Some(len) = asm_meta::generated_instruction_len(cpu_family, text)? {
+fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
+    if let Some(len) = asm_meta::generated_instruction_len(cpu, text)? {
         Ok(len)
+    } else if !cpu.supports_z80_syntax() {
+        Err(Diagnostic::new(format!(
+            "test assembler does not support instruction `{text}`"
+        )))
     } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
         Ok(2)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") {
@@ -668,21 +667,25 @@ fn instruction_len(cpu_family: CpuFamily, text: &str) -> Result<usize, Diagnosti
 }
 
 fn emit_instruction(
-    cpu_family: CpuFamily,
+    cpu: AssemblerCpu,
     text: &str,
     labels: &HashMap<String, u32>,
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
-    if let Some(generated) = asm_meta::encode_generated_instruction(cpu_family, text)? {
+    if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
         bytes.extend(generated);
-    } else if let Some(direct) = asm_meta::direct24_instruction(cpu_family, text) {
+    } else if !cpu.supports_z80_syntax() {
+        return Err(Diagnostic::new(format!(
+            "test assembler does not support instruction `{text}`"
+        )));
+    } else if let Some(direct) = asm_meta::direct24_instruction(cpu, text) {
         bytes.extend_from_slice(direct.prefix);
         push24(bytes, parse_addr(direct.addr, labels, pc)?);
-    } else if let Some(load) = asm_meta::imm24_load_instruction(cpu_family, text) {
+    } else if let Some(load) = asm_meta::imm24_load_instruction(cpu, text) {
         bytes.extend_from_slice(load.prefix);
         push24(bytes, parse_addr(load.value, labels, pc)?);
-    } else if let Some(branch) = asm_meta::branch_instruction(cpu_family, text) {
+    } else if let Some(branch) = asm_meta::branch_instruction(cpu, text) {
         bytes.push(branch.opcode);
         let target = parse_addr(branch.target, labels, pc)?;
         match branch.width {
@@ -2510,6 +2513,50 @@ mod tests {
         .unwrap();
 
         assert_eq!(bytes, [0xC3, 0x12, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn z80n_and_z180_inherit_z80_instruction_encoding() {
+        for cpu in [AssemblerCpu::Z80N, AssemblerCpu::Z180] {
+            let assembled =
+                assemble_subset_with_symbols_at(cpu, "ld a, 7Fh\nret\n", 0x0100).unwrap();
+
+            assert_eq!(assembled.bytes, [0x3E, 0x7F, 0xC9]);
+        }
+    }
+
+    #[test]
+    fn z180_and_ez80_accept_z180_lineage_instructions() {
+        for cpu in [AssemblerCpu::Z180, AssemblerCpu::Ez80] {
+            let assembled =
+                assemble_subset_with_symbols_at(cpu, "mlt bc\nout0 (34h), a\n", 0x0100).unwrap();
+
+            assert_eq!(assembled.bytes, [0xED, 0x4C, 0xED, 0x39, 0x34]);
+        }
+    }
+
+    #[test]
+    fn z80_and_z80n_reject_z180_ez80_only_instructions() {
+        for cpu in [AssemblerCpu::Z80, AssemblerCpu::Z80N] {
+            let error = assemble_subset_with_symbols_at(cpu, "mlt bc\n", 0x0100).unwrap_err();
+
+            assert_eq!(
+                error.message,
+                "test assembler does not support instruction `mlt bc`"
+            );
+        }
+    }
+
+    #[test]
+    fn i8080_and_i8085_reject_z80_syntax_until_intel_aliases_land() {
+        for cpu in [AssemblerCpu::I8080, AssemblerCpu::I8085] {
+            let error = assemble_subset_with_symbols_at(cpu, "ld a, 7Fh\n", 0x0100).unwrap_err();
+
+            assert_eq!(
+                error.message,
+                "test assembler does not support instruction `ld a, 7Fh`"
+            );
+        }
     }
 
     #[test]

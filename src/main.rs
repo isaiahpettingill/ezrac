@@ -16,8 +16,9 @@ use ezra::{
     parser::parse_program,
     project::{load_nearest_project_config, load_project_config},
     target::{
-        Address24, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
-        EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format, resolve_target_profile,
+        Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE,
+        EZRA_RODATA_BASE, EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format,
+        resolve_target_profile,
     },
     tbir::TbirProgram,
     vm::TestRunOptions,
@@ -76,6 +77,7 @@ struct BuildCommandOptions {
     debug_comments: bool,
     default_sdk_symbols: bool,
     input_kind: Option<InputKind>,
+    assembler_cpu: Option<AssemblerCpu>,
     layout_path: Option<String>,
     target: Option<String>,
 }
@@ -86,6 +88,7 @@ impl BuildCommandOptions {
         let mut debug_comments = false;
         let mut default_sdk_symbols = true;
         let mut input_kind = None;
+        let mut assembler_cpu = None;
         let mut layout_path = None;
         let mut target = None;
         let mut iter = args.iter();
@@ -96,6 +99,10 @@ impl BuildCommandOptions {
                 "--input-kind" => {
                     let value = iter.next().ok_or_else(usage)?;
                     input_kind = Some(InputKind::parse(value)?);
+                }
+                "--cpu" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    assembler_cpu = Some(AssemblerCpu::parse(value)?);
                 }
                 "--layout" => {
                     let value = iter.next().ok_or_else(usage)?;
@@ -114,6 +121,7 @@ impl BuildCommandOptions {
             debug_comments,
             default_sdk_symbols,
             input_kind,
+            assembler_cpu,
             layout_path,
             target,
         })
@@ -126,6 +134,7 @@ impl BuildCommandOptions {
             debug_comments,
             default_sdk_symbols: true,
             input_kind: None,
+            assembler_cpu: None,
             layout_path: None,
             target: None,
         }
@@ -135,6 +144,7 @@ impl BuildCommandOptions {
 trait BuildOptionsView {
     fn default_sdk_symbols(&self) -> bool;
     fn input_kind(&self) -> Option<InputKind>;
+    fn assembler_cpu(&self) -> Option<AssemblerCpu>;
     fn layout_path(&self) -> Option<&String>;
     fn target(&self) -> Option<&String>;
 }
@@ -146,6 +156,10 @@ impl BuildOptionsView for BuildCommandOptions {
 
     fn input_kind(&self) -> Option<InputKind> {
         self.input_kind
+    }
+
+    fn assembler_cpu(&self) -> Option<AssemblerCpu> {
+        self.assembler_cpu
     }
 
     fn layout_path(&self) -> Option<&String> {
@@ -209,6 +223,10 @@ impl BuildOptionsView for CommandOptions {
         None
     }
 
+    fn assembler_cpu(&self) -> Option<AssemblerCpu> {
+        None
+    }
+
     fn layout_path(&self) -> Option<&String> {
         self.layout_path.as_ref()
     }
@@ -223,6 +241,7 @@ struct AssembleOptions {
     path: String,
     output: Option<String>,
     base_addr: Option<u32>,
+    assembler_cpu: Option<AssemblerCpu>,
     layout_path: Option<String>,
     map_path: Option<String>,
     target: Option<String>,
@@ -277,6 +296,7 @@ impl AssembleOptions {
         let mut path = None;
         let mut output = None;
         let mut base_addr = None;
+        let mut assembler_cpu = None;
         let mut layout_path = None;
         let mut map_path = None;
         let mut target = None;
@@ -290,6 +310,10 @@ impl AssembleOptions {
                 "--base" => {
                     let value = iter.next().ok_or_else(usage)?;
                     base_addr = Some(parse_cli_u24(value)?);
+                }
+                "--cpu" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    assembler_cpu = Some(AssemblerCpu::parse(value)?);
                 }
                 "--layout" => {
                     let value = iter.next().ok_or_else(usage)?;
@@ -311,6 +335,7 @@ impl AssembleOptions {
             path: path.ok_or_else(usage)?,
             output,
             base_addr,
+            assembler_cpu,
             layout_path,
             map_path,
             target,
@@ -347,6 +372,9 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         return Err(format!("layout is invalid:\n{message}"));
     }
     let output_format = target.output_format;
+    let assembler_cpu = options
+        .assembler_cpu
+        .unwrap_or_else(|| AssemblerCpu::from(target.triple.cpu));
     let settings = BuildSettings {
         sdk: SdkResolver {
             target: Some(target.triple.value.clone()),
@@ -355,6 +383,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         target,
         output_format,
         input_kind: Some(InputKind::Assembly),
+        assembler_cpu,
         layout,
         layout_path,
         default_sdk_symbols: true,
@@ -366,7 +395,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
     };
     let image = if let Some(base_addr) = options.base_addr {
         let assembled = ezra::vm::assemble_subset_with_options_at(
-            settings.target.triple.cpu,
+            settings.assembler_cpu,
             &source,
             base_addr,
             &assembly_source_options(&source_path, &settings.layout),
@@ -403,6 +432,7 @@ struct BuildSettings {
     target: TargetProfile,
     output_format: OutputFormat,
     input_kind: Option<InputKind>,
+    assembler_cpu: AssemblerCpu,
     layout: Layout,
     layout_path: Option<PathBuf>,
     default_sdk_symbols: bool,
@@ -453,6 +483,15 @@ fn resolve_build_settings(
             .map(InputKind::parse)
             .transpose()?,
     };
+    let assembler_cpu = match options.assembler_cpu() {
+        Some(cpu) => cpu,
+        None => project
+            .as_ref()
+            .and_then(|project| project.assembler_cpu.as_deref())
+            .map(AssemblerCpu::parse)
+            .transpose()?
+            .unwrap_or_else(|| AssemblerCpu::from(target.triple.cpu)),
+    };
     let layout_path = options.layout_path().map(PathBuf::from).or_else(|| {
         project
             .as_ref()
@@ -484,6 +523,7 @@ fn resolve_build_settings(
         target,
         output_format,
         input_kind,
+        assembler_cpu,
         layout,
         layout_path,
         default_sdk_symbols: options.default_sdk_symbols(),
@@ -582,6 +622,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         debug_comments: options.debug_comments,
         default_sdk_symbols: options.default_sdk_symbols,
         input_kind: None,
+        assembler_cpu: None,
         layout_path: options.layout_path.clone(),
         target: options.target.clone(),
     })
@@ -725,7 +766,7 @@ fn write_build_artifacts(
     let executable_path = output_base.with_extension(settings.output_format.extension());
 
     let assembled = ezra::vm::assemble_subset_with_options_at(
-        settings.target.triple.cpu,
+        AssemblerCpu::from(settings.target.triple.cpu),
         &assembly,
         settings.layout.entry.get(),
         &assembly_source_options(source_path, &settings.layout),
@@ -846,7 +887,7 @@ fn build_assembly_image(
     for section in sections {
         let start = assembly_section_start(&settings.layout, &section.name)?;
         let assembled = ezra::vm::assemble_subset_with_options_at(
-            settings.target.triple.cpu,
+            settings.assembler_cpu,
             &section.source,
             start,
             &assembly_source_options(source_path, &settings.layout),
@@ -1581,7 +1622,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -1673,12 +1714,25 @@ mod tests {
         let options = BuildCommandOptions::parse(&[
             "--input-kind".to_owned(),
             "assembly".to_owned(),
+            "--cpu".to_owned(),
+            "z180".to_owned(),
             "main.txt".to_owned(),
         ])
         .unwrap();
 
         assert_eq!(options.path.as_deref(), Some("main.txt"));
         assert_eq!(options.input_kind, Some(InputKind::Assembly));
+        assert_eq!(options.assembler_cpu, Some(AssemblerCpu::Z180));
+    }
+
+    #[test]
+    fn assemble_options_parse_cpu() {
+        let options =
+            AssembleOptions::parse(&["--cpu".to_owned(), "z80n".to_owned(), "main.asm".to_owned()])
+                .unwrap();
+
+        assert_eq!(options.path, "main.asm");
+        assert_eq!(options.assembler_cpu, Some(AssemblerCpu::Z80N));
     }
 
     #[test]
@@ -1715,6 +1769,7 @@ mod tests {
             path: source_path.to_string_lossy().into_owned(),
             output: Some(output_path.to_string_lossy().into_owned()),
             base_addr: Some(0x04_0000),
+            assembler_cpu: None,
             layout_path: None,
             map_path: None,
             target: None,
@@ -1752,6 +1807,7 @@ mod tests {
             path: source_path.to_string_lossy().into_owned(),
             output: None,
             base_addr: None,
+            assembler_cpu: None,
             layout_path: None,
             map_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
@@ -1783,6 +1839,7 @@ mod tests {
                     .into_owned(),
                 output: Some(output.to_string_lossy().into_owned()),
                 base_addr: None,
+                assembler_cpu: None,
                 layout_path: None,
                 map_path: None,
                 target: Some("cpm-2.2-z80".to_owned()),
@@ -1817,6 +1874,7 @@ mod tests {
             path: source_path.to_string_lossy().into_owned(),
             output: Some(output_path.to_string_lossy().into_owned()),
             base_addr: None,
+            assembler_cpu: None,
             layout_path: None,
             map_path: Some(map_path.to_string_lossy().into_owned()),
             target: Some("cpm-2.2-z80".to_owned()),
@@ -1964,6 +2022,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: Some(InputKind::Assembly),
+            assembler_cpu: None,
             layout_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
         })
@@ -1996,6 +2055,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: Some(InputKind::Assembly),
+            assembler_cpu: None,
             layout_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
         })
@@ -2034,6 +2094,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: Some(InputKind::Assembly),
+            assembler_cpu: None,
             layout_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
         })
@@ -2086,6 +2147,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: Some(InputKind::Assembly),
+            assembler_cpu: None,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
             target: Some("zxspectrum-z80".to_owned()),
         })
@@ -2111,6 +2173,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: Some(InputKind::Assembly),
+            assembler_cpu: None,
             layout_path: None,
             target: Some("agonlight-mos-ez80".to_owned()),
         })
@@ -2202,6 +2265,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: None,
+            assembler_cpu: None,
             layout_path: None,
             target: None,
         })
@@ -2793,6 +2857,7 @@ mod tests {
             path: source_path.to_string_lossy().into_owned(),
             output: Some(output_path.to_string_lossy().into_owned()),
             base_addr: Some(0x0100),
+            assembler_cpu: None,
             layout_path: None,
             map_path: None,
             target: Some("cpm-2.2-z80".to_owned()),

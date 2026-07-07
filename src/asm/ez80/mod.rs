@@ -1,5 +1,5 @@
 use crate::diagnostic::Diagnostic;
-use crate::target::CpuFamily;
+use crate::target::AssemblerCpu;
 
 pub mod emitter;
 
@@ -11,12 +11,18 @@ pub use emitter::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InstructionSpec {
     pub syntax: &'static str,
-    pub cpus: &'static [CpuFamily],
+    pub cpus: &'static [AssemblerCpu],
     pub bytes: &'static [u8],
 }
 
-const Z80_AND_EZ80: &[CpuFamily] = &[CpuFamily::Z80, CpuFamily::Ez80];
-const EZ80_ONLY: &[CpuFamily] = &[CpuFamily::Ez80];
+const Z80_PLUS: &[AssemblerCpu] = &[
+    AssemblerCpu::Z80,
+    AssemblerCpu::Z80N,
+    AssemblerCpu::Z180,
+    AssemblerCpu::Ez80,
+];
+const Z180_PLUS: &[AssemblerCpu] = &[AssemblerCpu::Z180, AssemblerCpu::Ez80];
+const EZ80_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Ez80];
 
 pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("nop", &[0x00]),
@@ -104,10 +110,10 @@ pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("otir", &[0xED, 0xB3]),
     z80_ez80("outd", &[0xED, 0xAB]),
     z80_ez80("otdr", &[0xED, 0xBB]),
-    z80_ez80("mlt bc", &[0xED, 0x4C]),
-    z80_ez80("mlt de", &[0xED, 0x5C]),
-    z80_ez80("mlt hl", &[0xED, 0x6C]),
-    z80_ez80("mlt sp", &[0xED, 0x7C]),
+    z180_ez80("mlt bc", &[0xED, 0x4C]),
+    z180_ez80("mlt de", &[0xED, 0x5C]),
+    z180_ez80("mlt hl", &[0xED, 0x6C]),
+    z180_ez80("mlt sp", &[0xED, 0x7C]),
     ez80("slp", &[0xED, 0x76]),
     z80_ez80("adc hl, bc", &[0xED, 0x4A]),
     z80_ez80("adc hl, de", &[0xED, 0x5A]),
@@ -134,7 +140,15 @@ pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
 const fn z80_ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
     InstructionSpec {
         syntax,
-        cpus: Z80_AND_EZ80,
+        cpus: Z80_PLUS,
+        bytes,
+    }
+}
+
+const fn z180_ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
+    InstructionSpec {
+        syntax,
+        cpus: Z180_PLUS,
         bytes,
     }
 }
@@ -147,23 +161,23 @@ const fn ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
     }
 }
 
-pub fn exact_instruction(cpu: CpuFamily, text: &str) -> Option<&'static InstructionSpec> {
+pub fn exact_instruction(cpu: AssemblerCpu, text: &str) -> Option<&'static InstructionSpec> {
     EXACT_INSTRUCTIONS
         .iter()
         .find(|instruction| instruction.syntax == text && instruction.cpus.contains(&cpu))
 }
 
-pub fn instruction_set(cpu: CpuFamily) -> impl Iterator<Item = &'static InstructionSpec> {
+pub fn instruction_set(cpu: AssemblerCpu) -> impl Iterator<Item = &'static InstructionSpec> {
     EXACT_INSTRUCTIONS
         .iter()
         .filter(move |instruction| instruction.cpus.contains(&cpu))
 }
 
 pub fn encode_generated_instruction(
-    cpu: CpuFamily,
+    cpu: AssemblerCpu,
     text: &str,
 ) -> Result<Option<Vec<u8>>, Diagnostic> {
-    if !matches!(cpu, CpuFamily::Ez80 | CpuFamily::Z80) {
+    if !cpu.supports_z80_syntax() {
         return Ok(None);
     }
     if let Some((prefix, base)) = ez80_mode_suffixed_instruction(cpu, text) {
@@ -237,7 +251,7 @@ pub fn encode_generated_instruction(
     if let Some(bytes) = parse_lea_instruction(cpu, text)? {
         return Ok(Some(bytes));
     }
-    if let Some(bytes) = parse_io_instruction(text)? {
+    if let Some(bytes) = parse_io_instruction(cpu, text)? {
         return Ok(Some(bytes));
     }
     if let Some(bytes) = parse_rst_instruction(text)? {
@@ -246,8 +260,15 @@ pub fn encode_generated_instruction(
     Ok(None)
 }
 
-fn encode_ld_direct16(cpu: CpuFamily, dst: &str, src: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
-    if cpu != CpuFamily::Z80 {
+fn encode_ld_direct16(
+    cpu: AssemblerCpu,
+    dst: &str,
+    src: &str,
+) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if !matches!(
+        cpu,
+        AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180
+    ) {
         return Ok(None);
     }
     if let Some(addr) = parse_wrapped_indirect(dst) {
@@ -296,11 +317,14 @@ fn direct16_store_prefix(register: &str) -> Option<&'static [u8]> {
 }
 
 fn encode_ld_reg16_imm(
-    cpu: CpuFamily,
+    cpu: AssemblerCpu,
     dst: &str,
     src: &str,
 ) -> Result<Option<Vec<u8>>, Diagnostic> {
-    if cpu != CpuFamily::Z80 {
+    if !matches!(
+        cpu,
+        AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180
+    ) {
         return Ok(None);
     }
     if !is_numeric_literal(src) {
@@ -322,7 +346,10 @@ fn encode_ld_reg16_imm(
     Ok(Some(bytes))
 }
 
-pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<usize>, Diagnostic> {
+pub fn generated_instruction_len(
+    cpu: AssemblerCpu,
+    text: &str,
+) -> Result<Option<usize>, Diagnostic> {
     if let Some((_prefix, base)) = ez80_mode_suffixed_instruction(cpu, text) {
         if let Some(len) = generated_instruction_len(cpu, &base)? {
             return Ok(Some(len + 1));
@@ -340,8 +367,8 @@ pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<us
     Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()))
 }
 
-pub fn ez80_mode_suffixed_instruction(cpu: CpuFamily, text: &str) -> Option<(u8, String)> {
-    if !matches!(cpu, CpuFamily::Ez80) {
+pub fn ez80_mode_suffixed_instruction(cpu: AssemblerCpu, text: &str) -> Option<(u8, String)> {
+    if !cpu.supports_ez80_syntax() {
         return None;
     }
     let (mnemonic, rest) = text
@@ -387,8 +414,8 @@ impl BranchInstruction<'_> {
     }
 }
 
-pub fn branch_instruction<'a>(cpu: CpuFamily, text: &'a str) -> Option<BranchInstruction<'a>> {
-    if !matches!(cpu, CpuFamily::Ez80 | CpuFamily::Z80) {
+pub fn branch_instruction<'a>(cpu: AssemblerCpu, text: &'a str) -> Option<BranchInstruction<'a>> {
+    if !cpu.supports_z80_syntax() {
         return None;
     }
     for (prefix, opcode) in ABSOLUTE_BRANCH_FORMS {
@@ -396,7 +423,7 @@ pub fn branch_instruction<'a>(cpu: CpuFamily, text: &'a str) -> Option<BranchIns
             return Some(BranchInstruction {
                 opcode: *opcode,
                 target: target.trim(),
-                width: if cpu == CpuFamily::Ez80 {
+                width: if cpu == AssemblerCpu::Ez80 {
                     BranchWidth::Absolute24
                 } else {
                     BranchWidth::Absolute16
@@ -429,10 +456,10 @@ impl Imm24LoadInstruction<'_> {
 }
 
 pub fn imm24_load_instruction<'a>(
-    cpu: CpuFamily,
+    cpu: AssemblerCpu,
     text: &'a str,
 ) -> Option<Imm24LoadInstruction<'a>> {
-    if !matches!(cpu, CpuFamily::Ez80) {
+    if !cpu.supports_ez80_syntax() {
         return None;
     }
     for (prefix, bytes) in IMM24_LOAD_FORMS {
@@ -462,8 +489,11 @@ impl Direct24Instruction<'_> {
     }
 }
 
-pub fn direct24_instruction<'a>(cpu: CpuFamily, text: &'a str) -> Option<Direct24Instruction<'a>> {
-    if !matches!(cpu, CpuFamily::Ez80) {
+pub fn direct24_instruction<'a>(
+    cpu: AssemblerCpu,
+    text: &'a str,
+) -> Option<Direct24Instruction<'a>> {
+    if !cpu.supports_ez80_syntax() {
         return None;
     }
     let (dst, src) = parse_ld_operands(text)?;
@@ -1057,8 +1087,8 @@ fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
     }
 }
 
-fn parse_lea_instruction(cpu: CpuFamily, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
-    if cpu != CpuFamily::Ez80 {
+fn parse_lea_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if !cpu.supports_ez80_syntax() {
         return Ok(None);
     }
     let Some(rest) = text.strip_prefix("lea ") else {
@@ -1079,7 +1109,7 @@ fn parse_lea_instruction(cpu: CpuFamily, text: &str) -> Result<Option<Vec<u8>>, 
     Ok(Some(vec![0xED, 0x22, parse_index_offset(rest)?]))
 }
 
-fn parse_io_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+fn parse_io_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
     if let Some(port) = text
         .strip_prefix("in a, (")
         .and_then(|rest| rest.strip_suffix(')'))
@@ -1122,6 +1152,9 @@ fn parse_io_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
         return Ok(Some(vec![0xD3, parse_u8(port)?]));
     }
     if let Some(rest) = text.strip_prefix("in0 ") {
+        if !matches!(cpu, AssemblerCpu::Z180 | AssemblerCpu::Ez80) {
+            return Ok(None);
+        }
         let Some((register, port)) = rest.trim().split_once(',') else {
             return Err(Diagnostic::new(format!("invalid in0 syntax `{text}`")));
         };
@@ -1136,6 +1169,9 @@ fn parse_io_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
         return Ok(Some(vec![0xED, register * 8, parse_u8(port)?]));
     }
     if let Some(rest) = text.strip_prefix("out0 ") {
+        if !matches!(cpu, AssemblerCpu::Z180 | AssemblerCpu::Ez80) {
+            return Ok(None);
+        }
         let Some((port, register)) = rest.trim().split_once(',') else {
             return Err(Diagnostic::new(format!("invalid out0 syntax `{text}`")));
         };
@@ -1314,25 +1350,25 @@ mod tests {
     #[test]
     fn exact_instruction_metadata_encodes_common_ops() {
         assert_eq!(
-            exact_instruction(CpuFamily::Ez80, "nop").unwrap().bytes,
+            exact_instruction(AssemblerCpu::Ez80, "nop").unwrap().bytes,
             &[0x00]
         );
         assert_eq!(
-            exact_instruction(CpuFamily::Ez80, "reti").unwrap().bytes,
+            exact_instruction(AssemblerCpu::Ez80, "reti").unwrap().bytes,
             &[0xED, 0x4D]
         );
     }
 
     #[test]
     fn metadata_can_generate_z80_subset() {
-        let z80 = instruction_set(CpuFamily::Z80).collect::<Vec<_>>();
+        let z80 = instruction_set(AssemblerCpu::Z80).collect::<Vec<_>>();
         assert!(z80.iter().any(|instruction| instruction.syntax == "ret"));
         assert!(z80.iter().any(|instruction| instruction.syntax == "im 2"));
     }
 
     #[test]
     fn ez80_emulator_decodes_all_exact_instruction_metadata() {
-        for instruction in instruction_set(CpuFamily::Ez80) {
+        for instruction in instruction_set(AssemblerCpu::Ez80) {
             assert_ez80_emulator_decodes(instruction.syntax, instruction.bytes);
         }
     }
@@ -1366,7 +1402,7 @@ mod tests {
         ];
 
         for syntax in cases {
-            let bytes = encode_generated_instruction(CpuFamily::Ez80, syntax)
+            let bytes = encode_generated_instruction(AssemblerCpu::Ez80, syntax)
                 .unwrap()
                 .unwrap_or_else(|| panic!("missing generated encoding for `{syntax}`"));
             assert_ez80_emulator_decodes(syntax, &bytes);
@@ -1376,95 +1412,95 @@ mod tests {
     #[test]
     fn generated_instruction_metadata_encodes_operand_families() {
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "ld b, a").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld b, a").unwrap(),
             Some(vec![0x47])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "ld a, 7Fh").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld a, 7Fh").unwrap(),
             Some(vec![0x3E, 0x7F])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "inc c").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "inc c").unwrap(),
             Some(vec![0x0C])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "add a, c").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "add a, c").unwrap(),
             Some(vec![0x81])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "inc hl").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "inc hl").unwrap(),
             Some(vec![0x23])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "add hl, de").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "add hl, de").unwrap(),
             Some(vec![0x19])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "srl a").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "srl a").unwrap(),
             Some(vec![0xCB, 0x3F])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "bit 3, (hl)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "bit 3, (hl)").unwrap(),
             Some(vec![0xCB, 0x5E])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "in a, (34h)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "in a, (34h)").unwrap(),
             Some(vec![0xDB, 0x34])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "out0 (0Ch), a").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "out0 (0Ch), a").unwrap(),
             Some(vec![0xED, 0x39, 0x0C])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "rst.lis 10h").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "rst.lis 10h").unwrap(),
             Some(vec![0x49, 0xD7])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "xor 55h").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "xor 55h").unwrap(),
             Some(vec![0xEE, 0x55])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "ld d, (hl)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld d, (hl)").unwrap(),
             Some(vec![0x56])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "ld (hl), 43h").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld (hl), 43h").unwrap(),
             Some(vec![0x36, 0x43])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "ld c, (ix+2)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld c, (ix+2)").unwrap(),
             Some(vec![0xDD, 0x4E, 0x02])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "ld (iy-1), e").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld (iy-1), e").unwrap(),
             Some(vec![0xFD, 0x73, 0xFF])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "ld (ix+4), 99h").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld (ix+4), 99h").unwrap(),
             Some(vec![0xDD, 0x36, 0x04, 0x99])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "xor (iy+0)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "xor (iy+0)").unwrap(),
             Some(vec![0xFD, 0xAE, 0x00])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "rlc (ix+1)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "rlc (ix+1)").unwrap(),
             Some(vec![0xDD, 0xCB, 0x01, 0x06])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "rr (iy-2)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "rr (iy-2)").unwrap(),
             Some(vec![0xFD, 0xCB, 0xFE, 0x1E])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "bit 3, (ix+4)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "bit 3, (ix+4)").unwrap(),
             Some(vec![0xDD, 0xCB, 0x04, 0x5E])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "res 2, (iy+5)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "res 2, (iy+5)").unwrap(),
             Some(vec![0xFD, 0xCB, 0x05, 0x96])
         );
         assert_eq!(
-            encode_generated_instruction(CpuFamily::Ez80, "set 7, (ix-6)").unwrap(),
+            encode_generated_instruction(AssemblerCpu::Ez80, "set 7, (ix-6)").unwrap(),
             Some(vec![0xDD, 0xCB, 0xFA, 0xFE])
         );
     }
@@ -1492,7 +1528,7 @@ mod tests {
 
         for (syntax, bytes) in cases {
             assert_eq!(
-                encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
+                encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap(),
                 Some(bytes.clone()),
                 "{syntax}"
             );
@@ -1505,7 +1541,7 @@ mod tests {
         let cases = ["ld ixh, iyh", "ld h, ixh", "ld iyl, l"];
 
         for syntax in cases {
-            let error = encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap_err();
+            let error = encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap_err();
             assert!(
                 error.message.contains("cannot mix"),
                 "{syntax}: {}",
@@ -1535,7 +1571,7 @@ mod tests {
 
         for (syntax, bytes) in cases {
             assert_eq!(
-                encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
+                encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap(),
                 Some(bytes.clone()),
                 "{syntax}"
             );
@@ -1546,14 +1582,14 @@ mod tests {
     #[test]
     fn direct24_metadata_encodes_sp_loads_and_stores() {
         assert_eq!(
-            direct24_instruction(CpuFamily::Ez80, "ld sp, (040000h)").unwrap(),
+            direct24_instruction(AssemblerCpu::Ez80, "ld sp, (040000h)").unwrap(),
             Direct24Instruction {
                 prefix: &[0xED, 0x7B],
                 addr: "040000h",
             }
         );
         assert_eq!(
-            direct24_instruction(CpuFamily::Ez80, "ld (040003h), sp").unwrap(),
+            direct24_instruction(AssemblerCpu::Ez80, "ld (040003h), sp").unwrap(),
             Direct24Instruction {
                 prefix: &[0xED, 0x73],
                 addr: "040003h",
@@ -1574,18 +1610,18 @@ mod tests {
 
         for (syntax, bytes) in cases {
             assert_eq!(
-                encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
+                encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap(),
                 Some(bytes.clone()),
                 "{syntax}"
             );
             assert_ez80_emulator_decodes(syntax, &bytes);
             assert_eq!(
-                generated_instruction_len(CpuFamily::Ez80, syntax).unwrap(),
+                generated_instruction_len(AssemblerCpu::Ez80, syntax).unwrap(),
                 Some(bytes.len()),
                 "{syntax}"
             );
             assert_eq!(
-                encode_generated_instruction(CpuFamily::Z80, syntax).unwrap(),
+                encode_generated_instruction(AssemblerCpu::Z80, syntax).unwrap(),
                 None,
                 "{syntax}"
             );
@@ -1594,12 +1630,12 @@ mod tests {
 
     #[test]
     fn branch_metadata_describes_control_flow_widths() {
-        let call = branch_instruction(CpuFamily::Ez80, "call nz, _main").unwrap();
+        let call = branch_instruction(AssemblerCpu::Ez80, "call nz, _main").unwrap();
         assert_eq!(call.opcode, 0xC4);
         assert_eq!(call.target, "_main");
         assert_eq!(call.len(), 4);
 
-        let jr = branch_instruction(CpuFamily::Ez80, "jr z, .done").unwrap();
+        let jr = branch_instruction(AssemblerCpu::Ez80, "jr z, .done").unwrap();
         assert_eq!(jr.opcode, 0x28);
         assert_eq!(jr.target, ".done");
         assert_eq!(jr.len(), 2);
