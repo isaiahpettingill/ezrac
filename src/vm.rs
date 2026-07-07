@@ -8,7 +8,7 @@ use ez80::{Cpu, Machine, Reg16};
 
 use crate::asm_meta;
 use crate::diagnostic::Diagnostic;
-use crate::target::{Address24, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
+use crate::target::{Address24, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestRun {
@@ -270,7 +270,7 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 }
 
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    if let Some(instruction) = asm_meta::exact_instruction(text) {
+    if let Some(instruction) = asm_meta::exact_instruction(CpuFamily::Ez80, text) {
         Ok(instruction.bytes.len())
     } else if matches!(text, "ld sp, hl" | "jp (hl)" | "ex (sp), hl" | "ex af, af'") {
         Ok(1)
@@ -526,7 +526,7 @@ fn emit_instruction(
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
-    if let Some(instruction) = asm_meta::exact_instruction(text) {
+    if let Some(instruction) = asm_meta::exact_instruction(CpuFamily::Ez80, text) {
         bytes.extend_from_slice(instruction.bytes);
     } else if text == "ld sp, hl" {
         bytes.push(0xF9);
