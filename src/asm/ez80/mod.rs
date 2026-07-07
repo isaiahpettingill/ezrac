@@ -177,6 +177,9 @@ pub fn encode_generated_instruction(
     cpu: AssemblerCpu,
     text: &str,
 ) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if matches!(cpu, AssemblerCpu::I8080 | AssemblerCpu::I8085) {
+        return encode_intel_8080_instruction(cpu, text);
+    }
     if !cpu.supports_z80_syntax() {
         return Ok(None);
     }
@@ -350,6 +353,12 @@ pub fn generated_instruction_len(
     cpu: AssemblerCpu,
     text: &str,
 ) -> Result<Option<usize>, Diagnostic> {
+    if matches!(cpu, AssemblerCpu::I8080 | AssemblerCpu::I8085) {
+        if let Some(branch) = branch_instruction(cpu, text) {
+            return Ok(Some(branch.len()));
+        }
+        return Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()));
+    }
     if let Some((_prefix, base)) = ez80_mode_suffixed_instruction(cpu, text) {
         if let Some(len) = generated_instruction_len(cpu, &base)? {
             return Ok(Some(len + 1));
@@ -415,6 +424,9 @@ impl BranchInstruction<'_> {
 }
 
 pub fn branch_instruction<'a>(cpu: AssemblerCpu, text: &'a str) -> Option<BranchInstruction<'a>> {
+    if matches!(cpu, AssemblerCpu::I8080 | AssemblerCpu::I8085) {
+        return intel_8080_branch_instruction(text);
+    }
     if !cpu.supports_z80_syntax() {
         return None;
     }
@@ -1107,6 +1119,220 @@ fn parse_lea_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>
         return Ok(None);
     }
     Ok(Some(vec![0xED, 0x22, parse_index_offset(rest)?]))
+}
+
+fn encode_intel_8080_instruction(
+    cpu: AssemblerCpu,
+    text: &str,
+) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if cpu == AssemblerCpu::I8085 {
+        match text {
+            "rim" => return Ok(Some(vec![0x20])),
+            "sim" => return Ok(Some(vec![0x30])),
+            _ => {}
+        }
+    }
+    match text {
+        "nop" => return Ok(Some(vec![0x00])),
+        "hlt" => return Ok(Some(vec![0x76])),
+        "ei" => return Ok(Some(vec![0xFB])),
+        "di" => return Ok(Some(vec![0xF3])),
+        "rlc" => return Ok(Some(vec![0x07])),
+        "rrc" => return Ok(Some(vec![0x0F])),
+        "ral" => return Ok(Some(vec![0x17])),
+        "rar" => return Ok(Some(vec![0x1F])),
+        "daa" => return Ok(Some(vec![0x27])),
+        "cma" => return Ok(Some(vec![0x2F])),
+        "stc" => return Ok(Some(vec![0x37])),
+        "cmc" => return Ok(Some(vec![0x3F])),
+        "xchg" => return Ok(Some(vec![0xEB])),
+        "xthl" => return Ok(Some(vec![0xE3])),
+        "sphl" => return Ok(Some(vec![0xF9])),
+        "pchl" => return Ok(Some(vec![0xE9])),
+        "ret" => return Ok(Some(vec![0xC9])),
+        _ => {}
+    }
+    if let Some((dst, src)) = parse_two_operands(text.strip_prefix("mov ")) {
+        let Some(dst) = intel_reg_code(dst) else {
+            return Ok(None);
+        };
+        let Some(src) = intel_reg_code(src) else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![0x40 + dst * 8 + src]));
+    }
+    if let Some((dst, value)) = parse_two_operands(text.strip_prefix("mvi ")) {
+        let Some(dst) = intel_reg_code(dst) else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![0x06 + dst * 8, parse_u8(value)?]));
+    }
+    if let Some((dst, value)) = parse_two_operands(text.strip_prefix("lxi ")) {
+        let Some(dst) = intel_rp_code(dst) else {
+            return Ok(None);
+        };
+        return Ok(Some(word_bytes(0x01 + dst * 0x10, parse_u16(value)?)));
+    }
+    if let Some(register) = text.strip_prefix("inr ").and_then(intel_reg_code) {
+        return Ok(Some(vec![0x04 + register * 8]));
+    }
+    if let Some(register) = text.strip_prefix("dcr ").and_then(intel_reg_code) {
+        return Ok(Some(vec![0x05 + register * 8]));
+    }
+    if let Some(register) = text.strip_prefix("inx ").and_then(intel_rp_code) {
+        return Ok(Some(vec![0x03 + register * 0x10]));
+    }
+    if let Some(register) = text.strip_prefix("dcx ").and_then(intel_rp_code) {
+        return Ok(Some(vec![0x0B + register * 0x10]));
+    }
+    if let Some(register) = text.strip_prefix("dad ").and_then(intel_rp_code) {
+        return Ok(Some(vec![0x09 + register * 0x10]));
+    }
+    if let Some(register) = text.strip_prefix("push ").and_then(intel_stack_rp_code) {
+        return Ok(Some(vec![0xC5 + register * 0x10]));
+    }
+    if let Some(register) = text.strip_prefix("pop ").and_then(intel_stack_rp_code) {
+        return Ok(Some(vec![0xC1 + register * 0x10]));
+    }
+    if let Some(register) = text.strip_prefix("ldax ").and_then(intel_bd_rp_code) {
+        return Ok(Some(vec![0x0A + register * 0x10]));
+    }
+    if let Some(register) = text.strip_prefix("stax ").and_then(intel_bd_rp_code) {
+        return Ok(Some(vec![0x02 + register * 0x10]));
+    }
+    for (prefix, base) in [
+        ("add ", 0x80),
+        ("adc ", 0x88),
+        ("sub ", 0x90),
+        ("sbb ", 0x98),
+        ("ana ", 0xA0),
+        ("xra ", 0xA8),
+        ("ora ", 0xB0),
+        ("cmp ", 0xB8),
+    ] {
+        if let Some(register) = text.strip_prefix(prefix).and_then(intel_reg_code) {
+            return Ok(Some(vec![base + register]));
+        }
+    }
+    for (prefix, opcode) in [
+        ("adi ", 0xC6),
+        ("aci ", 0xCE),
+        ("sui ", 0xD6),
+        ("sbi ", 0xDE),
+        ("ani ", 0xE6),
+        ("xri ", 0xEE),
+        ("ori ", 0xF6),
+        ("cpi ", 0xFE),
+        ("in ", 0xDB),
+        ("out ", 0xD3),
+    ] {
+        if let Some(value) = text.strip_prefix(prefix) {
+            return Ok(Some(vec![opcode, parse_u8(value)?]));
+        }
+    }
+    for (prefix, opcode) in [
+        ("lda ", 0x3A),
+        ("sta ", 0x32),
+        ("lhld ", 0x2A),
+        ("shld ", 0x22),
+    ] {
+        if let Some(value) = text.strip_prefix(prefix) {
+            return Ok(Some(word_bytes(opcode, parse_u16(value)?)));
+        }
+    }
+    if let Some(("rst", value)) = text.split_once(' ') {
+        let target = parse_u8(value)?;
+        if target > 7 {
+            return Err(Diagnostic::new(format!(
+                "restart index {target} is outside 0..7"
+            )));
+        }
+        return Ok(Some(vec![0xC7 + target * 8]));
+    }
+    Ok(None)
+}
+
+fn intel_8080_branch_instruction(text: &str) -> Option<BranchInstruction<'_>> {
+    for (prefix, opcode) in [
+        ("jmp ", 0xC3),
+        ("jnz ", 0xC2),
+        ("jz ", 0xCA),
+        ("jnc ", 0xD2),
+        ("jc ", 0xDA),
+        ("jpo ", 0xE2),
+        ("jpe ", 0xEA),
+        ("jp ", 0xF2),
+        ("jm ", 0xFA),
+        ("call ", 0xCD),
+        ("cnz ", 0xC4),
+        ("cz ", 0xCC),
+        ("cnc ", 0xD4),
+        ("cc ", 0xDC),
+        ("cpo ", 0xE4),
+        ("cpe ", 0xEC),
+        ("cp ", 0xF4),
+        ("cm ", 0xFC),
+    ] {
+        if let Some(target) = text.strip_prefix(prefix) {
+            return Some(BranchInstruction {
+                opcode,
+                target: target.trim(),
+                width: BranchWidth::Absolute16,
+            });
+        }
+    }
+    None
+}
+
+fn parse_two_operands(rest: Option<&str>) -> Option<(&str, &str)> {
+    let (lhs, rhs) = rest?.split_once(',')?;
+    Some((lhs.trim(), rhs.trim()))
+}
+
+fn intel_reg_code(register: &str) -> Option<u8> {
+    match register.trim() {
+        "b" => Some(0),
+        "c" => Some(1),
+        "d" => Some(2),
+        "e" => Some(3),
+        "h" => Some(4),
+        "l" => Some(5),
+        "m" => Some(6),
+        "a" => Some(7),
+        _ => None,
+    }
+}
+
+fn intel_rp_code(register: &str) -> Option<u8> {
+    match register.trim() {
+        "b" => Some(0),
+        "d" => Some(1),
+        "h" => Some(2),
+        "sp" => Some(3),
+        _ => None,
+    }
+}
+
+fn intel_stack_rp_code(register: &str) -> Option<u8> {
+    match register.trim() {
+        "b" => Some(0),
+        "d" => Some(1),
+        "h" => Some(2),
+        "psw" => Some(3),
+        _ => None,
+    }
+}
+
+fn intel_bd_rp_code(register: &str) -> Option<u8> {
+    match register.trim() {
+        "b" => Some(0),
+        "d" => Some(1),
+        _ => None,
+    }
+}
+
+fn word_bytes(opcode: u8, value: u16) -> Vec<u8> {
+    vec![opcode, value as u8, (value >> 8) as u8]
 }
 
 fn parse_io_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {

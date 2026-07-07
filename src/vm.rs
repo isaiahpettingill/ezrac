@@ -675,6 +675,14 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
         bytes.extend(generated);
+    } else if let Some(branch) = asm_meta::branch_instruction(cpu, text) {
+        bytes.push(branch.opcode);
+        let target = parse_addr(branch.target, labels, pc)?;
+        match branch.width {
+            asm_meta::BranchWidth::Relative8 => bytes.push(relative_offset(pc, target)?),
+            asm_meta::BranchWidth::Absolute16 => push16(bytes, target)?,
+            asm_meta::BranchWidth::Absolute24 => push24(bytes, target),
+        }
     } else if !cpu.supports_z80_syntax() {
         return Err(Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -685,14 +693,6 @@ fn emit_instruction(
     } else if let Some(load) = asm_meta::imm24_load_instruction(cpu, text) {
         bytes.extend_from_slice(load.prefix);
         push24(bytes, parse_addr(load.value, labels, pc)?);
-    } else if let Some(branch) = asm_meta::branch_instruction(cpu, text) {
-        bytes.push(branch.opcode);
-        let target = parse_addr(branch.target, labels, pc)?;
-        match branch.width {
-            asm_meta::BranchWidth::Relative8 => bytes.push(relative_offset(pc, target)?),
-            asm_meta::BranchWidth::Absolute16 => push16(bytes, target)?,
-            asm_meta::BranchWidth::Absolute24 => push24(bytes, target),
-        }
     } else if let Some(value) = text.strip_prefix("ld h,") {
         bytes.push(0x26);
         bytes.push(parse_u8(value.trim())?);
@@ -2548,15 +2548,62 @@ mod tests {
     }
 
     #[test]
-    fn i8080_and_i8085_reject_z80_syntax_until_intel_aliases_land() {
+    fn i8080_and_i8085_accept_intel_8080_mnemonics() {
         for cpu in [AssemblerCpu::I8080, AssemblerCpu::I8085] {
-            let error = assemble_subset_with_symbols_at(cpu, "ld a, 7Fh\n", 0x0100).unwrap_err();
+            let assembled = assemble_subset_with_symbols_at(
+                cpu,
+                r#"
+                lxi h, 1234h
+                mvi a, 42h
+                mov m, a
+                inr m
+                dad h
+                xchg
+                xthl
+                sphl
+                pchl
+                start:
+                jnz start
+                call start
+                ret
+                "#,
+                0x0100,
+            )
+            .unwrap();
 
             assert_eq!(
-                error.message,
-                "test assembler does not support instruction `ld a, 7Fh`"
+                assembled.bytes,
+                [
+                    0x21, 0x34, 0x12, 0x3E, 0x42, 0x77, 0x34, 0x29, 0xEB, 0xE3, 0xF9, 0xE9, 0xC2,
+                    0x0C, 0x01, 0xCD, 0x0C, 0x01, 0xC9,
+                ]
             );
         }
+    }
+
+    #[test]
+    fn i8085_accepts_rim_sim_but_i8080_rejects_them() {
+        let assembled =
+            assemble_subset_with_symbols_at(AssemblerCpu::I8085, "rim\nsim\n", 0x0100).unwrap();
+        assert_eq!(assembled.bytes, [0x20, 0x30]);
+
+        let error =
+            assemble_subset_with_symbols_at(AssemblerCpu::I8080, "rim\n", 0x0100).unwrap_err();
+        assert_eq!(
+            error.message,
+            "test assembler does not support instruction `rim`"
+        );
+    }
+
+    #[test]
+    fn i8080_rejects_z80_extension_syntax() {
+        let error = assemble_subset_with_symbols_at(AssemblerCpu::I8080, "ld a, 7Fh\n", 0x0100)
+            .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "test assembler does not support instruction `ld a, 7Fh`"
+        );
     }
 
     #[test]
