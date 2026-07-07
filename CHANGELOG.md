@@ -1,0 +1,13 @@
+# Changelog
+
+## Unreleased
+
+- Added the `agonlight-mos-ez80` target profile for Agon Light MOS programs.
+- Added bundled Agon SDK modules under `toolchains/agonlight-mos-ez80/sdk`.
+- Emitted Agon MOS executable wrappers with the MOS header at byte `64` and program entry at `0x040045`.
+- Updated the Agon MOS runtime path to preserve the MOS stack, enable interrupts, use `rst.lis`, and return to MOS after `main`.
+- Expanded eZ80 assembler coverage for common control-flow, ALU, register, indexed, I/O, and block-operation mnemonics.
+- Added `ezra assemble` for standalone eZ80 assembly to raw binary output.
+- Routed build artifacts through project-local `target/<target>/...` directories.
+- Added `[build].executable` in `Ezra.toml` to control artifact basenames.
+- Added Agon MOS examples, including an interactive coffee-order demo.

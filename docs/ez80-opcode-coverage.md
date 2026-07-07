@@ -13,10 +13,27 @@ Current expanded coverage includes:
 - Standard `in`/`out` forms plus eZ80 `in0`/`out0` forms used by the runtime and Agon SDK.
 - Standalone CLI assembly through `ezra assemble --base <addr> --output <file.bin> <file.asm>`.
 
-Remaining UM0077 work:
+## Roadmap
+
+Priority 1: unblock SDK and example assembly.
+
+- Keep all instructions emitted by the compiler and bundled SDKs covered by the internal assembler.
+- Add focused tests when Agon, TI-84 Plus CE, or other target SDK snippets require new opcodes.
+- Prefer small opcode groups with direct encoding tests over broad parser-only acceptance.
+
+Priority 2: close common eZ80/Z80 gaps.
 
 - IXH/IYH/IXL/IYL aliases and any remaining IX/IY syntax variants not covered by register, direct, indexed, stack, and CB forms above.
 - Full eZ80 suffix/prefix mode variants including `.sis`, `.lil`, `.sil`, and `.lis` where applicable.
 - Any remaining eZ80-specific I/O forms beyond standard `in`/`out` and current `in0`/`out0` support.
 - Exhaustive operand aliases and syntax variants used by third-party assemblers.
+
+Priority 3: make coverage auditable.
+
 - A generated opcode table test suite cross-checking all accepted mnemonics against UM0077 encodings.
+- A machine-readable coverage table that distinguishes accepted syntax, emitted bytes, VM execution support, and inline-asm clobber inference.
+- Golden tests for standalone `ezra assemble` inputs used by examples and target SDKs.
+
+Longer-term decision:
+
+- Decide whether the internal assembler should become a complete production assembler, remain a test/build helper, or be replaced/integrated with a fuller assembler for final artifact validation.
