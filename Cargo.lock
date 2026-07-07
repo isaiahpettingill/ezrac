@@ -10,9 +10,9 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ez80"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f1cdc60ceeb5d15195eb3e402f31b5dd5de82b4294fd329d432aa475cc87096"
+checksum = "6c25b08081a8bc98ca8b55094b3701238586ea0ff9a14e82e248501873a648a1"
 
 [[package]]
 name = "ezra"

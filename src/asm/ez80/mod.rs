@@ -1168,6 +1168,25 @@ fn parse_number(text: &str) -> Result<u32, Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ez80::Machine;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn assert_ez80_emulator_decodes(syntax: &str, bytes: &[u8]) {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut machine = ez80::PlainMachine::new();
+            let mut cpu = ez80::Cpu::new_ez80();
+            for (offset, byte) in bytes.iter().copied().enumerate() {
+                machine.poke(offset as u32, byte);
+            }
+            cpu.disasm_instruction(&mut machine)
+        }));
+        let disasm = result
+            .unwrap_or_else(|_| panic!("emulator failed to decode `{syntax}` bytes {bytes:02X?}"));
+        assert_ne!(
+            disasm, "ILLEGAL",
+            "emulator decoded `{syntax}` bytes {bytes:02X?} as illegal"
+        );
+    }
 
     #[test]
     fn exact_instruction_metadata_encodes_common_ops() {
@@ -1186,6 +1205,49 @@ mod tests {
         let z80 = instruction_set(CpuFamily::Z80).collect::<Vec<_>>();
         assert!(z80.iter().any(|instruction| instruction.syntax == "ret"));
         assert!(z80.iter().any(|instruction| instruction.syntax == "im 2"));
+    }
+
+    #[test]
+    fn ez80_emulator_decodes_all_exact_instruction_metadata() {
+        for instruction in instruction_set(CpuFamily::Ez80) {
+            assert_ez80_emulator_decodes(instruction.syntax, instruction.bytes);
+        }
+    }
+
+    #[test]
+    fn ez80_emulator_decodes_representative_generated_instruction_metadata() {
+        let cases = [
+            "ld b, a",
+            "ld a, 7Fh",
+            "inc c",
+            "add a, c",
+            "inc hl",
+            "add hl, de",
+            "srl a",
+            "bit 3, (hl)",
+            "in a, (34h)",
+            "out0 (0Ch), a",
+            "rst.lis 10h",
+            "xor 55h",
+            "ld d, (hl)",
+            "ld (hl), 43h",
+            "ld c, (ix+2)",
+            "ld (iy-1), e",
+            "ld (ix+4), 99h",
+            "xor (iy+0)",
+            "rlc (ix+1)",
+            "rr (iy-2)",
+            "bit 3, (ix+4)",
+            "res 2, (iy+5)",
+            "set 7, (ix-6)",
+        ];
+
+        for syntax in cases {
+            let bytes = encode_generated_instruction(CpuFamily::Ez80, syntax)
+                .unwrap()
+                .unwrap_or_else(|| panic!("missing generated encoding for `{syntax}`"));
+            assert_ez80_emulator_decodes(syntax, &bytes);
+        }
     }
 
     #[test]
@@ -1308,9 +1370,10 @@ mod tests {
         for (syntax, bytes) in cases {
             assert_eq!(
                 encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
-                Some(bytes),
+                Some(bytes.clone()),
                 "{syntax}"
             );
+            assert_ez80_emulator_decodes(syntax, &bytes);
         }
     }
 
@@ -1350,9 +1413,10 @@ mod tests {
         for (syntax, bytes) in cases {
             assert_eq!(
                 encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
-                Some(bytes),
+                Some(bytes.clone()),
                 "{syntax}"
             );
+            assert_ez80_emulator_decodes(syntax, &bytes);
         }
     }
 
@@ -1372,6 +1436,8 @@ mod tests {
                 addr: "040003h",
             }
         );
+        assert_ez80_emulator_decodes("ld sp, (040000h)", &[0xED, 0x7B, 0x00, 0x00, 0x04]);
+        assert_ez80_emulator_decodes("ld (040003h), sp", &[0xED, 0x73, 0x03, 0x00, 0x04]);
     }
 
     #[test]
@@ -1389,6 +1455,7 @@ mod tests {
                 Some(bytes.clone()),
                 "{syntax}"
             );
+            assert_ez80_emulator_decodes(syntax, &bytes);
             assert_eq!(
                 generated_instruction_len(CpuFamily::Ez80, syntax).unwrap(),
                 Some(bytes.len()),
