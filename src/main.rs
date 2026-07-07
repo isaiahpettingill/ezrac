@@ -346,9 +346,13 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         return Err(format!("layout is invalid:\n{message}"));
     }
     let base_addr = options.base_addr.unwrap_or(layout.entry.get());
-    let assembled =
-        ezra::vm::assemble_subset_with_symbols_at(target.triple.cpu, &source, base_addr)
-            .map_err(|error| error.to_string())?;
+    let assembled = ezra::vm::assemble_subset_with_options_at(
+        target.triple.cpu,
+        &source,
+        base_addr,
+        &assembly_source_options(&source_path, &layout),
+    )
+    .map_err(|error| error.to_string())?;
     let output_path = options
         .output
         .as_ref()
@@ -668,10 +672,11 @@ fn write_build_artifacts(
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(settings.output_format.extension());
 
-    let assembled = ezra::vm::assemble_subset_with_symbols_at(
+    let assembled = ezra::vm::assemble_subset_with_options_at(
         settings.target.triple.cpu,
         &assembly,
         settings.layout.entry.get(),
+        &assembly_source_options(source_path, &settings.layout),
     )
     .map_err(|error| error.to_string())?;
     let map = build_output_map(
@@ -754,6 +759,23 @@ fn flat_assembly_map(
         }
     }
     Ok(out)
+}
+
+fn assembly_source_options(
+    source_path: &Path,
+    layout: &Layout,
+) -> ezra::vm::AssemblerSourceOptions {
+    ezra::vm::AssemblerSourceOptions {
+        source_path: Some(source_path.to_path_buf()),
+        symbols: layout
+            .symbols
+            .iter()
+            .map(|symbol| ezra::vm::AssemblySymbol {
+                name: symbol.name.clone(),
+                addr: symbol.value.get(),
+            })
+            .collect(),
+    }
 }
 
 fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Result<PathBuf, String> {
@@ -1566,6 +1588,72 @@ mod tests {
             Some("com")
         );
         assert_eq!(executable, [0x0E, 0x00, 0xCD, 0x05, 0x00]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assembly_build_can_reference_layout_symbols() {
+        let root = temp_root("build_asm_layout_symbols");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("exit.asm");
+        std::fs::write(
+            &source_path,
+            r#"
+            start:
+                ld c, 00h
+                call CPM_BDOS
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Assembly),
+            layout_path: None,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(outputs.executable).unwrap(),
+            [0x0E, 0x00, 0xCD, 0x05, 0x00]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assembly_build_reports_source_location_for_assembler_errors() {
+        let root = temp_root("build_asm_diagnostics");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("bad.asm");
+        std::fs::write(
+            &source_path,
+            r#"
+            start:
+                not_an_instruction
+            "#,
+        )
+        .unwrap();
+
+        let error = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Assembly),
+            layout_path: None,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(error.contains("bad.asm:3:17"), "{error}");
+        assert!(
+            error.contains("test assembler does not support instruction `not_an_instruction`"),
+            "{error}"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

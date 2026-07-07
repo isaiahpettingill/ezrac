@@ -2,12 +2,13 @@ use std::{
     cell::Cell,
     collections::{BTreeMap, HashMap},
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
 };
 
 use ez80::{Cpu, Machine, Reg8, Reg16};
 
 use crate::asm::ez80 as asm_meta;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,6 +39,12 @@ pub struct AssembledProgram {
 pub struct AssemblySymbol {
     pub name: String,
     pub addr: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AssemblerSourceOptions {
+    pub source_path: Option<PathBuf>,
+    pub symbols: Vec<AssemblySymbol>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -251,31 +258,63 @@ pub fn assemble_subset_with_symbols_at(
     assembly: &str,
     base_addr: u32,
 ) -> Result<AssembledProgram, Diagnostic> {
+    assemble_subset_with_options_at(
+        cpu_family,
+        assembly,
+        base_addr,
+        &AssemblerSourceOptions::default(),
+    )
+}
+
+pub fn assemble_subset_with_options_at(
+    cpu_family: CpuFamily,
+    assembly: &str,
+    base_addr: u32,
+    options: &AssemblerSourceOptions,
+) -> Result<AssembledProgram, Diagnostic> {
     if base_addr > Address24::MAX {
         return Err(Diagnostic::new(format!(
             "assembly base address 0x{base_addr:X} is outside the 24-bit address space"
         )));
     }
-    let instructions = assembly.lines().filter_map(parse_line).collect::<Vec<_>>();
+    let instructions = assembly
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| parse_line(index + 1, line))
+        .collect::<Vec<_>>();
     let mut labels = BTreeMap::new();
+    for symbol in &options.symbols {
+        labels.insert(symbol.name.clone(), symbol.addr);
+    }
     let mut pc = base_addr & 0xFF_FFFF;
 
     for instruction in &instructions {
-        match instruction {
+        match &instruction.kind {
             AsmLine::Label(name) => {
                 if pc > Address24::MAX {
-                    return Err(Diagnostic::new(format!(
-                        "assembly label `{name}` address 0x{pc:X} is outside the 24-bit address space"
-                    )));
+                    return Err(line_diagnostic(
+                        instruction,
+                        options,
+                        format!(
+                            "assembly label `{name}` address 0x{pc:X} is outside the 24-bit address space"
+                        ),
+                    ));
                 }
                 if labels.insert(name.clone(), pc).is_some() {
-                    return Err(Diagnostic::new(format!(
-                        "duplicate assembly label `{name}`"
-                    )));
+                    return Err(line_diagnostic(
+                        instruction,
+                        options,
+                        format!("duplicate assembly label `{name}`"),
+                    ));
                 }
             }
             AsmLine::Instruction(text) => {
-                pc = checked_assembly_pc_advance(pc, instruction_len(cpu_family, text)? as u32)?;
+                let len = instruction_len(cpu_family, text).map_err(|error| {
+                    error.with_location_if_missing(line_location(instruction, options))
+                })?;
+                pc = checked_assembly_pc_advance(pc, len as u32).map_err(|error| {
+                    error.with_location_if_missing(line_location(instruction, options))
+                })?;
             }
         }
     }
@@ -291,9 +330,16 @@ pub fn assemble_subset_with_symbols_at(
     let mut bytes = Vec::new();
     let mut pc = base_addr & 0xFF_FFFF;
     for instruction in instructions {
-        if let AsmLine::Instruction(text) = instruction {
-            emit_instruction(cpu_family, &text, &labels, pc, &mut bytes)?;
-            pc = checked_assembly_pc_advance(pc, instruction_len(cpu_family, &text)? as u32)?;
+        if let AsmLine::Instruction(ref text) = instruction.kind {
+            emit_instruction(cpu_family, text, &labels, pc, &mut bytes).map_err(|error| {
+                error.with_location_if_missing(line_location(&instruction, options))
+            })?;
+            let len = instruction_len(cpu_family, text).map_err(|error| {
+                error.with_location_if_missing(line_location(&instruction, options))
+            })?;
+            pc = checked_assembly_pc_advance(pc, len as u32).map_err(|error| {
+                error.with_location_if_missing(line_location(&instruction, options))
+            })?;
         }
     }
     Ok(AssembledProgram { bytes, symbols })
@@ -331,15 +377,55 @@ enum AsmLine {
     Instruction(String),
 }
 
-fn parse_line(line: &str) -> Option<AsmLine> {
-    let line = line.split(';').next().unwrap_or("").trim();
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LocatedAsmLine {
+    line: usize,
+    column: usize,
+    kind: AsmLine,
+}
+
+fn parse_line(line_number: usize, line: &str) -> Option<LocatedAsmLine> {
+    let line = line.split(';').next().unwrap_or("");
+    let column = line
+        .chars()
+        .position(|ch| !ch.is_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(1);
+    let line = line.trim();
     if line.is_empty() || line.starts_with("section ") {
         return None;
     }
     if let Some(label) = line.strip_suffix(':') {
-        return Some(AsmLine::Label(label.to_owned()));
+        return Some(LocatedAsmLine {
+            line: line_number,
+            column,
+            kind: AsmLine::Label(label.to_owned()),
+        });
     }
-    Some(AsmLine::Instruction(line.to_owned()))
+    Some(LocatedAsmLine {
+        line: line_number,
+        column,
+        kind: AsmLine::Instruction(line.to_owned()),
+    })
+}
+
+fn line_location(instruction: &LocatedAsmLine, options: &AssemblerSourceOptions) -> SourceLocation {
+    SourceLocation {
+        file: options
+            .source_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("<assembly>")),
+        line: instruction.line,
+        column: instruction.column,
+    }
+}
+
+fn line_diagnostic(
+    instruction: &LocatedAsmLine,
+    options: &AssemblerSourceOptions,
+    message: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::at(line_location(instruction, options), message)
 }
 
 fn instruction_len(cpu_family: CpuFamily, text: &str) -> Result<usize, Diagnostic> {
