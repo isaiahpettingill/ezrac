@@ -188,6 +188,9 @@ pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<us
     if let Some(branch) = branch_instruction(cpu, text) {
         return Ok(Some(branch.len()));
     }
+    if let Some(direct) = direct24_instruction(cpu, text) {
+        return Ok(Some(direct.len()));
+    }
     if let Some(load) = imm24_load_instruction(cpu, text) {
         return Ok(Some(load.len()));
     }
@@ -275,6 +278,50 @@ pub fn imm24_load_instruction<'a>(
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Direct24Instruction<'a> {
+    pub prefix: &'static [u8],
+    pub addr: &'a str,
+}
+
+impl Direct24Instruction<'_> {
+    pub const fn len(self) -> usize {
+        self.prefix.len() + 3
+    }
+}
+
+pub fn direct24_instruction<'a>(cpu: CpuFamily, text: &'a str) -> Option<Direct24Instruction<'a>> {
+    if !matches!(cpu, CpuFamily::Ez80) {
+        return None;
+    }
+    let (dst, src) = parse_ld_operands(text)?;
+    for (register, bytes) in DIRECT24_LOAD_FORMS {
+        if dst == *register {
+            let addr = parse_wrapped_indirect(src)?;
+            if is_register_indirect_addr(addr) {
+                return None;
+            }
+            return Some(Direct24Instruction {
+                prefix: bytes,
+                addr,
+            });
+        }
+    }
+    let addr = parse_wrapped_indirect(dst)?;
+    if is_register_indirect_addr(addr) {
+        return None;
+    }
+    for (register, bytes) in DIRECT24_STORE_FORMS {
+        if src == *register {
+            return Some(Direct24Instruction {
+                prefix: bytes,
+                addr,
+            });
+        }
+    }
+    None
+}
+
 const ABSOLUTE_BRANCH_FORMS: &[(&str, u8)] = &[
     ("call nz,", 0xC4),
     ("call z,", 0xCC),
@@ -314,10 +361,45 @@ const IMM24_LOAD_FORMS: &[(&str, &[u8])] = &[
     ("ld iy,", &[0xFD, 0x21]),
 ];
 
+const DIRECT24_LOAD_FORMS: &[(&str, &[u8])] = &[
+    ("a", &[0x3A]),
+    ("hl", &[0x2A]),
+    ("bc", &[0xED, 0x4B]),
+    ("de", &[0xED, 0x5B]),
+    ("ix", &[0xDD, 0x2A]),
+    ("iy", &[0xFD, 0x2A]),
+];
+
+const DIRECT24_STORE_FORMS: &[(&str, &[u8])] = &[
+    ("a", &[0x32]),
+    ("hl", &[0x22]),
+    ("bc", &[0xED, 0x43]),
+    ("de", &[0xED, 0x53]),
+    ("ix", &[0xDD, 0x22]),
+    ("iy", &[0xFD, 0x22]),
+];
+
 fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix("ld ")?;
     let (dst, src) = rest.split_once(',')?;
     Some((dst.trim(), src.trim()))
+}
+
+fn parse_wrapped_indirect(text: &str) -> Option<&str> {
+    text.strip_prefix('(')?.strip_suffix(')')
+}
+
+fn is_register_indirect_addr(addr: &str) -> bool {
+    matches!(addr, "bc" | "de" | "hl")
+        || is_index_indirect_addr(addr, "ix")
+        || is_index_indirect_addr(addr, "iy")
+}
+
+fn is_index_indirect_addr(addr: &str, register: &str) -> bool {
+    matches!(
+        addr.strip_prefix(register),
+        Some(rest) if rest.is_empty() || rest.starts_with(['+', '-'])
+    )
 }
 
 fn parse_inc_dec_reg8(text: &str) -> Option<(bool, u8)> {

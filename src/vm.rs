@@ -288,8 +288,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if parse_index_cb_operation(text)?.is_some() {
         Ok(4)
-    } else if parse_direct_index_load_or_store(text)?.is_some() {
-        Ok(5)
     } else if parse_index_byte_load(text)?.is_some()
         || parse_index_byte_store(text)?.is_some()
         || parse_index_reg8_load(text)?.is_some()
@@ -306,15 +304,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if parse_inc_dec_hl_indirect(text).is_some() {
         Ok(1)
-    } else if parse_ld_reg16_direct_load(text).is_some()
-        || parse_ld_direct_reg16_store(text).is_some()
-    {
-        Ok(5)
-    } else if text.starts_with("ld hl, (")
-        || text.starts_with("ld a, (")
-        || text.starts_with("ld (")
-    {
-        Ok(4)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") {
         Ok(2)
     } else if text.starts_with("xor ") {
@@ -334,9 +323,9 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if let Some(generated) = asm_meta::encode_generated_instruction(CpuFamily::Ez80, text)? {
         bytes.extend(generated);
-    } else if let Some((load, index, addr)) = parse_direct_index_load_or_store(text)? {
-        bytes.extend([index.prefix(), if load { 0x2A } else { 0x22 }]);
-        push24(bytes, parse_addr(addr, labels, pc)?);
+    } else if let Some(direct) = asm_meta::direct24_instruction(CpuFamily::Ez80, text) {
+        bytes.extend_from_slice(direct.prefix);
+        push24(bytes, parse_addr(direct.addr, labels, pc)?);
     } else if let Some(load) = asm_meta::imm24_load_instruction(CpuFamily::Ez80, text) {
         bytes.extend_from_slice(load.prefix);
         push24(bytes, parse_addr(load.value, labels, pc)?);
@@ -376,34 +365,6 @@ fn emit_instruction(
         bytes.push(0x12);
     } else if text == "ld (bc), a" {
         bytes.push(0x02);
-    } else if let Some((register, addr)) = parse_ld_reg16_direct_load(text) {
-        bytes.extend([0xED, ld_reg16_direct_load_opcode(register)]);
-        push24(bytes, parse_addr(addr, labels, pc)?);
-    } else if let Some((addr, register)) = parse_ld_direct_reg16_store(text) {
-        bytes.extend([0xED, ld_direct_reg16_store_opcode(register)]);
-        push24(bytes, parse_addr(addr, labels, pc)?);
-    } else if let Some(rest) = text.strip_prefix("ld hl, (") {
-        let addr = rest
-            .strip_suffix(')')
-            .ok_or_else(|| Diagnostic::new(format!("invalid load syntax `{text}`")))?;
-        bytes.push(0x2A);
-        push24(bytes, parse_addr(addr, labels, pc)?);
-    } else if let Some(rest) = text.strip_prefix("ld a, (") {
-        let addr = rest
-            .strip_suffix(')')
-            .ok_or_else(|| Diagnostic::new(format!("invalid load syntax `{text}`")))?;
-        bytes.push(0x3A);
-        push24(bytes, parse_addr(addr, labels, pc)?);
-    } else if let Some(rest) = text.strip_prefix("ld (") {
-        if let Some(addr) = rest.strip_suffix("), a") {
-            bytes.push(0x32);
-            push24(bytes, parse_addr(addr, labels, pc)?);
-        } else if let Some(addr) = rest.strip_suffix("), hl") {
-            bytes.push(0x22);
-            push24(bytes, parse_addr(addr, labels, pc)?);
-        } else {
-            return Err(Diagnostic::new(format!("invalid store syntax `{text}`")));
-        }
     } else if let Some(inc) = parse_inc_dec_hl_indirect(text) {
         bytes.push(if inc { 0x34 } else { 0x35 });
     } else if text == "dec sp" {
@@ -469,64 +430,8 @@ fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
     Some((dst.trim(), src.trim()))
 }
 
-fn parse_ld_reg16_direct_load(text: &str) -> Option<(&str, &str)> {
-    let (dst, src) = parse_ld_operands(text)?;
-    if !matches!(dst, "bc" | "de") {
-        return None;
-    }
-    Some((dst, parse_wrapped_indirect(src)?))
-}
-
-fn parse_ld_direct_reg16_store(text: &str) -> Option<(&str, &str)> {
-    let (dst, src) = parse_ld_operands(text)?;
-    if !matches!(src, "bc" | "de") {
-        return None;
-    }
-    Some((parse_wrapped_indirect(dst)?, src))
-}
-
-fn parse_direct_index_load_or_store(
-    text: &str,
-) -> Result<Option<(bool, IndexRegister, &str)>, Diagnostic> {
-    let Some((dst, src)) = parse_ld_operands(text) else {
-        return Ok(None);
-    };
-    let index = match dst {
-        "ix" => Some((true, IndexRegister::Ix, parse_wrapped_indirect(src))),
-        "iy" => Some((true, IndexRegister::Iy, parse_wrapped_indirect(src))),
-        _ => None,
-    };
-    if let Some((load, index, Some(addr))) = index {
-        return Ok(Some((load, index, addr)));
-    }
-    let Some(addr) = parse_wrapped_indirect(dst) else {
-        return Ok(None);
-    };
-    match src {
-        "ix" => Ok(Some((false, IndexRegister::Ix, addr))),
-        "iy" => Ok(Some((false, IndexRegister::Iy, addr))),
-        _ => Ok(None),
-    }
-}
-
 fn parse_wrapped_indirect(text: &str) -> Option<&str> {
     text.strip_prefix('(')?.strip_suffix(')')
-}
-
-fn ld_reg16_direct_load_opcode(register: &str) -> u8 {
-    match register {
-        "bc" => 0x4B,
-        "de" => 0x5B,
-        _ => unreachable!("invalid direct-load register {register}"),
-    }
-}
-
-fn ld_direct_reg16_store_opcode(register: &str) -> u8 {
-    match register {
-        "bc" => 0x43,
-        "de" => 0x53,
-        _ => unreachable!("invalid direct-store register {register}"),
-    }
 }
 
 fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
@@ -1430,6 +1335,63 @@ mod tests {
             [
                 0xED, 0x4B, 0x00, 0x01, 0x04, 0xED, 0x5B, 0x03, 0x01, 0x04, 0xED, 0x43, 0x06, 0x01,
                 0x04, 0xED, 0x53, 0x09, 0x01, 0x04,
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_all_direct24_loads_and_stores() {
+        let asm = r#"
+            ld a, (ix_buffer)
+            ld hl, (iy_buffer)
+            ld bc, (040006h)
+            ld de, (040009h)
+            ld ix, (04000Ch)
+            ld iy, (04000Fh)
+            ld (ix_buffer), a
+            ld (iy_buffer), hl
+            ld (040018h), bc
+            ld (04001Bh), de
+            ld (04001Eh), ix
+            ld (040021h), iy
+        ix_buffer:
+            nop
+        iy_buffer:
+            nop
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, 0x040000).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x3A, 0x38, 0x00, 0x04, 0x2A, 0x39, 0x00, 0x04, 0xED, 0x4B, 0x06, 0x00, 0x04, 0xED,
+                0x5B, 0x09, 0x00, 0x04, 0xDD, 0x2A, 0x0C, 0x00, 0x04, 0xFD, 0x2A, 0x0F, 0x00, 0x04,
+                0x32, 0x38, 0x00, 0x04, 0x22, 0x39, 0x00, 0x04, 0xED, 0x43, 0x18, 0x00, 0x04, 0xED,
+                0x53, 0x1B, 0x00, 0x04, 0xDD, 0x22, 0x1E, 0x00, 0x04, 0xFD, 0x22, 0x21, 0x00, 0x04,
+                0x00, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn direct24_labels_starting_with_index_register_names_are_not_index_indirect() {
+        let asm = r#"
+            ld a, (ix_label)
+            ld hl, (iy_label)
+            ld (ix_label), a
+            ld (iy_label), hl
+        ix_label:
+            nop
+        iy_label:
+            nop
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, 0x040000).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x3A, 0x10, 0x00, 0x04, 0x2A, 0x11, 0x00, 0x04, 0x32, 0x10, 0x00, 0x04, 0x22, 0x11,
+                0x00, 0x04, 0x00, 0x00,
             ]
         );
     }
