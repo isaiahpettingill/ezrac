@@ -175,6 +175,9 @@ pub fn encode_generated_instruction(
     if let Some(bytes) = parse_io_instruction(text)? {
         return Ok(Some(bytes));
     }
+    if let Some(bytes) = parse_rst_instruction(text)? {
+        return Ok(Some(bytes));
+    }
     Ok(None)
 }
 
@@ -455,6 +458,28 @@ fn parse_io_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
     Ok(None)
 }
 
+fn parse_rst_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    let (lis, target) = if let Some(target) = text.strip_prefix("rst.lis ") {
+        (true, target)
+    } else if let Some(target) = text.strip_prefix("rst ") {
+        (false, target)
+    } else {
+        return Ok(None);
+    };
+    let target = parse_number(target.trim())?;
+    if target > 0x38 || target % 8 != 0 {
+        return Err(Diagnostic::new(format!(
+            "restart target 0x{target:X} is not one of 0x00, 0x08, ..., 0x38"
+        )));
+    }
+    let opcode = 0xC7 + target as u8;
+    if lis {
+        Ok(Some(vec![0x49, opcode]))
+    } else {
+        Ok(Some(vec![opcode]))
+    }
+}
+
 fn is_indexed_indirect(text: &str) -> bool {
     text.starts_with("(ix") || text.starts_with("(iy")
 }
@@ -610,6 +635,10 @@ mod tests {
         assert_eq!(
             encode_generated_instruction(CpuFamily::Ez80, "out0 (0Ch), a").unwrap(),
             Some(vec![0xED, 0x39, 0x0C])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "rst.lis 10h").unwrap(),
+            Some(vec![0x49, 0xD7])
         );
     }
 

@@ -288,8 +288,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
         Ok(2)
-    } else if let Some(rst) = parse_rst(text)? {
-        Ok(rst.len())
     } else if parse_index_cb_operation(text)?.is_some() {
         Ok(4)
     } else if parse_direct_index_load_or_store(text)?.is_some() {
@@ -433,8 +431,6 @@ fn emit_instruction(
         bytes.push(0x3B);
     } else if text == "inc sp" {
         bytes.push(0x33);
-    } else if let Some(rst) = parse_rst(text)? {
-        rst.write_to(bytes);
     } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
         bytes.extend([index.prefix(), 0xCB, offset, opcode]);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
@@ -561,44 +557,6 @@ fn ld_direct_reg16_store_opcode(register: &str) -> u8 {
         "de" => 0x53,
         _ => unreachable!("invalid direct-store register {register}"),
     }
-}
-
-struct RstInstruction {
-    lis: bool,
-    opcode: u8,
-}
-
-impl RstInstruction {
-    fn len(&self) -> usize {
-        if self.lis { 2 } else { 1 }
-    }
-
-    fn write_to(&self, bytes: &mut Vec<u8>) {
-        if self.lis {
-            bytes.push(0x49);
-        }
-        bytes.push(self.opcode);
-    }
-}
-
-fn parse_rst(text: &str) -> Result<Option<RstInstruction>, Diagnostic> {
-    let (lis, target) = if let Some(target) = text.strip_prefix("rst.lis ") {
-        (true, target)
-    } else if let Some(target) = text.strip_prefix("rst ") {
-        (false, target)
-    } else {
-        return Ok(None);
-    };
-    let target = parse_number(target.trim())?;
-    if target > 0x38 || target % 8 != 0 {
-        return Err(Diagnostic::new(format!(
-            "restart target 0x{target:X} is not one of 0x00, 0x08, ..., 0x38"
-        )));
-    }
-    Ok(Some(RstInstruction {
-        lis,
-        opcode: 0xC7 + target as u8,
-    }))
 }
 
 fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
