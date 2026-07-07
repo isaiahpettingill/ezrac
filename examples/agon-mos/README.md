@@ -22,6 +22,17 @@ cargo run -- build examples/agon-mos/coffee-order/src/main.ezra
 
 It sets `[build].executable = "coffee-order"`, so the build writes `coffee-order.asm`, `coffee-order.map`, and `coffee-order.bin` under `examples/agon-mos/coffee-order/target/agonlight-mos-ez80/src`.
 
+Build the console SDK example:
+
+```sh
+cargo run -- build examples/agon-mos/console/src/main.ezra
+```
+
+The console example imports `agon.console`, a convenience module over MOS
+character and string output. The SDK assumes eZ80 ADL mode, MOS `rst.lis`
+character/string services, CR/LF newline conventions, and an emulator-only exit
+port for automation helpers.
+
 ## Coffee Order Demo
 
 The coffee example clears the screen, prints a small menu, clears MOS keyboard state, then calls `agon.mos.getkey()` for a single blocking key read.
