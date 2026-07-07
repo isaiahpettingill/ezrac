@@ -227,6 +227,128 @@ impl Layout {
         }
     }
 
+    pub fn ez80_test_flat() -> Self {
+        Self {
+            name: "ez80_test_flat".to_owned(),
+            load: Address24::new(0x01_0000),
+            entry: Address24::new(0x01_0040),
+            stack: Address24::new(0x0F_FF00),
+            regions: vec![
+                region("low", 0x00_0000, 0x00_FFFF, &[RegionFlags::RESERVED]),
+                region(
+                    "code",
+                    0x01_0000,
+                    0x03_FFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x04_0000, 0x04_FFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x05_0000,
+                    0x0B_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0x0C_0000, 0x0D_FFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0x0E_0000,
+                    0x0E_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0x0F_0000,
+                    0x0F_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 64),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x01_0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x01_0040)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x01_0040)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x0F_FF00)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x05_0000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x04_0000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x0C_0000)),
+            ],
+        }
+    }
+
+    pub fn ez80_test_split() -> Self {
+        Self {
+            name: "ez80_test_split".to_owned(),
+            load: Address24::new(0x02_0000),
+            entry: Address24::new(0x02_0040),
+            stack: Address24::new(0x1F_FF00),
+            regions: vec![
+                region("zero", 0x00_0000, 0x00_FFFF, &[RegionFlags::RESERVED]),
+                region(
+                    "rom",
+                    0x01_0000,
+                    0x01_FFFF,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::EXECUTE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "code",
+                    0x02_0000,
+                    0x03_FFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x04_0000, 0x04_FFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x10_0000,
+                    0x17_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0x18_0000, 0x1B_FFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0x1C_0000,
+                    0x1E_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0x1F_0000,
+                    0x1F_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 64),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x02_0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x02_0040)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x02_0040)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x1F_FF00)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x10_0000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x04_0000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x18_0000)),
+            ],
+        }
+    }
+
     pub fn z80_default() -> Self {
         Self {
             name: "z80_default".to_owned(),
@@ -905,6 +1027,25 @@ mod tests {
                 .iter()
                 .all(|symbol| symbol.value.get() <= 0xFFFF)
         );
+    }
+
+    #[test]
+    fn ez80_test_harness_layouts_validate() {
+        let flat = Layout::ez80_test_flat();
+        let split = Layout::ez80_test_split();
+
+        assert_eq!(flat.validate(), Ok(()));
+        assert_eq!(flat.name, "ez80_test_flat");
+        assert_eq!(flat.entry.get(), 0x01_0040);
+        assert_eq!(flat.stack.get(), 0x0F_FF00);
+
+        assert_eq!(split.validate(), Ok(()));
+        assert_eq!(split.name, "ez80_test_split");
+        assert_eq!(split.entry.get(), 0x02_0040);
+        assert_eq!(split.stack.get(), 0x1F_FF00);
+        assert!(split.regions.iter().any(|region| {
+            region.name == "rom" && region.flags.contains(RegionFlags::RESERVED)
+        }));
     }
 
     #[test]

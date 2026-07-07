@@ -385,6 +385,22 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(|target| target.starts_with("ezra-test-")) {
+        match import {
+            "harness.io" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ezra-test-ez80/sdk/harness/io.ezra"),
+                "harness.io",
+            )),
+            "harness.layout" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ezra-test-ez80/sdk/harness/layout.ezra"),
+                "harness.layout",
+            )),
+            "harness.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ezra-test-ez80/sdk/harness/memory.ezra"),
+                "harness.memory",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(|target| target.split('-').any(|part| part == "cpm")) {
         match import {
             "cpm.bdos" => Some(builtin_sdk_utf8(

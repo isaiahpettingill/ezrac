@@ -1,0 +1,54 @@
+// test: port 0x01 = 0x21
+// test: port 0x02 = 0x03
+// test: mem 0x100020 = 0x5A
+import harness.io
+import harness.layout
+import harness.memory
+
+const CELLS: u8 = 12
+
+global grid: [u8; CELLS] = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 44]
+global scratch_word: u16 = 0
+embed palette: bytes = bytes [0x10, 0x20, 0x30, 0x40, 0x50]
+
+fn fold_grid() -> u16 {
+    let index: u8 = 0
+    let acc: u16 = 0
+    while index < CELLS {
+        acc += cast<u16>(grid[index])
+        index += 1
+    }
+    return acc
+}
+
+fn touch_high_ram() {
+    let cursor: ptr<u8> = &grid[4]
+    harness.memory.store8(cursor, harness.memory.load8(cursor) + harness.io.read_pad2())
+    harness.memory.store8(cursor + 1, 7)
+}
+
+fn main() {
+    harness.layout.require_split_layout(1)
+    touch_high_ram()
+    scratch_word = fold_grid()
+
+    test.assert_eq_u8(grid[4], 8, 10)
+    test.assert_eq_u8(grid[5], 7, 11)
+    test.assert_eq_u16(scratch_word, 278, 12)
+    test.assert_eq_u8(harness.io.read_pad1(), 0x21, 13)
+    test.assert_eq_u24(palette.len, 5, 14)
+    test.assert_eq_u8(*(palette.ptr + 4), 0x50, 15)
+
+    harness.memory.write_split_device(harness.memory.read_split_device() + 1)
+    test.assert_eq_u8(harness.memory.read_split_device(), 0x5B, 16)
+
+    asm volatile(clobber memory, clobber ports, clobber a) {
+        "ld a, 053h"
+        "out0 (0Ch), a"
+    }
+    harness.io.debug_char('P')
+    harness.io.debug_char('L')
+    harness.io.debug_char('I')
+    harness.io.debug_char('T')
+    harness.io.pass()
+}

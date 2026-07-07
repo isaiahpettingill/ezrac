@@ -1,0 +1,62 @@
+// test: port 0x01 = 0x12
+// test: port 0x02 = 0x34
+// test: mem 0x050020 = 0x40
+import harness.io
+import harness.layout
+import harness.memory
+
+alias Byte = u8
+alias Word = u16
+
+const COUNT: u8 = 6
+const EXPECTED_SUM: Word = 1 + 2 + 3 + 4 + 5 + 6
+
+struct Packet {
+    tag: Byte
+    checksum: Word
+}
+
+global values: [Byte; COUNT] = [1, 2, 3, 4, 5, 6]
+global packet: Packet = Packet { tag: 0, checksum: 0 }
+embed banner: bytes = bytes [0x48, 0x41, 0x52, 0x4E]
+
+fn sum_values() -> Word {
+    let index: Byte = 0
+    let sum: Word = 0
+    while index < COUNT {
+        sum += cast<Word>(values[index])
+        index += 1
+    }
+    return sum
+}
+
+fn mutate_with_pointers() {
+    let cursor: ptr<u8> = &values[2]
+    harness.memory.store8(cursor, harness.memory.load8(cursor) + 7)
+    harness.memory.store8(cursor + 1, harness.memory.load8(cursor) + 1)
+}
+
+fn main() {
+    harness.layout.require_flat_layout(1)
+    mutate_with_pointers()
+
+    packet.tag = harness.io.read_pad1() + harness.io.read_pad2()
+    packet.checksum = sum_values()
+
+    test.assert_eq_u8(values[2], 10, 10)
+    test.assert_eq_u8(values[3], 11, 11)
+    test.assert_eq_u8(packet.tag, 0x46, 12)
+    test.assert_eq_u16(packet.checksum, EXPECTED_SUM + 14, 13)
+    test.assert_eq_u24(banner.len, 4, 14)
+    test.assert_eq_u8(*banner.ptr, 0x48, 15)
+    test.assert_eq_u8(*(banner.ptr + 3), 0x4E, 16)
+
+    harness.memory.write_flat_device(harness.memory.read_flat_device() + 2)
+    test.assert_eq_u8(harness.memory.read_flat_device(), 0x42, 17)
+
+    harness.io.debug_char('F')
+    harness.io.debug_char('L')
+    harness.io.debug_char('A')
+    harness.io.debug_char('T')
+    harness.io.pass()
+}

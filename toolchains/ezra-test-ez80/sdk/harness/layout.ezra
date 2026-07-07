@@ -1,0 +1,17 @@
+pub fn require_flat_layout(first_failure: u8) {
+    test.assert_eq_u24(EZRA_LOAD_ADDR, 0x010000, first_failure)
+    test.assert_eq_u24(EZRA_ENTRY_ADDR, 0x010040, first_failure + 1)
+    test.assert_eq_u24(EZRA_RAM_BASE, 0x050000, first_failure + 2)
+    test.assert_eq_u24(EZRA_RODATA_BASE, 0x040000, first_failure + 3)
+    test.assert_eq_u24(EZRA_ASSET_BASE, 0x0C0000, first_failure + 4)
+    test.assert_eq_u24(EZRA_STACK_TOP, 0x0FFF00, first_failure + 5)
+}
+
+pub fn require_split_layout(first_failure: u8) {
+    test.assert_eq_u24(EZRA_LOAD_ADDR, 0x020000, first_failure)
+    test.assert_eq_u24(EZRA_ENTRY_ADDR, 0x020040, first_failure + 1)
+    test.assert_eq_u24(EZRA_RAM_BASE, 0x100000, first_failure + 2)
+    test.assert_eq_u24(EZRA_RODATA_BASE, 0x040000, first_failure + 3)
+    test.assert_eq_u24(EZRA_ASSET_BASE, 0x180000, first_failure + 4)
+    test.assert_eq_u24(EZRA_STACK_TOP, 0x1FFF00, first_failure + 5)
+}
