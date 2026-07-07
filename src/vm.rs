@@ -4,7 +4,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use ez80::{Cpu, Machine, Reg16};
+use ez80::{Cpu, Machine, Reg8, Reg16};
 
 use crate::asm::ez80 as asm_meta;
 use crate::diagnostic::Diagnostic;
@@ -74,6 +74,15 @@ pub fn run_assembly_test_with_options_at(
     options: &TestRunOptions,
     base_addr: u32,
 ) -> Result<TestRun, Diagnostic> {
+    run_assembly_test_with_cpu_options_at(CpuFamily::Ez80, assembly, options, base_addr)
+}
+
+pub fn run_assembly_test_with_cpu_options_at(
+    cpu_family: CpuFamily,
+    assembly: &str,
+    options: &TestRunOptions,
+    base_addr: u32,
+) -> Result<TestRun, Diagnostic> {
     if options.stack_top > Address24::MAX {
         return Err(Diagnostic::new(format!(
             "test stack top 0x{:X} is outside the 24-bit address space",
@@ -88,7 +97,7 @@ pub fn run_assembly_test_with_options_at(
         }
     }
 
-    let code = assemble_ez80_subset_at(assembly, base_addr)?;
+    let code = assemble_subset_at(cpu_family, assembly, base_addr)?;
     let code_start = base_addr;
     let code_end = checked_code_end(code_start, code.len())?;
     let mut machine = TestMachine::new();
@@ -102,16 +111,42 @@ pub fn run_assembly_test_with_options_at(
         machine.poke(base_addr + address as u32, byte);
     }
 
-    let mut cpu = Cpu::new_ez80();
-    cpu.state.reg.adl = true;
+    let mut cpu = match cpu_family {
+        CpuFamily::Ez80 => Cpu::new_ez80(),
+        CpuFamily::Z80 => Cpu::new_z80(),
+        _ => {
+            return Err(Diagnostic::new(format!(
+                "test runner does not support CPU `{}`",
+                cpu_family.as_str()
+            )));
+        }
+    };
+    cpu.state.reg.adl = cpu_family == CpuFamily::Ez80;
     cpu.state.set_pc(base_addr);
-    cpu.state.reg.set24(Reg16::SP, options.stack_top);
+    if cpu_family == CpuFamily::Z80 {
+        cpu.state.reg.set16(Reg16::SP, options.stack_top as u16);
+    } else {
+        cpu.state.reg.set24(Reg16::SP, options.stack_top);
+    }
     if std::env::var_os("EZRA_TRACE_VM").is_some() {
         cpu.set_trace(true);
     }
 
     for instruction in 0..options.instruction_budget {
         let pc = cpu.state.pc();
+        if cpu_family == CpuFamily::Z80 && handle_cpm_bdos_call(&mut cpu, &mut machine)? {
+            if machine.halted {
+                return Ok(TestRun {
+                    halted: true,
+                    result_code: machine.result_code,
+                    instructions: instruction + 1,
+                    debug_output: machine.debug_output,
+                    ports: machine.ports,
+                    failure: None,
+                });
+            }
+            continue;
+        }
         if pc < code_start || pc >= code_end {
             return Ok(TestRun {
                 halted: false,
@@ -165,6 +200,28 @@ pub fn run_assembly_test_with_options_at(
     })
 }
 
+fn handle_cpm_bdos_call(cpu: &mut Cpu, machine: &mut TestMachine) -> Result<bool, Diagnostic> {
+    if cpu.state.pc() != 0x0005 {
+        return Ok(false);
+    }
+
+    match cpu.state.reg.get8(Reg8::C) {
+        0 => machine.halted = true,
+        2 => machine.debug_output.push(cpu.state.reg.get8(Reg8::E)),
+        function => {
+            return Err(Diagnostic::new(format!(
+                "CP/M BDOS function {function} is not implemented by the test runner"
+            )));
+        }
+    }
+
+    let sp = cpu.state.reg.get16(Reg16::SP) as u32;
+    let return_addr = machine.peek(sp) as u32 | ((machine.peek(sp.wrapping_add(1)) as u32) << 8);
+    cpu.state.reg.set16(Reg16::SP, sp.wrapping_add(2) as u16);
+    cpu.state.set_pc(return_addr);
+    Ok(true)
+}
+
 fn stack_pointer_in_bounds(sp: u32, stack_top: u32) -> bool {
     let floor = stack_top.saturating_sub(TEST_STACK_BYTES);
     (floor..=stack_top).contains(&sp)
@@ -175,6 +232,22 @@ pub fn assemble_ez80_subset_at(assembly: &str, base_addr: u32) -> Result<Vec<u8>
 }
 
 pub fn assemble_ez80_subset_with_symbols_at(
+    assembly: &str,
+    base_addr: u32,
+) -> Result<AssembledProgram, Diagnostic> {
+    assemble_subset_with_symbols_at(CpuFamily::Ez80, assembly, base_addr)
+}
+
+pub fn assemble_subset_at(
+    cpu_family: CpuFamily,
+    assembly: &str,
+    base_addr: u32,
+) -> Result<Vec<u8>, Diagnostic> {
+    Ok(assemble_subset_with_symbols_at(cpu_family, assembly, base_addr)?.bytes)
+}
+
+pub fn assemble_subset_with_symbols_at(
+    cpu_family: CpuFamily,
     assembly: &str,
     base_addr: u32,
 ) -> Result<AssembledProgram, Diagnostic> {
@@ -202,7 +275,7 @@ pub fn assemble_ez80_subset_with_symbols_at(
                 }
             }
             AsmLine::Instruction(text) => {
-                pc = checked_assembly_pc_advance(pc, instruction_len(text)? as u32)?;
+                pc = checked_assembly_pc_advance(pc, instruction_len(cpu_family, text)? as u32)?;
             }
         }
     }
@@ -219,8 +292,8 @@ pub fn assemble_ez80_subset_with_symbols_at(
     let mut pc = base_addr & 0xFF_FFFF;
     for instruction in instructions {
         if let AsmLine::Instruction(text) = instruction {
-            emit_instruction(&text, &labels, pc, &mut bytes)?;
-            pc = checked_assembly_pc_advance(pc, instruction_len(&text)? as u32)?;
+            emit_instruction(cpu_family, &text, &labels, pc, &mut bytes)?;
+            pc = checked_assembly_pc_advance(pc, instruction_len(cpu_family, &text)? as u32)?;
         }
     }
     Ok(AssembledProgram { bytes, symbols })
@@ -269,8 +342,8 @@ fn parse_line(line: &str) -> Option<AsmLine> {
     Some(AsmLine::Instruction(line.to_owned()))
 }
 
-fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    if let Some(len) = asm_meta::generated_instruction_len(CpuFamily::Ez80, text)? {
+fn instruction_len(cpu_family: CpuFamily, text: &str) -> Result<usize, Diagnostic> {
+    if let Some(len) = asm_meta::generated_instruction_len(cpu_family, text)? {
         Ok(len)
     } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
         Ok(2)
@@ -286,24 +359,26 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
 }
 
 fn emit_instruction(
+    cpu_family: CpuFamily,
     text: &str,
     labels: &HashMap<String, u32>,
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
-    if let Some(generated) = asm_meta::encode_generated_instruction(CpuFamily::Ez80, text)? {
+    if let Some(generated) = asm_meta::encode_generated_instruction(cpu_family, text)? {
         bytes.extend(generated);
-    } else if let Some(direct) = asm_meta::direct24_instruction(CpuFamily::Ez80, text) {
+    } else if let Some(direct) = asm_meta::direct24_instruction(cpu_family, text) {
         bytes.extend_from_slice(direct.prefix);
         push24(bytes, parse_addr(direct.addr, labels, pc)?);
-    } else if let Some(load) = asm_meta::imm24_load_instruction(CpuFamily::Ez80, text) {
+    } else if let Some(load) = asm_meta::imm24_load_instruction(cpu_family, text) {
         bytes.extend_from_slice(load.prefix);
         push24(bytes, parse_addr(load.value, labels, pc)?);
-    } else if let Some(branch) = asm_meta::branch_instruction(CpuFamily::Ez80, text) {
+    } else if let Some(branch) = asm_meta::branch_instruction(cpu_family, text) {
         bytes.push(branch.opcode);
         let target = parse_addr(branch.target, labels, pc)?;
         match branch.width {
             asm_meta::BranchWidth::Relative8 => bytes.push(relative_offset(pc, target)?),
+            asm_meta::BranchWidth::Absolute16 => push16(bytes, target)?,
             asm_meta::BranchWidth::Absolute24 => push24(bytes, target),
         }
     } else if let Some(value) = text.strip_prefix("ld h,") {
@@ -317,6 +392,17 @@ fn emit_instruction(
             "test assembler does not support instruction `{text}`"
         )));
     }
+    Ok(())
+}
+
+fn push16(bytes: &mut Vec<u8>, value: u32) -> Result<(), Diagnostic> {
+    if value > 0xFFFF {
+        return Err(Diagnostic::new(format!(
+            "address operand 0x{value:X} is outside the 16-bit address space"
+        )));
+    }
+    bytes.push(value as u8);
+    bytes.push((value >> 8) as u8);
     Ok(())
 }
 
@@ -472,6 +558,34 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn z80_assembler_uses_16_bit_absolute_branches() {
+        let bytes = assemble_subset_at(CpuFamily::Z80, "call 0005h\njp done\ndone:\nret\n", 0x0100)
+            .unwrap();
+
+        assert_eq!(bytes, [0xCD, 0x05, 0x00, 0xC3, 0x06, 0x01, 0xC9]);
+    }
+
+    #[test]
+    fn cpm_bdos_function_2_outputs_characters_and_function_0_exits() {
+        let run = run_assembly_test_with_cpu_options_at(
+            CpuFamily::Z80,
+            include_str!("../examples/cpm-z80/hello-line.asm"),
+            &TestRunOptions {
+                instruction_budget: 1_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0xFF00,
+            },
+            0x0100,
+        )
+        .unwrap();
+
+        assert!(run.halted, "{run:?}");
+        assert_eq!(run.debug_output, b"EZRA\r\n");
+        assert_eq!(run.failure, None);
     }
 
     #[test]

@@ -116,6 +116,7 @@ struct AssembleOptions {
     path: String,
     output: Option<String>,
     base_addr: u32,
+    target: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,6 +168,7 @@ impl AssembleOptions {
         let mut path = None;
         let mut output = None;
         let mut base_addr = 0x01_0000;
+        let mut target = None;
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
@@ -178,6 +180,10 @@ impl AssembleOptions {
                     let value = iter.next().ok_or_else(usage)?;
                     base_addr = parse_cli_u24(value)?;
                 }
+                "--target" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    target = Some(value.clone());
+                }
                 _ if path.is_none() => path = Some(arg.clone()),
                 _ => return Err(usage()),
             }
@@ -186,6 +192,7 @@ impl AssembleOptions {
             path: path.ok_or_else(usage)?,
             output,
             base_addr,
+            target,
         })
     }
 }
@@ -211,13 +218,20 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
     let source_path = PathBuf::from(&options.path);
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
-    let assembled = assemble_ez80_subset_with_symbols_at(&source, options.base_addr)
-        .map_err(|error| error.to_string())?;
+    let target = resolve_target_profile(options.target.as_deref())?;
+    let base_addr = if target.triple.cpu == CpuFamily::Z80 && options.base_addr == 0x01_0000 {
+        0x0100
+    } else {
+        options.base_addr
+    };
+    let assembled =
+        ezra::vm::assemble_subset_with_symbols_at(target.triple.cpu, &source, base_addr)
+            .map_err(|error| error.to_string())?;
     let output_path = options
         .output
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| source_path.with_extension("bin"));
+        .unwrap_or_else(|| source_path.with_extension(target.output_format.extension()));
     fs::write(&output_path, &assembled.bytes)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     println!("wrote {}", output_path.display());
@@ -816,6 +830,8 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 fn default_layout_for_target(target: &str) -> Layout {
     if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
+    } else if target.split('-').any(|part| part == "cpm") {
+        Layout::cpm_z80_com()
     } else if target.split('-').any(|part| part == "z80") {
         Layout::z80_default()
     } else {
@@ -978,6 +994,7 @@ mod tests {
             path: source_path.to_string_lossy().into_owned(),
             output: Some(output_path.to_string_lossy().into_owned()),
             base_addr: 0x04_0000,
+            target: None,
         })
         .unwrap();
 
@@ -985,6 +1002,68 @@ mod tests {
             std::fs::read(&output_path).unwrap(),
             [0x3E, 0x42, 0x49, 0xD7, 0xC9]
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assemble_file_writes_cpm_com_for_cpm_z80_target() {
+        let root = temp_root("assemble_cpm_file");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("hello.asm");
+        let output_path = source_path.with_extension("com");
+        std::fs::write(
+            &source_path,
+            r#"
+                start:
+                    ld c, 02h
+                    ld e, 48h
+                    call 0005h
+                    ld c, 00h
+                    call 0005h
+            "#,
+        )
+        .unwrap();
+
+        assemble_file(&AssembleOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            output: None,
+            base_addr: 0x01_0000,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            [
+                0x0E, 0x02, 0x1E, 0x48, 0xCD, 0x05, 0x00, 0x0E, 0x00, 0xCD, 0x05, 0x00
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cpm_z80_examples_assemble_as_com_programs() {
+        let root = temp_root("assemble_cpm_examples");
+        std::fs::create_dir_all(&root).unwrap();
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80");
+
+        for name in ["exit", "hello-char", "hello-line"] {
+            let output = root.join(format!("{name}.com"));
+            assemble_file(&AssembleOptions {
+                path: examples
+                    .join(format!("{name}.asm"))
+                    .to_string_lossy()
+                    .into_owned(),
+                output: Some(output.to_string_lossy().into_owned()),
+                base_addr: 0x01_0000,
+                target: Some("cpm-2.2-z80".to_owned()),
+            })
+            .unwrap();
+
+            assert!(!std::fs::read(output).unwrap().is_empty());
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1269,6 +1348,33 @@ mod tests {
                 .iter()
                 .all(|region| region.end.get() <= 0xFFFF)
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cpm_z80_target_uses_com_layout() {
+        let root = temp_root("cpm_z80_layout");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let settings = resolve_build_settings(
+            &CommandOptions {
+                path: source_path.to_string_lossy().into_owned(),
+                debug_comments: false,
+                default_sdk_symbols: true,
+                layout_path: None,
+                target: Some("cpm-2.2-z80".to_owned()),
+            },
+            &source_path,
+        )
+        .unwrap();
+
+        assert_eq!(settings.target.output_format, OutputFormat::CpmCom);
+        assert_eq!(settings.layout.name, "cpm_z80_com");
+        assert_eq!(settings.layout.load.get(), 0x0100);
+        assert_eq!(settings.layout.entry.get(), 0x0100);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1793,7 +1899,7 @@ mod tests {
         .unwrap();
 
         let error = build_source(source_path.to_str().unwrap()).unwrap_err();
-        assert!(error.contains("only `bin` is implemented"), "{error}");
+        assert!(error.contains("expected `bin` or `com`"), "{error}");
 
         let _ = std::fs::remove_dir_all(root);
     }

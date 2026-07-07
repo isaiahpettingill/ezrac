@@ -58,12 +58,14 @@ pub struct TargetMemoryModel {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputFormat {
+    CpmCom,
     RawBin,
 }
 
 impl OutputFormat {
     pub const fn extension(self) -> &'static str {
         match self {
+            Self::CpmCom => "com",
             Self::RawBin => "bin",
         }
     }
@@ -81,11 +83,19 @@ pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, Str
         ));
     };
     Ok(TargetProfile {
+        output_format: output_format_for_target(&triple),
         triple,
         memory,
         default_sdk_symbols: true,
-        output_format: OutputFormat::RawBin,
     })
+}
+
+fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
+    if triple.cpu == CpuFamily::Z80 && triple.value.split('-').any(|part| part == "cpm") {
+        OutputFormat::CpmCom
+    } else {
+        OutputFormat::RawBin
+    }
 }
 
 pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
@@ -105,8 +115,9 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
 pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
     match value {
         "bin" => Ok(OutputFormat::RawBin),
+        "com" => Ok(OutputFormat::CpmCom),
         _ => Err(format!(
-            "unsupported output format `{value}`; only `bin` is implemented"
+            "unsupported output format `{value}`; expected `bin` or `com`"
         )),
     }
 }
@@ -232,6 +243,14 @@ mod tests {
     }
 
     #[test]
+    fn cpm_z80_targets_default_to_com_output() {
+        let cpm = resolve_target_profile(Some("cpm-2.2-z80")).unwrap();
+
+        assert_eq!(cpm.output_format, OutputFormat::CpmCom);
+        assert_eq!(cpm.output_format.extension(), "com");
+    }
+
+    #[test]
     fn rejects_cpus_without_target_profiles_for_now() {
         let error = resolve_target_profile(Some("sega-genesis-m68k")).unwrap_err();
         assert!(
@@ -243,7 +262,8 @@ mod tests {
     #[test]
     fn raw_bin_is_the_only_implemented_output_format_for_now() {
         assert_eq!(parse_output_format("bin"), Ok(OutputFormat::RawBin));
+        assert_eq!(parse_output_format("com"), Ok(OutputFormat::CpmCom));
         let error = parse_output_format("hex").unwrap_err();
-        assert!(error.contains("only `bin` is implemented"), "{error}");
+        assert!(error.contains("expected `bin` or `com`"), "{error}");
     }
 }

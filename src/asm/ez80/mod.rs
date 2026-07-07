@@ -288,6 +288,7 @@ pub struct BranchInstruction<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BranchWidth {
     Relative8,
+    Absolute16,
     Absolute24,
 }
 
@@ -295,6 +296,7 @@ impl BranchInstruction<'_> {
     pub const fn len(self) -> usize {
         match self.width {
             BranchWidth::Relative8 => 2,
+            BranchWidth::Absolute16 => 3,
             BranchWidth::Absolute24 => 4,
         }
     }
@@ -309,7 +311,11 @@ pub fn branch_instruction<'a>(cpu: CpuFamily, text: &'a str) -> Option<BranchIns
             return Some(BranchInstruction {
                 opcode: *opcode,
                 target: target.trim(),
-                width: BranchWidth::Absolute24,
+                width: if cpu == CpuFamily::Ez80 {
+                    BranchWidth::Absolute24
+                } else {
+                    BranchWidth::Absolute16
+                },
             });
         }
     }
