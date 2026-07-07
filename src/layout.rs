@@ -155,8 +155,8 @@ impl Layout {
     pub fn agon_light_mos() -> Self {
         Self {
             name: "agon_light_mos".to_owned(),
-            load: Address24::new(0x03_FFC0),
-            entry: Address24::new(0x04_0000),
+            load: Address24::new(0x04_0000),
+            entry: Address24::new(0x04_0045),
             stack: Address24::new(0x0B_FF00),
             regions: vec![
                 region("low", 0x00_0000, 0x00_FFFF, &[RegionFlags::RESERVED]),
@@ -170,10 +170,10 @@ impl Layout {
                         RegionFlags::RESERVED,
                     ],
                 ),
-                region("header", 0x03_FFC0, 0x03_FFFF, &[RegionFlags::READ]),
+                region("header", 0x04_0000, 0x04_003F, &[RegionFlags::READ]),
                 region(
                     "code",
-                    0x04_0000,
+                    0x04_0045,
                     0x05_FFFF,
                     &[RegionFlags::READ, RegionFlags::EXECUTE],
                 ),
@@ -214,9 +214,9 @@ impl Layout {
                 section(".scratch", "scratch", 16),
             ],
             symbols: vec![
-                symbol("EZRA_LOAD_ADDR", Address24::new(0x03_FFC0)),
-                symbol("EZRA_ENTRY_ADDR", Address24::new(0x04_0000)),
-                symbol("EZRA_CODE_BASE", Address24::new(0x04_0000)),
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x04_0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x04_0045)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x04_0045)),
                 symbol("EZRA_STACK_TOP", Address24::new(0x0B_FF00)),
                 symbol("EZRA_RAM_BASE", Address24::new(0x07_0000)),
                 symbol("EZRA_RODATA_BASE", Address24::new(0x06_0000)),

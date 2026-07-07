@@ -104,6 +104,7 @@ impl CommandOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildSettings {
     sdk: SdkResolver,
+    target: String,
     output_format: OutputFormat,
     layout: Layout,
     layout_path: Option<PathBuf>,
@@ -143,6 +144,7 @@ fn resolve_build_settings(
 
     Ok(BuildSettings {
         sdk,
+        target: target.triple.value,
         output_format,
         layout,
         layout_path,
@@ -237,7 +239,8 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    fs::write(&executable_path, &assembled.bytes)
+    let executable = build_executable_bytes(&settings, &assembled.bytes)?;
+    fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
     Ok(BuildOutputs {
@@ -245,6 +248,32 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         map: map_path,
         executable: executable_path,
     })
+}
+
+fn build_executable_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
+    if settings.target.starts_with("agonlight-mos-ez80") {
+        return build_agon_mos_executable(settings.layout.entry.get(), code);
+    }
+    Ok(code.to_vec())
+}
+
+fn build_agon_mos_executable(entry: u32, code: &[u8]) -> Result<Vec<u8>, String> {
+    if entry > Address24::MAX {
+        return Err(format!(
+            "Agon MOS entry address 0x{entry:X} is outside the 24-bit address space"
+        ));
+    }
+    let mut out = Vec::with_capacity(69 + code.len());
+    out.push(0xC3);
+    out.push((entry & 0xFF) as u8);
+    out.push(((entry >> 8) & 0xFF) as u8);
+    out.push(((entry >> 16) & 0xFF) as u8);
+    out.resize(64, 0);
+    out.extend_from_slice(b"MOS");
+    out.push(0);
+    out.push(1);
+    out.extend_from_slice(code);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1222,10 +1251,13 @@ mod tests {
         let outputs = build_source(source_path.to_str().unwrap()).unwrap();
         let map = std::fs::read_to_string(&outputs.map).unwrap();
         let asm = std::fs::read_to_string(&outputs.asm).unwrap();
+        let bin = std::fs::read(&outputs.executable).unwrap();
 
-        assert!(map.contains(".text        0x040000"), "{map}");
+        assert!(map.contains(".text        0x040045"), "{map}");
         assert!(asm.contains("rst 10h"), "{asm}");
         assert!(asm.contains("out0 (00h), a"), "{asm}");
+        assert_eq!(&bin[0..4], &[0xC3, 0x45, 0x00, 0x04]);
+        assert_eq!(&bin[64..69], b"MOS\0\x01");
 
         let _ = std::fs::remove_dir_all(root);
     }
