@@ -272,20 +272,6 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     if let Some(len) = asm_meta::generated_instruction_len(CpuFamily::Ez80, text)? {
         Ok(len)
-    } else if matches!(
-        text,
-        "inc ix"
-            | "inc iy"
-            | "dec ix"
-            | "dec iy"
-            | "add ix, bc"
-            | "add ix, de"
-            | "add ix, ix"
-            | "add iy, bc"
-            | "add iy, de"
-            | "add iy, iy"
-    ) {
-        Ok(2)
     } else if text.starts_with("ld sp,") {
         Ok(4)
     } else if matches!(
@@ -302,10 +288,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
         Ok(2)
-    } else if parse_block_operation(text).is_some() {
-        Ok(2)
-    } else if parse_mlt_reg16(text).is_some() {
-        Ok(2)
     } else if let Some(rst) = parse_rst(text)? {
         Ok(rst.len())
     } else if parse_index_cb_operation(text)?.is_some() {
@@ -313,18 +295,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     } else if parse_bit_operation_reg8(text)?.is_some() {
         Ok(2)
     } else if parse_cb_reg8_or_hl_operation(text)?.is_some() {
-        Ok(2)
-    } else if text == "sbc hl, bc"
-        || text == "sbc hl, de"
-        || text == "sbc hl, hl"
-        || text == "sbc hl, sp"
-        || text == "adc hl, bc"
-        || text == "adc hl, de"
-        || text == "adc hl, hl"
-        || text == "adc hl, sp"
-        || text == "add ix, sp"
-        || text == "add iy, sp"
-    {
         Ok(2)
     } else if parse_direct_index_load_or_store(text)?.is_some() {
         Ok(5)
@@ -486,10 +456,6 @@ fn emit_instruction(
         bytes.push(0x3B);
     } else if text == "inc sp" {
         bytes.push(0x33);
-    } else if let Some(opcode) = parse_block_operation(text) {
-        bytes.extend([0xED, opcode]);
-    } else if let Some(opcode) = parse_mlt_reg16(text) {
-        bytes.extend([0xED, opcode]);
     } else if let Some(rst) = parse_rst(text)? {
         rst.write_to(bytes);
     } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
@@ -498,12 +464,6 @@ fn emit_instruction(
         bytes.extend([0xCB, opcode]);
     } else if let Some(opcode) = parse_cb_reg8_or_hl_operation(text)? {
         bytes.extend([0xCB, opcode]);
-    } else if text == "add ix, sp" {
-        bytes.extend([0xDD, 0x39]);
-    } else if text == "add iy, sp" {
-        bytes.extend([0xFD, 0x39]);
-    } else if let Some(opcode) = parse_index_reg16_operation(text) {
-        bytes.extend(opcode);
     } else if let Some(io) = parse_io_instruction(text)? {
         io.write_to(bytes);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
@@ -515,19 +475,6 @@ fn emit_instruction(
     } else if let Some(value) = text.strip_prefix("ld h,") {
         bytes.push(0x26);
         bytes.push(parse_u8(value.trim())?);
-    } else if let Some(register) = text
-        .strip_prefix("adc hl,")
-        .and_then(|r| reg16_code(r.trim()))
-    {
-        bytes.extend([0xED, 0x4A + register * 0x10]);
-    } else if text == "sbc hl, bc" {
-        bytes.extend([0xED, 0x42]);
-    } else if text == "sbc hl, de" {
-        bytes.extend([0xED, 0x52]);
-    } else if text == "sbc hl, hl" {
-        bytes.extend([0xED, 0x62]);
-    } else if text == "sbc hl, sp" {
-        bytes.extend([0xED, 0x72]);
     } else if let Some(value) = text.strip_prefix("xor ") {
         bytes.push(0xEE);
         bytes.push(parse_u8(value.trim())?);
@@ -650,55 +597,6 @@ fn ld_direct_reg16_store_opcode(register: &str) -> u8 {
         "bc" => 0x43,
         "de" => 0x53,
         _ => unreachable!("invalid direct-store register {register}"),
-    }
-}
-
-fn parse_block_operation(text: &str) -> Option<u8> {
-    match text {
-        "ldi" => Some(0xA0),
-        "ldir" => Some(0xB0),
-        "ldd" => Some(0xA8),
-        "lddr" => Some(0xB8),
-        "cpi" => Some(0xA1),
-        "cpir" => Some(0xB1),
-        "cpd" => Some(0xA9),
-        "cpdr" => Some(0xB9),
-        "ini" => Some(0xA2),
-        "inir" => Some(0xB2),
-        "ind" => Some(0xAA),
-        "indr" => Some(0xBA),
-        "outi" => Some(0xA3),
-        "otir" => Some(0xB3),
-        "outd" => Some(0xAB),
-        "otdr" => Some(0xBB),
-        _ => None,
-    }
-}
-
-fn parse_mlt_reg16(text: &str) -> Option<u8> {
-    let register = text.strip_prefix("mlt ")?;
-    match register.trim() {
-        "bc" => Some(0x4C),
-        "de" => Some(0x5C),
-        "hl" => Some(0x6C),
-        "sp" => Some(0x7C),
-        _ => None,
-    }
-}
-
-fn parse_index_reg16_operation(text: &str) -> Option<[u8; 2]> {
-    match text {
-        "inc ix" => Some([0xDD, 0x23]),
-        "inc iy" => Some([0xFD, 0x23]),
-        "dec ix" => Some([0xDD, 0x2B]),
-        "dec iy" => Some([0xFD, 0x2B]),
-        "add ix, bc" => Some([0xDD, 0x09]),
-        "add ix, de" => Some([0xDD, 0x19]),
-        "add ix, ix" => Some([0xDD, 0x29]),
-        "add iy, bc" => Some([0xFD, 0x09]),
-        "add iy, de" => Some([0xFD, 0x19]),
-        "add iy, iy" => Some([0xFD, 0x29]),
-        _ => None,
     }
 }
 
@@ -902,16 +800,6 @@ fn reg8_or_hl_code(register: &str) -> Option<u8> {
         return Some(6);
     }
     reg8_code(register)
-}
-
-fn reg16_code(register: &str) -> Option<u8> {
-    match register {
-        "bc" => Some(0),
-        "de" => Some(1),
-        "hl" => Some(2),
-        "sp" => Some(3),
-        _ => None,
-    }
 }
 
 fn parse_inc_dec_hl_indirect(text: &str) -> Option<bool> {
