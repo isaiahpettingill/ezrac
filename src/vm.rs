@@ -344,15 +344,7 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(1)
     } else if parse_ld_hl_imm(text)?.is_some() {
         Ok(2)
-    } else if parse_ld_reg8_reg8(text).is_some() {
-        Ok(1)
-    } else if parse_ld_reg8_imm(text)?.is_some() {
-        Ok(2)
-    } else if parse_inc_dec_reg8(text).is_some() {
-        Ok(1)
     } else if parse_inc_dec_hl_indirect(text).is_some() {
-        Ok(1)
-    } else if parse_accumulator_alu_reg8_or_hl(text).is_some() {
         Ok(1)
     } else if parse_accumulator_alu_imm(text)?.is_some() {
         Ok(2)
@@ -391,26 +383,6 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if let Some(generated) = asm_meta::encode_generated_instruction(CpuFamily::Ez80, text)? {
         bytes.extend(generated);
-    } else if text == "ld sp, hl" {
-        bytes.push(0xF9);
-    } else if text == "ld sp, ix" {
-        bytes.extend([0xDD, 0xF9]);
-    } else if text == "ld sp, iy" {
-        bytes.extend([0xFD, 0xF9]);
-    } else if text == "jp (hl)" {
-        bytes.push(0xE9);
-    } else if text == "jp (ix)" {
-        bytes.extend([0xDD, 0xE9]);
-    } else if text == "jp (iy)" {
-        bytes.extend([0xFD, 0xE9]);
-    } else if text == "ld i, a" {
-        bytes.extend([0xED, 0x47]);
-    } else if text == "ld r, a" {
-        bytes.extend([0xED, 0x4F]);
-    } else if text == "ld a, i" {
-        bytes.extend([0xED, 0x57]);
-    } else if text == "ld a, r" {
-        bytes.extend([0xED, 0x5F]);
     } else if let Some((load, index, addr)) = parse_direct_index_load_or_store(text)? {
         bytes.extend([index.prefix(), if load { 0x2A } else { 0x22 }]);
         push24(bytes, parse_addr(addr, labels, pc)?);
@@ -587,24 +559,6 @@ fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
         )));
     }
     Ok((offset as i8) as u8)
-}
-
-fn parse_ld_reg8_reg8(text: &str) -> Option<(u8, u8)> {
-    let (dst, src) = parse_ld_operands(text)?;
-    Some((reg8_code(dst)?, reg8_code(src)?))
-}
-
-fn parse_ld_reg8_imm(text: &str) -> Result<Option<(u8, u8)>, Diagnostic> {
-    let Some((dst, value)) = parse_ld_operands(text) else {
-        return Ok(None);
-    };
-    let Some(dst) = reg8_code(dst) else {
-        return Ok(None);
-    };
-    if reg8_code(value).is_some() || value.starts_with('(') {
-        return Ok(None);
-    }
-    Ok(Some((dst, parse_u8(value)?)))
 }
 
 fn parse_ld_reg8_from_hl(text: &str) -> Option<u8> {
@@ -960,16 +914,6 @@ fn reg16_code(register: &str) -> Option<u8> {
     }
 }
 
-fn parse_inc_dec_reg8(text: &str) -> Option<(bool, u8)> {
-    if let Some(register) = text.strip_prefix("inc ") {
-        return Some((true, reg8_code(register.trim())?));
-    }
-    if let Some(register) = text.strip_prefix("dec ") {
-        return Some((false, reg8_code(register.trim())?));
-    }
-    None
-}
-
 fn parse_inc_dec_hl_indirect(text: &str) -> Option<bool> {
     match text {
         "inc (hl)" => Some(true),
@@ -988,30 +932,6 @@ enum AccumulatorAluOp {
     Or,
     Xor,
     Cp,
-}
-
-fn parse_accumulator_alu_reg8_or_hl(text: &str) -> Option<(AccumulatorAluOp, u8)> {
-    if let Some(src) = text.strip_prefix("add a,") {
-        return Some((AccumulatorAluOp::Add, reg8_or_hl_code(src.trim())?));
-    }
-    if let Some(src) = text.strip_prefix("adc a,") {
-        return Some((AccumulatorAluOp::Adc, reg8_or_hl_code(src.trim())?));
-    }
-    if let Some(src) = text.strip_prefix("sbc a,") {
-        return Some((AccumulatorAluOp::Sbc, reg8_or_hl_code(src.trim())?));
-    }
-    for (prefix, op) in [
-        ("sub ", AccumulatorAluOp::Sub),
-        ("and ", AccumulatorAluOp::And),
-        ("or ", AccumulatorAluOp::Or),
-        ("xor ", AccumulatorAluOp::Xor),
-        ("cp ", AccumulatorAluOp::Cp),
-    ] {
-        if let Some(src) = text.strip_prefix(prefix) {
-            return Some((op, reg8_or_hl_code(src.trim())?));
-        }
-    }
-    None
 }
 
 fn parse_accumulator_alu_imm(text: &str) -> Result<Option<(AccumulatorAluOp, u8)>, Diagnostic> {
