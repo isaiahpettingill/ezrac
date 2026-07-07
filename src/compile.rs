@@ -28,6 +28,12 @@ pub struct CompileReport {
     pub has_main: bool,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SdkResolver {
+    pub target: Option<String>,
+    pub sdk_roots: Vec<PathBuf>,
+}
+
 pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileReport, Diagnostic> {
     let root = parse_program(&options.source, source)?;
     let imports = root
@@ -36,8 +42,13 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
         .filter(|decl| matches!(decl, crate::ast::Declaration::Import(_)))
         .count();
     let fallback_location = source_start_location(&options.source);
-    let program = resolve_program_imports(root, &mut Vec::new(), &mut HashSet::new())
-        .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
+    let program = resolve_program_imports(
+        root,
+        &SdkResolver::default(),
+        &mut Vec::new(),
+        &mut HashSet::new(),
+    )
+    .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
     let declarations = program.declarations.len();
     let has_main = program.main_function().is_some();
 
@@ -75,21 +86,34 @@ fn source_start_location(path: &Path) -> SourceLocation {
 }
 
 pub fn load_program(path: &Path) -> Result<Program, Diagnostic> {
+    load_program_with_sdk(path, &SdkResolver::default())
+}
+
+pub fn load_program_with_sdk(path: &Path, sdk: &SdkResolver) -> Result<Program, Diagnostic> {
     let source = fs::read_to_string(path).map_err(|error| {
         Diagnostic::new(format!("failed to read `{}`: {error}", path.display()))
     })?;
-    parse_and_resolve_imports(path, &source)
+    parse_and_resolve_imports_with_sdk(path, &source, sdk)
 }
 
 pub fn parse_and_resolve_imports(path: &Path, source: &str) -> Result<Program, Diagnostic> {
+    parse_and_resolve_imports_with_sdk(path, source, &SdkResolver::default())
+}
+
+pub fn parse_and_resolve_imports_with_sdk(
+    path: &Path,
+    source: &str,
+    sdk: &SdkResolver,
+) -> Result<Program, Diagnostic> {
     let root = parse_program(path, source)?;
     let mut stack = Vec::new();
     let mut seen = HashSet::new();
-    resolve_program_imports(root, &mut stack, &mut seen)
+    resolve_program_imports(root, sdk, &mut stack, &mut seen)
 }
 
 fn resolve_program_imports(
     program: Program,
+    sdk: &SdkResolver,
     stack: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<Program, Diagnostic> {
@@ -112,7 +136,7 @@ fn resolve_program_imports(
         });
     }
 
-    validate_private_import_access(&program)?;
+    validate_private_import_access(&program, sdk)?;
 
     let short_module_counts = direct_import_short_module_counts(&program);
     stack.push(path);
@@ -121,7 +145,7 @@ fn resolve_program_imports(
         let Declaration::Import(import) = declaration else {
             continue;
         };
-        let (import_path, source) = read_import_source(&program.source_path, import)?;
+        let (import_path, source) = read_import_source(&program.source_path, import, sdk)?;
         let imported = parse_program(&import_path, &source)?;
         let short_module = import.rsplit('.').next().unwrap_or(import);
         let include_short_aliases = short_module_counts
@@ -131,7 +155,7 @@ fn resolve_program_imports(
             <= 1;
         let module_aliases =
             module_alias_declarations(import, &imported.declarations, include_short_aliases);
-        let imported = resolve_program_imports(imported, stack, seen)?;
+        let imported = resolve_program_imports(imported, sdk, stack, seen)?;
         declarations.extend(
             imported
                 .declarations
@@ -169,8 +193,12 @@ fn is_entry_function(declaration: &Declaration) -> bool {
     matches!(declaration, Declaration::Function(function) if function.name == "main")
 }
 
-fn read_import_source(source_path: &Path, import: &str) -> Result<(PathBuf, String), Diagnostic> {
-    let candidates = import_file_candidates(source_path, import);
+fn read_import_source(
+    source_path: &Path,
+    import: &str,
+    sdk: &SdkResolver,
+) -> Result<(PathBuf, String), Diagnostic> {
+    let candidates = import_file_candidates(source_path, import, sdk);
     let missing_path = candidates
         .first()
         .cloned()
@@ -187,13 +215,16 @@ fn read_import_source(source_path: &Path, import: &str) -> Result<(PathBuf, Stri
             }
         }
     }
+    if let Some(source) = builtin_sdk_source(sdk.target.as_deref(), import) {
+        return Ok((builtin_sdk_path(import), source.to_owned()));
+    }
     Err(Diagnostic::new(format!(
         "failed to read import `{import}` at `{}`: not found",
         missing_path.display()
     )))
 }
 
-fn import_file_candidates(source_path: &Path, import: &str) -> Vec<PathBuf> {
+fn import_file_candidates(source_path: &Path, import: &str, sdk: &SdkResolver) -> Vec<PathBuf> {
     let module_path = PathBuf::from(import.replace('.', "/")).with_extension("ezra");
     let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
     let mut candidates = Vec::new();
@@ -204,9 +235,39 @@ fn import_file_candidates(source_path: &Path, import: &str) -> Vec<PathBuf> {
     }
 
     if let Ok(project_root) = std::env::current_dir() {
-        push_unique_path(&mut candidates, project_root.join(module_path));
+        push_unique_path(&mut candidates, project_root.join(&module_path));
+    }
+    for root in &sdk.sdk_roots {
+        push_unique_path(&mut candidates, root.join(&module_path));
     }
     candidates
+}
+
+fn builtin_sdk_path(import: &str) -> PathBuf {
+    PathBuf::from(format!("builtin-sdk/{}.ezra", import.replace('.', "/")))
+}
+
+fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
+    if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {
+        match import {
+            "agon.mos" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/mos.ezra"),
+                "agon.mos",
+            )),
+            "agon.vdp" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/vdp.ezra"),
+                "agon.vdp",
+            )),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+fn builtin_sdk_utf8(bytes: &'static [u8], module: &str) -> &'static str {
+    std::str::from_utf8(bytes)
+        .unwrap_or_else(|_| panic!("built-in SDK module `{module}` is not UTF-8"))
 }
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -310,7 +371,7 @@ fn alias_declaration(declaration: &Declaration, prefix: &str) -> Option<Declarat
     }
 }
 
-fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
+fn validate_private_import_access(program: &Program, sdk: &SdkResolver) -> Result<(), Diagnostic> {
     let mut private_imports = HashMap::new();
     let mut seen_imports = HashSet::new();
     for declaration in &program.declarations {
@@ -320,6 +381,7 @@ fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
         collect_private_imports(
             &program.source_path,
             import,
+            sdk,
             &mut private_imports,
             &mut seen_imports,
         )?;
@@ -338,10 +400,11 @@ fn validate_private_import_access(program: &Program) -> Result<(), Diagnostic> {
 fn collect_private_imports(
     source_path: &Path,
     import: &str,
+    sdk: &SdkResolver,
     private_imports: &mut HashMap<String, String>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<(), Diagnostic> {
-    let (import_path, source) = read_import_source(source_path, import)?;
+    let (import_path, source) = read_import_source(source_path, import, sdk)?;
     let normalized = normalize_path(&import_path);
     if !seen.insert(normalized) {
         return Ok(());
@@ -364,7 +427,7 @@ fn collect_private_imports(
         let Declaration::Import(nested) = declaration else {
             continue;
         };
-        collect_private_imports(&import_path, nested, private_imports, seen)?;
+        collect_private_imports(&import_path, nested, sdk, private_imports, seen)?;
     }
 
     Ok(())

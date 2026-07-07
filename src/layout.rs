@@ -152,6 +152,81 @@ impl Layout {
         }
     }
 
+    pub fn agon_light_mos() -> Self {
+        Self {
+            name: "agon_light_mos".to_owned(),
+            load: Address24::new(0x03_FFC0),
+            entry: Address24::new(0x04_0000),
+            stack: Address24::new(0x0B_FF00),
+            regions: vec![
+                region("low", 0x00_0000, 0x00_FFFF, &[RegionFlags::RESERVED]),
+                region(
+                    "mos",
+                    0x01_0000,
+                    0x03_FFBF,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::EXECUTE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region("header", 0x03_FFC0, 0x03_FFFF, &[RegionFlags::READ]),
+                region(
+                    "code",
+                    0x04_0000,
+                    0x05_FFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x06_0000, 0x06_FFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x07_0000,
+                    0x0B_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0x0C_0000, 0x0D_FFFF, &[RegionFlags::READ]),
+                region(
+                    "vdp",
+                    0x0E_0000,
+                    0x0E_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::VOLATILE],
+                ),
+                region(
+                    "scratch",
+                    0x0F_0000,
+                    0x0F_7FFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0x0F_8000,
+                    0x0F_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "header", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x03_FFC0)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x04_0000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x04_0000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x0B_FF00)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x07_0000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x06_0000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x0C_0000)),
+                symbol("AGON_VDP_PORT", Address24::new(0x0000_B0)),
+                symbol("AGON_EMULATOR_EXIT_PORT", Address24::new(0x0000_00)),
+            ],
+        }
+    }
+
     pub fn validate(&self) -> Result<(), Vec<Diagnostic>> {
         let mut diagnostics = Vec::new();
         let mut region_names = HashSet::new();

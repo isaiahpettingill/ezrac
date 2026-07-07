@@ -1,0 +1,6 @@
+[project]
+name = "agon-mos-hello"
+
+[build]
+target = "agonlight-mos-ez80"
+output = "bin"

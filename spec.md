@@ -495,6 +495,8 @@ For `import foo.bar`, module resolution should search:
 
 SDK modules must be normal EZRA modules unless they require explicit target intrinsics. Hardware-facing SDKs should expose typed constants and functions over ports, MMIO, volatile memory, inline assembly, and target layout symbols.
 
+Bundled SDKs must be stored as EZRA source files in target-specific SDK folders and embedded into the compiler binary. The compiler may also support installed toolchain SDK roots and project SDK paths. Project SDK paths shadow bundled SDK modules so applications can override or extend target libraries without modifying the compiler.
+
 ### 7.3 Project Scaffolding CLI
 
 The CLI should support project scaffolding.

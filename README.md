@@ -23,7 +23,10 @@ cargo run -- header
 
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `REMAINING_WORK.md` tracks known gaps and follow-up work.
-- The current target is eZ80 ADL mode. Classic Z80 support is planned as separate future work.
+- The current implemented backend is eZ80 ADL mode. Classic Z80 support is planned as separate future work.
+- Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
+- Agon Light MOS examples live under `examples/agon-mos`.
+- Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.
 
 ## Development
 

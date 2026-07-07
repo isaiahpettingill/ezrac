@@ -1,0 +1,22 @@
+import agon.mos
+
+pub const VDU_LF: u8 = 10
+pub const VDU_CR: u8 = 13
+pub const VDU_CLEAR: u8 = 12
+
+pub fn write(ch: u8) {
+    mos.putc(ch)
+}
+
+pub fn newline() {
+    mos.putc(VDU_CR)
+    mos.putc(VDU_LF)
+}
+
+pub fn clear() {
+    mos.putc(VDU_CLEAR)
+}
+
+pub fn emulator_exit(code: u8) {
+    mos.exit(code)
+}

@@ -7,7 +7,7 @@ use std::{
 use ezra::{
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
     cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
-    compile::load_program,
+    compile::{SdkResolver, load_program_with_sdk},
     diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
     parser::parse_program,
@@ -103,6 +103,7 @@ impl CommandOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildSettings {
+    sdk: SdkResolver,
     output_format: OutputFormat,
     layout: Layout,
     layout_path: Option<PathBuf>,
@@ -126,14 +127,22 @@ fn resolve_build_settings(
         .map(parse_output_format)
         .transpose()?
         .unwrap_or(target.output_format);
-    let layout_path = options
-        .layout_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| project.and_then(|project| project.layout_file));
-    let layout = load_layout(layout_path.as_deref())?;
+    let layout_path = options.layout_path.as_ref().map(PathBuf::from).or_else(|| {
+        project
+            .as_ref()
+            .and_then(|project| project.layout_file.clone())
+    });
+    let layout = load_layout(layout_path.as_deref(), &target.triple.value)?;
+    let sdk = SdkResolver {
+        target: Some(target.triple.value.clone()),
+        sdk_roots: project
+            .as_ref()
+            .map(|project| project.sdk_paths.clone())
+            .unwrap_or_default(),
+    };
 
     Ok(BuildSettings {
+        sdk,
         output_format,
         layout,
         layout_path,
@@ -175,12 +184,12 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
 fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOutputs, String> {
     let source_path = PathBuf::from(&options.path);
     let source_location = command_source_start_location(&source_path);
-    let program = load_program(&source_path).map_err(|error| {
+    let settings = resolve_build_settings(options, &source_path)?;
+    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let settings = resolve_build_settings(options, &source_path)?;
     if let Err(errors) = settings.layout.validate() {
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
@@ -255,12 +264,12 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let metadata = parse_test_metadata(&source)?;
-    let program = load_program(&source_path).map_err(|error| {
+    let settings = resolve_build_settings(options, &source_path)?;
+    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let settings = resolve_build_settings(options, &source_path)?;
     if let Err(errors) = settings.layout.validate() {
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
@@ -403,12 +412,12 @@ fn emit_asm(options: &CommandOptions) -> Result<(), String> {
 fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String, String> {
     let source_path = PathBuf::from(&options.path);
     let source_location = command_source_start_location(&source_path);
-    let program = load_program(&source_path).map_err(|error| {
+    let settings = resolve_build_settings(options, &source_path)?;
+    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let settings = resolve_build_settings(options, &source_path)?;
     if let Err(errors) = settings.layout.validate() {
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
@@ -444,12 +453,12 @@ fn check_source_with_layout(
         .iter()
         .filter(|decl| matches!(decl, ezra::ast::Declaration::Import(_)))
         .count();
-    let program = load_program(source_path).map_err(|error| {
+    let settings = resolve_build_settings(options, source_path)?;
+    let program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let settings = resolve_build_settings(options, source_path)?;
     if let Err(errors) = settings.layout.validate() {
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
@@ -475,7 +484,7 @@ fn check_source_with_layout(
 
 fn print_layout(path: Option<&str>) -> Result<(), String> {
     let layout_path = path.map(PathBuf::from);
-    let layout = load_layout(layout_path.as_deref())?;
+    let layout = load_layout(layout_path.as_deref(), ezra::target::DEFAULT_TARGET_TRIPLE)?;
     if let Err(errors) = layout.validate() {
         eprintln!(
             "error: {}",
@@ -493,9 +502,9 @@ fn print_layout(path: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn load_layout(path: Option<&Path>) -> Result<Layout, String> {
+fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
     let Some(path) = path else {
-        return Ok(Layout::ezra_default());
+        return Ok(default_layout_for_target(target));
     };
     let source = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -504,6 +513,14 @@ fn load_layout(path: Option<&Path>) -> Result<Layout, String> {
             .with_location_if_missing(command_source_start_location(path))
             .to_string()
     })
+}
+
+fn default_layout_for_target(target: &str) -> Layout {
+    if target.starts_with("agonlight-mos-ez80") {
+        Layout::agon_light_mos()
+    } else {
+        Layout::ezra_default()
+    }
 }
 
 fn assembly_options_from_layout(
@@ -1171,6 +1188,44 @@ mod tests {
             target: None,
         })
         .unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agon_mos_target_uses_builtin_sdk_and_layout() {
+        let root = temp_root("agon_builtin_sdk");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let source_path = root.join("src/main.ezra");
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+                [build]
+                target = "agonlight-mos-ez80"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &source_path,
+            r#"
+                import agon.vdp
+
+                fn main() {
+                    vdp.clear()
+                    vdp.write(65)
+                    vdp.emulator_exit(0)
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+        let map = std::fs::read_to_string(&outputs.map).unwrap();
+        let asm = std::fs::read_to_string(&outputs.asm).unwrap();
+
+        assert!(map.contains(".text        0x040000"), "{map}");
+        assert!(asm.contains("rst 10h"), "{asm}");
+        assert!(asm.contains("out0 (00h), a"), "{asm}");
 
         let _ = std::fs::remove_dir_all(root);
     }
