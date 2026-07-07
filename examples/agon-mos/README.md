@@ -10,6 +10,8 @@ cargo run -- build examples/agon-mos/hello/src/main.ezra
 
 This writes `main.asm`, `main.map`, and `main.bin` next to the source file.
 
+The example is a normal MOS executable: after `main` returns, control returns to MOS. The SDK exposes `vdp.emulator_exit` for CLI-emulator automation, but normal programs should not call it.
+
 ## Fab Agon Emulator
 
 Fab Agon Emulator is GPL-3.0. It is not vendored or submoduled here. To test with it, install or clone it separately and point the runner at your local checkout.

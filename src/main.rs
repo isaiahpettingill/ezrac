@@ -560,6 +560,7 @@ fn assembly_options_from_layout(
     AssemblyOptions {
         debug_comments,
         default_sdk_symbols,
+        mos_executable: layout.name == "agon_light_mos",
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),
@@ -1254,7 +1255,7 @@ mod tests {
         let bin = std::fs::read(&outputs.executable).unwrap();
 
         assert!(map.contains(".text        0x040045"), "{map}");
-        assert!(asm.contains("rst 10h"), "{asm}");
+        assert!(asm.contains("rst.lis 10h"), "{asm}");
         assert!(asm.contains("out0 (00h), a"), "{asm}");
         assert_eq!(&bin[0..4], &[0xC3, 0x45, 0x00, 0x04]);
         assert_eq!(&bin[64..69], b"MOS\0\x01");

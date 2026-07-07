@@ -37,6 +37,7 @@ pub fn emit_ez80_assembly_with_debug_comments(
 pub struct AssemblyOptions {
     pub debug_comments: bool,
     pub default_sdk_symbols: bool,
+    pub mos_executable: bool,
     pub load_addr: Address24,
     pub entry_addr: Address24,
     pub code_base: Address24,
@@ -54,6 +55,7 @@ impl Default for AssemblyOptions {
         Self {
             debug_comments: false,
             default_sdk_symbols: true,
+            mos_executable: false,
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
             code_base: EZRA_CODE_BASE,
@@ -1799,6 +1801,7 @@ struct Emitter {
     recursive_call_edges: HashSet<(String, String)>,
     inline_expansion_stack: Vec<String>,
     debug_comments: bool,
+    mos_executable: bool,
     stack_top: Address24,
     eliminate_dead_code: bool,
 }
@@ -1831,6 +1834,7 @@ impl Emitter {
             recursive_call_edges,
             inline_expansion_stack: Vec::new(),
             debug_comments: options.debug_comments,
+            mos_executable: options.mos_executable,
             stack_top: options.stack_top,
             eliminate_dead_code: true,
         }
@@ -1845,6 +1849,10 @@ impl Emitter {
         self.line("; target: eZ80 ADL mode");
         self.line("section .text");
         self.line("__ezra_start:");
+        if self.mos_executable {
+            self.line("    ei");
+            return;
+        }
         self.line("    di");
         self.line(&format!("    ld sp, {:06X}h", self.stack_top.get()));
     }
@@ -1876,6 +1884,13 @@ impl Emitter {
     fn emit_start_tail(&mut self) {
         self.line("    call _main");
         self.line("__ezra_exit:");
+        if self.mos_executable {
+            self.line("    ld hl, 000000h");
+            self.line("    ret");
+            self.emit_runtime_helpers();
+            self.line("");
+            return;
+        }
         self.line("    jp __ezra_exit");
         self.emit_runtime_helpers();
         self.line("");

@@ -8,5 +8,4 @@ fn main() {
     vdp.write(76)
     vdp.write(79)
     vdp.newline()
-    vdp.emulator_exit(0)
 }

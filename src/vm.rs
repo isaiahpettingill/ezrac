@@ -396,8 +396,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if parse_mlt_reg16(text).is_some() {
         Ok(2)
-    } else if parse_rst(text)?.is_some() {
-        Ok(1)
+    } else if let Some(rst) = parse_rst(text)? {
+        Ok(rst.len())
     } else if parse_bit_operation_reg8(text)?.is_some() {
         Ok(2)
     } else if text == "sbc hl, bc"
@@ -697,8 +697,8 @@ fn emit_instruction(
         bytes.extend([0xED, opcode]);
     } else if let Some(opcode) = parse_mlt_reg16(text) {
         bytes.extend([0xED, opcode]);
-    } else if let Some(opcode) = parse_rst(text)? {
-        bytes.push(opcode);
+    } else if let Some(rst) = parse_rst(text)? {
+        rst.write_to(bytes);
     } else if let Some(opcode) = parse_bit_operation_reg8(text)? {
         bytes.extend([0xCB, opcode]);
     } else if text == "add ix, sp" {
@@ -942,8 +942,30 @@ fn parse_mlt_reg16(text: &str) -> Option<u8> {
     }
 }
 
-fn parse_rst(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let Some(target) = text.strip_prefix("rst ") else {
+struct RstInstruction {
+    lis: bool,
+    opcode: u8,
+}
+
+impl RstInstruction {
+    fn len(&self) -> usize {
+        if self.lis { 2 } else { 1 }
+    }
+
+    fn write_to(&self, bytes: &mut Vec<u8>) {
+        if self.lis {
+            bytes.push(0x49);
+        }
+        bytes.push(self.opcode);
+    }
+}
+
+fn parse_rst(text: &str) -> Result<Option<RstInstruction>, Diagnostic> {
+    let (lis, target) = if let Some(target) = text.strip_prefix("rst.lis ") {
+        (true, target)
+    } else if let Some(target) = text.strip_prefix("rst ") {
+        (false, target)
+    } else {
         return Ok(None);
     };
     let target = parse_number(target.trim())?;
@@ -952,7 +974,10 @@ fn parse_rst(text: &str) -> Result<Option<u8>, Diagnostic> {
             "restart target 0x{target:X} is not one of 0x00, 0x08, ..., 0x38"
         )));
     }
-    Ok(Some(0xC7 + target as u8))
+    Ok(Some(RstInstruction {
+        lis,
+        opcode: 0xC7 + target as u8,
+    }))
 }
 
 fn parse_bit_operation_reg8(text: &str) -> Result<Option<u8>, Diagnostic> {
@@ -1478,6 +1503,13 @@ mod tests {
         let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
 
         assert_eq!(bytes, [0xC7, 0xCF, 0xD7, 0xDF, 0xE7, 0xEF, 0xF7, 0xFF]);
+    }
+
+    #[test]
+    fn assembles_lis_restart_instructions() {
+        let bytes = assemble_ez80_subset_at("rst.lis 10h\n", EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(bytes, [0x49, 0xD7]);
     }
 
     #[test]

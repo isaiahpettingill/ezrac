@@ -3,7 +3,7 @@ pub port EMULATOR_EXIT_PORT: u8 = 0x00
 pub fn putc(ch: u8) {
     asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
         "ld a, {ch}"
-        "rst 10h"
+        "rst.lis 10h"
     }
 }
 
