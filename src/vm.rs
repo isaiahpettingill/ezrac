@@ -292,10 +292,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(rst.len())
     } else if parse_index_cb_operation(text)?.is_some() {
         Ok(4)
-    } else if parse_bit_operation_reg8(text)?.is_some() {
-        Ok(2)
-    } else if parse_cb_reg8_or_hl_operation(text)?.is_some() {
-        Ok(2)
     } else if parse_direct_index_load_or_store(text)?.is_some() {
         Ok(5)
     } else if parse_io_instruction(text)?.is_some() {
@@ -460,10 +456,6 @@ fn emit_instruction(
         rst.write_to(bytes);
     } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
         bytes.extend([index.prefix(), 0xCB, offset, opcode]);
-    } else if let Some(opcode) = parse_bit_operation_reg8(text)? {
-        bytes.extend([0xCB, opcode]);
-    } else if let Some(opcode) = parse_cb_reg8_or_hl_operation(text)? {
-        bytes.extend([0xCB, opcode]);
     } else if let Some(io) = parse_io_instruction(text)? {
         io.write_to(bytes);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
@@ -478,14 +470,6 @@ fn emit_instruction(
     } else if let Some(value) = text.strip_prefix("xor ") {
         bytes.push(0xEE);
         bytes.push(parse_u8(value.trim())?);
-    } else if text == "srl a" {
-        bytes.extend([0xCB, 0x3F]);
-    } else if text == "sra a" {
-        bytes.extend([0xCB, 0x2F]);
-    } else if text == "rl a" {
-        bytes.extend([0xCB, 0x17]);
-    } else if text == "rr a" {
-        bytes.extend([0xCB, 0x1F]);
     } else if let Some(value) = text.strip_prefix("ld a,") {
         bytes.push(0x3E);
         bytes.push(parse_u8(value.trim())?);
@@ -721,47 +705,6 @@ fn parse_rst(text: &str) -> Result<Option<RstInstruction>, Diagnostic> {
     }))
 }
 
-fn parse_bit_operation_reg8(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let (base, rest) = if let Some(rest) = text.strip_prefix("bit ") {
-        (0x40, rest)
-    } else if let Some(rest) = text.strip_prefix("res ") {
-        (0x80, rest)
-    } else if let Some(rest) = text.strip_prefix("set ") {
-        (0xC0, rest)
-    } else {
-        return Ok(None);
-    };
-    let Some((bit, register)) = rest.split_once(',') else {
-        return Err(Diagnostic::new(format!(
-            "invalid bit operation syntax `{text}`"
-        )));
-    };
-    let bit = parse_number(bit.trim())?;
-    if bit > 7 {
-        return Err(Diagnostic::new(format!("bit index {bit} is outside 0..7")));
-    }
-    let Some(register) = reg8_or_hl_code(register.trim()) else {
-        return Err(Diagnostic::new(format!(
-            "invalid bit register `{}`",
-            register.trim()
-        )));
-    };
-    Ok(Some(base + bit as u8 * 8 + register))
-}
-
-fn parse_cb_reg8_or_hl_operation(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let Some((base, register)) = parse_cb_operation_operand(text) else {
-        return Ok(None);
-    };
-    let Some(register) = reg8_or_hl_code(register.trim()) else {
-        return Err(Diagnostic::new(format!(
-            "invalid rotate/shift register `{}`",
-            register.trim()
-        )));
-    };
-    Ok(Some(base + register))
-}
-
 fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
     if let Some(register) = text.strip_prefix("rlc ") {
         Some((0x00, register))
@@ -793,13 +736,6 @@ fn reg8_code(register: &str) -> Option<u8> {
         "a" => Some(7),
         _ => None,
     }
-}
-
-fn reg8_or_hl_code(register: &str) -> Option<u8> {
-    if register == "(hl)" {
-        return Some(6);
-    }
-    reg8_code(register)
 }
 
 fn parse_inc_dec_hl_indirect(text: &str) -> Option<bool> {

@@ -166,6 +166,12 @@ pub fn encode_generated_instruction(
     if let Some((op, register)) = parse_accumulator_alu_reg8_or_hl(text) {
         return Ok(Some(vec![accumulator_alu_reg8_opcode(op, register)]));
     }
+    if let Some(opcode) = parse_bit_operation_reg8_or_hl(text)? {
+        return Ok(Some(vec![0xCB, opcode]));
+    }
+    if let Some(opcode) = parse_cb_reg8_or_hl_operation(text)? {
+        return Ok(Some(vec![0xCB, opcode]));
+    }
     Ok(None)
 }
 
@@ -320,6 +326,74 @@ fn parse_accumulator_alu_reg8_or_hl(text: &str) -> Option<(AccumulatorAluOp, u8)
     None
 }
 
+fn parse_bit_operation_reg8_or_hl(text: &str) -> Result<Option<u8>, Diagnostic> {
+    for (prefix, base) in [("bit ", 0x40), ("res ", 0x80), ("set ", 0xC0)] {
+        let Some(rest) = text.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some((bit, register)) = rest.split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid bit operation `{text}`")));
+        };
+        let bit = parse_u8(bit.trim())?;
+        if bit > 7 {
+            return Err(Diagnostic::new(format!("bit index {bit} is outside 0..7")));
+        }
+        let register_text = register.trim();
+        if is_indexed_indirect(register_text) {
+            return Ok(None);
+        }
+        let Some(register) = reg8_or_hl_code(register_text) else {
+            return Err(Diagnostic::new(format!(
+                "invalid bit register `{}`",
+                register_text
+            )));
+        };
+        return Ok(Some(base + bit * 8 + register));
+    }
+    Ok(None)
+}
+
+fn parse_cb_reg8_or_hl_operation(text: &str) -> Result<Option<u8>, Diagnostic> {
+    let Some((base, register)) = parse_cb_operation_operand(text) else {
+        return Ok(None);
+    };
+    let register_text = register.trim();
+    if is_indexed_indirect(register_text) {
+        return Ok(None);
+    }
+    let Some(register) = reg8_or_hl_code(register_text) else {
+        return Err(Diagnostic::new(format!(
+            "invalid rotate/shift register `{}`",
+            register_text
+        )));
+    };
+    Ok(Some(base + register))
+}
+
+fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
+    if let Some(register) = text.strip_prefix("rlc ") {
+        Some((0x00, register))
+    } else if let Some(register) = text.strip_prefix("rrc ") {
+        Some((0x08, register))
+    } else if let Some(register) = text.strip_prefix("rl ") {
+        Some((0x10, register))
+    } else if let Some(register) = text.strip_prefix("rr ") {
+        Some((0x18, register))
+    } else if let Some(register) = text.strip_prefix("sla ") {
+        Some((0x20, register))
+    } else if let Some(register) = text.strip_prefix("sra ") {
+        Some((0x28, register))
+    } else if let Some(register) = text.strip_prefix("srl ") {
+        Some((0x38, register))
+    } else {
+        None
+    }
+}
+
+fn is_indexed_indirect(text: &str) -> bool {
+    text.starts_with("(ix") || text.starts_with("(iy")
+}
+
 fn reg8_code(register: &str) -> Option<u8> {
     match register {
         "b" => Some(0),
@@ -455,6 +529,14 @@ mod tests {
         assert_eq!(
             encode_generated_instruction(CpuFamily::Ez80, "add hl, de").unwrap(),
             Some(vec![0x19])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "srl a").unwrap(),
+            Some(vec![0xCB, 0x3F])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "bit 3, (hl)").unwrap(),
+            Some(vec![0xCB, 0x5E])
         );
     }
 
