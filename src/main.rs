@@ -548,13 +548,6 @@ fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String>
     ))
 }
 
-fn source_codegen_cpu(cpu: CpuFamily) -> CpuFamily {
-    match cpu {
-        CpuFamily::Z80N | CpuFamily::Z180 => CpuFamily::Z80,
-        cpu => cpu,
-    }
-}
-
 fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
     let max_addr = if settings.target.memory.address_width_bits >= 24 {
         Address24::MAX
@@ -709,7 +702,7 @@ fn build_ezra_source(
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            source_codegen_cpu(settings.target.triple.cpu),
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -777,7 +770,7 @@ fn write_build_artifacts(
     let executable_path = output_base.with_extension(settings.output_format.extension());
 
     let assembled = ezra::vm::assemble_subset_with_options_at(
-        AssemblerCpu::from(source_codegen_cpu(settings.target.triple.cpu)),
+        AssemblerCpu::from(settings.target.triple.cpu),
         &assembly,
         settings.layout.entry.get(),
         &assembly_source_options(source_path, &settings.layout),
@@ -1279,7 +1272,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            source_codegen_cpu(settings.target.triple.cpu),
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -1437,7 +1430,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
                 &assembly_options_from_layout_and_program(
                     &settings.layout,
                     &program,
-                    source_codegen_cpu(settings.target.triple.cpu),
+                    settings.target.triple.cpu,
                     options.command.debug_comments,
                     settings.default_sdk_symbols,
                 )?,
@@ -1469,7 +1462,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            source_codegen_cpu(settings.target.triple.cpu),
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -1513,7 +1506,7 @@ fn check_source_with_layout(
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            source_codegen_cpu(settings.target.triple.cpu),
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -2315,6 +2308,78 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn bare_z80n_source_build_accepts_z80n_inline_asm() {
+        let root = temp_root("bare_z80n_source_inline_asm");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    asm volatile {
+                        "nextreg 12h,a"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-z80n".to_owned()),
+        })
+        .unwrap();
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let bin = std::fs::read(outputs.executable).unwrap();
+
+        assert!(asm.contains("; target: z80n"), "{asm}");
+        assert!(bin.windows(3).any(|bytes| bytes == [0xED, 0x92, 0x12]));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn z80_source_build_rejects_z80n_inline_asm() {
+        let root = temp_root("z80_rejects_z80n_inline_asm");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    asm volatile {
+                        "nextreg 12h,a"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-z80".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("test assembler does not support instruction `nextreg 12h,a`"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

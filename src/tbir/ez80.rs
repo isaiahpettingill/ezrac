@@ -35,14 +35,16 @@ pub fn lower(
         target: TbirTarget {
             name: match options.cpu {
                 CpuFamily::Z80 => "z80".to_owned(),
+                CpuFamily::Z80N => "z80n".to_owned(),
+                CpuFamily::Z180 => "z180".to_owned(),
                 _ => "ez80-adl".to_owned(),
             },
-            pointer_width_bits: if options.cpu == CpuFamily::Z80 {
+            pointer_width_bits: if is_z80_family_16bit(options.cpu) {
                 16
             } else {
                 24
             },
-            native_int_widths: if options.cpu == CpuFamily::Z80 {
+            native_int_widths: if is_z80_family_16bit(options.cpu) {
                 vec![8, 16]
             } else {
                 vec![8, 16, 24]
@@ -58,7 +60,7 @@ pub fn lower(
 }
 
 fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic> {
-    if options.cpu == CpuFamily::Z80 {
+    if is_z80_family_16bit(options.cpu) {
         return Ok(TbirMemoryModel {
             address_width_bits: 16,
             regions: vec![
@@ -163,6 +165,10 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         address_width_bits: 24,
         regions,
     })
+}
+
+fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
+    matches!(cpu, CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180)
 }
 
 fn region(

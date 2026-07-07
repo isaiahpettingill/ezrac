@@ -137,6 +137,10 @@ pub fn emit_ez80_assembly_from_checked(
     Ok(peephole_cleanup(&emitter.out))
 }
 
+fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
+    matches!(cpu, CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180)
+}
+
 fn peephole_cleanup(assembly: &str) -> String {
     let mut out = String::new();
     let mut previous_redundant_load = None;
@@ -1889,7 +1893,7 @@ impl Emitter {
             return;
         }
         self.line("    di");
-        if self.cpu == CpuFamily::Z80 {
+        if is_z80_family_16bit(self.cpu) {
             self.line(&format!(
                 "    ld sp, {:04X}h",
                 self.stack_top.get() & 0xFFFF
@@ -1987,7 +1991,7 @@ impl Emitter {
         self.line("    ldir");
         self.line("    ret");
         self.line("__ezra_mul_u8:");
-        if self.cpu == CpuFamily::Z80 {
+        if is_z80_family_16bit(self.cpu) {
             self.line("    ld b, a");
             self.line("    xor a");
             self.line(".L_mul_u8_loop:");
@@ -2006,7 +2010,7 @@ impl Emitter {
             self.line("    ret");
         }
         self.line("__ezra_mul_u16:");
-        if self.cpu == CpuFamily::Z80 {
+        if is_z80_family_16bit(self.cpu) {
             self.line("    ld de, 0000h");
             self.line(".L_mul_u16_loop:");
             self.line("    ld a, b");
@@ -5811,7 +5815,7 @@ impl Emitter {
     }
 
     fn emit_out_a(&mut self, port: u8) {
-        if self.cpu == CpuFamily::Z80 {
+        if is_z80_family_16bit(self.cpu) {
             self.line(&format!("    out ({:02X}h), a", port));
         } else {
             self.line(&format!("    out0 ({:02X}h), a", port));
