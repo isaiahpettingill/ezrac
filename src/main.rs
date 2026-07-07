@@ -2383,6 +2383,80 @@ mod tests {
     }
 
     #[test]
+    fn bare_z180_source_build_accepts_z180_inline_asm() {
+        let root = temp_root("bare_z180_source_inline_asm");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    asm volatile(clobber flags) {
+                        "tst a"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-z180".to_owned()),
+        })
+        .unwrap();
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let bin = std::fs::read(outputs.executable).unwrap();
+
+        assert!(asm.contains("; target: z180"), "{asm}");
+        assert!(bin.windows(2).any(|bytes| bytes == [0xED, 0x3C]));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn z80_family_source_builds_reject_z180_only_inline_asm() {
+        for target in ["bare-z80", "bare-z80n"] {
+            let root = temp_root(target);
+            std::fs::create_dir_all(&root).unwrap();
+            let source_path = root.join("main.ezra");
+            std::fs::write(
+                &source_path,
+                r#"
+                    fn main() {
+                        asm volatile(clobber flags) {
+                            "tst a"
+                        }
+                    }
+                "#,
+            )
+            .unwrap();
+
+            let error = build_source_with_build_options(&BuildCommandOptions {
+                path: Some(source_path.to_string_lossy().into_owned()),
+                debug_comments: false,
+                default_sdk_symbols: true,
+                input_kind: Some(InputKind::Ezra),
+                assembler_cpu: None,
+                layout_path: None,
+                target: Some(target.to_owned()),
+            })
+            .unwrap_err();
+
+            assert!(
+                error.contains("test assembler does not support instruction `tst a`"),
+                "{target}: {error}"
+            );
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn bare_assembly_targets_cover_each_cpu_mode() {
         let cases = [
             ("bare-i8080", "mvi a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
