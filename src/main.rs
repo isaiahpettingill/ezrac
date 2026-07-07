@@ -557,6 +557,18 @@ fn test_source(path: &str) -> Result<(), String> {
 }
 
 fn test_source_with_command_options(options: &CommandOptions) -> Result<(), String> {
+    let run = run_source_with_command_options(options)?;
+    if !run.halted {
+        return Err(format_test_run_failure(&run));
+    }
+    if run.result_code != 0 {
+        return Err(format!("test failed with code {}", run.result_code));
+    }
+    println!("ok: test passed in {} instructions", run.instructions);
+    Ok(())
+}
+
+fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm::TestRun, String> {
     let source_path = PathBuf::from(&options.path);
     let source_location = command_source_start_location(&source_path);
     let source = fs::read_to_string(&source_path)
@@ -597,30 +609,27 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
         settings.layout.entry.get(),
     )
     .map_err(|error| error.to_string())?;
-    if !run.halted {
-        return Err(match run.failure {
-            Some(ezra::vm::TestRunFailure::Timeout) | None => {
-                format!("test timed out after {} instructions", run.instructions)
-            }
-            Some(ezra::vm::TestRunFailure::ExecutionOutsideMappedMemory { pc }) => format!(
-                "test executed outside mapped memory at 0x{pc:06X} after {} instructions",
-                run.instructions
-            ),
-            Some(ezra::vm::TestRunFailure::IllegalInstruction { pc }) => format!(
-                "test hit an illegal instruction at 0x{pc:06X} after {} instructions",
-                run.instructions
-            ),
-            Some(ezra::vm::TestRunFailure::StackOverflow { sp }) => format!(
-                "test stack overflowed into non-stack memory at SP=0x{sp:06X} after {} instructions",
-                run.instructions
-            ),
-        });
+    Ok(run)
+}
+
+fn format_test_run_failure(run: &ezra::vm::TestRun) -> String {
+    match run.failure {
+        Some(ezra::vm::TestRunFailure::Timeout) | None => {
+            format!("test timed out after {} instructions", run.instructions)
+        }
+        Some(ezra::vm::TestRunFailure::ExecutionOutsideMappedMemory { pc }) => format!(
+            "test executed outside mapped memory at 0x{pc:06X} after {} instructions",
+            run.instructions
+        ),
+        Some(ezra::vm::TestRunFailure::IllegalInstruction { pc }) => format!(
+            "test hit an illegal instruction at 0x{pc:06X} after {} instructions",
+            run.instructions
+        ),
+        Some(ezra::vm::TestRunFailure::StackOverflow { sp }) => format!(
+            "test stack overflowed into non-stack memory at SP=0x{sp:06X} after {} instructions",
+            run.instructions
+        ),
     }
-    if run.result_code != 0 {
-        return Err(format!("test failed with code {}", run.result_code));
-    }
-    println!("ok: test passed in {} instructions", run.instructions);
-    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -867,6 +876,10 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 fn default_layout_for_target(target: &str) -> Layout {
     if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
+    } else if target.starts_with("ezra-test-flat-ez80") {
+        Layout::ez80_test_flat()
+    } else if target.starts_with("ezra-test-split-ez80") {
+        Layout::ez80_test_split()
     } else if target.split('-').any(|part| part == "cpm") {
         Layout::cpm_z80_com()
     } else if target.split('-').any(|part| part == "z80") {
@@ -999,6 +1012,22 @@ mod tests {
         assert_eq!(options.path, "main.asm");
         assert_eq!(options.output, Some("out.bin".to_owned()));
         assert_eq!(options.base_addr, 0x04_0000);
+        assert_eq!(options.target, None);
+    }
+
+    #[test]
+    fn assemble_options_parse_target() {
+        let options = AssembleOptions::parse(&[
+            "--target".to_owned(),
+            "cpm-2.2-z80".to_owned(),
+            "main.asm".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.path, "main.asm");
+        assert_eq!(options.target, Some("cpm-2.2-z80".to_owned()));
+        assert_eq!(options.output, None);
+        assert_eq!(options.base_addr, 0x01_0000);
     }
 
     #[test]
@@ -1416,6 +1445,268 @@ mod tests {
         assert_eq!(settings.layout.name, "cpm_z80_com");
         assert_eq!(settings.layout.load.get(), 0x0100);
         assert_eq!(settings.layout.entry.get(), 0x0100);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_flat_harness_target_runs_and_captures_output() {
+        let root = temp_root("ez80_flat_harness");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    debug.char('O')
+                    debug.char('K')
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        let run = run_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-flat-ez80".to_owned()),
+        })
+        .unwrap();
+
+        assert!(run.halted, "{run:?}");
+        assert_eq!(run.result_code, 0);
+        assert_eq!(run.debug_output, b"OK");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_split_harness_target_uses_split_layout_and_memory() {
+        let root = temp_root("ez80_split_harness");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                global marker: u8 = 0x42
+
+                fn main() {
+                    marker = marker + 1
+                    test.assert_eq_u24(EZRA_RAM_BASE, 0x100000, 1)
+                    test.assert_eq_u24(EZRA_STACK_TOP, 0x1FFF00, 2)
+                    test.assert_eq_u8(marker, 0x43, 3)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        test_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-split-ez80".to_owned()),
+        })
+        .unwrap();
+
+        let outputs = build_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-split-ez80".to_owned()),
+        })
+        .unwrap();
+        let map = std::fs::read_to_string(outputs.map).unwrap();
+        assert!(map.contains(".text        0x020040"), "{map}");
+        assert!(
+            map.contains(".data        0x100000 0x100000 0x000001"),
+            "{map}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_harness_target_reports_execution_traps() {
+        let root = temp_root("ez80_harness_trap");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                naked fn main() {
+                    asm volatile {
+                        "jp 030000h"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = test_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-flat-ez80".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("test executed outside mapped memory at 0x030000"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_harness_project_config_writes_target_artifacts() {
+        let root = temp_root("ez80_harness_project_artifacts");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let source_path = root.join("src/game.ezra");
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+                [build]
+                target = "ezra-test-flat-ez80"
+                executable = "harness-game"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &source_path,
+            r#"
+                global marker: u8 = 0x5A
+                fn main() {
+                    test.assert_eq_u8(marker, 0x5A, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+        let expected_base = root
+            .join("target")
+            .join("ezra-test-flat-ez80")
+            .join("src")
+            .join("harness-game");
+
+        assert_eq!(outputs.asm, expected_base.with_extension("asm"));
+        assert_eq!(outputs.map, expected_base.with_extension("map"));
+        assert_eq!(outputs.executable, expected_base.with_extension("bin"));
+        let map = std::fs::read_to_string(outputs.map).unwrap();
+        assert!(map.contains(".text        0x010040"), "{map}");
+        assert!(map.contains(".data        0x050000"), "{map}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_harness_preserves_port_output_ordering() {
+        let root = temp_root("ez80_port_order");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                port DEBUG: u8 = 0x0C
+
+                fn main() {
+                    out DEBUG, 65
+                    out DEBUG, 66
+                    out DEBUG, 67
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        let run = run_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-flat-ez80".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(run.debug_output, b"ABC");
+        assert_eq!(run.result_code, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_harness_preserves_inline_asm_memory_clobber_barrier() {
+        let root = temp_root("ez80_asm_memory_barrier");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                global value: u8 = 1
+
+                fn main() {
+                    let before: u8 = value
+                    asm volatile(clobber memory, clobber a) {
+                        "ld a, 02h"
+                        "ld (050000h), a"
+                    }
+                    let after: u8 = value
+                    test.assert_eq_u8(before, 1, 1)
+                    test.assert_eq_u8(after, 2, 2)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        test_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-flat-ez80".to_owned()),
+        })
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ez80_harness_preserves_volatile_memory_ordering() {
+        let root = temp_root("ez80_volatile_order");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                volatile mmio DEVICE: ptr<u8> = 0x050020
+
+                fn main() {
+                    *DEVICE = 1
+                    *DEVICE = *DEVICE + 1
+                    test.assert_eq_u8(*DEVICE, 2, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        test_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ezra-test-flat-ez80".to_owned()),
+        })
+        .unwrap();
 
         let _ = std::fs::remove_dir_all(root);
     }
