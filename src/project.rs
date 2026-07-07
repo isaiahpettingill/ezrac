@@ -8,6 +8,7 @@ pub struct ProjectConfig {
     pub root: PathBuf,
     pub target: Option<String>,
     pub output: Option<String>,
+    pub input_kind: Option<String>,
     pub executable: Option<String>,
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
@@ -61,6 +62,12 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(required_string("build.output"))
         .transpose()?;
 
+    let input_kind = value
+        .get("build")
+        .and_then(|build| build.get("input_kind"))
+        .map(required_string("build.input_kind"))
+        .transpose()?;
+
     let executable = value
         .get("build")
         .and_then(|build| build.get("executable"))
@@ -97,6 +104,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         root,
         target,
         output,
+        input_kind,
         executable,
         layout_file,
         cartridge,
@@ -151,6 +159,7 @@ mod tests {
                 [build]
                 target = "agonlight-console8-ez80-1.0"
                 output = "bin"
+                input_kind = "ezra"
                 executable = "demo"
 
                 [layout]
@@ -171,6 +180,7 @@ mod tests {
             Some("agonlight-console8-ez80-1.0")
         );
         assert_eq!(config.output.as_deref(), Some("bin"));
+        assert_eq!(config.input_kind.as_deref(), Some("ezra"));
         assert_eq!(config.executable.as_deref(), Some("demo"));
         assert_eq!(
             config.layout_file,

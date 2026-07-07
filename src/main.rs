@@ -6,6 +6,7 @@ use std::{
 
 use ezra::{
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
+    ast::Program,
     cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
     compile::{SdkResolver, load_program_with_sdk},
     diagnostic::SourceLocation,
@@ -243,11 +244,30 @@ struct BuildSettings {
     sdk: SdkResolver,
     target: TargetProfile,
     output_format: OutputFormat,
+    input_kind: Option<InputKind>,
     layout: Layout,
     layout_path: Option<PathBuf>,
     default_sdk_symbols: bool,
     output_root: PathBuf,
     executable_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputKind {
+    Ezra,
+    Assembly,
+}
+
+impl InputKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "ezra" => Ok(Self::Ezra),
+            "assembly" => Ok(Self::Assembly),
+            _ => Err(format!(
+                "unsupported input kind `{value}`; expected `ezra` or `assembly`"
+            )),
+        }
+    }
 }
 
 fn resolve_build_settings(
@@ -267,6 +287,11 @@ fn resolve_build_settings(
         .map(parse_output_format)
         .transpose()?
         .unwrap_or(target.output_format);
+    let input_kind = project
+        .as_ref()
+        .and_then(|project| project.input_kind.as_deref())
+        .map(InputKind::parse)
+        .transpose()?;
     let layout_path = options.layout_path.as_ref().map(PathBuf::from).or_else(|| {
         project
             .as_ref()
@@ -297,6 +322,7 @@ fn resolve_build_settings(
         sdk,
         target,
         output_format,
+        input_kind,
         layout,
         layout_path,
         default_sdk_symbols: options.default_sdk_symbols,
@@ -395,17 +421,50 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     let source_path = PathBuf::from(&options.path);
     let source_location = command_source_start_location(&source_path);
     let settings = resolve_build_settings(options, &source_path)?;
+    validate_build_layout(&settings)?;
+    match detect_input_kind(&source_path, &settings)? {
+        InputKind::Ezra => build_ezra_source(&source_path, source_location, &settings, options),
+        InputKind::Assembly => build_assembly_source(&source_path, source_location, &settings),
+    }
+}
+
+fn validate_build_layout(settings: &BuildSettings) -> Result<(), String> {
+    if let Err(errors) = settings.layout.validate() {
+        let message = format_layout_errors(settings.layout_path.as_deref(), errors);
+        return Err(format!("layout is invalid:\n{message}"));
+    }
+    validate_layout_for_target(settings)
+}
+
+fn detect_input_kind(source_path: &Path, settings: &BuildSettings) -> Result<InputKind, String> {
+    if let Some(input_kind) = settings.input_kind {
+        return Ok(input_kind);
+    }
+    match source_path.extension().and_then(|ext| ext.to_str()) {
+        Some("ezra") => Ok(InputKind::Ezra),
+        Some("asm" | "s" | "z80" | "ez80" | "i8080" | "8080") => Ok(InputKind::Assembly),
+        Some(ext) => Err(format!(
+            "cannot infer input kind from extension `.{ext}`; use an `.ezra` source file or an assembly extension such as `.asm`"
+        )),
+        None => Err(format!(
+            "cannot infer input kind for `{}`; use an `.ezra` source file or an assembly extension such as `.asm`",
+            source_path.display()
+        )),
+    }
+}
+
+fn build_ezra_source(
+    source_path: &Path,
+    source_location: SourceLocation,
+    settings: &BuildSettings,
+    options: &CommandOptions,
+) -> Result<BuildOutputs, String> {
     let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    if let Err(errors) = settings.layout.validate() {
-        let message = format_layout_errors(settings.layout_path.as_deref(), errors);
-        return Err(format!("layout is invalid:\n{message}"));
-    }
-    validate_layout_for_target(&settings)?;
-    ensure_ez80_codegen_supported(&settings)?;
+    ensure_ez80_codegen_supported(settings)?;
     let assembly = emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
@@ -422,7 +481,31 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
             .to_string()
     })?;
 
-    let output_base = build_output_base_path(&settings, &source_path)?;
+    write_build_artifacts(source_path, source_location, settings, &program, &assembly)
+}
+
+fn build_assembly_source(
+    source_path: &Path,
+    source_location: SourceLocation,
+    settings: &BuildSettings,
+) -> Result<BuildOutputs, String> {
+    let assembly = fs::read_to_string(source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+    let program = Program {
+        source_path: source_path.to_path_buf(),
+        declarations: Vec::new(),
+    };
+    write_build_artifacts(source_path, source_location, settings, &program, &assembly)
+}
+
+fn write_build_artifacts(
+    source_path: &Path,
+    source_location: SourceLocation,
+    settings: &BuildSettings,
+    program: &Program,
+    assembly: &str,
+) -> Result<BuildOutputs, String> {
+    let output_base = build_output_base_path(settings, source_path)?;
     let asm_path = output_base.with_extension("asm");
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(settings.output_format.extension());
@@ -448,7 +531,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
-    fs::write(&asm_path, &assembly)
+    fs::write(&asm_path, assembly)
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
@@ -980,7 +1063,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra|file.asm>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -1222,6 +1305,88 @@ mod tests {
         );
         assert_eq!(&bin[0..5], &[0xF3, 0x31, 0x00, 0x00, 0xF0]);
         assert!(bin.len() > 5);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_assembly_input_by_extension() {
+        let root = temp_root("build_asm_extension");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("exit.asm");
+        std::fs::write(
+            &source_path,
+            r#"
+            start:
+                ld c, 00h
+                call 0005h
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap();
+
+        let asm = std::fs::read_to_string(&outputs.asm).unwrap();
+        let map = std::fs::read_to_string(&outputs.map).unwrap();
+        let executable = std::fs::read(&outputs.executable).unwrap();
+
+        assert!(asm.contains("start:"), "{asm}");
+        assert!(map.contains(".text        0x000100"), "{map}");
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("com")
+        );
+        assert_eq!(executable, [0x0E, 0x00, 0xCD, 0x05, 0x00]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_uses_project_input_kind_for_assembly() {
+        let root = temp_root("build_asm_project_kind");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+            [project]
+            name = "asm-demo"
+
+            [build]
+            target = "cpm-2.2-z80"
+            output = "com"
+            input_kind = "assembly"
+            executable = "demo"
+            "#,
+        )
+        .unwrap();
+        let source_path = root.join("src/main.txt");
+        std::fs::write(
+            &source_path,
+            r#"
+            start:
+                ld c, 00h
+                call 0005h
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+        let expected_base = root.join("target/cpm-2.2-z80/src/demo");
+
+        assert_eq!(outputs.asm, expected_base.with_extension("asm"));
+        assert_eq!(outputs.map, expected_base.with_extension("map"));
+        assert_eq!(outputs.executable, expected_base.with_extension("com"));
+        assert_eq!(
+            std::fs::read(outputs.executable).unwrap(),
+            [0x0E, 0x00, 0xCD, 0x05, 0x00]
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
