@@ -22,6 +22,27 @@ cargo run -- build examples/agon-mos/coffee-order/src/main.ezra
 
 It sets `[build].executable = "coffee-order"`, so the build writes `coffee-order.asm`, `coffee-order.map`, and `coffee-order.bin` under `examples/agon-mos/coffee-order/target/agonlight-mos-ez80/src`.
 
+Build the SDK showcase example:
+
+```sh
+cargo run -- build examples/agon-mos/sdk-showcase/src/main.ezra
+```
+
+It uses `agon.console`, `agon.vdp`, `agon.keyboard`, `agon.mouse`, and `agon.gpio` wrappers modeled after the AgonPlatform `agondev` MOS/VDP headers and examples.
+
+## Built-In SDK
+
+The bundled Agon SDK currently provides:
+
+- `agon.mos`: MOS calls for character/string output, keyboard read/clear, sysvars, VDP flags, I2C open/read/write/close, and emulator exit.
+- `agon.console`: text-mode convenience wrappers using American spelling, including `color`, `background`, cursor, tab, mode, and line printing helpers.
+- `agon.vdp`: VDU byte helpers, text color/background, palette, plotting, lines, rectangles, circles, viewports, origins, and VDP flag waits.
+- `agon.keyboard`: sysvar-backed keyboard state, blocking key read, clear state, locale, and repeat/LED configuration.
+- `agon.mouse`: VDU mouse control and sysvar-backed position/button/wheel/delta reads.
+- `agon.gpio`: low-level explicit port B/C/D data and direction wrappers.
+
+These wrappers intentionally stay close to `agondev`'s MOS and VDP conventions. Advanced interrupts, keyboard vectors, sprites, audio, and full device drivers are deferred until EZRA has stronger support for those ABI shapes.
+
 Build the console SDK example:
 
 ```sh
@@ -56,7 +77,7 @@ EZRA CAFE
 Pick 1-3:
 ```
 
-The example is a normal MOS executable: after `main` returns, control returns to MOS. The SDK exposes `vdp.emulator_exit` for CLI-emulator automation, but normal programs should not call it.
+The example is a normal MOS executable: after `main` returns, control returns to MOS. The SDK exposes `vdp.vdp_exit_emulator` for CLI-emulator automation, but normal programs should not call it.
 
 ## Ezra.toml
 

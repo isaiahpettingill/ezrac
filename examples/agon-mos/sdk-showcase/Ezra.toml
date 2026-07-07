@@ -1,0 +1,4 @@
+[build]
+target = "agonlight-mos-ez80"
+output = "bin"
+executable = "sdk-showcase"

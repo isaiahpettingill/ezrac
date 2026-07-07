@@ -1,0 +1,90 @@
+pub const LED_SCROLL_LOCK: u8 = 1
+pub const LED_NUM_LOCK: u8 = 2
+pub const LED_CAPS_LOCK: u8 = 4
+const SYSVAR_KEY_ASCII: u8 = 0x05
+const SYSVAR_KEY_MODS: u8 = 0x06
+const SYSVAR_VKEY_CODE: u8 = 0x17
+const SYSVAR_VKEY_DOWN: u8 = 0x18
+
+fn keyboard_write_vdu(ch: u8) {
+    asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld a, {ch}"
+        "rst.lis 10h"
+    }
+}
+
+fn keyboard_sysvars() -> ptr<u8> {
+    let result: ptr<u8> = 0
+    asm volatile(out result: ptr<u8> as reg24, clobber a, clobber hl, clobber ix) {
+        "ld a, 08h"
+        "rst.lis 08h"
+        "lea hl, ix+0"
+    }
+    return result
+}
+
+fn keyboard_sysvar_u8(offset: u8) -> u8 {
+    return *(keyboard_sysvars() + offset)
+}
+
+pub fn ascii() -> u8 {
+    return keyboard_sysvar_u8(SYSVAR_KEY_ASCII)
+}
+
+pub fn modifiers() -> u8 {
+    return keyboard_sysvar_u8(SYSVAR_KEY_MODS)
+}
+
+pub fn vkey_code() -> u8 {
+    return keyboard_sysvar_u8(SYSVAR_VKEY_CODE)
+}
+
+pub fn vkey_down() -> u8 {
+    return keyboard_sysvar_u8(SYSVAR_VKEY_DOWN)
+}
+
+pub fn keyboard_read_key() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as reg8, clobber a, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld a, 00h"
+        "rst.lis 08h"
+    }
+    return result
+}
+
+pub fn clear_state() {
+    asm volatile(clobber af, clobber ix, clobber flags, clobber memory) {
+        "ld a, 08h"
+        "rst.lis 08h"
+        "xor a"
+        "ld (ix+05h), a"
+        "ld (ix+18h), a"
+        "ld (ix+19h), a"
+    }
+}
+
+pub fn wait_down() {
+    while vkey_down() == 0 {}
+}
+
+pub fn wait_up() {
+    while vkey_down() != 0 {}
+}
+
+pub fn set_locale(locale: u8) {
+    keyboard_write_vdu(23)
+    keyboard_write_vdu(0)
+    keyboard_write_vdu(0x81)
+    keyboard_write_vdu(locale)
+}
+
+pub fn set_repeat(delay: u16, rate: u16, leds: u8) {
+    keyboard_write_vdu(23)
+    keyboard_write_vdu(0)
+    keyboard_write_vdu(0x88)
+    keyboard_write_vdu(cast<u8>(delay))
+    keyboard_write_vdu(cast<u8>(delay >> 8))
+    keyboard_write_vdu(cast<u8>(rate))
+    keyboard_write_vdu(cast<u8>(rate >> 8))
+    keyboard_write_vdu(leds)
+}

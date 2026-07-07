@@ -1,0 +1,45 @@
+pub port PORTB_DATA: u8 = 0x9A
+pub port PORTB_DDR: u8 = 0x9B
+pub port PORTC_DATA: u8 = 0x9E
+pub port PORTC_DDR: u8 = 0x9F
+pub port PORTD_DATA: u8 = 0xA2
+pub port PORTD_DDR: u8 = 0xA3
+
+pub const ALL_INPUTS: u8 = 0x00
+pub const ALL_OUTPUTS: u8 = 0xFF
+
+pub fn set_port_b_direction(mask: u8) {
+    out PORTB_DDR, mask
+}
+
+pub fn set_port_c_direction(mask: u8) {
+    out PORTC_DDR, mask
+}
+
+pub fn set_port_d_direction(mask: u8) {
+    out PORTD_DDR, mask
+}
+
+pub fn write_port_b(value: u8) {
+    out PORTB_DATA, value
+}
+
+pub fn write_port_c(value: u8) {
+    out PORTC_DATA, value
+}
+
+pub fn write_port_d(value: u8) {
+    out PORTD_DATA, value
+}
+
+pub fn read_port_b() -> u8 {
+    return in PORTB_DATA
+}
+
+pub fn read_port_c() -> u8 {
+    return in PORTC_DATA
+}
+
+pub fn read_port_d() -> u8 {
+    return in PORTD_DATA
+}
