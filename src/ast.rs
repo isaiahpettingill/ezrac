@@ -8,6 +8,10 @@ pub struct Program {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Declaration {
+    Cfg {
+        predicates: Vec<CfgPredicate>,
+        declaration: Box<Declaration>,
+    },
     Import(String),
     Const(ConstDecl),
     Alias(AliasDecl),
@@ -18,6 +22,23 @@ pub enum Declaration {
     Struct(StructDecl),
     ExternAsmFunction(ExternFunction),
     Function(Function),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CfgPredicate {
+    Target(String),
+    TargetFamily(String),
+    Cpu(String),
+    Vendor(String),
+    Os(String),
+    PointerWidth(u16),
+    AddressWidth(u16),
+    Feature(String),
+    Debug,
+    Release,
+    All(Vec<CfgPredicate>),
+    Any(Vec<CfgPredicate>),
+    Not(Box<CfgPredicate>),
 }
 
 #[derive(Clone, Debug, PartialEq)]

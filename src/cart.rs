@@ -671,6 +671,9 @@ fn section_usage_from_string_literals(program: &Program) -> Result<u32, Diagnost
 
 fn collect_declaration_string_literals(declaration: &Declaration, literals: &mut HashSet<String>) {
     match declaration {
+        Declaration::Cfg { declaration, .. } => {
+            collect_declaration_string_literals(declaration, literals)
+        }
         Declaration::Const(decl) => collect_expr_string_literals(&decl.value, literals),
         Declaration::Port(decl) => collect_expr_string_literals(&decl.value, literals),
         Declaration::Mmio(decl) => collect_expr_string_literals(&decl.value, literals),

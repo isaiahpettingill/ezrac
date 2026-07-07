@@ -116,6 +116,7 @@ impl HirProgram {
 
 fn lower_declaration(declaration: &Declaration) -> Option<HirDeclaration> {
     match declaration {
+        Declaration::Cfg { declaration, .. } => lower_declaration(declaration),
         Declaration::Import(_) => None,
         Declaration::Const(decl) => Some(HirDeclaration::Const(HirObject {
             public: decl.public,

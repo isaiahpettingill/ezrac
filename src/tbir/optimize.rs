@@ -12,6 +12,7 @@ pub fn optimize_program(program: &Program) -> (Program, TbirOptimizationReport) 
 
 fn analyze_declaration(declaration: &Declaration, report: &mut TbirOptimizationReport) {
     match declaration {
+        Declaration::Cfg { declaration, .. } => analyze_declaration(declaration, report),
         Declaration::Function(function) => analyze_function(function, report),
         Declaration::Const(decl) => count_foldable_expr(&decl.value, report),
         Declaration::Port(decl) => count_foldable_expr(&decl.value, report),

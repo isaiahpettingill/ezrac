@@ -7,11 +7,12 @@ use std::{
 use crate::{
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
     ast::{
-        AccessPath, AccessSegment, Declaration, EmbedSource, Expr, Function, Place, Program, Stmt,
-        Type,
+        AccessPath, AccessSegment, CfgPredicate, Declaration, EmbedSource, Expr, Function, Place,
+        Program, Stmt, Type,
     },
     diagnostic::{Diagnostic, SourceLocation},
     parser::parse_program,
+    target::{DEFAULT_TARGET_TRIPLE, parse_target_triple},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,7 +113,7 @@ pub fn parse_and_resolve_imports_with_sdk(
 }
 
 fn resolve_program_imports(
-    program: Program,
+    mut program: Program,
     sdk: &SdkResolver,
     stack: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
@@ -136,6 +137,8 @@ fn resolve_program_imports(
         });
     }
 
+    program.declarations = active_declarations(program.declarations, sdk)?;
+
     validate_private_import_access(&program, sdk)?;
 
     let short_module_counts = direct_import_short_module_counts(&program);
@@ -146,7 +149,8 @@ fn resolve_program_imports(
             continue;
         };
         let (import_path, source) = read_import_source(&program.source_path, import, sdk)?;
-        let imported = parse_program(&import_path, &source)?;
+        let mut imported = parse_program(&import_path, &source)?;
+        imported.declarations = active_declarations(imported.declarations, sdk)?;
         let short_module = import.rsplit('.').next().unwrap_or(import);
         let include_short_aliases = short_module_counts
             .get(short_module)
@@ -191,6 +195,120 @@ fn validate_main_signature(main: &Function) -> Result<(), Diagnostic> {
 
 fn is_entry_function(declaration: &Declaration) -> bool {
     matches!(declaration, Declaration::Function(function) if function.name == "main")
+}
+
+fn active_declarations(
+    declarations: Vec<Declaration>,
+    sdk: &SdkResolver,
+) -> Result<Vec<Declaration>, Diagnostic> {
+    let context = CfgContext::new(sdk)?;
+    declarations
+        .into_iter()
+        .filter_map(|declaration| active_declaration(declaration, &context).transpose())
+        .collect()
+}
+
+fn active_declaration(
+    declaration: Declaration,
+    context: &CfgContext,
+) -> Result<Option<Declaration>, Diagnostic> {
+    match declaration {
+        Declaration::Cfg {
+            predicates,
+            declaration,
+        } => {
+            for predicate in &predicates {
+                if !context.matches(predicate)? {
+                    return Ok(None);
+                }
+            }
+            active_declaration(*declaration, context)
+        }
+        declaration => Ok(Some(declaration)),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CfgContext {
+    target: String,
+    cpu: String,
+    target_family: Option<String>,
+    vendor: Option<String>,
+    os: Option<String>,
+    features: HashSet<String>,
+    pointer_width: u16,
+    address_width: u16,
+    debug: bool,
+}
+
+impl CfgContext {
+    fn new(sdk: &SdkResolver) -> Result<Self, Diagnostic> {
+        let target = sdk.target.as_deref().unwrap_or(DEFAULT_TARGET_TRIPLE);
+        let triple = parse_target_triple(target).map_err(Diagnostic::new)?;
+        let parts = target.split('-').collect::<Vec<_>>();
+        let cpu = triple.cpu.as_str().to_owned();
+        let target_family = parts.first().map(|part| (*part).to_owned());
+        let vendor = parts.get(1).map(|part| (*part).to_owned());
+        let os = parts
+            .iter()
+            .copied()
+            .find(|part| matches!(*part, "mos" | "cpm" | "baremetal"))
+            .map(str::to_owned);
+        let features = parts
+            .iter()
+            .copied()
+            .filter(|part| *part != cpu)
+            .map(str::to_owned)
+            .collect();
+        Ok(Self {
+            target: target.to_owned(),
+            cpu,
+            target_family,
+            vendor,
+            os,
+            features,
+            pointer_width: 24,
+            address_width: 24,
+            debug: cfg!(debug_assertions),
+        })
+    }
+
+    fn matches(&self, predicate: &CfgPredicate) -> Result<bool, Diagnostic> {
+        match predicate {
+            CfgPredicate::Target(value) => Ok(self.target == *value),
+            CfgPredicate::TargetFamily(value) => Ok(self.target_family.as_deref() == Some(value)),
+            CfgPredicate::Cpu(value) => Ok(self.cpu == *value),
+            CfgPredicate::Vendor(value) => Ok(self.vendor.as_deref() == Some(value)),
+            CfgPredicate::Os(value) => Ok(self.os.as_deref() == Some(value)),
+            CfgPredicate::PointerWidth(value) => Ok(self.pointer_width == *value),
+            CfgPredicate::AddressWidth(value) => Ok(self.address_width == *value),
+            CfgPredicate::Feature(value) => {
+                if !self.features.contains(value) {
+                    return Err(Diagnostic::new(format!("unknown cfg feature `{value}`")));
+                }
+                Ok(true)
+            }
+            CfgPredicate::Debug => Ok(self.debug),
+            CfgPredicate::Release => Ok(!self.debug),
+            CfgPredicate::All(predicates) => {
+                for predicate in predicates {
+                    if !self.matches(predicate)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            CfgPredicate::Any(predicates) => {
+                for predicate in predicates {
+                    if self.matches(predicate)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            CfgPredicate::Not(predicate) => Ok(!self.matches(predicate)?),
+        }
+    }
 }
 
 fn read_import_source(
@@ -438,6 +556,9 @@ fn validate_declaration_private_import_access(
     private_imports: &HashMap<String, String>,
 ) -> Result<(), Diagnostic> {
     match declaration {
+        Declaration::Cfg { declaration, .. } => {
+            validate_declaration_private_import_access(declaration, private_imports)
+        }
         Declaration::Const(decl) => {
             validate_type_private_import_access(&decl.ty, private_imports)?;
             validate_expr_private_import_access(&decl.value, private_imports, &HashSet::new())
@@ -734,6 +855,7 @@ fn reject_private_import_name(
 
 fn declaration_name(declaration: &Declaration) -> Option<&str> {
     match declaration {
+        Declaration::Cfg { declaration, .. } => declaration_name(declaration),
         Declaration::Import(_) => None,
         Declaration::Const(decl) => Some(&decl.name),
         Declaration::Alias(decl) => Some(&decl.name),
@@ -749,6 +871,7 @@ fn declaration_name(declaration: &Declaration) -> Option<&str> {
 
 fn declaration_is_public(declaration: &Declaration) -> bool {
     match declaration {
+        Declaration::Cfg { declaration, .. } => declaration_is_public(declaration),
         Declaration::Import(_) => true,
         Declaration::Const(decl) => decl.public,
         Declaration::Alias(decl) => decl.public,
@@ -941,6 +1064,169 @@ mod tests {
             assert_eq!(error.message, expected, "{label}");
             assert!(error.location.is_some(), "{label}: {error:?}");
         }
+    }
+
+    #[test]
+    fn cfg_filters_declarations_before_semantic_checks() {
+        let source = r#"
+            @cfg(cpu("z80"))
+            fn main() {
+                missing_on_inactive_target()
+            }
+
+            @cfg(cpu("ez80"))
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("ti84plusce-ez80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert_eq!(program.declarations.len(), 1);
+        assert_eq!(program.main_function().unwrap().body.len(), 1);
+        emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                default_sdk_symbols: true,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cfg_skips_inactive_imports_before_file_loading() {
+        let source = r#"
+            @cfg(cpu("z80"))
+            import missing.module
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("ti84plusce-ez80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert!(program.main_function().is_some());
+    }
+
+    #[test]
+    fn cfg_evaluates_target_predicates_and_multiple_attributes() {
+        let source = r#"
+            @cfg(all(target("agonlight-mos-ez80"), target_family("agonlight"), cpu("ez80")))
+            @cfg(all(os("mos"), pointer_width(24), address_width(24), feature("mos")))
+            const ACTIVE: u8 = 1
+
+            @cfg(any(cpu("z80"), not(target("agonlight-mos-ez80"))))
+            const INACTIVE: u8 = missing_symbol
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("agonlight-mos-ez80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert!(
+            program
+                .declarations
+                .iter()
+                .any(|decl| { matches!(decl, Declaration::Const(decl) if decl.name == "ACTIVE") })
+        );
+        assert!(
+            !program.declarations.iter().any(|decl| {
+                matches!(decl, Declaration::Const(decl) if decl.name == "INACTIVE")
+            })
+        );
+    }
+
+    #[test]
+    fn cfg_filters_imported_declarations_and_aliases() {
+        let root = temp_root("cfg_imports");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let lib_path = root.join("lib/utils.ezra");
+        std::fs::write(
+            &lib_path,
+            r#"
+                @cfg(cpu("z80"))
+                pub fn value() -> u8 { return missing_symbol }
+
+                @cfg(cpu("ez80"))
+                pub fn value() -> u8 { return 7 }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            r#"
+                import lib.utils
+
+                fn main() {
+                    test.assert_eq_u8(utils.value(), 7, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+        let sdk = SdkResolver {
+            target: Some("ti84plusce-ez80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program = load_program_with_sdk(&main_path, &sdk).unwrap();
+
+        assert_eq!(
+            program
+                .declarations
+                .iter()
+                .filter(|decl| matches!(decl, Declaration::Function(function) if function.name == "value"))
+                .count(),
+            1
+        );
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "utils.value")
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cfg_rejects_unknown_predicates_and_features() {
+        let unknown_predicate = parse_program(
+            Path::new("game.ezra"),
+            r#"
+                @cfg(board("agon"))
+                fn main() {}
+            "#,
+        )
+        .unwrap_err();
+        assert_eq!(unknown_predicate.message, "unknown cfg predicate `board`");
+
+        let unknown_feature = parse_and_resolve_imports_with_sdk(
+            Path::new("game.ezra"),
+            r#"
+                @cfg(feature("sprites"))
+                fn main() {}
+            "#,
+            &SdkResolver {
+                target: Some("agonlight-mos-ez80".to_owned()),
+                sdk_roots: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(unknown_feature.message, "unknown cfg feature `sprites`");
     }
 
     #[test]

@@ -5,9 +5,10 @@ use pest_derive::Parser;
 
 use crate::{
     ast::{
-        AccessPath, AccessSegment, AliasDecl, AsmInput, AsmOutput, AssignOp, BinaryOp, ConstDecl,
-        Declaration, EmbedDecl, EmbedSource, Expr, ExternFunction, Function, GlobalDecl, MmioDecl,
-        Param, Place, PortDecl, Program, Stmt, StructDecl, Type, UnaryOp,
+        AccessPath, AccessSegment, AliasDecl, AsmInput, AsmOutput, AssignOp, BinaryOp,
+        CfgPredicate, ConstDecl, Declaration, EmbedDecl, EmbedSource, Expr, ExternFunction,
+        Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, Stmt, StructDecl, Type,
+        UnaryOp,
     },
     diagnostic::{Diagnostic, SourceLocation},
 };
@@ -137,6 +138,26 @@ fn line_contains_assignment_op(line: &str) -> bool {
 
 fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
     match pair.as_rule() {
+        Rule::decl => {
+            let mut predicates = Vec::new();
+            let mut declaration = None;
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::cfg_attr => predicates.push(build_cfg_attr(inner)?),
+                    _ => declaration = Some(build_decl(inner)?),
+                }
+            }
+            let declaration = declaration
+                .ok_or_else(|| Diagnostic::new("conditional declaration missing declaration"))?;
+            if predicates.is_empty() {
+                Ok(declaration)
+            } else {
+                Ok(Declaration::Cfg {
+                    predicates,
+                    declaration: Box::new(declaration),
+                })
+            }
+        }
         Rule::import_decl => Ok(Declaration::Import(
             pair.into_inner().next().unwrap().as_str().to_owned(),
         )),
@@ -151,6 +172,77 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
         Rule::fn_decl => build_fn(pair).map(Declaration::Function),
         _ => unreachable!("unexpected decl rule {:?}", pair.as_rule()),
     }
+}
+
+fn build_cfg_attr(pair: Pair<'_, Rule>) -> Result<CfgPredicate, Diagnostic> {
+    build_cfg_predicate(pair.into_inner().next().unwrap())
+}
+
+fn build_cfg_predicate(pair: Pair<'_, Rule>) -> Result<CfgPredicate, Diagnostic> {
+    match pair.as_rule() {
+        Rule::cfg_predicate => build_cfg_predicate(pair.into_inner().next().unwrap()),
+        Rule::cfg_all => Ok(CfgPredicate::All(build_cfg_predicate_list(pair)?)),
+        Rule::cfg_any => Ok(CfgPredicate::Any(build_cfg_predicate_list(pair)?)),
+        Rule::cfg_not => Ok(CfgPredicate::Not(Box::new(build_cfg_predicate(
+            pair.into_inner().next().unwrap(),
+        )?))),
+        Rule::cfg_call => build_cfg_call(pair),
+        Rule::cfg_flag => match pair.as_str() {
+            "debug" => Ok(CfgPredicate::Debug),
+            "release" => Ok(CfgPredicate::Release),
+            other => Err(Diagnostic::new(format!("unknown cfg predicate `{other}`"))),
+        },
+        _ => unreachable!("unexpected cfg predicate rule {:?}", pair.as_rule()),
+    }
+}
+
+fn build_cfg_predicate_list(pair: Pair<'_, Rule>) -> Result<Vec<CfgPredicate>, Diagnostic> {
+    pair.into_inner()
+        .flat_map(|inner| inner.into_inner())
+        .map(build_cfg_predicate)
+        .collect()
+}
+
+fn build_cfg_call(pair: Pair<'_, Rule>) -> Result<CfgPredicate, Diagnostic> {
+    let mut parts = pair.into_inner();
+    let name = parts.next().unwrap().as_str();
+    let value = parts
+        .next()
+        .ok_or_else(|| Diagnostic::new(format!("cfg predicate `{name}` is missing an argument")))?;
+    match name {
+        "target" => Ok(CfgPredicate::Target(parse_cfg_string(name, value)?)),
+        "target_family" => Ok(CfgPredicate::TargetFamily(parse_cfg_string(name, value)?)),
+        "cpu" => Ok(CfgPredicate::Cpu(parse_cfg_string(name, value)?)),
+        "vendor" => Ok(CfgPredicate::Vendor(parse_cfg_string(name, value)?)),
+        "os" => Ok(CfgPredicate::Os(parse_cfg_string(name, value)?)),
+        "pointer_width" => Ok(CfgPredicate::PointerWidth(parse_cfg_int(name, value)?)),
+        "address_width" => Ok(CfgPredicate::AddressWidth(parse_cfg_int(name, value)?)),
+        "feature" => Ok(CfgPredicate::Feature(parse_cfg_string(name, value)?)),
+        other => Err(Diagnostic::new(format!("unknown cfg predicate `{other}`"))),
+    }
+}
+
+fn parse_cfg_string(name: &str, pair: Pair<'_, Rule>) -> Result<String, Diagnostic> {
+    if pair.as_rule() != Rule::string_lit {
+        return Err(Diagnostic::new(format!(
+            "cfg predicate `{name}` expects a string argument"
+        )));
+    }
+    parse_string(pair.as_str())
+}
+
+fn parse_cfg_int(name: &str, pair: Pair<'_, Rule>) -> Result<u16, Diagnostic> {
+    if pair.as_rule() != Rule::int_lit {
+        return Err(Diagnostic::new(format!(
+            "cfg predicate `{name}` expects an integer argument"
+        )));
+    }
+    let value = parse_int(pair.as_str())?;
+    u16::try_from(value).map_err(|_| {
+        Diagnostic::new(format!(
+            "cfg predicate `{name}` integer argument is outside u16 range"
+        ))
+    })
 }
 
 fn build_embed(pair: Pair<'_, Rule>) -> Result<EmbedDecl, Diagnostic> {

@@ -2,7 +2,16 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 program = { SOI ~ decl* ~ EOI }
-decl = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | extern_decl | fn_decl }
+decl = { cfg_attr* ~ decl_core }
+decl_core = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | extern_decl | fn_decl }
+cfg_attr = { "@cfg" ~ "(" ~ cfg_predicate ~ ")" }
+cfg_predicate = { cfg_all | cfg_any | cfg_not | cfg_call | cfg_flag }
+cfg_all = { "all" ~ "(" ~ cfg_predicates? ~ ")" }
+cfg_any = { "any" ~ "(" ~ cfg_predicates? ~ ")" }
+cfg_not = { "not" ~ "(" ~ cfg_predicate ~ ")" }
+cfg_call = { ident ~ "(" ~ (string_lit | int_lit) ~ ")" }
+cfg_flag = { "debug" | "release" }
+cfg_predicates = { cfg_predicate ~ ("," ~ cfg_predicate)* ~ ","? }
 
 layout_file = { SOI ~ layout_decl ~ EOI }
 layout_decl = { "layout" ~ ident ~ "{" ~ layout_item* ~ "}" }

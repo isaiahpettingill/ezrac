@@ -8248,6 +8248,7 @@ fn storage_ranges_overlap(left: Variable, right: Variable) -> bool {
 
 fn declaration_name(declaration: &Declaration) -> Option<&str> {
     match declaration {
+        Declaration::Cfg { declaration, .. } => declaration_name(declaration),
         Declaration::Import(_) => None,
         Declaration::Const(decl) => Some(&decl.name),
         Declaration::Alias(decl) => Some(&decl.name),
