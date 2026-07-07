@@ -1,6 +1,9 @@
 use crate::{asm::AssemblyOptions, ast::Program, diagnostic::Diagnostic, hir::HirProgram};
 
+pub mod diagnostics;
+pub mod dump;
 pub mod ez80;
+pub mod optimize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TbirProgram {
@@ -8,6 +11,7 @@ pub struct TbirProgram {
     pub target: TbirTarget,
     pub memory: TbirMemoryModel,
     pub declarations: Vec<TbirDeclaration>,
+    pub optimizations: TbirOptimizationReport,
     pub lowered_program: Program,
 }
 
@@ -78,6 +82,14 @@ pub enum TbirEffect {
     Call,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TbirOptimizationReport {
+    pub constant_folds: usize,
+    pub dead_statements_marked: usize,
+    pub inline_candidates: Vec<String>,
+    pub tail_call_candidates: Vec<String>,
+}
+
 impl TbirProgram {
     pub fn for_ez80(
         hir: &HirProgram,
@@ -85,6 +97,10 @@ impl TbirProgram {
         options: &AssemblyOptions,
     ) -> Result<Self, Diagnostic> {
         ez80::lower(hir, lowered_program, options)
+    }
+
+    pub fn dump_text(&self) -> String {
+        dump::text(self)
     }
 }
 
@@ -180,6 +196,62 @@ mod tests {
             .unwrap();
 
         assert_eq!(count, (&vec![TbirEffect::Call], true, false, 1));
+    }
+
+    #[test]
+    fn tbir_reports_optimization_markers_and_dump() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+                inline fn helper() -> u8 { return 1 + 2 }
+                fn main() {
+                    return
+                    helper()
+                }
+            "#,
+        )
+        .unwrap();
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+        let dump = tbir.dump_text();
+
+        assert!(tbir.optimizations.constant_folds >= 1);
+        assert_eq!(tbir.optimizations.inline_candidates, ["helper"]);
+        assert!(dump.contains("TBIR"), "{dump}");
+        assert!(dump.contains("target: ez80-adl"), "{dump}");
+        assert!(dump.contains("optimizations:"), "{dump}");
+    }
+
+    #[test]
+    fn tbir_rejects_ez80_port_outside_8_bit_range() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            "port BAD: u16 = 0x0100\nfn main() {}",
+        )
+        .unwrap();
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let error = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "port `BAD` value 0x100 is outside the eZ80 8-bit port range"
+        );
+    }
+
+    #[test]
+    fn tbir_rejects_ez80_mmio_outside_24_bit_range() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            "volatile mmio BAD: ptr<u8> = 0x01000000\nfn main() {}",
+        )
+        .unwrap();
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let error = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "mmio `BAD` address 0x1000000 is outside the eZ80 24-bit address space"
+        );
     }
 
     fn object_kind(tbir: &TbirProgram, name: &str) -> Option<TbirObjectKind> {

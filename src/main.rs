@@ -9,6 +9,7 @@ use ezra::{
     cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
     compile::{SdkResolver, load_program_with_sdk},
     diagnostic::SourceLocation,
+    hir::HirProgram,
     layout::{Layout, parse_layout},
     parser::parse_program,
     project::load_nearest_project_config,
@@ -16,6 +17,7 @@ use ezra::{
         Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
         EZRA_VRAM_BASE, OutputFormat, parse_output_format, resolve_target_profile,
     },
+    tbir::TbirProgram,
     vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
 };
 
@@ -43,6 +45,10 @@ fn run() -> Result<(), String> {
         Some("emit-asm") => {
             let options = CommandOptions::parse(&args[1..])?;
             emit_asm(&options)
+        }
+        Some("emit-ir") => {
+            let options = EmitIrOptions::parse(&args[1..])?;
+            emit_ir(&options)
         }
         Some("test") => {
             let options = CommandOptions::parse(&args[1..])?;
@@ -110,6 +116,50 @@ struct AssembleOptions {
     path: String,
     output: Option<String>,
     base_addr: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EmitIrOptions {
+    command: CommandOptions,
+    stage: IrStage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IrStage {
+    Hir,
+    Tbir,
+}
+
+impl EmitIrOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut rest = Vec::new();
+        let mut stage = IrStage::Tbir;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--stage" {
+                let value = iter.next().ok_or_else(usage)?;
+                stage = IrStage::parse(value)?;
+            } else {
+                rest.push(arg.clone());
+            }
+        }
+        Ok(Self {
+            command: CommandOptions::parse(&rest)?,
+            stage,
+        })
+    }
+}
+
+impl IrStage {
+    fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "hir" => Ok(Self::Hir),
+            "tbir" => Ok(Self::Tbir),
+            _ => Err(format!(
+                "unknown IR stage `{text}`; expected `hir` or `tbir`"
+            )),
+        }
+    }
 }
 
 impl AssembleOptions {
@@ -549,6 +599,44 @@ fn emit_asm(options: &CommandOptions) -> Result<(), String> {
     Ok(())
 }
 
+fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
+    let source_path = PathBuf::from(&options.command.path);
+    let source_location = command_source_start_location(&source_path);
+    let settings = resolve_build_settings(&options.command, &source_path)?;
+    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    if let Err(errors) = settings.layout.validate() {
+        let message = format_layout_errors(settings.layout_path.as_deref(), errors);
+        return Err(format!("layout is invalid:\n{message}"));
+    }
+    let hir = HirProgram::from_ast(&program).map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    match options.stage {
+        IrStage::Hir => print!("{}", hir.dump_text()),
+        IrStage::Tbir => {
+            let tbir = TbirProgram::for_ez80(
+                &hir,
+                &program,
+                &assembly_options_from_layout_and_program(
+                    &settings.layout,
+                    &program,
+                    options.command.debug_comments,
+                    settings.default_sdk_symbols,
+                )?,
+            )
+            .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
+            print!("{}", tbir.dump_text());
+        }
+    }
+    Ok(())
+}
+
 fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String, String> {
     let source_path = PathBuf::from(&options.path);
     let source_location = command_source_start_location(&source_path);
@@ -750,7 +838,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble eZ80 assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble eZ80 assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -782,6 +870,19 @@ mod tests {
         assert_eq!(options.path, "main.asm");
         assert_eq!(options.output, Some("out.bin".to_owned()));
         assert_eq!(options.base_addr, 0x04_0000);
+    }
+
+    #[test]
+    fn emit_ir_options_parse_stage() {
+        let options = EmitIrOptions::parse(&[
+            "--stage".to_owned(),
+            "hir".to_owned(),
+            "game.ezra".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.stage, IrStage::Hir);
+        assert_eq!(options.command.path, "game.ezra");
     }
 
     #[test]

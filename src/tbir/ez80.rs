@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     TbirAccess, TbirDeclaration, TbirEffect, TbirMemoryModel, TbirMemoryRegion, TbirObjectKind,
-    TbirProgram, TbirTarget,
+    TbirProgram, TbirTarget, diagnostics, optimize,
 };
 
 pub fn lower(
@@ -16,8 +16,20 @@ pub fn lower(
     lowered_program: &Program,
     options: &AssemblyOptions,
 ) -> Result<TbirProgram, Diagnostic> {
+    diagnostics::validate_ez80_program(lowered_program)?;
     let memory = memory_model(options)?;
     let declarations = hir.declarations.iter().map(lower_declaration).collect();
+    let (lowered_program, mut optimizations) = optimize::optimize_program(lowered_program);
+    optimizations.tail_call_candidates = hir
+        .declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            HirDeclaration::Function(function) => Some(&function.analysis.tail_call_candidates),
+            _ => None,
+        })
+        .flatten()
+        .cloned()
+        .collect();
     Ok(TbirProgram {
         source: hir.source_path.clone(),
         target: TbirTarget {
@@ -29,7 +41,8 @@ pub fn lower(
         },
         memory,
         declarations,
-        lowered_program: lowered_program.clone(),
+        optimizations,
+        lowered_program,
     })
 }
 

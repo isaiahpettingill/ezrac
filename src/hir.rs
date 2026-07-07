@@ -5,6 +5,8 @@ use crate::{
     diagnostic::Diagnostic,
 };
 
+pub mod dump;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirProgram {
     pub source_path: PathBuf,
@@ -105,6 +107,10 @@ impl HirProgram {
                 shared_library_candidate: program.main_function().is_none(),
             },
         })
+    }
+
+    pub fn dump_text(&self) -> String {
+        dump::text(self)
     }
 }
 
@@ -395,5 +401,20 @@ mod tests {
         assert!(!caller.analysis.recursive);
         assert!(!caller.analysis.tail_recursive);
         assert_eq!(caller.analysis.tail_call_candidates, ["callee"]);
+    }
+
+    #[test]
+    fn hir_dump_exposes_analysis_summary() {
+        let program = parse_program(
+            Path::new("lib.ezra"),
+            "pub inline fn helper() -> u8 { return 1 }",
+        )
+        .unwrap();
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let dump = hir.dump_text();
+
+        assert!(dump.contains("HIR"), "{dump}");
+        assert!(dump.contains("shared_library_candidate=true"), "{dump}");
+        assert!(dump.contains("fn helper"), "{dump}");
     }
 }
