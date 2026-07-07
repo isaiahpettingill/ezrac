@@ -10,10 +10,12 @@ use crate::{
         Function, Place, Program, Stmt, Type, UnaryOp,
     },
     diagnostic::Diagnostic,
+    hir::HirProgram,
     target::{
         Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
         EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
     },
+    tbir::TbirProgram,
 };
 
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
@@ -77,6 +79,8 @@ pub fn emit_ez80_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
+    let hir = HirProgram::from_ast(program)?;
+    let _tbir = TbirProgram::for_ez80(&hir, &options)?;
     let symbols = Symbols::from_program(program, options.clone())?;
     let main = program
         .main_function()

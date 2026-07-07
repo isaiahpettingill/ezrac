@@ -225,7 +225,9 @@ fn resolve_build_settings(
                 .unwrap_or_else(|| Path::new("."))
                 .join("target")
         });
-    let executable_name = project.as_ref().and_then(|project| project.executable.clone());
+    let executable_name = project
+        .as_ref()
+        .and_then(|project| project.executable.clone());
 
     Ok(BuildSettings {
         sdk,
@@ -345,7 +347,12 @@ fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Resul
             .ok_or_else(|| format!("source path `{}` has no file stem", source_path.display()))?,
     };
     let relative_parent = source_parent
-        .strip_prefix(settings.output_root.parent().unwrap_or_else(|| Path::new(".")))
+        .strip_prefix(
+            settings
+                .output_root
+                .parent()
+                .unwrap_or_else(|| Path::new(".")),
+        )
         .unwrap_or(source_parent);
     Ok(settings
         .output_root

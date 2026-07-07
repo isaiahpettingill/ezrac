@@ -1,10 +1,13 @@
 pub mod asm;
+pub mod asm_meta;
 pub mod ast;
 pub mod cart;
 pub mod compile;
 pub mod diagnostic;
+pub mod hir;
 pub mod layout;
 pub mod parser;
 pub mod project;
 pub mod target;
+pub mod tbir;
 pub mod vm;

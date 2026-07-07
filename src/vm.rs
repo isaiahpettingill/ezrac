@@ -6,6 +6,7 @@ use std::{
 
 use ez80::{Cpu, Machine, Reg16};
 
+use crate::asm_meta;
 use crate::diagnostic::Diagnostic;
 use crate::target::{Address24, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -269,7 +270,9 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 }
 
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    if matches!(text, "ld sp, hl" | "jp (hl)" | "ex (sp), hl" | "ex af, af'") {
+    if let Some(instruction) = asm_meta::exact_instruction(text) {
+        Ok(instruction.bytes.len())
+    } else if matches!(text, "ld sp, hl" | "jp (hl)" | "ex (sp), hl" | "ex af, af'") {
         Ok(1)
     } else if matches!(
         text,
@@ -523,7 +526,9 @@ fn emit_instruction(
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
-    if text == "ld sp, hl" {
+    if let Some(instruction) = asm_meta::exact_instruction(text) {
+        bytes.extend_from_slice(instruction.bytes);
+    } else if text == "ld sp, hl" {
         bytes.push(0xF9);
     } else if text == "ld sp, ix" {
         bytes.extend([0xDD, 0xF9]);
