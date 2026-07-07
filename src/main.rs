@@ -1074,6 +1074,7 @@ mod tests {
                     stack 0xF00000;
 
                     region code 0x010000..0x01FFFF read execute;
+                    region overlap 0x018000..0x02FFFF read;
                     section .text -> code align 24;
                 }
             "#,
@@ -1109,6 +1110,10 @@ mod tests {
         );
         assert!(
             invalid_error.contains("section `.text` alignment must be a power of two"),
+            "{invalid_error}"
+        );
+        assert!(
+            invalid_error.contains("regions `code` and `overlap` overlap"),
             "{invalid_error}"
         );
 

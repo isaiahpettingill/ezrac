@@ -845,6 +845,105 @@ mod tests {
     }
 
     #[test]
+    fn required_diagnostics_report_messages_and_locations() {
+        let cases = [
+            (
+                "type mismatch",
+                "fn main() { let ordered: bool = false < true }\n",
+                "type mismatch",
+            ),
+            (
+                "unknown identifier",
+                "fn main() { missing() }\n",
+                "unknown function `missing`",
+            ),
+            (
+                "duplicate declaration",
+                "const VALUE: u8 = 1\nglobal VALUE: u8 = 2\nfn main() {}\n",
+                "duplicate declaration `VALUE`",
+            ),
+            (
+                "invalid cast",
+                r#"
+                fn main() {
+                    let raw: u16 = 0x1234
+                    let p: ptr<u8> = cast<ptr<u8>>(raw)
+                }
+                "#,
+                "integer-to-pointer casts require u24 or ptr24",
+            ),
+            (
+                "pointer arithmetic on non-pointers",
+                r#"
+                global left: u8 = 0
+                global right: u8 = 0
+                fn main() {
+                    let lp: ptr<u8> = &left
+                    let rp: ptr<u8> = &right
+                    let bad: ptr<u8> = lp + rp
+                }
+                "#,
+                "pointer arithmetic requires exactly one pointer operand",
+            ),
+            (
+                "array index out of bounds",
+                r#"
+                global bytes: [u8; 2] = [1, 2]
+                fn main() { let value: u8 = bytes[2] }
+                "#,
+                "array index 2 is out of bounds for `bytes` length 2",
+            ),
+            (
+                "struct field does not exist",
+                r#"
+                struct Entity { x: u8 }
+                global player: Entity = Entity { x: 1 }
+                fn main() { let value: u8 = player.y }
+                "#,
+                "struct `Entity` has no field `y`",
+            ),
+            (
+                "inline asm output type mismatch",
+                r#"
+                fn main() {
+                    let result: u8 = 0
+                    asm volatile(out result: u16 as reg16, clobber hl) {
+                        "ld hl, 000007h"
+                    }
+                }
+                "#,
+                "inline asm output `result` declared type `u16` does not match bound type `u8`",
+            ),
+            (
+                "inline asm undeclared clobber",
+                r#"
+                fn main() {
+                    asm(clobber made_up) {
+                        "nop"
+                    }
+                }
+                "#,
+                "unknown inline asm clobber `made_up`",
+            ),
+        ];
+
+        for (label, source, expected) in cases {
+            let options = CompileOptions {
+                source: PathBuf::from(format!("{label}.ezra")),
+                debug_comments: false,
+                default_sdk_symbols: true,
+            };
+            let error = match check_source(source, &options) {
+                Ok(_) => panic!("{label}: expected diagnostic"),
+                Err(error) => error,
+            };
+
+            assert_eq!(error.message, expected, "{label}");
+            assert!(error.location.is_some(), "{label}: {error:?}");
+        }
+    }
+
+    #[test]
     fn resolves_imported_declarations() {
         let root = temp_root("imports");
         std::fs::create_dir_all(root.join("lib")).unwrap();
