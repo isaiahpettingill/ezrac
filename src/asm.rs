@@ -92,16 +92,17 @@ pub struct CheckedEz80Program {
 impl CheckedEz80Program {
     pub fn from_program(program: &Program, options: &AssemblyOptions) -> Result<Self, Diagnostic> {
         let hir = HirProgram::from_ast(program)?;
-        let tbir = TbirProgram::for_ez80(&hir, options)?;
+        let tbir = TbirProgram::for_ez80(&hir, program, options)?;
         Ok(Self { hir, tbir })
     }
 }
 
 pub fn emit_ez80_assembly_from_checked(
-    program: &Program,
+    _program: &Program,
     checked: &CheckedEz80Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
+    let program = &checked.tbir.lowered_program;
     debug_assert_eq!(checked.hir.source_path, program.source_path);
     let symbols = Symbols::from_program(program, options.clone())?;
     let main = program

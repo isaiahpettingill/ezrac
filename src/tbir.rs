@@ -1,5 +1,6 @@
 use crate::{
     asm::AssemblyOptions,
+    ast::Program,
     diagnostic::Diagnostic,
     hir::{HirDeclaration, HirProgram},
     target::Address24,
@@ -11,6 +12,7 @@ pub struct TbirProgram {
     pub target: TbirTarget,
     pub memory: TbirMemoryModel,
     pub declarations: Vec<TbirDeclaration>,
+    pub lowered_program: Program,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,7 +83,11 @@ pub enum TbirEffect {
 }
 
 impl TbirProgram {
-    pub fn for_ez80(hir: &HirProgram, options: &AssemblyOptions) -> Result<Self, Diagnostic> {
+    pub fn for_ez80(
+        hir: &HirProgram,
+        lowered_program: &Program,
+        options: &AssemblyOptions,
+    ) -> Result<Self, Diagnostic> {
         let memory = ez80_memory_model(options)?;
         let declarations = hir.declarations.iter().map(lower_declaration).collect();
         Ok(Self {
@@ -95,6 +101,7 @@ impl TbirProgram {
             },
             memory,
             declarations,
+            lowered_program: lowered_program.clone(),
         })
     }
 }
@@ -227,7 +234,7 @@ mod tests {
     fn tbir_binds_ez80_memory_model() {
         let program = parse_program(Path::new("test.ezra"), "fn main() {}").unwrap();
         let hir = HirProgram::from_ast(&program).unwrap();
-        let tbir = TbirProgram::for_ez80(&hir, &AssemblyOptions::default()).unwrap();
+        let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
         assert_eq!(tbir.target.pointer_width_bits, 24);
         assert!(
             tbir.memory
