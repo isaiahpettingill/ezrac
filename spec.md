@@ -2164,21 +2164,108 @@ Required compiler pipeline:
 source
   -> pest parse tree
   -> AST
-  -> name resolution
-  -> type checking
-  -> typed IR
-  -> simple optimization
-  -> target assembly
-  -> assembler
-  -> target packer
-  -> emulator test runner
+  -> typed HIR
+  -> target-bound IR (TBIR)
+  -> machine lowering
+  -> EZRA target assembly
+  -> metadata-generated target assembler
+  -> configured binary layout emitter
+  -> final binary/package
+  -> emulator test runner when requested
 ```
 
-The current implementation may lower directly toward eZ80 ADL assembly, but the specification requires a target-neutral lowering boundary before additional CPU families are considered production targets.
+The current implementation may lower directly toward eZ80 ADL assembly, but the specification requires explicit HIR and TBIR stages before treating advanced diagnostics, target-aware optimization, or additional CPU families as production quality.
 
-### 40.1 Future Retro IR
+### 40.1 HIR and TBIR
 
-EZRA should define a retro-oriented intermediate language as future work. This IR is not fully specified yet, but it should be designed for small machines rather than assuming a modern SSA-only architecture.
+EZRA uses two main intermediate representations after AST construction.
+
+HIR is the typed, mostly target-independent source representation. It is where EZRA performs name resolution, type checking, constant evaluation, shared-library validation, source-level diagnostics, target-independent safe optimizations, and analysis such as recursion, tail-call eligibility, and loop-candidate detection.
+
+TBIR is the target-bound checked optimization representation. It is built after selecting a target profile and loading the target memory model, layout, SDK metadata, port map, MMIO map, ABI rules, and optimization profile. TBIR is not primarily a portability layer. It exists to make hardware-aware diagnostics and platform-aware optimizations possible before lowering to assembly.
+
+The complete IR design is maintained in `docs/ir-design.md`. The serialized IR format is not required to be textual. Implementations may generate compact binary IR from Rust structs when useful for caching, debugging tools, or cross-process compiler stages, as long as diagnostics preserve source locations and tools can inspect the IR through a documented dump format.
+
+HIR responsibilities:
+
+```text
+- resolved names, imports, visibility, aliases, and declarations
+- checked expression and statement types
+- constant evaluation and target-independent range facts
+- shared-library checking before final target binding
+- control-flow validation, return checking, and unreachable-code diagnostics
+- pure expression folding, dead constant branch removal, and simple inlining markers
+- recursion detection, tail-recursion detection, and tail-call candidate marking
+- loop candidate marking for later target-aware optimization
+```
+
+TBIR responsibilities:
+
+```text
+- selected target pointer width, integer legality, ABI, and calling convention facts
+- concrete memory regions, sections, object placement, port maps, and MMIO maps
+- pointer provenance, known bounds, region permissions, and static out-of-bounds diagnostics
+- volatile memory, port I/O, inline assembly, calls, interrupts, and clobbers as explicit effects
+- target-aware inlining, tail-call optimization, tail-recursion-to-loop conversion, and loop optimization
+- target-aware integer narrowing/widening, helper-call selection, and address-arithmetic choices
+- platform-aware memory and loop optimizations when target cache/layout facts make them legal and useful
+- predictable lowering to readable EZRA target assembly
+```
+
+Target-bound diagnostics should include hard errors for statically proven invalid memory and port behavior, including out-of-bounds object pointers, address ranges outside the selected target, writes to read-only regions, reads or writes through incompatible pointer spaces, invalid port width or direction, impossible section placement, and overlaps in defined binary layout.
+
+Shared libraries are checked in HIR and instantiated into TBIR when compiled as part of a target-selected application or package. Cross-platform full applications are not the primary design goal; shared math, algorithm, and utility libraries are.
+
+### 40.2 Optimization Model
+
+HIR may perform only target-independent optimizations that preserve EZRA's defined behavior and do not require concrete target memory facts. TBIR performs target-aware optimizations using target cost models, cache/layout facts when present, and effect/alias/provenance analysis.
+
+Required safe optimization families:
+
+```text
+- constant folding and propagation
+- copy propagation
+- dead code and unreachable block removal
+- dead constant branch removal
+- unused private function/global removal
+- explicit and cost-model-driven inlining
+- tail-call optimization where ABI-compatible
+- tail-recursion-to-loop conversion
+- loop-invariant code motion
+- induction variable simplification
+- strength reduction
+- loop unrolling when code-size policy allows
+- nested loop reordering or tiling when dependence analysis and target cache profile allow
+- integer narrowing/widening when range analysis proves equivalence
+- helper-call selection for multiply/divide/mod and other non-native operations
+- stack-slot reuse and layout optimization after liveness exists
+```
+
+Optimizations must preserve:
+
+```text
+- volatile memory ordering
+- port I/O ordering
+- inline asm effects and clobbers
+- memory and port clobbers
+- interrupt-visible memory behavior
+- unknown call effects
+- pointer provenance and aliasing rules
+- target memory permissions and section placement constraints
+- defined arithmetic behavior, including divide/remainder by zero producing zero
+```
+
+Loop reordering, tiling, and cache-oriented transformations are legal only when dependence analysis proves the new iteration order equivalent, the target optimization profile indicates a benefit, and no volatile, port, inline-asm, interrupt, or unknown-call effects are reordered incorrectly.
+
+### 40.3 Machine Lowering, Assembly, and Binary Layout
+
+Machine lowering converts TBIR into target instruction choices, registers, stack slots, concrete calling convention operations, and readable EZRA target assembly.
+
+Assembly is handled by a target-specific, metadata-generated EZRA assembler. The assembler encodes instructions, symbols, relocations, and section data. It should also provide map/symbol information to the binary layout emitter.
+
+The configured binary layout emitter consumes assembled sections, symbols, target profile data, and project configuration to produce the final artifact shape. Examples include raw `.bin`, Agon MOS executable wrappers, future ROM images, cartridge packages, calculator packages, disk images, or other target-defined containers.
+
+### 40.4 Target Fit
 
 Goals:
 
@@ -2191,7 +2278,7 @@ Goals:
 - preserve predictable lowering to readable target assembly
 ```
 
-The IR should make target differences explicit:
+HIR and TBIR must make target differences explicit:
 
 ```text
 - pointer width and address-space width
@@ -2203,9 +2290,9 @@ The IR should make target differences explicit:
 - helper/runtime ABI for operations that the CPU cannot lower directly
 ```
 
-This IR remains to be specced. Until it exists, non-eZ80 targets should be treated as design targets, experimental prototypes, or golden-output experiments rather than fully supported backends.
+Until HIR and TBIR exist, non-eZ80 targets should be treated as design targets, experimental prototypes, or golden-output experiments rather than fully supported backends.
 
-### 40.2 Future Conditional Compilation
+### 40.5 Future Conditional Compilation
 
 EZRA should define conditional compilation as future work so shared code and SDK modules can support multiple targets from one source tree. The syntax and exact evaluation rules are not yet specified.
 
@@ -2220,27 +2307,6 @@ Goals:
 ```
 
 Conditional compilation must run early enough that target-incompatible imports and declarations can be excluded before name resolution and type checking. It must also preserve deterministic builds: the active target triple, target features, and user build features must be visible in build metadata and map output.
-
-Required optimizations:
-
-```text
-- constant folding
-- constant propagation
-- dead code elimination
-- inline functions marked `inline`
-- remove unused private functions
-- peephole cleanup for obvious redundant loads/stores
-```
-
-The optimizer must respect:
-
-```text
-- volatile memory
-- port operations
-- asm volatile
-- memory clobbers
-- port clobbers
-```
 
 ---
 
