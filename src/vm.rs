@@ -6,7 +6,7 @@ use std::{
 
 use ez80::{Cpu, Machine, Reg16};
 
-use crate::asm_meta;
+use crate::asm::ez80 as asm_meta;
 use crate::diagnostic::Diagnostic;
 use crate::target::{Address24, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 

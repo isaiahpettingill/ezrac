@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod ez80;
+
 use crate::{
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl,
