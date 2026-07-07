@@ -294,8 +294,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(4)
     } else if parse_direct_index_load_or_store(text)?.is_some() {
         Ok(5)
-    } else if parse_io_instruction(text)?.is_some() {
-        Ok(2)
     } else if parse_index_byte_load(text)?.is_some()
         || parse_index_byte_store(text)?.is_some()
         || parse_index_reg8_load(text)?.is_some()
@@ -332,8 +330,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if text.starts_with("xor ") {
         Ok(2)
-    } else if text.starts_with("in0 ") || text.starts_with("out0 ") {
-        Ok(3)
     } else {
         Err(Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -433,21 +429,6 @@ fn emit_instruction(
     } else if let Some((op, value)) = parse_accumulator_alu_imm(text)? {
         bytes.push(accumulator_alu_imm_opcode(op));
         bytes.push(value);
-    } else if let Some(rest) = text.strip_prefix("in0 ") {
-        let port = rest
-            .trim()
-            .strip_prefix("a, (")
-            .and_then(|rest| rest.strip_suffix(')'))
-            .ok_or_else(|| Diagnostic::new(format!("invalid in0 syntax `{text}`")))?;
-        bytes.extend([0xED, 0x38, parse_u8(port)?]);
-    } else if let Some(rest) = text.strip_prefix("out0 ") {
-        let port = rest
-            .trim()
-            .strip_prefix('(')
-            .and_then(|rest| rest.split_once(')'))
-            .ok_or_else(|| Diagnostic::new(format!("invalid out0 syntax `{text}`")))?
-            .0;
-        bytes.extend([0xED, 0x39, parse_u8(port)?]);
     } else if text == "dec sp" {
         bytes.push(0x3B);
     } else if text == "inc sp" {
@@ -456,8 +437,6 @@ fn emit_instruction(
         rst.write_to(bytes);
     } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
         bytes.extend([index.prefix(), 0xCB, offset, opcode]);
-    } else if let Some(io) = parse_io_instruction(text)? {
-        io.write_to(bytes);
     } else if let Some(value) = text.strip_prefix("ld ix,") {
         bytes.extend([0xDD, 0x21]);
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
@@ -582,89 +561,6 @@ fn ld_direct_reg16_store_opcode(register: &str) -> u8 {
         "de" => 0x53,
         _ => unreachable!("invalid direct-store register {register}"),
     }
-}
-
-struct IoInstruction {
-    prefix: bool,
-    opcode: u8,
-    immediate: Option<u8>,
-}
-
-impl IoInstruction {
-    fn write_to(self, bytes: &mut Vec<u8>) {
-        if self.prefix {
-            bytes.push(0xED);
-        }
-        bytes.push(self.opcode);
-        if let Some(value) = self.immediate {
-            bytes.push(value);
-        }
-    }
-}
-
-fn parse_io_instruction(text: &str) -> Result<Option<IoInstruction>, Diagnostic> {
-    if let Some(port) = text
-        .strip_prefix("in a, (")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        if port.trim() == "c" {
-            return Ok(Some(IoInstruction {
-                prefix: true,
-                opcode: 0x78,
-                immediate: None,
-            }));
-        }
-        return Ok(Some(IoInstruction {
-            prefix: false,
-            opcode: 0xDB,
-            immediate: Some(parse_u8(port.trim())?),
-        }));
-    }
-    if let Some(rest) = text.strip_prefix("in ") {
-        let Some((register, port)) = rest.split_once(',') else {
-            return Err(Diagnostic::new(format!("invalid in syntax `{text}`")));
-        };
-        let Some(register) = reg8_code(register.trim()) else {
-            return Ok(None);
-        };
-        if port.trim() != "(c)" {
-            return Ok(None);
-        }
-        return Ok(Some(IoInstruction {
-            prefix: true,
-            opcode: 0x40 + register * 8,
-            immediate: None,
-        }));
-    }
-    if let Some(rest) = text.strip_prefix("out ") {
-        let Some((port, register)) = rest.split_once(',') else {
-            return Err(Diagnostic::new(format!("invalid out syntax `{text}`")));
-        };
-        let port = port.trim();
-        let register = register.trim();
-        if port == "(c)" {
-            let Some(register) = reg8_code(register) else {
-                return Ok(None);
-            };
-            return Ok(Some(IoInstruction {
-                prefix: true,
-                opcode: 0x41 + register * 8,
-                immediate: None,
-            }));
-        }
-        let Some(port) = parse_wrapped_indirect(port) else {
-            return Ok(None);
-        };
-        if register != "a" {
-            return Ok(None);
-        }
-        return Ok(Some(IoInstruction {
-            prefix: false,
-            opcode: 0xD3,
-            immediate: Some(parse_u8(port)?),
-        }));
-    }
-    Ok(None)
 }
 
 struct RstInstruction {

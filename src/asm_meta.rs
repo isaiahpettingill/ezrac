@@ -172,6 +172,9 @@ pub fn encode_generated_instruction(
     if let Some(opcode) = parse_cb_reg8_or_hl_operation(text)? {
         return Ok(Some(vec![0xCB, opcode]));
     }
+    if let Some(bytes) = parse_io_instruction(text)? {
+        return Ok(Some(bytes));
+    }
     Ok(None)
 }
 
@@ -390,6 +393,68 @@ fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
     }
 }
 
+fn parse_io_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if let Some(port) = text
+        .strip_prefix("in a, (")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        if port.trim() == "c" {
+            return Ok(Some(vec![0xED, 0x78]));
+        }
+        return Ok(Some(vec![0xDB, parse_u8(port.trim())?]));
+    }
+    if let Some(rest) = text.strip_prefix("in ") {
+        let Some((register, port)) = rest.split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid in syntax `{text}`")));
+        };
+        let Some(register) = reg8_code(register.trim()) else {
+            return Ok(None);
+        };
+        if port.trim() != "(c)" {
+            return Ok(None);
+        }
+        return Ok(Some(vec![0xED, 0x40 + register * 8]));
+    }
+    if let Some(rest) = text.strip_prefix("out ") {
+        let Some((port, register)) = rest.split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid out syntax `{text}`")));
+        };
+        if port.trim() == "(c)" {
+            let Some(register) = reg8_code(register.trim()) else {
+                return Ok(None);
+            };
+            return Ok(Some(vec![0xED, 0x41 + register * 8]));
+        }
+        let port = port
+            .trim()
+            .strip_prefix('(')
+            .and_then(|port| port.strip_suffix(')'))
+            .ok_or_else(|| Diagnostic::new(format!("invalid out port syntax `{text}`")))?;
+        if register.trim() != "a" {
+            return Ok(None);
+        }
+        return Ok(Some(vec![0xD3, parse_u8(port)?]));
+    }
+    if let Some(rest) = text.strip_prefix("in0 ") {
+        let port = rest
+            .trim()
+            .strip_prefix("a, (")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .ok_or_else(|| Diagnostic::new(format!("invalid in0 syntax `{text}`")))?;
+        return Ok(Some(vec![0xED, 0x38, parse_u8(port)?]));
+    }
+    if let Some(rest) = text.strip_prefix("out0 ") {
+        let port = rest
+            .trim()
+            .strip_prefix('(')
+            .and_then(|rest| rest.split_once(')'))
+            .ok_or_else(|| Diagnostic::new(format!("invalid out0 syntax `{text}`")))?
+            .0;
+        return Ok(Some(vec![0xED, 0x39, parse_u8(port)?]));
+    }
+    Ok(None)
+}
+
 fn is_indexed_indirect(text: &str) -> bool {
     text.starts_with("(ix") || text.starts_with("(iy")
 }
@@ -537,6 +602,14 @@ mod tests {
         assert_eq!(
             encode_generated_instruction(CpuFamily::Ez80, "bit 3, (hl)").unwrap(),
             Some(vec![0xCB, 0x5E])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "in a, (34h)").unwrap(),
+            Some(vec![0xDB, 0x34])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "out0 (0Ch), a").unwrap(),
+            Some(vec![0xED, 0x39, 0x0C])
         );
     }
 
