@@ -1,4 +1,8 @@
-use std::{env, fs, path::PathBuf, process::ExitCode};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use ezra::{
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
@@ -6,13 +10,14 @@ use ezra::{
         CartridgeHeader, build_cartridge_map, build_cartridge_with_layout_code_and_symbols,
         layout_section_bases,
     },
-    compile::{CompileOptions, check_source, load_program},
+    compile::load_program,
     diagnostic::SourceLocation,
     layout::{Layout, parse_layout},
     parser::parse_program,
+    project::load_nearest_project_config,
     target::{
         Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE, EZRA_RODATA_BASE,
-        EZRA_VRAM_BASE,
+        EZRA_VRAM_BASE, TargetProfile, resolve_target_profile,
     },
     vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
 };
@@ -62,6 +67,7 @@ struct CommandOptions {
     debug_comments: bool,
     default_sdk_symbols: bool,
     layout_path: Option<String>,
+    target: Option<String>,
 }
 
 impl CommandOptions {
@@ -70,6 +76,7 @@ impl CommandOptions {
         let mut debug_comments = false;
         let mut default_sdk_symbols = true;
         let mut layout_path = None;
+        let mut target = None;
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
@@ -78,6 +85,10 @@ impl CommandOptions {
                 "--layout" => {
                     let value = iter.next().ok_or_else(usage)?;
                     layout_path = Some(value.clone());
+                }
+                "--target" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    target = Some(value.clone());
                 }
                 _ if path.is_none() => path = Some(arg.clone()),
                 _ => return Err(usage()),
@@ -88,8 +99,43 @@ impl CommandOptions {
             debug_comments,
             default_sdk_symbols,
             layout_path,
+            target,
         })
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BuildSettings {
+    target: TargetProfile,
+    layout: Layout,
+    layout_path: Option<PathBuf>,
+    default_sdk_symbols: bool,
+}
+
+fn resolve_build_settings(
+    options: &CommandOptions,
+    source_path: &Path,
+) -> Result<BuildSettings, String> {
+    let project = load_nearest_project_config(source_path).map_err(|error| error.to_string())?;
+    let target_name = options.target.as_deref().or_else(|| {
+        project
+            .as_ref()
+            .and_then(|project| project.target.as_deref())
+    });
+    let target = resolve_target_profile(target_name)?;
+    let layout_path = options
+        .layout_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| project.and_then(|project| project.layout_file));
+    let layout = load_layout(layout_path.as_deref())?;
+
+    Ok(BuildSettings {
+        target,
+        layout,
+        layout_path,
+        default_sdk_symbols: options.default_sdk_symbols,
+    })
 }
 
 fn build(options: &CommandOptions) -> Result<(), String> {
@@ -119,6 +165,7 @@ fn build_source_with_options(path: &str, debug_comments: bool) -> Result<BuildOu
         debug_comments,
         default_sdk_symbols: true,
         layout_path: None,
+        target: None,
     })
 }
 
@@ -130,18 +177,18 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let layout = load_layout(options.layout_path.as_deref())?;
-    if let Err(errors) = layout.validate() {
-        let message = format_layout_errors(options.layout_path.as_deref(), errors);
+    let settings = resolve_build_settings(options, &source_path)?;
+    if let Err(errors) = settings.layout.validate() {
+        let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
-            &layout,
+            &settings.layout,
             &program,
             options.debug_comments,
-            options.default_sdk_symbols,
+            settings.default_sdk_symbols,
         )?,
     )
     .map_err(|error| {
@@ -161,17 +208,22 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     let map_path = dir.join(format!("{stem}.map"));
     let cart_path = dir.join(format!("{stem}.ezra.cart"));
 
-    let assembled = assemble_ez80_subset_with_symbols_at(&assembly, layout.entry.get())
+    let assembled = assemble_ez80_subset_with_symbols_at(&assembly, settings.layout.entry.get())
         .map_err(|error| error.to_string())?;
-    let map = build_cartridge_map(&program, &layout, assembled.bytes.len(), &assembled.symbols)
-        .map_err(|error| {
-            error
-                .with_location_if_missing(source_location.clone())
-                .to_string()
-        })?;
+    let map = build_cartridge_map(
+        &program,
+        &settings.layout,
+        assembled.bytes.len(),
+        &assembled.symbols,
+    )
+    .map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
     let cart = build_cartridge_with_layout_code_and_symbols(
         &program,
-        &layout,
+        &settings.layout,
         &assembled.bytes,
         &assembled.symbols,
     )
@@ -198,6 +250,7 @@ fn test_source(path: &str) -> Result<(), String> {
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
+        target: None,
     })
 }
 
@@ -212,18 +265,18 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let layout = load_layout(options.layout_path.as_deref())?;
-    if let Err(errors) = layout.validate() {
-        let message = format_layout_errors(options.layout_path.as_deref(), errors);
+    let settings = resolve_build_settings(options, &source_path)?;
+    if let Err(errors) = settings.layout.validate() {
+        let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
     let assembly = emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
-            &layout,
+            &settings.layout,
             &program,
             options.debug_comments,
-            options.default_sdk_symbols,
+            settings.default_sdk_symbols,
         )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
@@ -233,9 +286,9 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
             instruction_budget: 1_000_000,
             initial_ports: metadata.initial_ports,
             initial_memory: metadata.initial_memory,
-            stack_top: layout.stack.get(),
+            stack_top: settings.layout.stack.get(),
         },
-        layout.entry.get(),
+        settings.layout.entry.get(),
     )
     .map_err(|error| error.to_string())?;
     if !run.halted {
@@ -360,18 +413,18 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let layout = load_layout(options.layout_path.as_deref())?;
-    if let Err(errors) = layout.validate() {
-        let message = format_layout_errors(options.layout_path.as_deref(), errors);
+    let settings = resolve_build_settings(options, &source_path)?;
+    if let Err(errors) = settings.layout.validate() {
+        let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
     emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
-            &layout,
+            &settings.layout,
             &program,
             options.debug_comments,
-            options.default_sdk_symbols,
+            settings.default_sdk_symbols,
         )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())
@@ -381,21 +434,7 @@ fn check(options: &CommandOptions) -> Result<(), String> {
     let source_path = PathBuf::from(&options.path);
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
-    if options.layout_path.is_some() {
-        return check_source_with_layout(options, &source_path, &source);
-    }
-    let compile_options = CompileOptions {
-        source: source_path,
-        debug_comments: options.debug_comments,
-        default_sdk_symbols: options.default_sdk_symbols,
-    };
-    let report = check_source(&source, &compile_options).map_err(|error| error.to_string())?;
-
-    println!(
-        "ok: {} imports, {} declarations, main present",
-        report.imports, report.declarations
-    );
-    Ok(())
+    check_source_with_layout(options, &source_path, &source)
 }
 
 fn check_source_with_layout(
@@ -415,18 +454,18 @@ fn check_source_with_layout(
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
-    let layout = load_layout(options.layout_path.as_deref())?;
-    if let Err(errors) = layout.validate() {
-        let message = format_layout_errors(options.layout_path.as_deref(), errors);
+    let settings = resolve_build_settings(options, source_path)?;
+    if let Err(errors) = settings.layout.validate() {
+        let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
     emit_ez80_assembly_with_options(
         &program,
         assembly_options_from_layout_and_program(
-            &layout,
+            &settings.layout,
             &program,
             options.debug_comments,
-            options.default_sdk_symbols,
+            settings.default_sdk_symbols,
         )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
@@ -440,9 +479,13 @@ fn check_source_with_layout(
 }
 
 fn print_layout(path: Option<&str>) -> Result<(), String> {
-    let layout = load_layout(path)?;
+    let layout_path = path.map(PathBuf::from);
+    let layout = load_layout(layout_path.as_deref())?;
     if let Err(errors) = layout.validate() {
-        eprintln!("error: {}", format_layout_errors(path, errors));
+        eprintln!(
+            "error: {}",
+            format_layout_errors(layout_path.as_deref(), errors)
+        );
         return Err("layout is invalid".to_owned());
     }
 
@@ -455,15 +498,15 @@ fn print_layout(path: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn load_layout(path: Option<&str>) -> Result<Layout, String> {
+fn load_layout(path: Option<&Path>) -> Result<Layout, String> {
     let Some(path) = path else {
         return Ok(Layout::ezra_default());
     };
-    let source =
-        fs::read_to_string(path).map_err(|error| format!("failed to read {path}: {error}"))?;
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     parse_layout(&source).map_err(|error| {
         error
-            .with_location_if_missing(command_source_start_location(std::path::Path::new(path)))
+            .with_location_if_missing(command_source_start_location(path))
             .to_string()
     })
 }
@@ -509,8 +552,8 @@ fn layout_symbol(layout: &Layout, name: &str) -> Option<Address24> {
         .map(|symbol| symbol.value)
 }
 
-fn format_layout_errors(path: Option<&str>, errors: Vec<ezra::diagnostic::Diagnostic>) -> String {
-    let location = path.map(|path| command_source_start_location(std::path::Path::new(path)));
+fn format_layout_errors(path: Option<&Path>, errors: Vec<ezra::diagnostic::Diagnostic>) -> String {
+    let location = path.map(command_source_start_location);
     errors
         .into_iter()
         .map(|error| {
@@ -554,7 +597,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable eZ80 assembly\n  test [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the ez80 VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and .ezra.cart artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -706,6 +749,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
+            target: None,
         })
         .unwrap_err();
         assert!(
@@ -758,6 +802,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: Some(parse_layout_path.to_string_lossy().into_owned()),
+            target: None,
         })
         .unwrap_err();
         assert!(
@@ -771,6 +816,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: Some(invalid_layout_path.to_string_lossy().into_owned()),
+            target: None,
         })
         .unwrap_err();
         assert!(
@@ -813,6 +859,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: None,
         })
         .unwrap_err();
         let prefix = format!("layout is invalid:\n{}:1:1:", layout_path.display());
@@ -903,6 +950,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: false,
             layout_path: None,
+            target: None,
         })
         .unwrap_err();
         assert!(error.contains("unknown port `PAD1_LO`"), "{error}");
@@ -928,6 +976,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: false,
             layout_path: None,
+            target: None,
         })
         .unwrap();
 
@@ -1019,6 +1068,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: None,
         })
         .unwrap();
 
@@ -1074,6 +1124,125 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: None,
+        })
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commands_use_ezra_toml_target_and_layout() {
+        let root = temp_root("project_config_layout");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("layouts")).unwrap();
+        let source_path = root.join("src/game.ezra");
+        let layout_path = root.join("layouts/agon.ezralayout");
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+                [build]
+                target = "agonlight-console8-ez80-1.0"
+
+                [layout]
+                file = "layouts/agon.ezralayout"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout project_layout {
+                    load 0x020000;
+                    entry 0x020040;
+                    stack 0xEFFE00;
+
+                    region code 0x020000..0x02FFFF read execute;
+                    region ram 0x030000..0x03FFFF read write;
+                    region rodata 0x040000..0x04FFFF read;
+                    region assets 0x120000..0x12FFFF read;
+                    region scratch 0xE00000..0xE0FFFF read write;
+                    section .header -> code align 64;
+                    section .text -> code align 16;
+                    section .rodata -> rodata align 16;
+                    section .data -> ram align 16;
+                    section .bss -> ram align 16;
+                    section .assets -> assets align 256;
+                    section .scratch -> scratch align 16;
+
+                    symbol EZRA_RAM_BASE = 0x030000;
+                }
+            "#,
+        )
+        .unwrap();
+
+        check(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: None,
+        })
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commands_reject_non_ez80_targets_for_now() {
+        let root = temp_root("unsupported_target");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+
+        let error = check(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("zxspectrum-z80".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("only eZ80 codegen is implemented"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cli_target_overrides_project_target() {
+        let root = temp_root("target_override");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            root.join("Ezra.toml"),
+            r#"
+                [build]
+                target = "zxspectrum-z80"
+            "#,
+        )
+        .unwrap();
+
+        check(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("ti84plusce-ez80".to_owned()),
         })
         .unwrap();
 
@@ -1215,6 +1384,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: None,
         })
         .unwrap();
 
@@ -1279,6 +1449,7 @@ mod tests {
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: None,
         })
         .unwrap();
 

@@ -17,6 +17,79 @@ pub const EZRA_STACK_TOP: Address24 = Address24::new(0xF0_0000);
 
 pub const HEADER_SIZE: u16 = 0x0040;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CpuFamily {
+    Ez80,
+    Z80,
+    M68k,
+    I8080,
+}
+
+impl CpuFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ez80 => "ez80",
+            Self::Z80 => "z80",
+            Self::M68k => "m68k",
+            Self::I8080 => "8080",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetTriple {
+    pub value: String,
+    pub cpu: CpuFamily,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetProfile {
+    pub triple: TargetTriple,
+    pub default_sdk_symbols: bool,
+}
+
+pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
+
+pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, String> {
+    let triple = parse_target_triple(target.unwrap_or(DEFAULT_TARGET_TRIPLE))?;
+    if triple.cpu != CpuFamily::Ez80 {
+        return Err(format!(
+            "target `{}` uses CPU `{}`, but only eZ80 codegen is implemented",
+            triple.value,
+            triple.cpu.as_str()
+        ));
+    }
+    Ok(TargetProfile {
+        triple,
+        default_sdk_symbols: true,
+    })
+}
+
+pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
+    if value.trim() != value || value.is_empty() {
+        return Err(format!("invalid target triple `{value}`"));
+    }
+    let parts = value.split('-').collect::<Vec<_>>();
+    if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+        return Err(format!("invalid target triple `{value}`"));
+    }
+    let cpu = parts
+        .iter()
+        .rev()
+        .find_map(|part| match *part {
+            "ez80" => Some(CpuFamily::Ez80),
+            "z80" => Some(CpuFamily::Z80),
+            "m68k" => Some(CpuFamily::M68k),
+            "8080" => Some(CpuFamily::I8080),
+            _ => None,
+        })
+        .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;
+    Ok(TargetTriple {
+        value: value.to_owned(),
+        cpu,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Address24(u32);
 
@@ -73,3 +146,42 @@ impl std::fmt::Display for AddressOutOfRange {
 }
 
 impl std::error::Error for AddressOutOfRange {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_target_triples_with_optional_versions() {
+        assert_eq!(
+            parse_target_triple("agonlight-console8-ez80-1.0")
+                .unwrap()
+                .cpu,
+            CpuFamily::Ez80
+        );
+        assert_eq!(
+            parse_target_triple("cpm-2.2-z80").unwrap().cpu,
+            CpuFamily::Z80
+        );
+        assert_eq!(
+            parse_target_triple("sega-genesis-m68k").unwrap().cpu,
+            CpuFamily::M68k
+        );
+    }
+
+    #[test]
+    fn rejects_targets_without_known_cpu_family() {
+        let error = parse_target_triple("agonlight-console8").unwrap_err();
+        assert!(error.contains("missing a supported CPU family"), "{error}");
+    }
+
+    #[test]
+    fn only_ez80_targets_have_codegen_for_now() {
+        assert!(resolve_target_profile(Some("ti84plusce-ez80")).is_ok());
+        let error = resolve_target_profile(Some("zxspectrum-z80")).unwrap_err();
+        assert!(
+            error.contains("only eZ80 codegen is implemented"),
+            "{error}"
+        );
+    }
+}

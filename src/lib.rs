@@ -5,5 +5,6 @@ pub mod compile;
 pub mod diagnostic;
 pub mod layout;
 pub mod parser;
+pub mod project;
 pub mod target;
 pub mod vm;

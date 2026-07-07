@@ -1848,7 +1848,7 @@ mod tests {
                 .as_nanos()
         ));
         let source_path = source_root.join("nested/game.ezra");
-        let embed_path = format!("{}/blob.bin", relative_dir.display());
+        let embed_path = format!("{}/blob.bin", relative_dir.display()).replace('\\', "/");
         let source = format!(
             r#"
             embed blob: bytes = file("{embed_path}") section .assets align 1
