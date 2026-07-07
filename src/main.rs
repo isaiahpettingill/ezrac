@@ -536,13 +536,18 @@ fn resolve_build_settings(
 fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
     if matches!(
         settings.target.triple.cpu,
-        CpuFamily::Ez80 | CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180
+        CpuFamily::Ez80
+            | CpuFamily::Z80
+            | CpuFamily::Z80N
+            | CpuFamily::Z180
+            | CpuFamily::I8080
+            | CpuFamily::I8085
     ) {
         return Ok(());
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL and Z80-family targets; use `assemble` for hand-written assembly or a supported source target",
+        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL, Z80-family, and 8080-family targets; use `assemble` for hand-written assembly or a supported source target",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
@@ -2454,6 +2459,155 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn bare_i8080_source_build_emits_intel_assembly() {
+        let root = temp_root("bare_i8080_source_build");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-i8080".to_owned()),
+        })
+        .unwrap();
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let bin = std::fs::read(outputs.executable).unwrap();
+
+        assert!(asm.contains("; target: i8080"), "{asm}");
+        assert!(asm.contains("    lxi sp,"), "{asm}");
+        assert!(asm.contains("    call _main"), "{asm}");
+        assert!(asm.contains("    out 0Dh"), "{asm}");
+        assert!(!asm.contains("    ld "), "{asm}");
+        assert!(!asm.contains("ldir"), "{asm}");
+        assert!(!bin.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bare_i8080_source_builds_core_language_program() {
+        let root = temp_root("bare_i8080_source_core_language");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    let left: u8 = 2
+                    let right: u8 = 3
+                    let sum: u8 = left + right
+                    if sum == 5 {
+                        test.pass()
+                    } else {
+                        test.fail(1)
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-i8080".to_owned()),
+        })
+        .unwrap();
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+
+        assert!(
+            asm.contains("    adi ") || asm.contains("    add "),
+            "{asm}"
+        );
+        assert!(asm.contains("    j"), "{asm}");
+        assert!(!asm.contains("sbc hl"), "{asm}");
+        assert!(!asm.contains("ldir"), "{asm}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bare_i8085_source_build_accepts_i8085_inline_asm() {
+        let root = temp_root("bare_i8085_source_inline_asm");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    asm volatile {
+                        "rim"
+                        "sim"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-i8085".to_owned()),
+        })
+        .unwrap();
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let bin = std::fs::read(outputs.executable).unwrap();
+
+        assert!(asm.contains("; target: i8085"), "{asm}");
+        assert!(bin.windows(2).any(|bytes| bytes == [0x20, 0x30]));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bare_i8080_source_build_rejects_i8085_inline_asm() {
+        let root = temp_root("bare_i8080_rejects_i8085_inline_asm");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    asm volatile {
+                        "rim"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-i8080".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("test assembler does not support instruction `rim`"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

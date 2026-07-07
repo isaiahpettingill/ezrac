@@ -1263,6 +1263,14 @@ fn encode_intel_8080_instruction(
         "sphl" => return Ok(Some(vec![0xF9])),
         "pchl" => return Ok(Some(vec![0xE9])),
         "ret" => return Ok(Some(vec![0xC9])),
+        "rnz" => return Ok(Some(vec![0xC0])),
+        "rz" => return Ok(Some(vec![0xC8])),
+        "rnc" => return Ok(Some(vec![0xD0])),
+        "rc" => return Ok(Some(vec![0xD8])),
+        "rpo" => return Ok(Some(vec![0xE0])),
+        "rpe" => return Ok(Some(vec![0xE8])),
+        "rp" => return Ok(Some(vec![0xF0])),
+        "rm" => return Ok(Some(vec![0xF8])),
         _ => {}
     }
     if let Some((dst, src)) = parse_two_operands(text.strip_prefix("mov ")) {

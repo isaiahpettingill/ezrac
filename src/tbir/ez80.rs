@@ -168,7 +168,10 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
 }
 
 fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
-    matches!(cpu, CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180)
+    matches!(
+        cpu,
+        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::I8080 | CpuFamily::I8085
+    )
 }
 
 fn region(
