@@ -77,13 +77,15 @@ Recent VM assembler coverage includes:
    - are likely in TI-84 Plus CE or Agon Light style SDK code
    - are useful for testing compiler output
 
-5. Reconcile the temporary assembler path with full assembly emission.
+5. Implement the metadata-generated production assembler path.
 
-   The emitted assembly is the intended artifact. The current test assembler is still a helper subset for VM execution. Decide whether to:
+   The design decision is recorded in `spec.md`: EZRA assembly is a supported production path with EZRA-specific, documented syntax. The assembler should be generated from instruction metadata rather than maintained as a large hand-coded opcode matcher. Follow-up work should:
 
-   - keep growing the subset assembler,
-   - replace it with a real assembler integration,
-   - or formalize the subset as only a test fixture while separately validating emitted assembly with a fuller tool.
+   - define instruction metadata format
+   - generate parser/encoder tables from metadata
+   - generate opcode coverage documentation and golden encoding tests
+   - feed inline-asm validation and clobber inference from the same metadata where possible
+   - keep `ezra assemble` documented and stable as a standalone CLI path
 
 6. Introduce a target-neutral middle IR before adding additional CPU backends.
 

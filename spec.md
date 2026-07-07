@@ -2015,6 +2015,39 @@ game.bin       default raw target executable
 
 The exact final artifact extension may vary by target and `Ezra.toml` output settings. The default output format is raw `.bin`. There is no default cartridge format. Targets may later define target-specific binary, tape, disk, ROM, hex, calculator package, or cartridge formats, and those formats must get their cartridge/package layout from explicit target or project configuration.
 
+### 38.1 Standalone Assembler
+
+EZRA includes a supported standalone assembler path. It is not only a private VM test helper.
+
+The assembler uses EZRA-specific assembly syntax. It does not aim to accept every third-party eZ80, Z80, or vendor assembler dialect. Accepted syntax must be documented, stable, and suitable for compiler output, target SDKs, examples, inline assembly, and direct user-authored assembly files.
+
+The assembler implementation should be generated from instruction metadata rather than maintained as a large hand-coded opcode matcher. The metadata should describe:
+
+```text
+- mnemonic and canonical spelling
+- operand forms and aliases accepted by EZRA syntax
+- CPU family and target-mode availability
+- instruction bytes, prefixes, suffixes, and relocation needs
+- width/address-mode constraints
+- flags, register clobbers, memory effects, and port effects where known
+- documentation and coverage status
+```
+
+Generated artifacts may include parser/encoder tables, opcode coverage documentation, golden encoding tests, inline-asm validation data, and clobber-inference tables.
+
+The standalone assembler must have production expectations:
+
+```text
+- deterministic binary output
+- clear diagnostics with source locations
+- documented syntax and target-mode limitations
+- symbol and map support for build outputs
+- golden tests for accepted instructions and representative programs
+- no silent acceptance of instructions unavailable on the selected target profile
+```
+
+Compatibility with third-party assembler syntax is optional and must not compromise the documented EZRA syntax. If compatibility aliases are added, they should be represented in metadata and tested explicitly.
+
 Required sections:
 
 ```text

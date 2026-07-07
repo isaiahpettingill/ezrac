@@ -34,6 +34,7 @@ Priority 3: make coverage auditable.
 - A machine-readable coverage table that distinguishes accepted syntax, emitted bytes, VM execution support, and inline-asm clobber inference.
 - Golden tests for standalone `ezra assemble` inputs used by examples and target SDKs.
 
-Longer-term decision:
+Longer-term direction:
 
-- Decide whether the internal assembler should become a complete production assembler, remain a test/build helper, or be replaced/integrated with a fuller assembler for final artifact validation.
+- Treat EZRA assembly as a supported production path with EZRA-specific, documented syntax.
+- Generate parser/encoder tables, coverage docs, and golden tests from instruction metadata instead of growing a hand-coded opcode matcher indefinitely.
