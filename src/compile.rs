@@ -409,6 +409,18 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(is_ti_z80_target) {
+        match import {
+            "ti.os" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti-z80/sdk/ti/os.ezra"),
+                "ti.os",
+            )),
+            "ti.lcd" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti-z80/sdk/ti/lcd.ezra"),
+                "ti.lcd",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(|target| target.starts_with("zxspectrum-z80")) {
         match import {
             "zx.rom" => Some(builtin_sdk_utf8(
@@ -456,6 +468,13 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
 
 fn is_ti_ce_target(target: &str) -> bool {
     target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80")
+}
+
+fn is_ti_z80_target(target: &str) -> bool {
+    target.starts_with("ti83-z80")
+        || target.starts_with("ti83plus-z80")
+        || target.starts_with("ti84-z80")
+        || target.starts_with("ti84plus-z80")
 }
 
 fn builtin_sdk_utf8(bytes: &'static [u8], module: &str) -> &'static str {
@@ -1412,6 +1431,35 @@ mod tests {
             }));
             assert!(program.declarations.iter().any(|decl| {
                 matches!(decl, Declaration::Function(function) if function.name == "os.wait_key")
+            }));
+        }
+    }
+
+    #[test]
+    fn ti_z80_targets_use_builtin_ti_sdk() {
+        let source = r#"
+            import ti.os
+            import ti.lcd
+
+            fn main() {
+                lcd.set_first_byte(3)
+                let value: u8 = os.zero()
+            }
+        "#;
+
+        for target in ["ti83-z80", "ti83plus-z80", "ti84-z80", "ti84plus-z80"] {
+            let sdk = SdkResolver {
+                target: Some(target.to_owned()),
+                sdk_roots: Vec::new(),
+            };
+            let program =
+                parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+            assert!(program.declarations.iter().any(|decl| {
+                matches!(decl, Declaration::Function(function) if function.name == "lcd.set_first_byte")
+            }));
+            assert!(program.declarations.iter().any(|decl| {
+                matches!(decl, Declaration::Function(function) if function.name == "os.zero")
             }));
         }
     }

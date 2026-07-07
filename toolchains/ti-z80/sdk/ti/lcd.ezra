@@ -1,0 +1,10 @@
+pub const PLOTSSCREEN: u16 = 0x9340
+pub const WIDTH: u8 = 96
+pub const HEIGHT: u8 = 64
+
+pub fn set_first_byte(value: u8) {
+    asm volatile(in value: u8 as reg8, clobber a, clobber memory) {
+        "ld a, {value}"
+        "ld (9340h), a"
+    }
+}
