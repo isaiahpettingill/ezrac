@@ -28,6 +28,10 @@ pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("retn", &[0xED, 0x45]),
     z80_ez80("or a", &[0xB7]),
     z80_ez80("xor a", &[0xAF]),
+    z80_ez80("inc sp", &[0x33]),
+    z80_ez80("dec sp", &[0x3B]),
+    z80_ez80("inc (hl)", &[0x34]),
+    z80_ez80("dec (hl)", &[0x35]),
     z80_ez80("scf", &[0x37]),
     z80_ez80("ccf", &[0x3F]),
     z80_ez80("cpl", &[0x2F]),
@@ -48,6 +52,12 @@ pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("ld sp, hl", &[0xF9]),
     z80_ez80("ld sp, ix", &[0xDD, 0xF9]),
     z80_ez80("ld sp, iy", &[0xFD, 0xF9]),
+    z80_ez80("ld a, (bc)", &[0x0A]),
+    z80_ez80("ld a, (de)", &[0x1A]),
+    z80_ez80("ld a, (hl)", &[0x7E]),
+    z80_ez80("ld (bc), a", &[0x02]),
+    z80_ez80("ld (de), a", &[0x12]),
+    z80_ez80("ld (hl), a", &[0x77]),
     z80_ez80("jp (hl)", &[0xE9]),
     z80_ez80("jp (ix)", &[0xDD, 0xE9]),
     z80_ez80("jp (iy)", &[0xFD, 0xE9]),
@@ -146,6 +156,17 @@ pub fn encode_generated_instruction(
         if let (Some(dst), Some(src)) = (reg8_code(dst), reg8_code(src)) {
             return Ok(Some(vec![0x40 + dst * 8 + src]));
         }
+        if let (Some(dst), Some(src)) = (reg8_code(dst), parse_hl_indirect(src)) {
+            return Ok(Some(vec![0x40 + dst * 8 + src]));
+        }
+        if let (Some(dst), Some(src)) = (parse_hl_indirect(dst), reg8_code(src)) {
+            return Ok(Some(vec![0x40 + dst * 8 + src]));
+        }
+        if let Some(dst) = parse_hl_indirect(dst) {
+            if reg8_code(src).is_none() && !src.starts_with('(') {
+                return Ok(Some(vec![0x06 + dst * 8, parse_u8(src)?]));
+            }
+        }
         if let Some(dst) = reg8_code(dst) {
             if reg8_code(src).is_none() && is_numeric_literal(src) {
                 return Ok(Some(vec![ld_reg8_imm_opcode(dst), parse_u8(src)?]));
@@ -168,6 +189,9 @@ pub fn encode_generated_instruction(
     }
     if let Some((op, value)) = parse_accumulator_alu_imm(text)? {
         return Ok(Some(vec![accumulator_alu_imm_opcode(op), value]));
+    }
+    if let Some(bytes) = parse_index_instruction(text)? {
+        return Ok(Some(bytes));
     }
     if let Some(opcode) = parse_bit_operation_reg8_or_hl(text)? {
         return Ok(Some(vec![0xCB, opcode]));
@@ -389,6 +413,10 @@ fn parse_wrapped_indirect(text: &str) -> Option<&str> {
     text.strip_prefix('(')?.strip_suffix(')')
 }
 
+fn parse_hl_indirect(text: &str) -> Option<u8> {
+    (text == "(hl)").then_some(6)
+}
+
 fn is_register_indirect_addr(addr: &str) -> bool {
     matches!(addr, "bc" | "de" | "hl")
         || is_index_indirect_addr(addr, "ix")
@@ -496,6 +524,127 @@ fn parse_alu_imm(
         return Ok(None);
     }
     Ok(Some((op, parse_u8(src)?)))
+}
+
+fn parse_index_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if let Some((dst, src)) = parse_ld_operands(text) {
+        if let (Some(dst), Some((prefix, offset))) = (reg8_code(dst), parse_index_indirect(src)?) {
+            return Ok(Some(vec![prefix, 0x46 + dst * 8, offset]));
+        }
+        if let (Some((prefix, offset)), Some(src)) = (parse_index_indirect(dst)?, reg8_code(src)) {
+            return Ok(Some(vec![prefix, 0x70 + src, offset]));
+        }
+        if let Some((prefix, offset)) = parse_index_indirect(dst)? {
+            if reg8_code(src).is_none() && parse_index_indirect(src)?.is_none() {
+                return Ok(Some(vec![prefix, 0x36, offset, parse_u8(src)?]));
+            }
+        }
+    }
+    if let Some((inc, operand)) = parse_inc_dec_operand(text) {
+        let Some((prefix, offset)) = parse_index_indirect(operand.trim())? else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![prefix, if inc { 0x34 } else { 0x35 }, offset]));
+    }
+    if let Some((op, prefix, offset)) = parse_index_alu(text)? {
+        return Ok(Some(vec![
+            prefix,
+            accumulator_alu_reg8_opcode(op, 6),
+            offset,
+        ]));
+    }
+    Ok(None)
+}
+
+fn parse_index_alu(text: &str) -> Result<Option<(AccumulatorAluOp, u8, u8)>, Diagnostic> {
+    if let Some(src) = text.strip_prefix("add a,") {
+        return parse_index_alu_operand(AccumulatorAluOp::Add, src.trim());
+    }
+    if let Some(src) = text.strip_prefix("adc a,") {
+        return parse_index_alu_operand(AccumulatorAluOp::Adc, src.trim());
+    }
+    if let Some(src) = text.strip_prefix("sbc a,") {
+        return parse_index_alu_operand(AccumulatorAluOp::Sbc, src.trim());
+    }
+    for (prefix, op) in [
+        ("sub ", AccumulatorAluOp::Sub),
+        ("and ", AccumulatorAluOp::And),
+        ("or ", AccumulatorAluOp::Or),
+        ("xor ", AccumulatorAluOp::Xor),
+        ("cp ", AccumulatorAluOp::Cp),
+    ] {
+        if let Some(src) = text.strip_prefix(prefix) {
+            return parse_index_alu_operand(op, src.trim());
+        }
+    }
+    Ok(None)
+}
+
+fn parse_index_alu_operand(
+    op: AccumulatorAluOp,
+    operand: &str,
+) -> Result<Option<(AccumulatorAluOp, u8, u8)>, Diagnostic> {
+    let Some((prefix, offset)) = parse_index_indirect(operand)? else {
+        return Ok(None);
+    };
+    Ok(Some((op, prefix, offset)))
+}
+
+fn parse_inc_dec_operand(text: &str) -> Option<(bool, &str)> {
+    if let Some(operand) = text.strip_prefix("inc ") {
+        return Some((true, operand));
+    }
+    if let Some(operand) = text.strip_prefix("dec ") {
+        return Some((false, operand));
+    }
+    None
+}
+
+fn parse_index_indirect(text: &str) -> Result<Option<(u8, u8)>, Diagnostic> {
+    let Some(inner) = parse_wrapped_indirect(text) else {
+        return Ok(None);
+    };
+    if let Some(rest) = inner.strip_prefix("ix") {
+        if !is_index_displacement(rest) {
+            return Ok(None);
+        }
+        return parse_index_offset(rest).map(|offset| Some((0xDD, offset)));
+    }
+    if let Some(rest) = inner.strip_prefix("iy") {
+        if !is_index_displacement(rest) {
+            return Ok(None);
+        }
+        return parse_index_offset(rest).map(|offset| Some((0xFD, offset)));
+    }
+    Ok(None)
+}
+
+fn is_index_displacement(text: &str) -> bool {
+    let text = text.trim().strip_suffix(')').unwrap_or(text.trim());
+    text.is_empty() || text.starts_with(['+', '-'])
+}
+
+fn parse_index_offset(text: &str) -> Result<u8, Diagnostic> {
+    let text = text.trim();
+    let text = text.strip_suffix(')').unwrap_or(text);
+    if text.is_empty() {
+        return Ok(0);
+    }
+    let (sign, digits) = text.split_at(1);
+    let magnitude = parse_number(digits.trim())?;
+    if magnitude > 0x7F {
+        return Err(Diagnostic::new(format!(
+            "index displacement `{text}` is outside signed 8-bit range"
+        )));
+    }
+    let value = match sign {
+        "+" => magnitude as i8,
+        "-" => -(magnitude as i8),
+        _ => {
+            return Err(Diagnostic::new(format!("invalid ix displacement `{text}`")));
+        }
+    };
+    Ok(value as u8)
 }
 
 fn parse_bit_operation_reg8_or_hl(text: &str) -> Result<Option<u8>, Diagnostic> {
@@ -822,6 +971,30 @@ mod tests {
         assert_eq!(
             encode_generated_instruction(CpuFamily::Ez80, "xor 55h").unwrap(),
             Some(vec![0xEE, 0x55])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "ld d, (hl)").unwrap(),
+            Some(vec![0x56])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "ld (hl), 43h").unwrap(),
+            Some(vec![0x36, 0x43])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "ld c, (ix+2)").unwrap(),
+            Some(vec![0xDD, 0x4E, 0x02])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "ld (iy-1), e").unwrap(),
+            Some(vec![0xFD, 0x73, 0xFF])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "ld (ix+4), 99h").unwrap(),
+            Some(vec![0xDD, 0x36, 0x04, 0x99])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "xor (iy+0)").unwrap(),
+            Some(vec![0xFD, 0xAE, 0x00])
         );
     }
 

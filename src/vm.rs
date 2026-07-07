@@ -272,38 +272,10 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     if let Some(len) = asm_meta::generated_instruction_len(CpuFamily::Ez80, text)? {
         Ok(len)
-    } else if matches!(
-        text,
-        "dec sp"
-            | "inc sp"
-            | "ld a, (bc)"
-            | "ld a, (hl)"
-            | "ld a, (de)"
-            | "ld (bc), a"
-            | "ld (de), a"
-            | "ld (hl), a"
-    ) {
-        Ok(1)
     } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
         Ok(2)
     } else if parse_index_cb_operation(text)?.is_some() {
         Ok(4)
-    } else if parse_index_byte_load(text)?.is_some()
-        || parse_index_byte_store(text)?.is_some()
-        || parse_index_reg8_load(text)?.is_some()
-        || parse_index_reg8_store(text)?.is_some()
-        || parse_index_inc_dec(text)?.is_some()
-        || parse_index_alu(text)?.is_some()
-    {
-        Ok(3)
-    } else if parse_index_imm_store(text)?.is_some() {
-        Ok(4)
-    } else if parse_ld_reg8_from_hl(text).is_some() || parse_ld_hl_from_reg8(text).is_some() {
-        Ok(1)
-    } else if parse_ld_hl_imm(text)?.is_some() {
-        Ok(2)
-    } else if parse_inc_dec_hl_indirect(text).is_some() {
-        Ok(1)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") {
         Ok(2)
     } else if text.starts_with("xor ") {
@@ -336,41 +308,6 @@ fn emit_instruction(
             asm_meta::BranchWidth::Relative8 => bytes.push(relative_offset(pc, target)?),
             asm_meta::BranchWidth::Absolute24 => push24(bytes, target),
         }
-    } else if let Some((index, offset)) = parse_index_byte_load(text)? {
-        bytes.extend([index.prefix(), 0x7E, offset]);
-    } else if let Some((index, offset)) = parse_index_byte_store(text)? {
-        bytes.extend([index.prefix(), 0x77, offset]);
-    } else if let Some((index, dst, offset)) = parse_index_reg8_load(text)? {
-        bytes.extend([index.prefix(), 0x46 + dst * 8, offset]);
-    } else if let Some((index, offset, src)) = parse_index_reg8_store(text)? {
-        bytes.extend([index.prefix(), 0x70 + src, offset]);
-    } else if let Some((index, offset, value)) = parse_index_imm_store(text)? {
-        bytes.extend([index.prefix(), 0x36, offset, value]);
-    } else if let Some((inc, index, offset)) = parse_index_inc_dec(text)? {
-        bytes.extend([index.prefix(), if inc { 0x34 } else { 0x35 }, offset]);
-    } else if let Some((op, index, offset)) = parse_index_alu(text)? {
-        bytes.extend([index.prefix(), accumulator_alu_reg8_opcode(op, 6), offset]);
-    } else if let Some(register) = parse_ld_reg8_from_hl(text) {
-        bytes.push(0x46 + register * 8);
-    } else if let Some(register) = parse_ld_hl_from_reg8(text) {
-        bytes.push(0x70 + register);
-    } else if let Some(value) = parse_ld_hl_imm(text)? {
-        bytes.push(0x36);
-        bytes.push(value);
-    } else if text == "ld a, (de)" {
-        bytes.push(0x1A);
-    } else if text == "ld a, (bc)" {
-        bytes.push(0x0A);
-    } else if text == "ld (de), a" {
-        bytes.push(0x12);
-    } else if text == "ld (bc), a" {
-        bytes.push(0x02);
-    } else if let Some(inc) = parse_inc_dec_hl_indirect(text) {
-        bytes.push(if inc { 0x34 } else { 0x35 });
-    } else if text == "dec sp" {
-        bytes.push(0x3B);
-    } else if text == "inc sp" {
-        bytes.push(0x33);
     } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
         bytes.extend([index.prefix(), 0xCB, offset, opcode]);
     } else if let Some(value) = text.strip_prefix("ld h,") {
@@ -398,38 +335,6 @@ fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
     Ok((offset as i8) as u8)
 }
 
-fn parse_ld_reg8_from_hl(text: &str) -> Option<u8> {
-    let (dst, src) = parse_ld_operands(text)?;
-    if src != "(hl)" {
-        return None;
-    }
-    reg8_code(dst)
-}
-
-fn parse_ld_hl_from_reg8(text: &str) -> Option<u8> {
-    let (dst, src) = parse_ld_operands(text)?;
-    if dst != "(hl)" {
-        return None;
-    }
-    reg8_code(src)
-}
-
-fn parse_ld_hl_imm(text: &str) -> Result<Option<u8>, Diagnostic> {
-    let Some((dst, value)) = parse_ld_operands(text) else {
-        return Ok(None);
-    };
-    if dst != "(hl)" || reg8_code(value).is_some() || value.starts_with('(') {
-        return Ok(None);
-    }
-    Ok(Some(parse_u8(value)?))
-}
-
-fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
-    let rest = text.strip_prefix("ld ")?;
-    let (dst, src) = rest.split_once(',')?;
-    Some((dst.trim(), src.trim()))
-}
-
 fn parse_wrapped_indirect(text: &str) -> Option<&str> {
     text.strip_prefix('(')?.strip_suffix(')')
 }
@@ -454,53 +359,6 @@ fn parse_cb_operation_operand(text: &str) -> Option<(u8, &str)> {
     }
 }
 
-fn reg8_code(register: &str) -> Option<u8> {
-    match register {
-        "b" => Some(0),
-        "c" => Some(1),
-        "d" => Some(2),
-        "e" => Some(3),
-        "h" => Some(4),
-        "l" => Some(5),
-        "a" => Some(7),
-        _ => None,
-    }
-}
-
-fn parse_inc_dec_hl_indirect(text: &str) -> Option<bool> {
-    match text {
-        "inc (hl)" => Some(true),
-        "dec (hl)" => Some(false),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AccumulatorAluOp {
-    Add,
-    Adc,
-    Sub,
-    Sbc,
-    And,
-    Or,
-    Xor,
-    Cp,
-}
-
-fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
-    let base = match op {
-        AccumulatorAluOp::Add => 0x80,
-        AccumulatorAluOp::Adc => 0x88,
-        AccumulatorAluOp::Sub => 0x90,
-        AccumulatorAluOp::Sbc => 0x98,
-        AccumulatorAluOp::And => 0xA0,
-        AccumulatorAluOp::Xor => 0xA8,
-        AccumulatorAluOp::Or => 0xB0,
-        AccumulatorAluOp::Cp => 0xB8,
-    };
-    base + register
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IndexRegister {
     Ix,
@@ -514,127 +372,6 @@ impl IndexRegister {
             IndexRegister::Iy => 0xFD,
         }
     }
-}
-
-fn parse_index_byte_load(text: &str) -> Result<Option<(IndexRegister, u8)>, Diagnostic> {
-    for (prefix, register) in [
-        ("ld a, (ix", IndexRegister::Ix),
-        ("ld a, (iy", IndexRegister::Iy),
-    ] {
-        let Some(rest) = text.strip_prefix(prefix) else {
-            continue;
-        };
-        return parse_index_offset(rest).map(|offset| Some((register, offset)));
-    }
-    Ok(None)
-}
-
-fn parse_index_byte_store(text: &str) -> Result<Option<(IndexRegister, u8)>, Diagnostic> {
-    for (prefix, register) in [("ld (ix", IndexRegister::Ix), ("ld (iy", IndexRegister::Iy)] {
-        let Some(rest) = text.strip_prefix(prefix) else {
-            continue;
-        };
-        let Some(rest) = rest.strip_suffix("), a") else {
-            return Ok(None);
-        };
-        return parse_index_offset(rest).map(|offset| Some((register, offset)));
-    }
-    Ok(None)
-}
-
-fn parse_index_reg8_load(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
-    let Some((dst, src)) = parse_ld_operands(text) else {
-        return Ok(None);
-    };
-    if dst == "a" {
-        return Ok(None);
-    }
-    let Some(dst) = reg8_code(dst) else {
-        return Ok(None);
-    };
-    let Some((index, offset)) = parse_index_indirect(src)? else {
-        return Ok(None);
-    };
-    Ok(Some((index, dst, offset)))
-}
-
-fn parse_index_reg8_store(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
-    let Some((dst, src)) = parse_ld_operands(text) else {
-        return Ok(None);
-    };
-    let Some((index, offset)) = parse_index_indirect(dst)? else {
-        return Ok(None);
-    };
-    if src == "a" {
-        return Ok(None);
-    }
-    let Some(src) = reg8_code(src) else {
-        return Ok(None);
-    };
-    Ok(Some((index, offset, src)))
-}
-
-fn parse_index_imm_store(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
-    let Some((dst, src)) = parse_ld_operands(text) else {
-        return Ok(None);
-    };
-    let Some((index, offset)) = parse_index_indirect(dst)? else {
-        return Ok(None);
-    };
-    if reg8_code(src).is_some() || parse_index_indirect(src)?.is_some() {
-        return Ok(None);
-    }
-    Ok(Some((index, offset, parse_u8(src)?)))
-}
-
-fn parse_index_inc_dec(text: &str) -> Result<Option<(bool, IndexRegister, u8)>, Diagnostic> {
-    let (inc, operand) = if let Some(operand) = text.strip_prefix("inc ") {
-        (true, operand)
-    } else if let Some(operand) = text.strip_prefix("dec ") {
-        (false, operand)
-    } else {
-        return Ok(None);
-    };
-    let Some((index, offset)) = parse_index_indirect(operand.trim())? else {
-        return Ok(None);
-    };
-    Ok(Some((inc, index, offset)))
-}
-
-fn parse_index_alu(
-    text: &str,
-) -> Result<Option<(AccumulatorAluOp, IndexRegister, u8)>, Diagnostic> {
-    if let Some(src) = text.strip_prefix("add a,") {
-        return parse_index_alu_operand(AccumulatorAluOp::Add, src.trim());
-    }
-    if let Some(src) = text.strip_prefix("adc a,") {
-        return parse_index_alu_operand(AccumulatorAluOp::Adc, src.trim());
-    }
-    if let Some(src) = text.strip_prefix("sbc a,") {
-        return parse_index_alu_operand(AccumulatorAluOp::Sbc, src.trim());
-    }
-    for (prefix, op) in [
-        ("sub ", AccumulatorAluOp::Sub),
-        ("and ", AccumulatorAluOp::And),
-        ("or ", AccumulatorAluOp::Or),
-        ("xor ", AccumulatorAluOp::Xor),
-        ("cp ", AccumulatorAluOp::Cp),
-    ] {
-        if let Some(src) = text.strip_prefix(prefix) {
-            return parse_index_alu_operand(op, src.trim());
-        }
-    }
-    Ok(None)
-}
-
-fn parse_index_alu_operand(
-    op: AccumulatorAluOp,
-    operand: &str,
-) -> Result<Option<(AccumulatorAluOp, IndexRegister, u8)>, Diagnostic> {
-    let Some((index, offset)) = parse_index_indirect(operand)? else {
-        return Ok(None);
-    };
-    Ok(Some((op, index, offset)))
 }
 
 fn parse_index_cb_operation(text: &str) -> Result<Option<(IndexRegister, u8, u8)>, Diagnostic> {
