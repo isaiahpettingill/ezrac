@@ -2292,9 +2292,94 @@ HIR and TBIR must make target differences explicit:
 
 Until HIR and TBIR exist, non-eZ80 targets should be treated as design targets, experimental prototypes, or golden-output experiments rather than fully supported backends.
 
-### 40.5 Future Conditional Compilation
+### 40.5 Conditional Compilation
 
-EZRA should define conditional compilation as future work so shared code and SDK modules can support multiple targets from one source tree. The syntax and exact evaluation rules are not yet specified.
+EZRA supports declaration-level conditional compilation with structured `@cfg(...)` attributes. The syntax is intentionally closer to Rust attributes and Zig/V compile-time predicates than to C/C++ text preprocessing: conditions attach to EZRA declarations and are evaluated by the compiler before HIR name resolution and type checking.
+
+Examples:
+
+```ezra
+@cfg(target("agonlight-mos-ez80"))
+import agon.mos
+
+@cfg(cpu("ez80"))
+fn fast_copy(dst: ptr<u8>, src: ptr<u8>, len: u24) {
+    asm volatile clobber(memory) {
+        "ldir"
+    }
+}
+
+@cfg(not(cpu("ez80")))
+fn fast_copy(dst: ptr<u8>, src: ptr<u8>, len: u24) {
+    while len > 0 {
+        *dst = *src
+        dst += 1
+        src += 1
+        len -= 1
+    }
+}
+
+@cfg(all(cpu("ez80"), feature("mos")))
+const HAS_MOS: bool = true
+```
+
+`@cfg(...)` may be applied to:
+
+```text
+- imports
+- constants
+- type aliases
+- ports
+- MMIO declarations
+- embeds
+- globals
+- structs
+- extern asm functions
+- normal functions
+```
+
+Statement-level conditional compilation is not part of the initial design. Prefer declaration-level variants and shared helper functions. This keeps inactive target-specific code out of HIR/TBIR without introducing a token-level preprocessor.
+
+Supported predicates:
+
+```text
+target("triple")          true when the selected target triple exactly matches
+target_family("name")     true for broad target families such as "agonlight" or "ti84pce"
+cpu("name")               true for CPU families such as "ez80", "z80", or "m68k"
+vendor("name")            true for target vendors/platform owners when modeled by the target profile
+os("name")                true for OS/runtime profiles such as "mos"
+pointer_width(N)          true when pointer width is N bits
+address_width(N)          true when physical target addresses are N bits
+feature("name")           true when a target or build feature is enabled
+debug                     true for debug/profile builds when profiles are added
+release                   true for release/profile builds when profiles are added
+all(a, b, ...)            true when all nested conditions are true
+any(a, b, ...)            true when at least one nested condition is true
+not(a)                    true when the nested condition is false
+```
+
+Unknown predicate names are compile errors. Unknown feature names are compile errors unless the project explicitly declares user build features in `Ezra.toml`. A malformed condition is a parse error with the attribute source location.
+
+Multiple `@cfg(...)` attributes on the same declaration are combined with logical `all(...)` semantics:
+
+```ezra
+@cfg(cpu("ez80"))
+@cfg(feature("mos"))
+fn mos_only() {}
+```
+
+is equivalent to:
+
+```ezra
+@cfg(all(cpu("ez80"), feature("mos")))
+fn mos_only() {}
+```
+
+Inactive declarations are removed before import resolution, HIR construction, type checking, TBIR lowering, assembly emission, and binary layout. Inactive code is still lexed and parsed as EZRA syntax so syntax errors do not hide permanently in shared source files, but it is not semantically checked for unavailable symbols, target-incompatible ports/MMIO, or unsupported inline assembly.
+
+When conditional compilation removes all active implementations of a referenced symbol, the normal unknown-identifier or missing-declaration diagnostic is reported. If the compiler can prove that two active declarations with the same exported name conflict after `@cfg` evaluation, it reports a duplicate declaration diagnostic and includes the active condition context when useful.
+
+Build metadata and map output should record the selected target triple, active target features, and active user build features so conditional builds remain reproducible.
 
 Goals:
 
