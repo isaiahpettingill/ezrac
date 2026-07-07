@@ -166,6 +166,9 @@ pub fn encode_generated_instruction(
     if let Some((op, register)) = parse_accumulator_alu_reg8_or_hl(text) {
         return Ok(Some(vec![accumulator_alu_reg8_opcode(op, register)]));
     }
+    if let Some((op, value)) = parse_accumulator_alu_imm(text)? {
+        return Ok(Some(vec![accumulator_alu_imm_opcode(op), value]));
+    }
     if let Some(opcode) = parse_bit_operation_reg8_or_hl(text)? {
         return Ok(Some(vec![0xCB, opcode]));
     }
@@ -330,6 +333,41 @@ fn parse_accumulator_alu_reg8_or_hl(text: &str) -> Option<(AccumulatorAluOp, u8)
         }
     }
     None
+}
+
+fn parse_accumulator_alu_imm(text: &str) -> Result<Option<(AccumulatorAluOp, u8)>, Diagnostic> {
+    if let Some(src) = text.strip_prefix("add a,") {
+        return parse_alu_imm(src, AccumulatorAluOp::Add);
+    }
+    if let Some(src) = text.strip_prefix("adc a,") {
+        return parse_alu_imm(src, AccumulatorAluOp::Adc);
+    }
+    if let Some(src) = text.strip_prefix("sbc a,") {
+        return parse_alu_imm(src, AccumulatorAluOp::Sbc);
+    }
+    for (prefix, op) in [
+        ("sub ", AccumulatorAluOp::Sub),
+        ("and ", AccumulatorAluOp::And),
+        ("or ", AccumulatorAluOp::Or),
+        ("xor ", AccumulatorAluOp::Xor),
+        ("cp ", AccumulatorAluOp::Cp),
+    ] {
+        if let Some(src) = text.strip_prefix(prefix) {
+            return parse_alu_imm(src, op);
+        }
+    }
+    Ok(None)
+}
+
+fn parse_alu_imm(
+    src: &str,
+    op: AccumulatorAluOp,
+) -> Result<Option<(AccumulatorAluOp, u8)>, Diagnostic> {
+    let src = src.trim();
+    if reg8_or_hl_code(src).is_some() || !is_numeric_literal(src) {
+        return Ok(None);
+    }
+    Ok(Some((op, parse_u8(src)?)))
 }
 
 fn parse_bit_operation_reg8_or_hl(text: &str) -> Result<Option<u8>, Diagnostic> {
@@ -541,6 +579,19 @@ fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
     base + register
 }
 
+fn accumulator_alu_imm_opcode(op: AccumulatorAluOp) -> u8 {
+    match op {
+        AccumulatorAluOp::Add => 0xC6,
+        AccumulatorAluOp::Adc => 0xCE,
+        AccumulatorAluOp::Sub => 0xD6,
+        AccumulatorAluOp::Sbc => 0xDE,
+        AccumulatorAluOp::And => 0xE6,
+        AccumulatorAluOp::Xor => 0xEE,
+        AccumulatorAluOp::Or => 0xF6,
+        AccumulatorAluOp::Cp => 0xFE,
+    }
+}
+
 fn parse_u8(text: &str) -> Result<u8, Diagnostic> {
     let value = parse_number(text)?;
     if value > 0xFF {
@@ -639,6 +690,10 @@ mod tests {
         assert_eq!(
             encode_generated_instruction(CpuFamily::Ez80, "rst.lis 10h").unwrap(),
             Some(vec![0x49, 0xD7])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "xor 55h").unwrap(),
+            Some(vec![0xEE, 0x55])
         );
     }
 

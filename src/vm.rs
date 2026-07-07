@@ -308,8 +308,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         Ok(2)
     } else if parse_inc_dec_hl_indirect(text).is_some() {
         Ok(1)
-    } else if parse_accumulator_alu_imm(text)?.is_some() {
-        Ok(2)
     } else if parse_ld_reg16_direct_load(text).is_some()
         || parse_ld_direct_reg16_store(text).is_some()
     {
@@ -424,9 +422,6 @@ fn emit_instruction(
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(inc) = parse_inc_dec_hl_indirect(text) {
         bytes.push(if inc { 0x34 } else { 0x35 });
-    } else if let Some((op, value)) = parse_accumulator_alu_imm(text)? {
-        bytes.push(accumulator_alu_imm_opcode(op));
-        bytes.push(value);
     } else if text == "dec sp" {
         bytes.push(0x3B);
     } else if text == "inc sp" {
@@ -441,9 +436,6 @@ fn emit_instruction(
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(value) = text.strip_prefix("ld h,") {
         bytes.push(0x26);
-        bytes.push(parse_u8(value.trim())?);
-    } else if let Some(value) = text.strip_prefix("xor ") {
-        bytes.push(0xEE);
         bytes.push(parse_u8(value.trim())?);
     } else if let Some(value) = text.strip_prefix("ld a,") {
         bytes.push(0x3E);
@@ -612,46 +604,6 @@ enum AccumulatorAluOp {
     Cp,
 }
 
-fn parse_accumulator_alu_imm(text: &str) -> Result<Option<(AccumulatorAluOp, u8)>, Diagnostic> {
-    if let Some(src) = text.strip_prefix("add a,") {
-        let src = src.trim();
-        if reg8_code(src).is_some() {
-            return Ok(None);
-        }
-        return Ok(Some((AccumulatorAluOp::Add, parse_u8(src)?)));
-    }
-    if let Some(src) = text.strip_prefix("adc a,") {
-        let src = src.trim();
-        if reg8_code(src).is_some() {
-            return Ok(None);
-        }
-        return Ok(Some((AccumulatorAluOp::Adc, parse_u8(src)?)));
-    }
-    if let Some(src) = text.strip_prefix("sbc a,") {
-        let src = src.trim();
-        if reg8_code(src).is_some() {
-            return Ok(None);
-        }
-        return Ok(Some((AccumulatorAluOp::Sbc, parse_u8(src)?)));
-    }
-    for (prefix, op) in [
-        ("sub ", AccumulatorAluOp::Sub),
-        ("and ", AccumulatorAluOp::And),
-        ("or ", AccumulatorAluOp::Or),
-        ("xor ", AccumulatorAluOp::Xor),
-        ("cp ", AccumulatorAluOp::Cp),
-    ] {
-        if let Some(src) = text.strip_prefix(prefix) {
-            let src = src.trim();
-            if reg8_code(src).is_some() {
-                return Ok(None);
-            }
-            return Ok(Some((op, parse_u8(src)?)));
-        }
-    }
-    Ok(None)
-}
-
 fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
     let base = match op {
         AccumulatorAluOp::Add => 0x80,
@@ -664,19 +616,6 @@ fn accumulator_alu_reg8_opcode(op: AccumulatorAluOp, register: u8) -> u8 {
         AccumulatorAluOp::Cp => 0xB8,
     };
     base + register
-}
-
-fn accumulator_alu_imm_opcode(op: AccumulatorAluOp) -> u8 {
-    match op {
-        AccumulatorAluOp::Add => 0xC6,
-        AccumulatorAluOp::Adc => 0xCE,
-        AccumulatorAluOp::Sub => 0xD6,
-        AccumulatorAluOp::Sbc => 0xDE,
-        AccumulatorAluOp::And => 0xE6,
-        AccumulatorAluOp::Xor => 0xEE,
-        AccumulatorAluOp::Or => 0xF6,
-        AccumulatorAluOp::Cp => 0xFE,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
