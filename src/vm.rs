@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use ez80::{Cpu, Machine, Reg8, Reg16};
+use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
 use crate::asm::ez80 as asm_meta;
 use crate::diagnostic::{Diagnostic, SourceLocation};
@@ -118,16 +118,7 @@ pub fn run_assembly_test_with_cpu_options_at(
         machine.poke(base_addr + address as u32, byte);
     }
 
-    let mut cpu = match cpu_family {
-        CpuFamily::Ez80 => Cpu::new_ez80(),
-        CpuFamily::Z80 => Cpu::new_z80(),
-        _ => {
-            return Err(Diagnostic::new(format!(
-                "test runner does not support CPU `{}`",
-                cpu_family.as_str()
-            )));
-        }
-    };
+    let mut cpu = Cpu::new_for_mode(cpu_mode_for_family(cpu_family));
     cpu.state.reg.adl = cpu_family == CpuFamily::Ez80;
     cpu.state.set_pc(base_addr);
     if cpu_family == CpuFamily::Z80 {
@@ -205,6 +196,18 @@ pub fn run_assembly_test_with_cpu_options_at(
         ports: machine.ports,
         failure: Some(TestRunFailure::Timeout),
     })
+}
+
+fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
+    match cpu {
+        CpuFamily::Ez80 => CpuMode::EZ80,
+        CpuFamily::Z80 => CpuMode::Z80,
+        CpuFamily::Z80N => CpuMode::Z80N,
+        CpuFamily::Z180 => CpuMode::Z180,
+        CpuFamily::I8080 => CpuMode::I8080,
+        CpuFamily::I8085 => CpuMode::I8085,
+        CpuFamily::M68k => CpuMode::Z80,
+    }
 }
 
 fn handle_cpm_bdos_call(cpu: &mut Cpu, machine: &mut TestMachine) -> Result<bool, Diagnostic> {

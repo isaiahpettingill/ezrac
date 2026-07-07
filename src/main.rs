@@ -498,6 +498,7 @@ fn resolve_build_settings(
             .and_then(|project| project.layout_file.clone())
     });
     let layout = load_layout(layout_path.as_deref(), &target.triple.value)?;
+    let default_sdk_symbols = options.default_sdk_symbols() && target.default_sdk_symbols;
     let sdk = SdkResolver {
         target: Some(target.triple.value.clone()),
         sdk_roots: project
@@ -526,22 +527,32 @@ fn resolve_build_settings(
         assembler_cpu,
         layout,
         layout_path,
-        default_sdk_symbols: options.default_sdk_symbols(),
+        default_sdk_symbols,
         output_root,
         executable_name,
     })
 }
 
 fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
-    if matches!(settings.target.triple.cpu, CpuFamily::Ez80 | CpuFamily::Z80) {
+    if matches!(
+        settings.target.triple.cpu,
+        CpuFamily::Ez80 | CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180
+    ) {
         return Ok(());
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL and classic Z80; use `assemble` for hand-written assembly or a supported source target",
+        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL and Z80-family targets; use `assemble` for hand-written assembly or a supported source target",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
+}
+
+fn source_codegen_cpu(cpu: CpuFamily) -> CpuFamily {
+    match cpu {
+        CpuFamily::Z80N | CpuFamily::Z180 => CpuFamily::Z80,
+        cpu => cpu,
+    }
 }
 
 fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
@@ -698,7 +709,7 @@ fn build_ezra_source(
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            settings.target.triple.cpu,
+            source_codegen_cpu(settings.target.triple.cpu),
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -766,7 +777,7 @@ fn write_build_artifacts(
     let executable_path = output_base.with_extension(settings.output_format.extension());
 
     let assembled = ezra::vm::assemble_subset_with_options_at(
-        AssemblerCpu::from(settings.target.triple.cpu),
+        AssemblerCpu::from(source_codegen_cpu(settings.target.triple.cpu)),
         &assembly,
         settings.layout.entry.get(),
         &assembly_source_options(source_path, &settings.layout),
@@ -808,7 +819,9 @@ fn build_output_map(
     code_len: usize,
     symbols: &[ezra::vm::AssemblySymbol],
 ) -> Result<String, ezra::diagnostic::Diagnostic> {
-    if settings.output_format == OutputFormat::CpmCom {
+    if settings.output_format == OutputFormat::CpmCom
+        || bare_target_cpu(&settings.target.triple.value).is_some()
+    {
         let code_len = u32::try_from(code_len).map_err(|_| {
             ezra::diagnostic::Diagnostic::new("program code exceeds 24-bit address space")
         })?;
@@ -1157,6 +1170,9 @@ fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Resul
 }
 
 fn build_executable_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
+    if settings.output_format == OutputFormat::IntelHex {
+        return Ok(intel_hex_bytes(settings.layout.load.get(), code));
+    }
     if settings
         .target
         .triple
@@ -1166,6 +1182,36 @@ fn build_executable_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u
         return build_agon_mos_executable(settings.layout.entry.get(), code);
     }
     Ok(code.to_vec())
+}
+
+fn intel_hex_bytes(base_addr: u32, code: &[u8]) -> Vec<u8> {
+    let mut out = String::new();
+    let mut current_upper = None;
+    for (offset, chunk) in code.chunks(16).enumerate() {
+        let addr = base_addr + (offset * 16) as u32;
+        let upper = (addr >> 16) as u16;
+        if current_upper != Some(upper) {
+            current_upper = Some(upper);
+            push_ihex_record(&mut out, 0, 0x04, &upper.to_be_bytes());
+        }
+        push_ihex_record(&mut out, (addr & 0xFFFF) as u16, 0x00, chunk);
+    }
+    push_ihex_record(&mut out, 0, 0x01, &[]);
+    out.into_bytes()
+}
+
+fn push_ihex_record(out: &mut String, address: u16, kind: u8, data: &[u8]) {
+    let len = data.len() as u8;
+    let mut sum = len
+        .wrapping_add((address >> 8) as u8)
+        .wrapping_add(address as u8)
+        .wrapping_add(kind);
+    out.push_str(&format!(":{len:02X}{address:04X}{kind:02X}"));
+    for byte in data {
+        sum = sum.wrapping_add(*byte);
+        out.push_str(&format!("{byte:02X}"));
+    }
+    out.push_str(&format!("{:02X}\n", (!sum).wrapping_add(1)));
 }
 
 fn build_agon_mos_executable(entry: u32, code: &[u8]) -> Result<Vec<u8>, String> {
@@ -1233,7 +1279,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            settings.target.triple.cpu,
+            source_codegen_cpu(settings.target.triple.cpu),
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -1391,7 +1437,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
                 &assembly_options_from_layout_and_program(
                     &settings.layout,
                     &program,
-                    settings.target.triple.cpu,
+                    source_codegen_cpu(settings.target.triple.cpu),
                     options.command.debug_comments,
                     settings.default_sdk_symbols,
                 )?,
@@ -1423,7 +1469,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            settings.target.triple.cpu,
+            source_codegen_cpu(settings.target.triple.cpu),
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -1467,7 +1513,7 @@ fn check_source_with_layout(
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
-            settings.target.triple.cpu,
+            source_codegen_cpu(settings.target.triple.cpu),
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -1516,7 +1562,12 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 }
 
 fn default_layout_for_target(target: &str) -> Layout {
-    if target.starts_with("agonlight-mos-ez80") {
+    if let Some(cpu) = bare_target_cpu(target) {
+        match cpu {
+            AssemblerCpu::Ez80 => Layout::bare_ez80(),
+            _ => Layout::bare_16(cpu.as_str()),
+        }
+    } else if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
     } else if target.starts_with("ezra-test-flat-ez80") {
         Layout::ez80_test_flat()
@@ -1529,6 +1580,14 @@ fn default_layout_for_target(target: &str) -> Layout {
     } else {
         Layout::ezra_default()
     }
+}
+
+fn bare_target_cpu(target: &str) -> Option<AssemblerCpu> {
+    let mut parts = target.split('-');
+    if parts.next()? != "bare" {
+        return None;
+    }
+    parts.find_map(|part| AssemblerCpu::parse(part).ok())
 }
 
 fn assembly_options_from_layout(
@@ -2185,6 +2244,111 @@ mod tests {
         assert_eq!(bin[69], 0xC9);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bare_z80_source_build_starts_at_zero_without_header() {
+        let root = temp_root("bare_z80_source_bin");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("bare-z80".to_owned()),
+        })
+        .unwrap();
+        let map = std::fs::read_to_string(outputs.map).unwrap();
+        let bin = std::fs::read(outputs.executable).unwrap();
+
+        assert!(map.contains(".text        0x000000"), "{map}");
+        assert!(!bin.starts_with(b"EZRA"), "{bin:02X?}");
+        assert!(!bin.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bare_source_build_can_emit_com_and_intel_hex() {
+        for (name, output, extension, prefix) in [
+            ("bare_z80_source_com", "com", "com", ""),
+            ("bare_z80_source_hex", "hex", "hex", ":020000040000FA"),
+        ] {
+            let root = temp_root(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("Ezra.toml"),
+                format!(
+                    r#"
+                    [project]
+                    name = "bare-demo"
+
+                    [build]
+                    input = "main.ezra"
+                    target = "bare-z80"
+                    output = "{output}"
+                    executable = "demo"
+                    "#
+                ),
+            )
+            .unwrap();
+            let source_path = root.join("main.ezra");
+            std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+            let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+            let bytes = std::fs::read(&outputs.executable).unwrap();
+
+            assert_eq!(
+                outputs.executable.extension().and_then(|ext| ext.to_str()),
+                Some(extension)
+            );
+            if !prefix.is_empty() {
+                let text = String::from_utf8(bytes).unwrap();
+                assert!(text.starts_with(prefix), "{text}");
+                assert!(text.ends_with(":00000001FF\n"), "{text}");
+            }
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn bare_assembly_targets_cover_each_cpu_mode() {
+        let cases = [
+            ("bare-i8080", "mvi a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
+            ("bare-i8085", "rim\nsim\nret\n", vec![0x20, 0x30, 0xC9]),
+            ("bare-z80", "ld a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
+            ("bare-z80n", "ld a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
+            ("bare-z180", "mlt bc\nret\n", vec![0xED, 0x4C, 0xC9]),
+            ("bare-ez80", "ld a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
+        ];
+
+        for (target, source, expected) in cases {
+            let root = temp_root(target);
+            std::fs::create_dir_all(&root).unwrap();
+            let source_path = root.join("main.asm");
+            let output_path = root.join("main.bin");
+            std::fs::write(&source_path, source).unwrap();
+
+            assemble_file(&AssembleOptions {
+                path: source_path.to_string_lossy().into_owned(),
+                output: Some(output_path.to_string_lossy().into_owned()),
+                base_addr: None,
+                assembler_cpu: None,
+                layout_path: None,
+                map_path: None,
+                target: Some(target.to_owned()),
+            })
+            .unwrap();
+
+            assert_eq!(std::fs::read(output_path).unwrap(), expected, "{target}");
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -3510,8 +3674,8 @@ mod tests {
     }
 
     #[test]
-    fn commands_reject_unimplemented_output_formats() {
-        let root = temp_root("unsupported_output");
+    fn commands_accept_intel_hex_output_format() {
+        let root = temp_root("intel_hex_output");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("game.ezra");
         std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
@@ -3525,8 +3689,11 @@ mod tests {
         )
         .unwrap();
 
-        let error = build_source(source_path.to_str().unwrap()).unwrap_err();
-        assert!(error.contains("expected `bin` or `com`"), "{error}");
+        let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("hex")
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

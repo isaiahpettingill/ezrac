@@ -21,8 +21,11 @@ pub const HEADER_SIZE: u16 = 0x0040;
 pub enum CpuFamily {
     Ez80,
     Z80,
+    Z80N,
+    Z180,
     M68k,
     I8080,
+    I8085,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +88,10 @@ impl From<CpuFamily> for AssemblerCpu {
         match cpu {
             CpuFamily::Ez80 => Self::Ez80,
             CpuFamily::Z80 => Self::Z80,
+            CpuFamily::Z80N => Self::Z80N,
+            CpuFamily::Z180 => Self::Z180,
             CpuFamily::I8080 => Self::I8080,
+            CpuFamily::I8085 => Self::I8085,
             CpuFamily::M68k => Self::Ez80,
         }
     }
@@ -96,8 +102,11 @@ impl CpuFamily {
         match self {
             Self::Ez80 => "ez80",
             Self::Z80 => "z80",
+            Self::Z80N => "z80n",
+            Self::Z180 => "z180",
             Self::M68k => "m68k",
-            Self::I8080 => "8080",
+            Self::I8080 => "i8080",
+            Self::I8085 => "i8085",
         }
     }
 }
@@ -125,6 +134,7 @@ pub struct TargetMemoryModel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputFormat {
     CpmCom,
+    IntelHex,
     RawBin,
 }
 
@@ -132,6 +142,7 @@ impl OutputFormat {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::CpmCom => "com",
+            Self::IntelHex => "hex",
             Self::RawBin => "bin",
         }
     }
@@ -150,14 +161,22 @@ pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, Str
     };
     Ok(TargetProfile {
         output_format: output_format_for_target(&triple),
-        triple,
         memory,
-        default_sdk_symbols: true,
+        default_sdk_symbols: !is_bare_target(&triple),
+        triple,
     })
 }
 
+fn is_bare_target(triple: &TargetTriple) -> bool {
+    triple.value.split('-').any(|part| part == "bare")
+}
+
 fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
-    if triple.cpu == CpuFamily::Z80 && triple.value.split('-').any(|part| part == "cpm") {
+    if matches!(
+        triple.cpu,
+        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180
+    ) && triple.value.split('-').any(|part| part == "cpm")
+    {
         OutputFormat::CpmCom
     } else {
         OutputFormat::RawBin
@@ -170,11 +189,15 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
             pointer_width_bits: 24,
             address_width_bits: 24,
         }),
-        CpuFamily::Z80 => Some(TargetMemoryModel {
+        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 => Some(TargetMemoryModel {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
-        CpuFamily::M68k | CpuFamily::I8080 => None,
+        CpuFamily::I8080 | CpuFamily::I8085 => Some(TargetMemoryModel {
+            pointer_width_bits: 16,
+            address_width_bits: 16,
+        }),
+        CpuFamily::M68k => None,
     }
 }
 
@@ -182,8 +205,9 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
     match value {
         "bin" => Ok(OutputFormat::RawBin),
         "com" => Ok(OutputFormat::CpmCom),
+        "hex" | "ihex" | "intel-hex" => Ok(OutputFormat::IntelHex),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin` or `com`"
+            "unsupported output format `{value}`; expected `bin`, `com`, or `hex`"
         )),
     }
 }
@@ -201,9 +225,12 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
         .rev()
         .find_map(|part| match *part {
             "ez80" => Some(CpuFamily::Ez80),
+            "z180" => Some(CpuFamily::Z180),
+            "z80n" => Some(CpuFamily::Z80N),
             "z80" => Some(CpuFamily::Z80),
             "m68k" => Some(CpuFamily::M68k),
-            "8080" => Some(CpuFamily::I8080),
+            "i8080" | "8080" => Some(CpuFamily::I8080),
+            "i8085" | "8085" => Some(CpuFamily::I8085),
             _ => None,
         })
         .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;
@@ -287,6 +314,18 @@ mod tests {
             CpuFamily::Z80
         );
         assert_eq!(
+            parse_target_triple("bare-z80n").unwrap().cpu,
+            CpuFamily::Z80N
+        );
+        assert_eq!(
+            parse_target_triple("bare-z180").unwrap().cpu,
+            CpuFamily::Z180
+        );
+        assert_eq!(
+            parse_target_triple("bare-i8085").unwrap().cpu,
+            CpuFamily::I8085
+        );
+        assert_eq!(
             parse_target_triple("sega-genesis-m68k").unwrap().cpu,
             CpuFamily::M68k
         );
@@ -317,6 +356,16 @@ mod tests {
     }
 
     #[test]
+    fn resolves_bare_targets_without_default_sdk_symbols() {
+        let target = resolve_target_profile(Some("bare-z180")).unwrap();
+
+        assert_eq!(target.triple.cpu, CpuFamily::Z180);
+        assert_eq!(target.output_format, OutputFormat::RawBin);
+        assert_eq!(target.memory.address_width_bits, 16);
+        assert!(!target.default_sdk_symbols);
+    }
+
+    #[test]
     fn rejects_cpus_without_target_profiles_for_now() {
         let error = resolve_target_profile(Some("sega-genesis-m68k")).unwrap_err();
         assert!(
@@ -326,10 +375,11 @@ mod tests {
     }
 
     #[test]
-    fn raw_bin_is_the_only_implemented_output_format_for_now() {
+    fn parses_output_formats() {
         assert_eq!(parse_output_format("bin"), Ok(OutputFormat::RawBin));
         assert_eq!(parse_output_format("com"), Ok(OutputFormat::CpmCom));
-        let error = parse_output_format("hex").unwrap_err();
-        assert!(error.contains("expected `bin` or `com`"), "{error}");
+        assert_eq!(parse_output_format("hex"), Ok(OutputFormat::IntelHex));
+        let error = parse_output_format("bad").unwrap_err();
+        assert!(error.contains("expected `bin`, `com`, or `hex`"), "{error}");
     }
 }

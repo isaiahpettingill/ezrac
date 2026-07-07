@@ -82,6 +82,100 @@ pub struct Layout {
 }
 
 impl Layout {
+    pub fn bare_16(cpu: &str) -> Self {
+        Self {
+            name: format!("bare_{cpu}"),
+            load: Address24::new(0x0000),
+            entry: Address24::new(0x0000),
+            stack: Address24::new(0xFFFF),
+            regions: vec![
+                region(
+                    "code",
+                    0x0000,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x8000, 0x9FFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xA000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xC000, 0xDFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xE000,
+                    0xEFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xF000,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: bare_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xFFFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x8000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
+            ],
+        }
+    }
+
+    pub fn bare_ez80() -> Self {
+        Self {
+            name: "bare_ez80".to_owned(),
+            load: Address24::new(0x0000),
+            entry: Address24::new(0x0000),
+            stack: Address24::new(0xFF_FFFF),
+            regions: vec![
+                region(
+                    "code",
+                    0x000000,
+                    0x3FFFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x400000, 0x5FFFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x600000,
+                    0x9FFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xA00000, 0xBFFFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xC00000,
+                    0xEFFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xF00000,
+                    0xFFFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: bare_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xFF_FFFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x600000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x400000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xA00000)),
+            ],
+        }
+    }
+
     pub fn ezra_default() -> Self {
         Self {
             name: "ezra_default".to_owned(),
@@ -989,6 +1083,18 @@ fn section(name: &str, region: &str, align: u32) -> Section {
         region: region.to_owned(),
         align,
     }
+}
+
+fn bare_sections() -> Vec<Section> {
+    vec![
+        section(".header", "code", 1),
+        section(".text", "code", 1),
+        section(".rodata", "rodata", 1),
+        section(".data", "ram", 1),
+        section(".bss", "ram", 1),
+        section(".assets", "assets", 1),
+        section(".scratch", "scratch", 1),
+    ]
 }
 
 fn symbol(name: &str, value: Address24) -> Symbol {
