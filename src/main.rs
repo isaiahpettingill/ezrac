@@ -18,7 +18,7 @@ use ezra::{
         EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format, resolve_target_profile,
     },
     tbir::TbirProgram,
-    vm::{TestRunOptions, assemble_ez80_subset_with_symbols_at, run_assembly_test_with_options_at},
+    vm::TestRunOptions,
 };
 
 fn main() -> ExitCode {
@@ -306,12 +306,12 @@ fn resolve_build_settings(
 }
 
 fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
-    if settings.target.triple.cpu == CpuFamily::Ez80 {
+    if matches!(settings.target.triple.cpu, CpuFamily::Ez80 | CpuFamily::Z80) {
         return Ok(());
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL; use `assemble` for hand-written assembly or an eZ80 target",
+        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL and classic Z80; use `assemble` for hand-written assembly or a supported source target",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
@@ -411,6 +411,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -426,11 +427,15 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(settings.output_format.extension());
 
-    let assembled = assemble_ez80_subset_with_symbols_at(&assembly, settings.layout.entry.get())
-        .map_err(|error| error.to_string())?;
-    let map = build_cartridge_map(
+    let assembled = ezra::vm::assemble_subset_with_symbols_at(
+        settings.target.triple.cpu,
+        &assembly,
+        settings.layout.entry.get(),
+    )
+    .map_err(|error| error.to_string())?;
+    let map = build_output_map(
+        &settings,
         &program,
-        &settings.layout,
         assembled.bytes.len(),
         &assembled.symbols,
     )
@@ -456,6 +461,33 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         map: map_path,
         executable: executable_path,
     })
+}
+
+fn build_output_map(
+    settings: &BuildSettings,
+    program: &ezra::ast::Program,
+    code_len: usize,
+    symbols: &[ezra::vm::AssemblySymbol],
+) -> Result<String, ezra::diagnostic::Diagnostic> {
+    if settings.output_format == OutputFormat::CpmCom {
+        let code_len = u32::try_from(code_len).map_err(|_| {
+            ezra::diagnostic::Diagnostic::new("program code exceeds 24-bit address space")
+        })?;
+        let end = settings
+            .layout
+            .entry
+            .get()
+            .checked_add(code_len.saturating_sub(1))
+            .ok_or_else(|| {
+                ezra::diagnostic::Diagnostic::new("program code exceeds 24-bit address space")
+            })?;
+        return Ok(format!(
+            "section      start      end        size\n{:<12} {} 0x{:06X} 0x{:06X}\n",
+            ".text", settings.layout.entry, end, code_len
+        ));
+    }
+
+    build_cartridge_map(program, &settings.layout, code_len, symbols)
 }
 
 fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Result<PathBuf, String> {
@@ -547,12 +579,14 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
-    let run = run_assembly_test_with_options_at(
+    let run = ezra::vm::run_assembly_test_with_cpu_options_at(
+        settings.target.triple.cpu,
         &assembly,
         &TestRunOptions {
             instruction_budget: 1_000_000,
@@ -706,6 +740,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
                 &assembly_options_from_layout_and_program(
                     &settings.layout,
                     &program,
+                    settings.target.triple.cpu,
                     options.command.debug_comments,
                     settings.default_sdk_symbols,
                 )?,
@@ -737,6 +772,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -780,6 +816,7 @@ fn check_source_with_layout(
         assembly_options_from_layout_and_program(
             &settings.layout,
             &program,
+            settings.target.triple.cpu,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -841,10 +878,12 @@ fn default_layout_for_target(target: &str) -> Layout {
 
 fn assembly_options_from_layout(
     layout: &Layout,
+    cpu: CpuFamily,
     debug_comments: bool,
     default_sdk_symbols: bool,
 ) -> AssemblyOptions {
     AssemblyOptions {
+        cpu,
         debug_comments,
         default_sdk_symbols,
         mos_executable: layout.name == "agon_light_mos",
@@ -864,10 +903,12 @@ fn assembly_options_from_layout(
 fn assembly_options_from_layout_and_program(
     layout: &Layout,
     program: &ezra::ast::Program,
+    cpu: CpuFamily,
     debug_comments: bool,
     default_sdk_symbols: bool,
 ) -> Result<AssemblyOptions, String> {
-    let mut options = assembly_options_from_layout(layout, debug_comments, default_sdk_symbols);
+    let mut options =
+        assembly_options_from_layout(layout, cpu, debug_comments, default_sdk_symbols);
     options.section_bases =
         layout_section_bases(program, layout).map_err(|error| error.to_string())?;
     Ok(options)
@@ -926,7 +967,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble eZ80 assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -1380,8 +1421,8 @@ mod tests {
     }
 
     #[test]
-    fn z80_source_build_reaches_clear_codegen_diagnostic_after_cfg() {
-        let root = temp_root("z80_codegen_diagnostic");
+    fn z80_source_check_accepts_16_bit_cfg() {
+        let root = temp_root("z80_source_check");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("game.ezra");
         std::fs::write(
@@ -1393,19 +1434,14 @@ mod tests {
         )
         .unwrap();
 
-        let error = check(&CommandOptions {
+        check(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("zxspectrum-z80".to_owned()),
         })
-        .unwrap_err();
-
-        assert!(
-            error.contains("EZRA source codegen is only implemented for eZ80 ADL"),
-            "{error}"
-        );
+        .unwrap();
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1832,25 +1868,101 @@ mod tests {
     }
 
     #[test]
-    fn commands_reject_non_ez80_source_codegen_for_now() {
-        let root = temp_root("unsupported_target");
+    fn commands_run_z80_source_on_emulator() {
+        let root = temp_root("z80_source_test");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("game.ezra");
-        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    let i: u8 = 0
+                    let sum: u8 = 0
+                    while i < 5 {
+                        sum += i
+                        i += 1
+                    }
+                    test.assert_eq_u8(sum, 10, 1)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
 
-        let error = check(&CommandOptions {
+        test_source_with_command_options(&CommandOptions {
             path: source_path.to_string_lossy().into_owned(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("zxspectrum-z80".to_owned()),
         })
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            error.contains("EZRA source codegen is only implemented for eZ80 ADL"),
-            "{error}"
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn z80_source_emits_z80_assembly_without_ez80_adl_forms() {
+        let root = temp_root("z80_source_asm");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    let a: u16 = 12
+                    let b: u16 = 13
+                    let c: u16 = a * b
+                    test.assert_eq_u16(c, 156, 2)
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        let asm = emit_assembly_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("zxspectrum-z80".to_owned()),
+        })
+        .unwrap();
+
+        assert!(asm.contains("; target: Z80"), "{asm}");
+        assert!(asm.contains("ld sp, FF00h"), "{asm}");
+        assert!(asm.contains("out (0Dh), a"), "{asm}");
+        assert!(!asm.contains("out0"), "{asm}");
+        assert!(!asm.contains("rst.lis"), "{asm}");
+        assert!(!asm.contains("mlt"), "{asm}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cpm_z80_source_build_writes_com_binary() {
+        let root = temp_root("cpm_source_build");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+
+        let outputs = build_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap();
+
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let com = std::fs::read(&outputs.executable).unwrap();
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("com")
         );
+        assert!(asm.contains("; target: Z80"), "{asm}");
+        assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
 
         let _ = std::fs::remove_dir_all(root);
     }

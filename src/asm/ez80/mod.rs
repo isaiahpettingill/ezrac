@@ -179,6 +179,12 @@ pub fn encode_generated_instruction(
         return Ok(Some(bytes));
     }
     if let Some((dst, src)) = parse_ld_operands(text) {
+        if let Some(bytes) = encode_ld_reg16_imm(cpu, dst, src)? {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) = encode_ld_direct16(cpu, dst, src)? {
+            return Ok(Some(bytes));
+        }
         if let (Some(dst), Some(src)) = (reg8_code(dst), reg8_code(src)) {
             return Ok(Some(vec![0x40 + dst * 8 + src]));
         }
@@ -235,6 +241,82 @@ pub fn encode_generated_instruction(
         return Ok(Some(bytes));
     }
     Ok(None)
+}
+
+fn encode_ld_direct16(cpu: CpuFamily, dst: &str, src: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if cpu != CpuFamily::Z80 {
+        return Ok(None);
+    }
+    if let Some(addr) = parse_wrapped_indirect(dst) {
+        let Some(prefix) = direct16_store_prefix(src) else {
+            return Ok(None);
+        };
+        let value = parse_u16(addr)?;
+        let mut bytes = prefix.to_vec();
+        bytes.push(value as u8);
+        bytes.push((value >> 8) as u8);
+        return Ok(Some(bytes));
+    }
+    if let Some(addr) = parse_wrapped_indirect(src) {
+        let Some(prefix) = direct16_load_prefix(dst) else {
+            return Ok(None);
+        };
+        let value = parse_u16(addr)?;
+        let mut bytes = prefix.to_vec();
+        bytes.push(value as u8);
+        bytes.push((value >> 8) as u8);
+        return Ok(Some(bytes));
+    }
+    Ok(None)
+}
+
+fn direct16_load_prefix(register: &str) -> Option<&'static [u8]> {
+    match register {
+        "a" => Some(&[0x3A]),
+        "hl" => Some(&[0x2A]),
+        "bc" => Some(&[0xED, 0x4B]),
+        "de" => Some(&[0xED, 0x5B]),
+        "sp" => Some(&[0xED, 0x7B]),
+        _ => None,
+    }
+}
+
+fn direct16_store_prefix(register: &str) -> Option<&'static [u8]> {
+    match register {
+        "a" => Some(&[0x32]),
+        "hl" => Some(&[0x22]),
+        "bc" => Some(&[0xED, 0x43]),
+        "de" => Some(&[0xED, 0x53]),
+        "sp" => Some(&[0xED, 0x73]),
+        _ => None,
+    }
+}
+
+fn encode_ld_reg16_imm(
+    cpu: CpuFamily,
+    dst: &str,
+    src: &str,
+) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if cpu != CpuFamily::Z80 {
+        return Ok(None);
+    }
+    if !is_numeric_literal(src) {
+        return Ok(None);
+    }
+    let prefix_and_opcode: &[u8] = match dst {
+        "bc" => &[0x01],
+        "de" => &[0x11],
+        "hl" => &[0x21],
+        "sp" => &[0x31],
+        "ix" => &[0xDD, 0x21],
+        "iy" => &[0xFD, 0x21],
+        _ => return Ok(None),
+    };
+    let value = parse_u16(src)?;
+    let mut bytes = prefix_and_opcode.to_vec();
+    bytes.push(value as u8);
+    bytes.push((value >> 8) as u8);
+    Ok(Some(bytes))
 }
 
 pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<usize>, Diagnostic> {
@@ -1147,6 +1229,16 @@ fn parse_u8(text: &str) -> Result<u8, Diagnostic> {
         return Err(Diagnostic::new(format!("value {text} is outside u8 range")));
     }
     Ok(value as u8)
+}
+
+fn parse_u16(text: &str) -> Result<u16, Diagnostic> {
+    let value = parse_number(text)?;
+    if value > 0xFFFF {
+        return Err(Diagnostic::new(format!(
+            "value {text} is outside u16 range"
+        )));
+    }
+    Ok(value as u16)
 }
 
 fn is_numeric_literal(text: &str) -> bool {

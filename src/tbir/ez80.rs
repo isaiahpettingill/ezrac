@@ -3,7 +3,7 @@ use crate::{
     ast::Program,
     diagnostic::Diagnostic,
     hir::{HirDeclaration, HirProgram},
-    target::Address24,
+    target::{Address24, CpuFamily},
 };
 
 use super::{
@@ -33,9 +33,20 @@ pub fn lower(
     Ok(TbirProgram {
         source: hir.source_path.clone(),
         target: TbirTarget {
-            name: "ez80-adl".to_owned(),
-            pointer_width_bits: 24,
-            native_int_widths: vec![8, 16, 24],
+            name: match options.cpu {
+                CpuFamily::Z80 => "z80".to_owned(),
+                _ => "ez80-adl".to_owned(),
+            },
+            pointer_width_bits: if options.cpu == CpuFamily::Z80 {
+                16
+            } else {
+                24
+            },
+            native_int_widths: if options.cpu == CpuFamily::Z80 {
+                vec![8, 16]
+            } else {
+                vec![8, 16, 24]
+            },
             prefer_code_size: true,
             has_cache: false,
         },
@@ -47,6 +58,45 @@ pub fn lower(
 }
 
 fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic> {
+    if options.cpu == CpuFamily::Z80 {
+        return Ok(TbirMemoryModel {
+            address_width_bits: 16,
+            regions: vec![
+                region(
+                    "code",
+                    options.code_base,
+                    0x1_0000u32.saturating_sub(options.code_base.get()),
+                    TbirAccess::ReadOnly,
+                    false,
+                    true,
+                ),
+                region(
+                    "rodata",
+                    options.rodata_base,
+                    0x1_0000u32.saturating_sub(options.rodata_base.get()),
+                    TbirAccess::ReadOnly,
+                    false,
+                    false,
+                ),
+                region(
+                    "ram",
+                    options.ram_base,
+                    0x1_0000u32.saturating_sub(options.ram_base.get()),
+                    TbirAccess::ReadWrite,
+                    false,
+                    false,
+                ),
+                region(
+                    "assets",
+                    options.asset_base,
+                    0x1_0000u32.saturating_sub(options.asset_base.get()),
+                    TbirAccess::ReadOnly,
+                    false,
+                    false,
+                ),
+            ],
+        });
+    }
     let regions = vec![
         region(
             "code",
