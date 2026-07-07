@@ -98,8 +98,88 @@ pub fn encode_generated_instruction(
 }
 
 pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<usize>, Diagnostic> {
+    if let Some(branch) = branch_instruction(cpu, text) {
+        return Ok(Some(branch.len()));
+    }
     Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()))
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BranchInstruction<'a> {
+    pub opcode: u8,
+    pub target: &'a str,
+    pub width: BranchWidth,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchWidth {
+    Relative8,
+    Absolute24,
+}
+
+impl BranchInstruction<'_> {
+    pub const fn len(self) -> usize {
+        match self.width {
+            BranchWidth::Relative8 => 2,
+            BranchWidth::Absolute24 => 4,
+        }
+    }
+}
+
+pub fn branch_instruction<'a>(cpu: CpuFamily, text: &'a str) -> Option<BranchInstruction<'a>> {
+    if !matches!(cpu, CpuFamily::Ez80 | CpuFamily::Z80) {
+        return None;
+    }
+    for (prefix, opcode) in ABSOLUTE_BRANCH_FORMS {
+        if let Some(target) = text.strip_prefix(prefix) {
+            return Some(BranchInstruction {
+                opcode: *opcode,
+                target: target.trim(),
+                width: BranchWidth::Absolute24,
+            });
+        }
+    }
+    for (prefix, opcode) in RELATIVE_BRANCH_FORMS {
+        if let Some(target) = text.strip_prefix(prefix) {
+            return Some(BranchInstruction {
+                opcode: *opcode,
+                target: target.trim(),
+                width: BranchWidth::Relative8,
+            });
+        }
+    }
+    None
+}
+
+const ABSOLUTE_BRANCH_FORMS: &[(&str, u8)] = &[
+    ("call nz,", 0xC4),
+    ("call z,", 0xCC),
+    ("call nc,", 0xD4),
+    ("call c,", 0xDC),
+    ("call po,", 0xE4),
+    ("call pe,", 0xEC),
+    ("call p,", 0xF4),
+    ("call m,", 0xFC),
+    ("call ", 0xCD),
+    ("jp z,", 0xCA),
+    ("jp nz,", 0xC2),
+    ("jp c,", 0xDA),
+    ("jp nc,", 0xD2),
+    ("jp po,", 0xE2),
+    ("jp pe,", 0xEA),
+    ("jp p,", 0xF2),
+    ("jp m,", 0xFA),
+    ("jp ", 0xC3),
+];
+
+const RELATIVE_BRANCH_FORMS: &[(&str, u8)] = &[
+    ("jr z,", 0x28),
+    ("jr nz,", 0x20),
+    ("jr c,", 0x38),
+    ("jr nc,", 0x30),
+    ("jr ", 0x18),
+    ("djnz ", 0x10),
+];
 
 fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix("ld ")?;
@@ -271,5 +351,18 @@ mod tests {
             encode_generated_instruction(CpuFamily::Ez80, "add a, c").unwrap(),
             Some(vec![0x81])
         );
+    }
+
+    #[test]
+    fn branch_metadata_describes_control_flow_widths() {
+        let call = branch_instruction(CpuFamily::Ez80, "call nz, _main").unwrap();
+        assert_eq!(call.opcode, 0xC4);
+        assert_eq!(call.target, "_main");
+        assert_eq!(call.len(), 4);
+
+        let jr = branch_instruction(CpuFamily::Ez80, "jr z, .done").unwrap();
+        assert_eq!(jr.opcode, 0x28);
+        assert_eq!(jr.target, ".done");
+        assert_eq!(jr.len(), 2);
     }
 }

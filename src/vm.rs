@@ -296,35 +296,8 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld a, r"
     ) {
         Ok(2)
-    } else if text.starts_with("ld sp,")
-        || text.starts_with("call nz,")
-        || text.starts_with("call z,")
-        || text.starts_with("call nc,")
-        || text.starts_with("call c,")
-        || text.starts_with("call po,")
-        || text.starts_with("call pe,")
-        || text.starts_with("call p,")
-        || text.starts_with("call m,")
-        || text.starts_with("call ")
-        || text.starts_with("jp z,")
-        || text.starts_with("jp nz,")
-        || text.starts_with("jp c,")
-        || text.starts_with("jp nc,")
-        || text.starts_with("jp po,")
-        || text.starts_with("jp pe,")
-        || text.starts_with("jp p,")
-        || text.starts_with("jp m,")
-        || text.starts_with("jp ")
-    {
+    } else if text.starts_with("ld sp,") {
         Ok(4)
-    } else if text.starts_with("jr z,")
-        || text.starts_with("jr nz,")
-        || text.starts_with("jr c,")
-        || text.starts_with("jr nc,")
-        || text.starts_with("jr ")
-        || text.starts_with("djnz ")
-    {
-        Ok(2)
     } else if matches!(
         text,
         "ret"
@@ -554,78 +527,13 @@ fn emit_instruction(
     } else if let Some(value) = text.strip_prefix("ld sp,") {
         bytes.push(0x31);
         push24(bytes, parse_addr(value.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call nz,") {
-        bytes.push(0xC4);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call z,") {
-        bytes.push(0xCC);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call nc,") {
-        bytes.push(0xD4);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call c,") {
-        bytes.push(0xDC);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call po,") {
-        bytes.push(0xE4);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call pe,") {
-        bytes.push(0xEC);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call p,") {
-        bytes.push(0xF4);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call m,") {
-        bytes.push(0xFC);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("call ") {
-        bytes.push(0xCD);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp z,") {
-        bytes.push(0xCA);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp nz,") {
-        bytes.push(0xC2);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp c,") {
-        bytes.push(0xDA);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp nc,") {
-        bytes.push(0xD2);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp po,") {
-        bytes.push(0xE2);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp pe,") {
-        bytes.push(0xEA);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp p,") {
-        bytes.push(0xF2);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp m,") {
-        bytes.push(0xFA);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jp ") {
-        bytes.push(0xC3);
-        push24(bytes, parse_addr(target.trim(), labels, pc)?);
-    } else if let Some(target) = text.strip_prefix("jr z,") {
-        bytes.push(0x28);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
-    } else if let Some(target) = text.strip_prefix("jr nz,") {
-        bytes.push(0x20);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
-    } else if let Some(target) = text.strip_prefix("jr c,") {
-        bytes.push(0x38);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
-    } else if let Some(target) = text.strip_prefix("jr nc,") {
-        bytes.push(0x30);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
-    } else if let Some(target) = text.strip_prefix("jr ") {
-        bytes.push(0x18);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
-    } else if let Some(target) = text.strip_prefix("djnz ") {
-        bytes.push(0x10);
-        bytes.push(relative_offset(pc, parse_addr(target.trim(), labels, pc)?)?);
+    } else if let Some(branch) = asm_meta::branch_instruction(CpuFamily::Ez80, text) {
+        bytes.push(branch.opcode);
+        let target = parse_addr(branch.target, labels, pc)?;
+        match branch.width {
+            asm_meta::BranchWidth::Relative8 => bytes.push(relative_offset(pc, target)?),
+            asm_meta::BranchWidth::Absolute24 => push24(bytes, target),
+        }
     } else if let Some((index, offset)) = parse_index_byte_load(text)? {
         bytes.extend([index.prefix(), 0x7E, offset]);
     } else if let Some((index, offset)) = parse_index_byte_store(text)? {
