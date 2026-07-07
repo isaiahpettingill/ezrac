@@ -79,8 +79,30 @@ pub fn emit_ez80_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
-    let hir = HirProgram::from_ast(program)?;
-    let _tbir = TbirProgram::for_ez80(&hir, &options)?;
+    let checked = CheckedEz80Program::from_program(program, &options)?;
+    emit_ez80_assembly_from_checked(program, &checked, options)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckedEz80Program {
+    pub hir: HirProgram,
+    pub tbir: TbirProgram,
+}
+
+impl CheckedEz80Program {
+    pub fn from_program(program: &Program, options: &AssemblyOptions) -> Result<Self, Diagnostic> {
+        let hir = HirProgram::from_ast(program)?;
+        let tbir = TbirProgram::for_ez80(&hir, options)?;
+        Ok(Self { hir, tbir })
+    }
+}
+
+pub fn emit_ez80_assembly_from_checked(
+    program: &Program,
+    checked: &CheckedEz80Program,
+    options: AssemblyOptions,
+) -> Result<String, Diagnostic> {
+    debug_assert_eq!(checked.hir.source_path, program.source_path);
     let symbols = Symbols::from_program(program, options.clone())?;
     let main = program
         .main_function()

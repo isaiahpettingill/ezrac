@@ -270,8 +270,8 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 }
 
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    if let Some(instruction) = asm_meta::exact_instruction(CpuFamily::Ez80, text) {
-        Ok(instruction.bytes.len())
+    if let Some(len) = asm_meta::generated_instruction_len(CpuFamily::Ez80, text)? {
+        Ok(len)
     } else if matches!(text, "ld sp, hl" | "jp (hl)" | "ex (sp), hl" | "ex af, af'") {
         Ok(1)
     } else if matches!(
@@ -526,8 +526,8 @@ fn emit_instruction(
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
-    if let Some(instruction) = asm_meta::exact_instruction(CpuFamily::Ez80, text) {
-        bytes.extend_from_slice(instruction.bytes);
+    if let Some(generated) = asm_meta::encode_generated_instruction(CpuFamily::Ez80, text)? {
+        bytes.extend(generated);
     } else if text == "ld sp, hl" {
         bytes.push(0xF9);
     } else if text == "ld sp, ix" {
