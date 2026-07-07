@@ -21,8 +21,9 @@ const Z80_PLUS: &[AssemblerCpu] = &[
     AssemblerCpu::Z180,
     AssemblerCpu::Ez80,
 ];
+const Z80N_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Z80N];
+const Z180_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Z180];
 const Z180_PLUS: &[AssemblerCpu] = &[AssemblerCpu::Z180, AssemblerCpu::Ez80];
-const EZ80_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Ez80];
 
 pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("nop", &[0x00]),
@@ -110,11 +111,37 @@ pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("otir", &[0xED, 0xB3]),
     z80_ez80("outd", &[0xED, 0xAB]),
     z80_ez80("otdr", &[0xED, 0xBB]),
+    z80n("swapnib", &[0xED, 0x23]),
+    z80n("mirror a", &[0xED, 0x24]),
+    z80n("bsla de, b", &[0xED, 0x28]),
+    z80n("bsra de, b", &[0xED, 0x29]),
+    z80n("bsrl de, b", &[0xED, 0x2A]),
+    z80n("bsrf de, b", &[0xED, 0x2B]),
+    z80n("brlc de, b", &[0xED, 0x2C]),
+    z80n("mul d, e", &[0xED, 0x30]),
+    z80n("add hl, a", &[0xED, 0x31]),
+    z80n("add de, a", &[0xED, 0x32]),
+    z80n("add bc, a", &[0xED, 0x33]),
+    z80n("outinb", &[0xED, 0x90]),
+    z80n("pixeldn", &[0xED, 0x93]),
+    z80n("pixelad", &[0xED, 0x94]),
+    z80n("setae", &[0xED, 0x95]),
+    z80n("jp (c)", &[0xED, 0x98]),
+    z80n("ldix", &[0xED, 0xA4]),
+    z80n("ldws", &[0xED, 0xA5]),
+    z80n("lddx", &[0xED, 0xAC]),
+    z80n("ldirx", &[0xED, 0xB4]),
+    z80n("ldpirx", &[0xED, 0xB7]),
+    z80n("lddrx", &[0xED, 0xBC]),
+    z180("otim", &[0xED, 0x83]),
+    z180("otimr", &[0xED, 0x93]),
+    z180("otdm", &[0xED, 0x8B]),
+    z180("otdmr", &[0xED, 0x9B]),
     z180_ez80("mlt bc", &[0xED, 0x4C]),
     z180_ez80("mlt de", &[0xED, 0x5C]),
     z180_ez80("mlt hl", &[0xED, 0x6C]),
     z180_ez80("mlt sp", &[0xED, 0x7C]),
-    ez80("slp", &[0xED, 0x76]),
+    z180_ez80("slp", &[0xED, 0x76]),
     z80_ez80("adc hl, bc", &[0xED, 0x4A]),
     z80_ez80("adc hl, de", &[0xED, 0x5A]),
     z80_ez80("adc hl, hl", &[0xED, 0x6A]),
@@ -145,6 +172,22 @@ const fn z80_ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec
     }
 }
 
+const fn z80n(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
+    InstructionSpec {
+        syntax,
+        cpus: Z80N_ONLY,
+        bytes,
+    }
+}
+
+const fn z180(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
+    InstructionSpec {
+        syntax,
+        cpus: Z180_ONLY,
+        bytes,
+    }
+}
+
 const fn z180_ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
     InstructionSpec {
         syntax,
@@ -153,18 +196,14 @@ const fn z180_ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpe
     }
 }
 
-const fn ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
-    InstructionSpec {
-        syntax,
-        cpus: EZ80_ONLY,
-        bytes,
-    }
+pub fn exact_instruction(cpu: AssemblerCpu, text: &str) -> Option<&'static InstructionSpec> {
+    EXACT_INSTRUCTIONS.iter().find(|instruction| {
+        exact_syntax_matches(instruction.syntax, text) && instruction.cpus.contains(&cpu)
+    })
 }
 
-pub fn exact_instruction(cpu: AssemblerCpu, text: &str) -> Option<&'static InstructionSpec> {
-    EXACT_INSTRUCTIONS
-        .iter()
-        .find(|instruction| instruction.syntax == text && instruction.cpus.contains(&cpu))
+fn exact_syntax_matches(expected: &str, actual: &str) -> bool {
+    expected == actual || expected.replace(", ", ",") == actual
 }
 
 pub fn instruction_set(cpu: AssemblerCpu) -> impl Iterator<Item = &'static InstructionSpec> {
@@ -191,6 +230,12 @@ pub fn encode_generated_instruction(
     }
     if let Some(instruction) = exact_instruction(cpu, text) {
         return Ok(Some(instruction.bytes.to_vec()));
+    }
+    if let Some(bytes) = parse_z80n_instruction(cpu, text)? {
+        return Ok(Some(bytes));
+    }
+    if let Some(bytes) = parse_z180_instruction(cpu, text)? {
+        return Ok(Some(bytes));
     }
     if let Some(bytes) = parse_prefixed_reg8_instruction(text)? {
         return Ok(Some(bytes));
@@ -293,6 +338,74 @@ fn encode_ld_direct16(
         bytes.push(value as u8);
         bytes.push((value >> 8) as u8);
         return Ok(Some(bytes));
+    }
+    Ok(None)
+}
+
+fn parse_z80n_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if cpu != AssemblerCpu::Z80N {
+        return Ok(None);
+    }
+    if let Some(value) = text.strip_prefix("test ") {
+        return Ok(Some(vec![0xED, 0x27, parse_u8(value)?]));
+    }
+    if let Some(value) = text.strip_prefix("push ") {
+        if !is_numeric_literal(value) {
+            return Ok(None);
+        }
+        let value = parse_u16(value)?;
+        return Ok(Some(vec![0xED, 0x8A, (value >> 8) as u8, value as u8]));
+    }
+    if let Some(value) = text.strip_prefix("add hl,") {
+        return parse_z80n_add_imm(value.trim(), 0x34);
+    }
+    if let Some(value) = text.strip_prefix("add de,") {
+        return parse_z80n_add_imm(value.trim(), 0x35);
+    }
+    if let Some(value) = text.strip_prefix("add bc,") {
+        return parse_z80n_add_imm(value.trim(), 0x36);
+    }
+    if let Some(rest) = text.strip_prefix("nextreg ") {
+        let Some((register, value)) = rest.split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid nextreg syntax `{text}`")));
+        };
+        let register = parse_u8(register.trim())?;
+        let value = value.trim();
+        if value == "a" {
+            return Ok(Some(vec![0xED, 0x92, register]));
+        }
+        return Ok(Some(vec![0xED, 0x91, register, parse_u8(value)?]));
+    }
+    Ok(None)
+}
+
+fn parse_z80n_add_imm(value: &str, opcode: u8) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if !is_numeric_literal(value) {
+        return Ok(None);
+    }
+    let value = parse_u16(value)?;
+    Ok(Some(vec![0xED, opcode, value as u8, (value >> 8) as u8]))
+}
+
+fn parse_z180_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if cpu != AssemblerCpu::Z180 {
+        return Ok(None);
+    }
+    if let Some(value) = text.strip_prefix("tstio ") {
+        return Ok(Some(vec![0xED, 0x74, parse_u8(value)?]));
+    }
+    if let Some(value) = text.strip_prefix("tst ") {
+        if is_numeric_literal(value) {
+            return Ok(Some(vec![0xED, 0x64, parse_u8(value)?]));
+        }
+        let register = if value == "(hl)" {
+            Some(6)
+        } else {
+            reg8_code(value)
+        };
+        if let Some(register) = register {
+            return Ok(Some(vec![0xED, 0x04 + register * 8]));
+        }
     }
     Ok(None)
 }
@@ -1802,6 +1915,100 @@ mod tests {
                 "{syntax}"
             );
             assert_ez80_emulator_decodes(syntax, &bytes);
+        }
+    }
+
+    #[test]
+    fn generated_instruction_metadata_encodes_z80n_extensions() {
+        let cases = [
+            ("swapnib", vec![0xED, 0x23]),
+            ("mirror a", vec![0xED, 0x24]),
+            ("test 7Fh", vec![0xED, 0x27, 0x7F]),
+            ("bsla de,b", vec![0xED, 0x28]),
+            ("bsra de,b", vec![0xED, 0x29]),
+            ("bsrl de,b", vec![0xED, 0x2A]),
+            ("bsrf de,b", vec![0xED, 0x2B]),
+            ("brlc de,b", vec![0xED, 0x2C]),
+            ("mul d,e", vec![0xED, 0x30]),
+            ("add hl,a", vec![0xED, 0x31]),
+            ("add de,a", vec![0xED, 0x32]),
+            ("add bc,a", vec![0xED, 0x33]),
+            ("add hl,1234h", vec![0xED, 0x34, 0x34, 0x12]),
+            ("add de,2345h", vec![0xED, 0x35, 0x45, 0x23]),
+            ("add bc,3456h", vec![0xED, 0x36, 0x56, 0x34]),
+            ("push 1234h", vec![0xED, 0x8A, 0x12, 0x34]),
+            ("outinb", vec![0xED, 0x90]),
+            ("nextreg 12h,34h", vec![0xED, 0x91, 0x12, 0x34]),
+            ("nextreg 12h,a", vec![0xED, 0x92, 0x12]),
+            ("pixeldn", vec![0xED, 0x93]),
+            ("pixelad", vec![0xED, 0x94]),
+            ("setae", vec![0xED, 0x95]),
+            ("jp (c)", vec![0xED, 0x98]),
+            ("ldix", vec![0xED, 0xA4]),
+            ("ldws", vec![0xED, 0xA5]),
+            ("lddx", vec![0xED, 0xAC]),
+            ("ldirx", vec![0xED, 0xB4]),
+            ("ldpirx", vec![0xED, 0xB7]),
+            ("lddrx", vec![0xED, 0xBC]),
+        ];
+
+        for (syntax, bytes) in cases {
+            assert_eq!(
+                encode_generated_instruction(AssemblerCpu::Z80N, syntax).unwrap(),
+                Some(bytes),
+                "{syntax}"
+            );
+            assert_eq!(
+                encode_generated_instruction(AssemblerCpu::Z80, syntax).unwrap(),
+                None,
+                "{syntax}"
+            );
+            assert_eq!(
+                encode_generated_instruction(AssemblerCpu::Z180, syntax).unwrap(),
+                None,
+                "{syntax}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_instruction_metadata_encodes_z180_extensions() {
+        let cases = [
+            ("slp", vec![0xED, 0x76], true),
+            ("mlt bc", vec![0xED, 0x4C], true),
+            ("otim", vec![0xED, 0x83], false),
+            ("otimr", vec![0xED, 0x93], false),
+            ("otdm", vec![0xED, 0x8B], false),
+            ("otdmr", vec![0xED, 0x9B], false),
+            ("tst b", vec![0xED, 0x04], false),
+            ("tst c", vec![0xED, 0x0C], false),
+            ("tst (hl)", vec![0xED, 0x34], false),
+            ("tst a", vec![0xED, 0x3C], false),
+            ("tst 5Ah", vec![0xED, 0x64, 0x5A], false),
+            ("tstio 80h", vec![0xED, 0x74, 0x80], false),
+        ];
+
+        for (syntax, bytes, also_ez80) in cases {
+            assert_eq!(
+                encode_generated_instruction(AssemblerCpu::Z180, syntax).unwrap(),
+                Some(bytes.clone()),
+                "{syntax}"
+            );
+            assert_eq!(
+                encode_generated_instruction(AssemblerCpu::Z80, syntax).unwrap(),
+                None,
+                "{syntax}"
+            );
+            assert_eq!(
+                encode_generated_instruction(AssemblerCpu::Z80N, syntax).unwrap(),
+                None,
+                "{syntax}"
+            );
+            assert_eq!(
+                encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap(),
+                also_ez80.then_some(bytes),
+                "{syntax}"
+            );
         }
     }
 
