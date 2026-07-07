@@ -1,0 +1,266 @@
+pub const SYSTEM_RESET: u8 = 0
+pub const CONSOLE_INPUT: u8 = 1
+pub const CONSOLE_OUTPUT: u8 = 2
+pub const READER_INPUT: u8 = 3
+pub const PUNCH_OUTPUT: u8 = 4
+pub const LIST_OUTPUT: u8 = 5
+pub const DIRECT_CONSOLE_IO: u8 = 6
+pub const GET_IO_BYTE: u8 = 7
+pub const SET_IO_BYTE: u8 = 8
+pub const PRINT_STRING: u8 = 9
+pub const READ_CONSOLE_BUFFER: u8 = 10
+pub const GET_CONSOLE_STATUS: u8 = 11
+pub const RETURN_VERSION_NUMBER: u8 = 12
+pub const RESET_DISK_SYSTEM: u8 = 13
+pub const SELECT_DISK: u8 = 14
+pub const OPEN_FILE: u8 = 15
+pub const CLOSE_FILE: u8 = 16
+pub const SEARCH_FOR_FIRST: u8 = 17
+pub const SEARCH_FOR_NEXT: u8 = 18
+pub const DELETE_FILE: u8 = 19
+pub const READ_SEQUENTIAL: u8 = 20
+pub const WRITE_SEQUENTIAL: u8 = 21
+pub const MAKE_FILE: u8 = 22
+pub const RENAME_FILE: u8 = 23
+pub const RETURN_LOGIN_VECTOR: u8 = 24
+pub const RETURN_CURRENT_DISK: u8 = 25
+pub const SET_DMA_ADDRESS: u8 = 26
+pub const GET_ALLOCATION_VECTOR: u8 = 27
+pub const WRITE_PROTECT_DISK: u8 = 28
+pub const GET_READ_ONLY_VECTOR: u8 = 29
+pub const SET_FILE_ATTRIBUTES: u8 = 30
+pub const GET_DISK_PARAMETER_BLOCK: u8 = 31
+pub const GET_SET_USER_CODE: u8 = 32
+pub const READ_RANDOM: u8 = 33
+pub const WRITE_RANDOM: u8 = 34
+pub const COMPUTE_FILE_SIZE: u8 = 35
+pub const SET_RANDOM_RECORD: u8 = 36
+pub const RESET_DRIVE: u8 = 37
+pub const ACCESS_DRIVE: u8 = 38
+pub const FREE_DRIVE: u8 = 39
+pub const WRITE_RANDOM_WITH_ZERO_FILL: u8 = 40
+
+pub const BDOS_ENTRY: u16 = 0x0005
+pub const DEFAULT_DMA_ADDRESS: u16 = 0x0080
+
+pub fn call(function: u8) {
+    asm volatile(in function: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "call 0005h"
+    }
+}
+
+pub fn call_e(function: u8, value: u8) {
+    asm volatile(in function: u8 as reg8, in value: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "ld e, {value}"
+        "call 0005h"
+    }
+}
+
+pub fn call_de(function: u8, value: u16) {
+    asm volatile(in function: u8 as reg8, in value: u16 as reg16, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "ld de, {value}"
+        "call 0005h"
+    }
+}
+
+pub fn call_a(function: u8) -> u8 {
+    let result: u8 = 0
+    asm volatile(in function: u8 as reg8, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "call 0005h"
+        "ld {result}, a"
+    }
+    return result
+}
+
+pub fn call_de_a(function: u8, value: u16) -> u8 {
+    let result: u8 = 0
+    asm volatile(in function: u8 as reg8, in value: u16 as reg16, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "ld de, {value}"
+        "call 0005h"
+        "ld {result}, a"
+    }
+    return result
+}
+
+pub fn call_hl(function: u8) -> u16 {
+    let result: u16 = 0
+    asm volatile(in function: u8 as reg8, out result: u16 as reg16, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "call 0005h"
+        "ld {result}, hl"
+    }
+    return result
+}
+
+pub fn exit() {
+    call(SYSTEM_RESET)
+}
+
+pub fn console_input() -> u8 {
+    return call_a(CONSOLE_INPUT)
+}
+
+pub fn console_output(ch: u8) {
+    call_e(CONSOLE_OUTPUT, ch)
+}
+
+pub fn reader_input() -> u8 {
+    return call_a(READER_INPUT)
+}
+
+pub fn punch_output(ch: u8) {
+    call_e(PUNCH_OUTPUT, ch)
+}
+
+pub fn list_output(ch: u8) {
+    call_e(LIST_OUTPUT, ch)
+}
+
+pub fn direct_console_io(value: u8) -> u8 {
+    return call_de_a(DIRECT_CONSOLE_IO, cast<u16>(value))
+}
+
+pub fn get_io_byte() -> u8 {
+    return call_a(GET_IO_BYTE)
+}
+
+pub fn set_io_byte(value: u8) {
+    call_e(SET_IO_BYTE, value)
+}
+
+pub fn print_string(address: u16) {
+    call_de(PRINT_STRING, address)
+}
+
+pub fn read_console_buffer(address: u16) {
+    call_de(READ_CONSOLE_BUFFER, address)
+}
+
+pub fn console_status() -> u8 {
+    return call_a(GET_CONSOLE_STATUS)
+}
+
+pub fn version() -> u16 {
+    return call_hl(RETURN_VERSION_NUMBER)
+}
+
+pub fn reset_disk_system() {
+    call(RESET_DISK_SYSTEM)
+}
+
+pub fn select_disk(drive: u8) {
+    call_e(SELECT_DISK, drive)
+}
+
+pub fn open_file(fcb: u16) -> u8 {
+    return call_de_a(OPEN_FILE, fcb)
+}
+
+pub fn close_file(fcb: u16) -> u8 {
+    return call_de_a(CLOSE_FILE, fcb)
+}
+
+pub fn search_for_first(fcb: u16) -> u8 {
+    return call_de_a(SEARCH_FOR_FIRST, fcb)
+}
+
+pub fn search_for_next() -> u8 {
+    return call_a(SEARCH_FOR_NEXT)
+}
+
+pub fn delete_file(fcb: u16) -> u8 {
+    return call_de_a(DELETE_FILE, fcb)
+}
+
+pub fn read_sequential(fcb: u16) -> u8 {
+    return call_de_a(READ_SEQUENTIAL, fcb)
+}
+
+pub fn write_sequential(fcb: u16) -> u8 {
+    return call_de_a(WRITE_SEQUENTIAL, fcb)
+}
+
+pub fn make_file(fcb: u16) -> u8 {
+    return call_de_a(MAKE_FILE, fcb)
+}
+
+pub fn rename_file(fcb: u16) -> u8 {
+    return call_de_a(RENAME_FILE, fcb)
+}
+
+pub fn login_vector() -> u16 {
+    return call_hl(RETURN_LOGIN_VECTOR)
+}
+
+pub fn current_disk() -> u8 {
+    return call_a(RETURN_CURRENT_DISK)
+}
+
+pub fn set_dma_address(address: u16) {
+    call_de(SET_DMA_ADDRESS, address)
+}
+
+pub fn allocation_vector() -> u16 {
+    return call_hl(GET_ALLOCATION_VECTOR)
+}
+
+pub fn write_protect_disk() {
+    call(WRITE_PROTECT_DISK)
+}
+
+pub fn read_only_vector() -> u16 {
+    return call_hl(GET_READ_ONLY_VECTOR)
+}
+
+pub fn set_file_attributes(fcb: u16) -> u8 {
+    return call_de_a(SET_FILE_ATTRIBUTES, fcb)
+}
+
+pub fn disk_parameter_block() -> u16 {
+    return call_hl(GET_DISK_PARAMETER_BLOCK)
+}
+
+pub fn get_user_code() -> u8 {
+    return call_de_a(GET_SET_USER_CODE, 0x00FF)
+}
+
+pub fn set_user_code(code: u8) {
+    call_e(GET_SET_USER_CODE, code)
+}
+
+pub fn read_random(fcb: u16) -> u8 {
+    return call_de_a(READ_RANDOM, fcb)
+}
+
+pub fn write_random(fcb: u16) -> u8 {
+    return call_de_a(WRITE_RANDOM, fcb)
+}
+
+pub fn compute_file_size(fcb: u16) -> u8 {
+    return call_de_a(COMPUTE_FILE_SIZE, fcb)
+}
+
+pub fn set_random_record(fcb: u16) -> u8 {
+    return call_de_a(SET_RANDOM_RECORD, fcb)
+}
+
+pub fn reset_drive(mask: u16) {
+    call_de(RESET_DRIVE, mask)
+}
+
+pub fn access_drive(mask: u16) {
+    call_de(ACCESS_DRIVE, mask)
+}
+
+pub fn free_drive(mask: u16) {
+    call_de(FREE_DRIVE, mask)
+}
+
+pub fn write_random_with_zero_fill(fcb: u16) -> u8 {
+    return call_de_a(WRITE_RANDOM_WITH_ZERO_FILL, fcb)
+}

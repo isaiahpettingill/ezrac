@@ -1,0 +1,22 @@
+import cpm.bdos
+
+pub const LF: u8 = 10
+pub const CR: u8 = 13
+pub const CTRL_Z: u8 = 26
+
+pub fn write(ch: u8) {
+    bdos.console_output(ch)
+}
+
+pub fn read() -> u8 {
+    return bdos.console_input()
+}
+
+pub fn newline() {
+    write(CR)
+    write(LF)
+}
+
+pub fn exit() {
+    bdos.exit()
+}

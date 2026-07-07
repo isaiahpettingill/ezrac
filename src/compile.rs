@@ -381,6 +381,18 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(|target| target.split('-').any(|part| part == "cpm")) {
+        match import {
+            "cpm.bdos" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/bdos.ezra"),
+                "cpm.bdos",
+            )),
+            "cpm.console" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/console.ezra"),
+                "cpm.console",
+            )),
+            _ => None,
+        }
     } else {
         None
     }
@@ -1230,6 +1242,63 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(unknown_feature.message, "unknown cfg feature `sprites`");
+    }
+
+    #[test]
+    fn cpm_z80_target_uses_builtin_bdos_sdk() {
+        let source = r#"
+            import cpm.bdos
+
+            fn main() {
+                bdos.console_output(65)
+                bdos.exit()
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("cpm-2.2-z80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Const(decl) if decl.name == "bdos.CONSOLE_OUTPUT")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "cpm.bdos.exit")
+        }));
+    }
+
+    #[test]
+    fn cpm_z80_target_uses_builtin_console_sdk() {
+        let source = r#"
+            import cpm.console
+
+            fn main() {
+                console.write(65)
+                console.newline()
+                console.exit()
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("cpm-2.2-z80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "console.write")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "cpm.console.exit")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
+        }));
     }
 
     #[test]
