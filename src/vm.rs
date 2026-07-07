@@ -1031,6 +1031,100 @@ mod tests {
     }
 
     #[test]
+    fn assembles_ix_iy_byte_alias_forms() {
+        let asm = r#"
+            ld ixh, 12h
+            ld ixl, a
+            ld b, ixh
+            ld ixh, ixl
+            inc ixh
+            dec ixl
+            add a, ixh
+            xor ixl
+            ld iyh, 34h
+            ld iyl, a
+            ld c, iyh
+            ld iyh, iyl
+            inc iyh
+            dec iyl
+            adc a, iyh
+            cp iyl
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xDD, 0x26, 0x12, 0xDD, 0x6F, 0xDD, 0x44, 0xDD, 0x65, 0xDD, 0x24, 0xDD, 0x2D, 0xDD,
+                0x84, 0xDD, 0xAD, 0xFD, 0x26, 0x34, 0xFD, 0x6F, 0xFD, 0x4C, 0xFD, 0x65, 0xFD, 0x24,
+                0xFD, 0x2D, 0xFD, 0x8C, 0xFD, 0xBD,
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_full_in0_out0_register_forms() {
+        let asm = r#"
+            in0 b, (12h)
+            in0 c, (12h)
+            in0 d, (12h)
+            in0 e, (12h)
+            in0 h, (12h)
+            in0 l, (12h)
+            in0 a, (12h)
+            out0 (34h), b
+            out0 (34h), c
+            out0 (34h), d
+            out0 (34h), e
+            out0 (34h), h
+            out0 (34h), l
+            out0 (34h), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0xED, 0x00, 0x12, 0xED, 0x08, 0x12, 0xED, 0x10, 0x12, 0xED, 0x18, 0x12, 0xED, 0x20,
+                0x12, 0xED, 0x28, 0x12, 0xED, 0x38, 0x12, 0xED, 0x01, 0x34, 0xED, 0x09, 0x34, 0xED,
+                0x11, 0x34, 0xED, 0x19, 0x34, 0xED, 0x21, 0x34, 0xED, 0x29, 0x34, 0xED, 0x39, 0x34,
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_ez80_mode_suffix_prefix_forms() {
+        let asm = r#"
+            nop.sis
+            ld.lis b, a
+            xor.sil 55h
+            out0.lil (0Ch), a
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x40, 0x00, 0x49, 0x47, 0x52, 0xEE, 0x55, 0x5B, 0xED, 0x39, 0x0C
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_sp_direct24_loads_and_stores() {
+        let asm = r#"
+            ld sp, (040000h)
+            ld (040003h), sp
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [0xED, 0x7B, 0x00, 0x00, 0x04, 0xED, 0x73, 0x03, 0x00, 0x04]
+        );
+    }
+
+    #[test]
     fn assembles_standard_io_instructions() {
         let asm = r#"
             in a, (12h)

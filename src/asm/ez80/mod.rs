@@ -16,6 +16,7 @@ pub struct InstructionSpec {
 }
 
 const Z80_AND_EZ80: &[CpuFamily] = &[CpuFamily::Z80, CpuFamily::Ez80];
+const EZ80_ONLY: &[CpuFamily] = &[CpuFamily::Ez80];
 
 pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("nop", &[0x00]),
@@ -107,6 +108,7 @@ pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("mlt de", &[0xED, 0x5C]),
     z80_ez80("mlt hl", &[0xED, 0x6C]),
     z80_ez80("mlt sp", &[0xED, 0x7C]),
+    ez80("slp", &[0xED, 0x76]),
     z80_ez80("adc hl, bc", &[0xED, 0x4A]),
     z80_ez80("adc hl, de", &[0xED, 0x5A]),
     z80_ez80("adc hl, hl", &[0xED, 0x6A]),
@@ -137,6 +139,14 @@ const fn z80_ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec
     }
 }
 
+const fn ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
+    InstructionSpec {
+        syntax,
+        cpus: EZ80_ONLY,
+        bytes,
+    }
+}
+
 pub fn exact_instruction(cpu: CpuFamily, text: &str) -> Option<&'static InstructionSpec> {
     EXACT_INSTRUCTIONS
         .iter()
@@ -156,8 +166,17 @@ pub fn encode_generated_instruction(
     if !matches!(cpu, CpuFamily::Ez80 | CpuFamily::Z80) {
         return Ok(None);
     }
+    if let Some((prefix, base)) = ez80_mode_suffixed_instruction(cpu, text) {
+        if let Some(mut bytes) = encode_generated_instruction(cpu, &base)? {
+            bytes.insert(0, prefix);
+            return Ok(Some(bytes));
+        }
+    }
     if let Some(instruction) = exact_instruction(cpu, text) {
         return Ok(Some(instruction.bytes.to_vec()));
+    }
+    if let Some(bytes) = parse_prefixed_reg8_instruction(text)? {
+        return Ok(Some(bytes));
     }
     if let Some((dst, src)) = parse_ld_operands(text) {
         if let (Some(dst), Some(src)) = (reg8_code(dst), reg8_code(src)) {
@@ -219,6 +238,11 @@ pub fn encode_generated_instruction(
 }
 
 pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<usize>, Diagnostic> {
+    if let Some((_prefix, base)) = ez80_mode_suffixed_instruction(cpu, text) {
+        if let Some(len) = generated_instruction_len(cpu, &base)? {
+            return Ok(Some(len + 1));
+        }
+    }
     if let Some(branch) = branch_instruction(cpu, text) {
         return Ok(Some(branch.len()));
     }
@@ -229,6 +253,29 @@ pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<us
         return Ok(Some(load.len()));
     }
     Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()))
+}
+
+pub fn ez80_mode_suffixed_instruction(cpu: CpuFamily, text: &str) -> Option<(u8, String)> {
+    if !matches!(cpu, CpuFamily::Ez80) {
+        return None;
+    }
+    let (mnemonic, rest) = text
+        .split_once(char::is_whitespace)
+        .map_or((text, ""), |(mnemonic, rest)| (mnemonic, rest.trim_start()));
+    let (mnemonic, suffix) = mnemonic.rsplit_once('.')?;
+    let prefix = match suffix {
+        "sis" => 0x40,
+        "lis" => 0x49,
+        "sil" => 0x52,
+        "lil" => 0x5B,
+        _ => return None,
+    };
+    let base = if rest.is_empty() {
+        mnemonic.to_owned()
+    } else {
+        format!("{mnemonic} {rest}")
+    };
+    Some((prefix, base))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -400,6 +447,7 @@ const DIRECT24_LOAD_FORMS: &[(&str, &[u8])] = &[
     ("hl", &[0x2A]),
     ("bc", &[0xED, 0x4B]),
     ("de", &[0xED, 0x5B]),
+    ("sp", &[0xED, 0x7B]),
     ("ix", &[0xDD, 0x2A]),
     ("iy", &[0xFD, 0x2A]),
 ];
@@ -409,6 +457,7 @@ const DIRECT24_STORE_FORMS: &[(&str, &[u8])] = &[
     ("hl", &[0x22]),
     ("bc", &[0xED, 0x43]),
     ("de", &[0xED, 0x53]),
+    ("sp", &[0xED, 0x73]),
     ("ix", &[0xDD, 0x22]),
     ("iy", &[0xFD, 0x22]),
 ];
@@ -523,6 +572,171 @@ fn parse_accumulator_alu_imm(text: &str) -> Result<Option<(AccumulatorAluOp, u8)
         }
     }
     Ok(None)
+}
+
+fn parse_prefixed_reg8_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if let Some((dst, src)) = parse_ld_operands(text) {
+        if let (Some(dst), Some(src)) = (prefixed_reg8_code(dst), prefixed_reg8_code(src)) {
+            return prefixed_reg8_bytes(dst, src, |dst, src| 0x40 + dst * 8 + src).map(Some);
+        }
+        if let Some(dst) = prefixed_reg8_code(dst) {
+            if !is_numeric_literal(src) {
+                return Ok(None);
+            }
+            return prefixed_reg8_unary_bytes(
+                dst,
+                ld_reg8_imm_opcode(dst.code),
+                Some(parse_u8(src)?),
+            )
+            .map(Some);
+        }
+    }
+    if let Some((inc, register)) = parse_inc_dec_reg8(text) {
+        let opcode = if inc { 0x04 } else { 0x05 };
+        return Ok(Some(vec![opcode + register * 8]));
+    }
+    if let Some((inc, operand)) = parse_inc_dec_operand(text) {
+        let Some(register) = prefixed_reg8_code(operand.trim()) else {
+            return Ok(None);
+        };
+        let opcode = if inc { 0x04 } else { 0x05 };
+        return prefixed_reg8_unary_bytes(register, opcode + register.code * 8, None).map(Some);
+    }
+    if let Some((op, register)) = parse_accumulator_alu_prefixed_reg8(text) {
+        return prefixed_reg8_unary_bytes(
+            register,
+            accumulator_alu_reg8_opcode(op, register.code),
+            None,
+        )
+        .map(Some);
+    }
+    Ok(None)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrefixedReg8 {
+    prefix: Option<u8>,
+    code: u8,
+}
+
+fn prefixed_reg8_code(register: &str) -> Option<PrefixedReg8> {
+    match register.trim() {
+        "b" => Some(PrefixedReg8 {
+            prefix: None,
+            code: 0,
+        }),
+        "c" => Some(PrefixedReg8 {
+            prefix: None,
+            code: 1,
+        }),
+        "d" => Some(PrefixedReg8 {
+            prefix: None,
+            code: 2,
+        }),
+        "e" => Some(PrefixedReg8 {
+            prefix: None,
+            code: 3,
+        }),
+        "h" => Some(PrefixedReg8 {
+            prefix: None,
+            code: 4,
+        }),
+        "l" => Some(PrefixedReg8 {
+            prefix: None,
+            code: 5,
+        }),
+        "a" => Some(PrefixedReg8 {
+            prefix: None,
+            code: 7,
+        }),
+        "ixh" => Some(PrefixedReg8 {
+            prefix: Some(0xDD),
+            code: 4,
+        }),
+        "ixl" => Some(PrefixedReg8 {
+            prefix: Some(0xDD),
+            code: 5,
+        }),
+        "iyh" => Some(PrefixedReg8 {
+            prefix: Some(0xFD),
+            code: 4,
+        }),
+        "iyl" => Some(PrefixedReg8 {
+            prefix: Some(0xFD),
+            code: 5,
+        }),
+        _ => None,
+    }
+}
+
+fn prefixed_reg8_bytes(
+    dst: PrefixedReg8,
+    src: PrefixedReg8,
+    opcode: impl FnOnce(u8, u8) -> u8,
+) -> Result<Vec<u8>, Diagnostic> {
+    let prefix = merge_reg8_prefixes(dst, src)?;
+    let mut bytes = Vec::new();
+    if let Some(prefix) = prefix {
+        bytes.push(prefix);
+    }
+    bytes.push(opcode(dst.code, src.code));
+    Ok(bytes)
+}
+
+fn prefixed_reg8_unary_bytes(
+    register: PrefixedReg8,
+    opcode: u8,
+    immediate: Option<u8>,
+) -> Result<Vec<u8>, Diagnostic> {
+    let mut bytes = Vec::new();
+    if let Some(prefix) = register.prefix {
+        bytes.push(prefix);
+    }
+    bytes.push(opcode);
+    if let Some(immediate) = immediate {
+        bytes.push(immediate);
+    }
+    Ok(bytes)
+}
+
+fn merge_reg8_prefixes(left: PrefixedReg8, right: PrefixedReg8) -> Result<Option<u8>, Diagnostic> {
+    match (left.prefix, right.prefix) {
+        (Some(left), Some(right)) if left != right => Err(Diagnostic::new(
+            "cannot mix ix and iy 8-bit register aliases in one instruction",
+        )),
+        (Some(_), None) if matches!(right.code, 4 | 5) => Err(Diagnostic::new(
+            "cannot mix ix/iy 8-bit register aliases with h or l",
+        )),
+        (None, Some(_)) if matches!(left.code, 4 | 5) => Err(Diagnostic::new(
+            "cannot mix ix/iy 8-bit register aliases with h or l",
+        )),
+        (Some(prefix), _) | (_, Some(prefix)) => Ok(Some(prefix)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn parse_accumulator_alu_prefixed_reg8(text: &str) -> Option<(AccumulatorAluOp, PrefixedReg8)> {
+    if let Some(src) = text.strip_prefix("add a,") {
+        return Some((AccumulatorAluOp::Add, prefixed_reg8_code(src.trim())?));
+    }
+    if let Some(src) = text.strip_prefix("adc a,") {
+        return Some((AccumulatorAluOp::Adc, prefixed_reg8_code(src.trim())?));
+    }
+    if let Some(src) = text.strip_prefix("sbc a,") {
+        return Some((AccumulatorAluOp::Sbc, prefixed_reg8_code(src.trim())?));
+    }
+    for (prefix, op) in [
+        ("sub ", AccumulatorAluOp::Sub),
+        ("and ", AccumulatorAluOp::And),
+        ("or ", AccumulatorAluOp::Or),
+        ("xor ", AccumulatorAluOp::Xor),
+        ("cp ", AccumulatorAluOp::Cp),
+    ] {
+        if let Some(src) = text.strip_prefix(prefix) {
+            return Some((op, prefixed_reg8_code(src.trim())?));
+        }
+    }
+    None
 }
 
 fn parse_alu_imm(
@@ -795,21 +1009,32 @@ fn parse_io_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
         return Ok(Some(vec![0xD3, parse_u8(port)?]));
     }
     if let Some(rest) = text.strip_prefix("in0 ") {
-        let port = rest
-            .trim()
-            .strip_prefix("a, (")
-            .and_then(|rest| rest.strip_suffix(')'))
-            .ok_or_else(|| Diagnostic::new(format!("invalid in0 syntax `{text}`")))?;
-        return Ok(Some(vec![0xED, 0x38, parse_u8(port)?]));
-    }
-    if let Some(rest) = text.strip_prefix("out0 ") {
-        let port = rest
+        let Some((register, port)) = rest.trim().split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid in0 syntax `{text}`")));
+        };
+        let Some(register) = reg8_code(register.trim()) else {
+            return Ok(None);
+        };
+        let port = port
             .trim()
             .strip_prefix('(')
-            .and_then(|rest| rest.split_once(')'))
-            .ok_or_else(|| Diagnostic::new(format!("invalid out0 syntax `{text}`")))?
-            .0;
-        return Ok(Some(vec![0xED, 0x39, parse_u8(port)?]));
+            .and_then(|rest| rest.strip_suffix(')'))
+            .ok_or_else(|| Diagnostic::new(format!("invalid in0 syntax `{text}`")))?;
+        return Ok(Some(vec![0xED, register * 8, parse_u8(port)?]));
+    }
+    if let Some(rest) = text.strip_prefix("out0 ") {
+        let Some((port, register)) = rest.trim().split_once(',') else {
+            return Err(Diagnostic::new(format!("invalid out0 syntax `{text}`")));
+        };
+        let Some(register) = reg8_code(register.trim()) else {
+            return Ok(None);
+        };
+        let port = port
+            .trim()
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .ok_or_else(|| Diagnostic::new(format!("invalid out0 syntax `{text}`")))?;
+        return Ok(Some(vec![0xED, 0x01 + register * 8, parse_u8(port)?]));
     }
     Ok(None)
 }
@@ -1057,6 +1282,124 @@ mod tests {
             encode_generated_instruction(CpuFamily::Ez80, "set 7, (ix-6)").unwrap(),
             Some(vec![0xDD, 0xCB, 0xFA, 0xFE])
         );
+    }
+
+    #[test]
+    fn generated_instruction_metadata_encodes_ix_iy_byte_aliases() {
+        let cases = [
+            ("ld ixh, 12h", vec![0xDD, 0x26, 0x12]),
+            ("ld ixl, a", vec![0xDD, 0x6F]),
+            ("ld b, ixh", vec![0xDD, 0x44]),
+            ("ld ixh, ixl", vec![0xDD, 0x65]),
+            ("inc ixh", vec![0xDD, 0x24]),
+            ("dec ixl", vec![0xDD, 0x2D]),
+            ("add a, ixh", vec![0xDD, 0x84]),
+            ("xor ixl", vec![0xDD, 0xAD]),
+            ("ld iyh, 34h", vec![0xFD, 0x26, 0x34]),
+            ("ld iyl, a", vec![0xFD, 0x6F]),
+            ("ld c, iyh", vec![0xFD, 0x4C]),
+            ("ld iyh, iyl", vec![0xFD, 0x65]),
+            ("inc iyh", vec![0xFD, 0x24]),
+            ("dec iyl", vec![0xFD, 0x2D]),
+            ("adc a, iyh", vec![0xFD, 0x8C]),
+            ("cp iyl", vec![0xFD, 0xBD]),
+        ];
+
+        for (syntax, bytes) in cases {
+            assert_eq!(
+                encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
+                Some(bytes),
+                "{syntax}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_misleading_ix_iy_byte_alias_mixes() {
+        let cases = ["ld ixh, iyh", "ld h, ixh", "ld iyl, l"];
+
+        for syntax in cases {
+            let error = encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap_err();
+            assert!(
+                error.message.contains("cannot mix"),
+                "{syntax}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn generated_instruction_metadata_encodes_all_in0_out0_register_forms() {
+        let cases = [
+            ("in0 b, (12h)", vec![0xED, 0x00, 0x12]),
+            ("in0 c, (12h)", vec![0xED, 0x08, 0x12]),
+            ("in0 d, (12h)", vec![0xED, 0x10, 0x12]),
+            ("in0 e, (12h)", vec![0xED, 0x18, 0x12]),
+            ("in0 h, (12h)", vec![0xED, 0x20, 0x12]),
+            ("in0 l, (12h)", vec![0xED, 0x28, 0x12]),
+            ("in0 a, (12h)", vec![0xED, 0x38, 0x12]),
+            ("out0 (34h), b", vec![0xED, 0x01, 0x34]),
+            ("out0 (34h), c", vec![0xED, 0x09, 0x34]),
+            ("out0 (34h), d", vec![0xED, 0x11, 0x34]),
+            ("out0 (34h), e", vec![0xED, 0x19, 0x34]),
+            ("out0 (34h), h", vec![0xED, 0x21, 0x34]),
+            ("out0 (34h), l", vec![0xED, 0x29, 0x34]),
+            ("out0 (34h), a", vec![0xED, 0x39, 0x34]),
+        ];
+
+        for (syntax, bytes) in cases {
+            assert_eq!(
+                encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
+                Some(bytes),
+                "{syntax}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct24_metadata_encodes_sp_loads_and_stores() {
+        assert_eq!(
+            direct24_instruction(CpuFamily::Ez80, "ld sp, (040000h)").unwrap(),
+            Direct24Instruction {
+                prefix: &[0xED, 0x7B],
+                addr: "040000h",
+            }
+        );
+        assert_eq!(
+            direct24_instruction(CpuFamily::Ez80, "ld (040003h), sp").unwrap(),
+            Direct24Instruction {
+                prefix: &[0xED, 0x73],
+                addr: "040003h",
+            }
+        );
+    }
+
+    #[test]
+    fn generated_instruction_metadata_encodes_ez80_mode_suffixes() {
+        let cases = [
+            ("nop.sis", vec![0x40, 0x00]),
+            ("ld.lis b, a", vec![0x49, 0x47]),
+            ("xor.sil 55h", vec![0x52, 0xEE, 0x55]),
+            ("out0.lil (0Ch), a", vec![0x5B, 0xED, 0x39, 0x0C]),
+        ];
+
+        for (syntax, bytes) in cases {
+            assert_eq!(
+                encode_generated_instruction(CpuFamily::Ez80, syntax).unwrap(),
+                Some(bytes.clone()),
+                "{syntax}"
+            );
+            assert_eq!(
+                generated_instruction_len(CpuFamily::Ez80, syntax).unwrap(),
+                Some(bytes.len()),
+                "{syntax}"
+            );
+            assert_eq!(
+                encode_generated_instruction(CpuFamily::Z80, syntax).unwrap(),
+                None,
+                "{syntax}"
+            );
+        }
     }
 
     #[test]
