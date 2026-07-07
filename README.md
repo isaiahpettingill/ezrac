@@ -64,6 +64,7 @@ Examples live under `examples/agon-mos`. See `examples/agon-mos/README.md` for b
 ## Project Notes
 
 - `spec.md` describes the intended language, runtime, and cartridge format.
+- `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `REMAINING_WORK.md` tracks known gaps and follow-up work.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.

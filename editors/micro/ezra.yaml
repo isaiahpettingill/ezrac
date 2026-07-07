@@ -1,0 +1,21 @@
+filetype: ezra
+
+detect:
+  filename: "\\.(ezra|ezralayout)$"
+
+rules:
+  - comment: "//.*"
+  - constant.string:
+      start: "\""
+      end: "\""
+      skip: "\\\\."
+      rules:
+        - constant.specialChar: "\\\\[n0t\\\\'\"]"
+  - constant.string: "'(\\\\[n0t\\\\'\"]|[^'\\\\])'"
+  - constant.number: "\\b(0x[0-9A-Fa-f]+|0b[01]+|[0-9]+)(u8|i8|u16|i16|u24|i24)?\\b"
+  - constant.bool: "\\b(true|false)\\b"
+  - type: "\\b(u8|i8|u16|i16|u24|i24|ptr|bytes)\\b"
+  - statement: "\\b(if|else|while|loop|break|continue|return)\\b"
+  - special: "\\b(pub|inline|naked|interrupt|volatile|as|clobber)\\b"
+  - symbol.operator: "(->|\\.\\.|<<=|>>=|==|!=|<=|>=|&&|\\|\\||<<|>>|[-+*/%&|^~!=<>]=?)"
+  - statement: "\\b(import|const|alias|port|mmio|embed|global|struct|extern|asm|fn|layout|load|entry|stack|region|section|symbol|let|out|in|cast|file|text|cstr|repeat|align|read|write|execute|reserved)\\b"

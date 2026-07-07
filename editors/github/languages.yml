@@ -1,0 +1,9 @@
+Ezra:
+  type: programming
+  color: "#6f55ff"
+  extensions:
+    - ".ezra"
+    - ".ezralayout"
+  tm_scope: source.ezra
+  ace_mode: text
+  language_id: 987654321

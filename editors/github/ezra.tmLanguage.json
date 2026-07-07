@@ -1,0 +1,28 @@
+{
+  "name": "Ezra",
+  "scopeName": "source.ezra",
+  "fileTypes": [
+    "ezra",
+    "ezralayout"
+  ],
+  "patterns": [
+    { "name": "comment.line.double-slash.ezra", "match": "//.*$" },
+    {
+      "name": "string.quoted.double.ezra",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.ezra", "match": "\\\\[n0t\\\\'\\\"]" }
+      ]
+    },
+    { "name": "constant.character.ezra", "match": "'(?:\\\\[n0t\\\\'\\\"]|[^'\\\\])'" },
+    { "name": "constant.numeric.ezra", "match": "\\b(?:0x[0-9A-Fa-f]+|0b[01]+|[0-9]+)(?:u8|i8|u16|i16|u24|i24)?\\b" },
+    { "name": "constant.language.boolean.ezra", "match": "\\b(?:true|false)\\b" },
+    { "name": "storage.modifier.ezra", "match": "\\b(?:pub|inline|naked|interrupt|volatile)\\b" },
+    { "name": "keyword.control.ezra", "match": "\\b(?:if|else|while|loop|break|continue|return)\\b" },
+    { "name": "keyword.other.ezra", "match": "\\b(?:import|const|alias|port|mmio|embed|global|struct|extern|asm|fn|layout|load|entry|stack|region|section|symbol|let|out|in|cast|file|bytes|text|cstr|repeat|align|read|write|execute|reserved|as|clobber)\\b" },
+    { "name": "support.type.ezra", "match": "\\b(?:ptr|u8|i8|u16|i16|u24|i24)\\b" },
+    { "name": "keyword.operator.ezra", "match": "->|\\.\\.|<<=|>>=|==|!=|<=|>=|&&|\\|\\||<<|>>|[-+*/%&|^~!=<>]=?" },
+    { "name": "entity.name.function.ezra", "match": "(?<=\\bfn\\s+)[A-Za-z_][A-Za-z0-9_]*" }
+  ]
+}

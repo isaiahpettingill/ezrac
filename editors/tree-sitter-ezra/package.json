@@ -1,0 +1,14 @@
+{
+  "name": "tree-sitter-ezra",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Ezra.",
+  "main": "grammar.js",
+  "keywords": [
+    "tree-sitter",
+    "ezra"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "tree-sitter-cli": "^0.22.6"
+  }
+}

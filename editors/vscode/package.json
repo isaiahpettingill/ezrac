@@ -1,0 +1,36 @@
+{
+  "name": "ezra-language",
+  "displayName": "Ezra Language",
+  "description": "Syntax highlighting for the EZRA language.",
+  "version": "0.1.0",
+  "publisher": "ezra",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ezra",
+        "aliases": [
+          "Ezra",
+          "ezra"
+        ],
+        "extensions": [
+          ".ezra",
+          ".ezralayout"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ezra",
+        "scopeName": "source.ezra",
+        "path": "./syntaxes/ezra.tmLanguage.json"
+      }
+    ]
+  }
+}

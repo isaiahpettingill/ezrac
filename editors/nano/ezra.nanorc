@@ -1,0 +1,13 @@
+syntax "ezra" "\\.(ezra|ezralayout)$"
+
+comment "//"
+
+color brightblue "\\<(import|const|alias|port|mmio|embed|global|struct|extern|asm|fn|layout|load|entry|stack|region|section|symbol|let|out|in|cast)\\>"
+color magenta "\\<(if|else|while|loop|break|continue|return)\\>"
+color cyan "\\<(pub|inline|naked|interrupt|volatile|as|clobber|align|read|write|execute|reserved)\\>"
+color green "\\<(file|bytes|text|cstr|repeat|ptr|u8|i8|u16|i16|u24|i24)\\>"
+color brightred "\\<(true|false)\\>"
+color brightyellow "\\<(0x[0-9A-Fa-f]+|0b[01]+|[0-9]+)(u8|i8|u16|i16|u24|i24)?\\>"
+color yellow start="\"" end="\""
+color yellow "'(\\\\[n0t\\\\'\"]|[^'\\\\])'"
+color brightblack "//.*$"
