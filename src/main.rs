@@ -867,6 +867,11 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
     settings.output_format == OutputFormat::CpmCom
         || bare_target_cpu(&settings.target.triple.value).is_some()
         || settings.target.triple.value.starts_with("zxspectrum-z80")
+        || is_ti_ce_target(&settings.target.triple.value)
+}
+
+fn is_ti_ce_target(target: &str) -> bool {
+    target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1571,6 +1576,8 @@ fn default_layout_for_target(target: &str) -> Layout {
         }
     } else if target.starts_with("zxspectrum-z80") {
         Layout::zx_spectrum_z80()
+    } else if is_ti_ce_target(target) {
+        Layout::ti_ce_ez80(target)
     } else if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
     } else if target.starts_with("ezra-test-flat-ez80") {
@@ -3007,6 +3014,63 @@ mod tests {
         assert_eq!(&bin[0..3], &[0xF3, 0x31, 0x00]);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ti_ce_targets_use_tice_layout_and_sdk() {
+        for (target, expected_layout) in [
+            ("ti84plusce-ez80", "ti84plusce-ez80_layout"),
+            ("ti83premiumce-ez80", "ti83premiumce-ez80_layout"),
+        ] {
+            let root = temp_root(target);
+            std::fs::create_dir_all(&root).unwrap();
+            let source_path = root.join("game.ezra");
+            std::fs::write(
+                &source_path,
+                r#"
+                    import tice.os
+                    import tice.lcd
+
+                    fn main() {
+                        lcd.set_first_pixel(4)
+                        os.idle()
+                    }
+                "#,
+            )
+            .unwrap();
+
+            let outputs = build_source_with_command_options(&CommandOptions {
+                path: source_path.to_string_lossy().into_owned(),
+                debug_comments: false,
+                default_sdk_symbols: false,
+                layout_path: None,
+                target: Some(target.to_owned()),
+            })
+            .unwrap();
+            let settings = resolve_build_settings(
+                &CommandOptions {
+                    path: source_path.to_string_lossy().into_owned(),
+                    debug_comments: false,
+                    default_sdk_symbols: false,
+                    layout_path: None,
+                    target: Some(target.to_owned()),
+                },
+                &source_path,
+            )
+            .unwrap();
+            let asm = std::fs::read_to_string(outputs.asm).unwrap();
+            let map = std::fs::read_to_string(outputs.map).unwrap();
+            let bin = std::fs::read(outputs.executable).unwrap();
+
+            assert_eq!(settings.layout.name, expected_layout);
+            assert_eq!(settings.layout.entry.get(), 0xD1_A881);
+            assert!(asm.contains("; target: eZ80 ADL mode"), "{asm}");
+            assert!(asm.contains("ld (0D40000h), a"), "{asm}");
+            assert!(map.contains(".text        0xD1A881"), "{map}");
+            assert_eq!(&bin[0..4], &[0xF3, 0x31, 0xFF, 0xFF]);
+
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

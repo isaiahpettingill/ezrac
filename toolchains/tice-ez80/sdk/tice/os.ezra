@@ -1,0 +1,14 @@
+pub fn wait_key() -> u8 {
+    let key: u8 = 0
+    asm volatile(out key: u8 as reg8, clobber a, clobber flags) {
+        "xor a"
+        "ld {key}, a"
+    }
+    return key
+}
+
+pub fn idle() {
+    asm volatile {
+        "nop"
+    }
+}

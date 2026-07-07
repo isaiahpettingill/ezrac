@@ -176,6 +176,68 @@ impl Layout {
         }
     }
 
+    pub fn ti_ce_ez80(target: &str) -> Self {
+        Self {
+            name: format!("{target}_layout"),
+            load: Address24::new(0xD1_A881),
+            entry: Address24::new(0xD1_A881),
+            stack: Address24::new(0xD3_FFFF),
+            regions: vec![
+                region(
+                    "code",
+                    0xD1_A881,
+                    0xD2_FFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0xD3_0000, 0xD3_3FFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xD3_4000,
+                    0xD3_BFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xD3_C000, 0xD3_DFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xD3_E000,
+                    0xD3_EFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xD3_F000,
+                    0xD3_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "vram",
+                    0xD4_0000,
+                    0xD5_2BFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::VOLATILE],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0xD1_A881)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0xD1_A881)),
+                symbol("EZRA_CODE_BASE", Address24::new(0xD1_A881)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xD3_FFFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xD3_4000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0xD3_0000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xD3_C000)),
+                symbol("TICE_VRAM_BASE", Address24::new(0xD4_0000)),
+            ],
+        }
+    }
+
     pub fn ezra_default() -> Self {
         Self {
             name: "ezra_default".to_owned(),

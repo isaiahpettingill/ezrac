@@ -103,7 +103,7 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         region(
             "code",
             options.code_base,
-            0x01_0000,
+            region_size(options.code_base, 0x01_0000),
             TbirAccess::ReadOnly,
             false,
             true,
@@ -111,7 +111,7 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         region(
             "rodata",
             options.rodata_base,
-            0x02_0000,
+            region_size(options.rodata_base, 0x02_0000),
             TbirAccess::ReadOnly,
             false,
             false,
@@ -119,7 +119,7 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         region(
             "ram",
             options.ram_base,
-            0x04_0000,
+            region_size(options.ram_base, 0x04_0000),
             TbirAccess::ReadWrite,
             false,
             false,
@@ -127,7 +127,7 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         region(
             "vram",
             options.vram_base,
-            0x04_0000,
+            region_size(options.vram_base, 0x04_0000),
             TbirAccess::ReadWrite,
             true,
             false,
@@ -135,7 +135,7 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         region(
             "audio",
             options.audio_base,
-            0x04_0000,
+            region_size(options.audio_base, 0x04_0000),
             TbirAccess::ReadWrite,
             true,
             false,
@@ -143,7 +143,7 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         region(
             "assets",
             options.asset_base,
-            0x30_0000,
+            region_size(options.asset_base, 0x30_0000),
             TbirAccess::ReadOnly,
             false,
             false,
@@ -172,6 +172,11 @@ fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
         cpu,
         CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::I8080 | CpuFamily::I8085
     )
+}
+
+fn region_size(start: Address24, preferred: u32) -> u32 {
+    let remaining = Address24::MAX + 1 - start.get();
+    preferred.min(remaining)
 }
 
 fn region(

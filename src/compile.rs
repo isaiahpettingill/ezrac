@@ -397,6 +397,18 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(is_ti_ce_target) {
+        match import {
+            "tice.os" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/tice-ez80/sdk/tice/os.ezra"),
+                "tice.os",
+            )),
+            "tice.lcd" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/tice-ez80/sdk/tice/lcd.ezra"),
+                "tice.lcd",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(|target| target.starts_with("zxspectrum-z80")) {
         match import {
             "zx.rom" => Some(builtin_sdk_utf8(
@@ -440,6 +452,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
     } else {
         None
     }
+}
+
+fn is_ti_ce_target(target: &str) -> bool {
+    target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80")
 }
 
 fn builtin_sdk_utf8(bytes: &'static [u8], module: &str) -> &'static str {
@@ -1369,6 +1385,35 @@ mod tests {
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "screen.border")
         }));
+    }
+
+    #[test]
+    fn ti_ce_targets_use_builtin_tice_sdk() {
+        let source = r#"
+            import tice.os
+            import tice.lcd
+
+            fn main() {
+                lcd.set_first_pixel(3)
+                let key: u8 = os.wait_key()
+            }
+        "#;
+
+        for target in ["ti84plusce-ez80", "ti83premiumce-ez80"] {
+            let sdk = SdkResolver {
+                target: Some(target.to_owned()),
+                sdk_roots: Vec::new(),
+            };
+            let program =
+                parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+            assert!(program.declarations.iter().any(|decl| {
+                matches!(decl, Declaration::Function(function) if function.name == "lcd.set_first_pixel")
+            }));
+            assert!(program.declarations.iter().any(|decl| {
+                matches!(decl, Declaration::Function(function) if function.name == "os.wait_key")
+            }));
+        }
     }
 
     #[test]
