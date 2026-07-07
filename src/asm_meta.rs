@@ -91,6 +91,13 @@ pub fn encode_generated_instruction(
         let base = if inc { 0x04 } else { 0x05 };
         return Ok(Some(vec![base + register * 8]));
     }
+    if let Some((inc, register)) = parse_inc_dec_reg16(text) {
+        let base = if inc { 0x03 } else { 0x0B };
+        return Ok(Some(vec![base + register * 0x10]));
+    }
+    if let Some(register) = parse_add_hl_reg16(text) {
+        return Ok(Some(vec![0x09 + register * 0x10]));
+    }
     if let Some((op, register)) = parse_accumulator_alu_reg8_or_hl(text) {
         return Ok(Some(vec![accumulator_alu_reg8_opcode(op, register)]));
     }
@@ -197,6 +204,21 @@ fn parse_inc_dec_reg8(text: &str) -> Option<(bool, u8)> {
     None
 }
 
+fn parse_inc_dec_reg16(text: &str) -> Option<(bool, u8)> {
+    if let Some(register) = text.strip_prefix("inc ") {
+        return Some((true, reg16_code(register.trim())?));
+    }
+    if let Some(register) = text.strip_prefix("dec ") {
+        return Some((false, reg16_code(register.trim())?));
+    }
+    None
+}
+
+fn parse_add_hl_reg16(text: &str) -> Option<u8> {
+    let register = text.strip_prefix("add hl,")?.trim();
+    reg16_code(register)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AccumulatorAluOp {
     Add,
@@ -251,6 +273,16 @@ fn reg8_or_hl_code(register: &str) -> Option<u8> {
         return Some(6);
     }
     reg8_code(register)
+}
+
+fn reg16_code(register: &str) -> Option<u8> {
+    match register {
+        "bc" => Some(0),
+        "de" => Some(1),
+        "hl" => Some(2),
+        "sp" => Some(3),
+        _ => None,
+    }
 }
 
 fn ld_reg8_imm_opcode(register: u8) -> u8 {
@@ -350,6 +382,14 @@ mod tests {
         assert_eq!(
             encode_generated_instruction(CpuFamily::Ez80, "add a, c").unwrap(),
             Some(vec![0x81])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "inc hl").unwrap(),
+            Some(vec![0x23])
+        );
+        assert_eq!(
+            encode_generated_instruction(CpuFamily::Ez80, "add hl, de").unwrap(),
+            Some(vec![0x19])
         );
     }
 

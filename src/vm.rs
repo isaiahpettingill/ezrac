@@ -356,13 +356,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
             | "ld l, c"
             | "ld l, a"
             | "ld (hl), a"
-            | "inc hl"
-            | "inc de"
-            | "dec bc"
-            | "add hl, hl"
-            | "add hl, bc"
-            | "add hl, de"
-            | "add hl, sp"
             | "add a, a"
             | "add a, b"
             | "add a, c"
@@ -459,8 +452,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     } else if parse_inc_dec_reg8(text).is_some() {
         Ok(1)
     } else if parse_inc_dec_hl_indirect(text).is_some() {
-        Ok(1)
-    } else if parse_inc_dec_reg16(text).is_some() {
         Ok(1)
     } else if parse_accumulator_alu_reg8_or_hl(text).is_some() {
         Ok(1)
@@ -751,8 +742,6 @@ fn emit_instruction(
         bytes.extend(opcode);
     } else if let Some(io) = parse_io_instruction(text)? {
         io.write_to(bytes);
-    } else if text == "add hl, sp" {
-        bytes.push(0x39);
     } else if text == "inc b" {
         bytes.push(0x04);
     } else if text == "dec b" {
@@ -792,18 +781,6 @@ fn emit_instruction(
         bytes.push(0x6F);
     } else if text == "ld l, c" {
         bytes.push(0x69);
-    } else if text == "inc hl" {
-        bytes.push(0x23);
-    } else if text == "inc de" {
-        bytes.push(0x13);
-    } else if text == "dec bc" {
-        bytes.push(0x0B);
-    } else if text == "add hl, hl" {
-        bytes.push(0x29);
-    } else if text == "add hl, bc" {
-        bytes.push(0x09);
-    } else if text == "add hl, de" {
-        bytes.push(0x19);
     } else if text == "add a, a" {
         bytes.push(0x87);
     } else if let Some(register) = text
