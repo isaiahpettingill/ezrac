@@ -817,9 +817,7 @@ fn build_output_map(
     code_len: usize,
     symbols: &[ezra::vm::AssemblySymbol],
 ) -> Result<String, ezra::diagnostic::Diagnostic> {
-    if settings.output_format == OutputFormat::CpmCom
-        || bare_target_cpu(&settings.target.triple.value).is_some()
-    {
+    if uses_flat_output_map(settings) {
         let code_len = u32::try_from(code_len).map_err(|_| {
             ezra::diagnostic::Diagnostic::new("program code exceeds 24-bit address space")
         })?;
@@ -863,6 +861,12 @@ fn flat_assembly_map(
         }
     }
     Ok(out)
+}
+
+fn uses_flat_output_map(settings: &BuildSettings) -> bool {
+    settings.output_format == OutputFormat::CpmCom
+        || bare_target_cpu(&settings.target.triple.value).is_some()
+        || settings.target.triple.value.starts_with("zxspectrum-z80")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1565,6 +1569,8 @@ fn default_layout_for_target(target: &str) -> Layout {
             AssemblerCpu::Ez80 => Layout::bare_ez80(),
             _ => Layout::bare_16(cpu.as_str()),
         }
+    } else if target.starts_with("zxspectrum-z80") {
+        Layout::zx_spectrum_z80()
     } else if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
     } else if target.starts_with("ezra-test-flat-ez80") {
@@ -2921,7 +2927,7 @@ mod tests {
     }
 
     #[test]
-    fn z80_target_uses_16_bit_default_layout() {
+    fn zxspectrum_target_uses_spectrum_layout() {
         let root = temp_root("z80_default_layout");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("game.ezra");
@@ -2942,7 +2948,16 @@ mod tests {
         assert_eq!(settings.target.triple.cpu, CpuFamily::Z80);
         assert_eq!(settings.target.memory.pointer_width_bits, 16);
         assert_eq!(settings.target.memory.address_width_bits, 16);
-        assert_eq!(settings.layout.name, "z80_default");
+        assert_eq!(settings.layout.name, "zx_spectrum_z80");
+        assert_eq!(settings.layout.load.get(), 0x8000);
+        assert_eq!(settings.layout.entry.get(), 0x8000);
+        assert!(
+            settings
+                .layout
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "ZX_SCREEN_BASE" && symbol.value.get() == 0x4000)
+        );
         assert!(
             settings
                 .layout
@@ -2950,6 +2965,46 @@ mod tests {
                 .iter()
                 .all(|region| region.end.get() <= 0xFFFF)
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zxspectrum_source_build_uses_sdk_and_writes_flat_binary() {
+        let root = temp_root("zxspectrum_sdk_build");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                import zx.rom
+                import zx.screen
+
+                fn main() {
+                    screen.border(2)
+                    rom.print_char(65)
+                }
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: false,
+            layout_path: None,
+            target: Some("zxspectrum-z80".to_owned()),
+        })
+        .unwrap();
+
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let map = std::fs::read_to_string(outputs.map).unwrap();
+        let bin = std::fs::read(outputs.executable).unwrap();
+        assert!(asm.contains("; target: Z80"), "{asm}");
+        assert!(asm.contains("out (0FEh), a"), "{asm}");
+        assert!(asm.contains("rst 10h"), "{asm}");
+        assert!(map.contains(".text        0x008000"), "{map}");
+        assert_eq!(&bin[0..3], &[0xF3, 0x31, 0x00]);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3902,7 +3957,7 @@ mod tests {
         .unwrap();
 
         assert!(asm.contains("; target: Z80"), "{asm}");
-        assert!(asm.contains("ld sp, FF00h"), "{asm}");
+        assert!(asm.contains("ld sp, 5B00h"), "{asm}");
         assert!(asm.contains("out (0Dh), a"), "{asm}");
         assert!(!asm.contains("out0"), "{asm}");
         assert!(!asm.contains("rst.lis"), "{asm}");

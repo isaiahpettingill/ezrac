@@ -1,0 +1,15 @@
+pub const PRINT_CHAR: u16 = 0x0010
+pub const CLS: u16 = 0x0DAF
+
+pub fn print_char(ch: u8) {
+    asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld a, {ch}"
+        "rst 10h"
+    }
+}
+
+pub fn cls() {
+    asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "call 0DAFh"
+    }
+}

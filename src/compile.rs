@@ -397,6 +397,18 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(|target| target.starts_with("zxspectrum-z80")) {
+        match import {
+            "zx.rom" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/rom.ezra"),
+                "zx.rom",
+            )),
+            "zx.screen" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/screen.ezra"),
+                "zx.screen",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(|target| target.starts_with("ezra-test-")) {
         match import {
             "harness.io" => Some(builtin_sdk_utf8(
@@ -1330,6 +1342,32 @@ mod tests {
         }));
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
+        }));
+    }
+
+    #[test]
+    fn zxspectrum_target_uses_builtin_zx_sdk() {
+        let source = r#"
+            import zx.rom
+            import zx.screen
+
+            fn main() {
+                rom.print_char(65)
+                screen.border(1)
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("zxspectrum-z80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "rom.print_char")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "screen.border")
         }));
     }
 

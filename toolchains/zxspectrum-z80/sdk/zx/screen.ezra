@@ -1,0 +1,10 @@
+pub const SCREEN_BASE: u16 = 0x4000
+pub const ATTR_BASE: u16 = 0x5800
+pub const BORDER_PORT: u8 = 0xFE
+
+pub fn border(color: u8) {
+    asm volatile(in color: u8 as reg8, clobber a, clobber flags, clobber ports) {
+        "ld a, {color}"
+        "out (0FEh), a"
+    }
+}

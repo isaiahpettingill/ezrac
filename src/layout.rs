@@ -499,6 +499,83 @@ impl Layout {
         }
     }
 
+    pub fn zx_spectrum_z80() -> Self {
+        Self {
+            name: "zx_spectrum_z80".to_owned(),
+            load: Address24::new(0x8000),
+            entry: Address24::new(0x8000),
+            stack: Address24::new(0x5B00),
+            regions: vec![
+                region(
+                    "rom",
+                    0x0000,
+                    0x3FFF,
+                    &[RegionFlags::READ, RegionFlags::RESERVED],
+                ),
+                region(
+                    "display",
+                    0x4000,
+                    0x5AFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::VOLATILE],
+                ),
+                region(
+                    "system",
+                    0x5B00,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "code",
+                    0x8000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0xC000, 0xCFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xD000,
+                    0xDFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xE000, 0xE7FF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xE800,
+                    0xEFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xF000,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x8000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x8000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x8000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x5B00)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xD000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0xC000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xE000)),
+                symbol("ZX_SCREEN_BASE", Address24::new(0x4000)),
+                symbol("ZX_ATTR_BASE", Address24::new(0x5800)),
+                symbol("ZX_ROM_PRINT_CHAR", Address24::new(0x0010)),
+                symbol("ZX_ROM_CLS", Address24::new(0x0DAF)),
+            ],
+        }
+    }
+
     pub fn cpm_z80_com() -> Self {
         Self {
             name: "cpm_z80_com".to_owned(),
