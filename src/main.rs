@@ -74,6 +74,7 @@ struct BuildCommandOptions {
     path: Option<String>,
     debug_comments: bool,
     default_sdk_symbols: bool,
+    input_kind: Option<InputKind>,
     layout_path: Option<String>,
     target: Option<String>,
 }
@@ -83,6 +84,7 @@ impl BuildCommandOptions {
         let mut path = None;
         let mut debug_comments = false;
         let mut default_sdk_symbols = true;
+        let mut input_kind = None;
         let mut layout_path = None;
         let mut target = None;
         let mut iter = args.iter();
@@ -90,6 +92,10 @@ impl BuildCommandOptions {
             match arg.as_str() {
                 "--debug-comments" => debug_comments = true,
                 "--no-default-sdk-symbols" => default_sdk_symbols = false,
+                "--input-kind" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    input_kind = Some(InputKind::parse(value)?);
+                }
                 "--layout" => {
                     let value = iter.next().ok_or_else(usage)?;
                     layout_path = Some(value.clone());
@@ -106,6 +112,7 @@ impl BuildCommandOptions {
             path,
             debug_comments,
             default_sdk_symbols,
+            input_kind,
             layout_path,
             target,
         })
@@ -117,6 +124,7 @@ impl BuildCommandOptions {
             path: Some(path),
             debug_comments,
             default_sdk_symbols: true,
+            input_kind: None,
             layout_path: None,
             target: None,
         }
@@ -125,6 +133,7 @@ impl BuildCommandOptions {
 
 trait BuildOptionsView {
     fn default_sdk_symbols(&self) -> bool;
+    fn input_kind(&self) -> Option<InputKind>;
     fn layout_path(&self) -> Option<&String>;
     fn target(&self) -> Option<&String>;
 }
@@ -132,6 +141,10 @@ trait BuildOptionsView {
 impl BuildOptionsView for BuildCommandOptions {
     fn default_sdk_symbols(&self) -> bool {
         self.default_sdk_symbols
+    }
+
+    fn input_kind(&self) -> Option<InputKind> {
+        self.input_kind
     }
 
     fn layout_path(&self) -> Option<&String> {
@@ -191,6 +204,10 @@ impl BuildOptionsView for CommandOptions {
         self.default_sdk_symbols
     }
 
+    fn input_kind(&self) -> Option<InputKind> {
+        None
+    }
+
     fn layout_path(&self) -> Option<&String> {
         self.layout_path.as_ref()
     }
@@ -204,7 +221,9 @@ impl BuildOptionsView for CommandOptions {
 struct AssembleOptions {
     path: String,
     output: Option<String>,
-    base_addr: u32,
+    base_addr: Option<u32>,
+    layout_path: Option<String>,
+    map_path: Option<String>,
     target: Option<String>,
 }
 
@@ -256,7 +275,9 @@ impl AssembleOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut path = None;
         let mut output = None;
-        let mut base_addr = 0x01_0000;
+        let mut base_addr = None;
+        let mut layout_path = None;
+        let mut map_path = None;
         let mut target = None;
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
@@ -267,7 +288,15 @@ impl AssembleOptions {
                 }
                 "--base" => {
                     let value = iter.next().ok_or_else(usage)?;
-                    base_addr = parse_cli_u24(value)?;
+                    base_addr = Some(parse_cli_u24(value)?);
+                }
+                "--layout" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    layout_path = Some(value.clone());
+                }
+                "--map" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    map_path = Some(value.clone());
                 }
                 "--target" => {
                     let value = iter.next().ok_or_else(usage)?;
@@ -281,6 +310,8 @@ impl AssembleOptions {
             path: path.ok_or_else(usage)?,
             output,
             base_addr,
+            layout_path,
+            map_path,
             target,
         })
     }
@@ -308,11 +339,13 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let target = resolve_target_profile(options.target.as_deref())?;
-    let base_addr = if target.triple.cpu == CpuFamily::Z80 && options.base_addr == 0x01_0000 {
-        0x0100
-    } else {
-        options.base_addr
-    };
+    let layout_path = options.layout_path.as_ref().map(PathBuf::from);
+    let layout = load_layout(layout_path.as_deref(), &target.triple.value)?;
+    if let Err(errors) = layout.validate() {
+        let message = format_layout_errors(layout_path.as_deref(), errors);
+        return Err(format!("layout is invalid:\n{message}"));
+    }
+    let base_addr = options.base_addr.unwrap_or(layout.entry.get());
     let assembled =
         ezra::vm::assemble_subset_with_symbols_at(target.triple.cpu, &source, base_addr)
             .map_err(|error| error.to_string())?;
@@ -324,6 +357,14 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
     fs::write(&output_path, &assembled.bytes)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     println!("wrote {}", output_path.display());
+    if let Some(map_path) = options.map_path.as_ref().map(PathBuf::from) {
+        fs::write(
+            &map_path,
+            flat_assembly_map(&layout, assembled.bytes.len(), &assembled.symbols)?,
+        )
+        .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
+        println!("wrote {}", map_path.display());
+    }
     Ok(())
 }
 
@@ -375,11 +416,14 @@ fn resolve_build_settings(
         .map(parse_output_format)
         .transpose()?
         .unwrap_or(target.output_format);
-    let input_kind = project
-        .as_ref()
-        .and_then(|project| project.input_kind.as_deref())
-        .map(InputKind::parse)
-        .transpose()?;
+    let input_kind = match options.input_kind() {
+        Some(input_kind) => Some(input_kind),
+        None => project
+            .as_ref()
+            .and_then(|project| project.input_kind.as_deref())
+            .map(InputKind::parse)
+            .transpose()?,
+    };
     let layout_path = options.layout_path().map(PathBuf::from).or_else(|| {
         project
             .as_ref()
@@ -508,6 +552,7 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         path: Some(options.path.clone()),
         debug_comments: options.debug_comments,
         default_sdk_symbols: options.default_sdk_symbols,
+        input_kind: None,
         layout_path: options.layout_path.clone(),
         target: options.target.clone(),
     })
@@ -684,6 +729,31 @@ fn build_output_map(
     }
 
     build_cartridge_map(program, &settings.layout, code_len, symbols)
+}
+
+fn flat_assembly_map(
+    layout: &Layout,
+    code_len: usize,
+    symbols: &[ezra::vm::AssemblySymbol],
+) -> Result<String, String> {
+    let code_len = u32::try_from(code_len)
+        .map_err(|_| "assembled program exceeds the 24-bit address space".to_owned())?;
+    let end = layout
+        .entry
+        .get()
+        .checked_add(code_len.saturating_sub(1))
+        .ok_or_else(|| "assembled program exceeds the 24-bit address space".to_owned())?;
+    let mut out = format!(
+        "section      start      end        size\n{:<12} {} 0x{:06X} 0x{:06X}\n",
+        ".text", layout.entry, end, code_len
+    );
+    if !symbols.is_empty() {
+        out.push_str("\nsymbol       address\n");
+        for symbol in symbols {
+            out.push_str(&format!("{:<12} 0x{:06X}\n", symbol.name, symbol.addr));
+        }
+    }
+    Ok(out)
 }
 
 fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Result<PathBuf, String> {
@@ -1176,7 +1246,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
 }
 
 #[cfg(test)]
@@ -1244,7 +1314,7 @@ mod tests {
 
         assert_eq!(options.path, "main.asm");
         assert_eq!(options.output, Some("out.bin".to_owned()));
-        assert_eq!(options.base_addr, 0x04_0000);
+        assert_eq!(options.base_addr, Some(0x04_0000));
         assert_eq!(options.target, None);
     }
 
@@ -1260,7 +1330,20 @@ mod tests {
         assert_eq!(options.path, "main.asm");
         assert_eq!(options.target, Some("cpm-2.2-z80".to_owned()));
         assert_eq!(options.output, None);
-        assert_eq!(options.base_addr, 0x01_0000);
+        assert_eq!(options.base_addr, None);
+    }
+
+    #[test]
+    fn build_options_parse_input_kind() {
+        let options = BuildCommandOptions::parse(&[
+            "--input-kind".to_owned(),
+            "assembly".to_owned(),
+            "main.txt".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.path.as_deref(), Some("main.txt"));
+        assert_eq!(options.input_kind, Some(InputKind::Assembly));
     }
 
     #[test]
@@ -1296,7 +1379,9 @@ mod tests {
         assemble_file(&AssembleOptions {
             path: source_path.to_string_lossy().into_owned(),
             output: Some(output_path.to_string_lossy().into_owned()),
-            base_addr: 0x04_0000,
+            base_addr: Some(0x04_0000),
+            layout_path: None,
+            map_path: None,
             target: None,
         })
         .unwrap();
@@ -1331,7 +1416,9 @@ mod tests {
         assemble_file(&AssembleOptions {
             path: source_path.to_string_lossy().into_owned(),
             output: None,
-            base_addr: 0x01_0000,
+            base_addr: None,
+            layout_path: None,
+            map_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
         })
         .unwrap();
@@ -1360,7 +1447,9 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
                 output: Some(output.to_string_lossy().into_owned()),
-                base_addr: 0x01_0000,
+                base_addr: None,
+                layout_path: None,
+                map_path: None,
                 target: Some("cpm-2.2-z80".to_owned()),
             })
             .unwrap();
@@ -1558,6 +1647,7 @@ mod tests {
             path: None,
             debug_comments: false,
             default_sdk_symbols: true,
+            input_kind: None,
             layout_path: None,
             target: None,
         })
@@ -2148,7 +2238,9 @@ mod tests {
         assemble_file(&AssembleOptions {
             path: source_path.to_string_lossy().into_owned(),
             output: Some(output_path.to_string_lossy().into_owned()),
-            base_addr: 0x0100,
+            base_addr: Some(0x0100),
+            layout_path: None,
+            map_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
         })
         .unwrap();
