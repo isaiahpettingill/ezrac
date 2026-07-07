@@ -422,6 +422,12 @@ output = "bin"
 # Omit this to use the selected target's default layout.
 file = "layouts/demo.ezralayout"
 
+[cartridge]
+# Optional. There is no default cartridge. Only set this when the selected
+# target/output format needs a cartridge/package layout.
+layout = "cartridges/agon.toml"
+manifest = "cartridges/manifest.toml"
+
 [sdk]
 # Project-local or external SDK roots. These supplement, but do not replace,
 # the selected target's toolchain SDK unless disabled by target/tool options.
@@ -435,6 +441,8 @@ Rules:
 - the target triple selects the CPU profile, pointer width, default layout, output format, SDK set, and test-runner profile.
 - `build.output` may override the target's default output format.
 - a layout file in `Ezra.toml` overrides the target default layout.
+- `cartridge.layout` may define a target-specific cartridge/package layout, but it is not used for default `.bin` builds.
+- no target gets an implicit cartridge by default; cartridge output must be selected by target/output configuration.
 - SDK search paths in `Ezra.toml` are ordinary source roots and may provide custom modules.
 - command-line `--target` and `--layout` options may override project settings for one build.
 - the compiler must report an error when no target can be resolved.
@@ -2003,7 +2011,7 @@ game.map       section/symbol map
 game.bin       default raw target executable
 ```
 
-The exact final artifact extension may vary by target and `Ezra.toml` output settings. The default output format is raw `.bin`. Targets may later define target-specific binary, tape, disk, ROM, hex, calculator package, or cartridge formats.
+The exact final artifact extension may vary by target and `Ezra.toml` output settings. The default output format is raw `.bin`. There is no default cartridge format. Targets may later define target-specific binary, tape, disk, ROM, hex, calculator package, or cartridge formats, and those formats must get their cartridge/package layout from explicit target or project configuration.
 
 Required sections:
 

@@ -9,7 +9,14 @@ pub struct ProjectConfig {
     pub target: Option<String>,
     pub output: Option<String>,
     pub layout_file: Option<PathBuf>,
+    pub cartridge: Option<CartridgeConfig>,
     pub sdk_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CartridgeConfig {
+    pub layout_file: PathBuf,
+    pub manifest_file: Option<PathBuf>,
 }
 
 pub fn load_nearest_project_config(
@@ -60,6 +67,8 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .transpose()?
         .map(|file| root.join(file));
 
+    let cartridge = parse_cartridge_config(&value, &root)?;
+
     let sdk_paths = match value.get("sdk").and_then(|sdk| sdk.get("paths")) {
         Some(toml::Value::Array(paths)) => paths
             .iter()
@@ -82,8 +91,31 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         target,
         output,
         layout_file,
+        cartridge,
         sdk_paths,
     })
+}
+
+fn parse_cartridge_config(
+    value: &toml::Value,
+    root: &Path,
+) -> Result<Option<CartridgeConfig>, Diagnostic> {
+    let Some(cartridge) = value.get("cartridge") else {
+        return Ok(None);
+    };
+    let layout_file = cartridge
+        .get("layout")
+        .map(required_string("cartridge.layout"))
+        .transpose()?
+        .ok_or_else(|| Diagnostic::new("project field `cartridge.layout` is required"))?;
+    let manifest_file = cartridge
+        .get("manifest")
+        .map(required_string("cartridge.manifest"))
+        .transpose()?;
+    Ok(Some(CartridgeConfig {
+        layout_file: root.join(layout_file),
+        manifest_file: manifest_file.map(|file| root.join(file)),
+    }))
 }
 
 fn required_string(field: &'static str) -> impl Fn(&toml::Value) -> Result<String, Diagnostic> {
@@ -115,6 +147,10 @@ mod tests {
                 [layout]
                 file = "layouts/demo.ezralayout"
 
+                [cartridge]
+                layout = "cartridges/agon.toml"
+                manifest = "cartridges/manifest.toml"
+
                 [sdk]
                 paths = ["sdk", "../shared"]
             "#,
@@ -131,11 +167,36 @@ mod tests {
             Some(PathBuf::from("/project/layouts/demo.ezralayout"))
         );
         assert_eq!(
+            config.cartridge,
+            Some(CartridgeConfig {
+                layout_file: PathBuf::from("/project/cartridges/agon.toml"),
+                manifest_file: Some(PathBuf::from("/project/cartridges/manifest.toml")),
+            })
+        );
+        assert_eq!(
             config.sdk_paths,
             vec![
                 PathBuf::from("/project/sdk"),
                 PathBuf::from("/project/../shared")
             ]
+        );
+    }
+
+    #[test]
+    fn cartridge_config_requires_a_layout() {
+        let error = parse_project_config(
+            Path::new("/project/Ezra.toml"),
+            r#"
+                [cartridge]
+                manifest = "cart.toml"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.message.contains("cartridge.layout` is required"),
+            "{}",
+            error.message
         );
     }
 }
