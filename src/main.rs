@@ -346,28 +346,52 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         let message = format_layout_errors(layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
-    let base_addr = options.base_addr.unwrap_or(layout.entry.get());
-    let assembled = ezra::vm::assemble_subset_with_options_at(
-        target.triple.cpu,
-        &source,
-        base_addr,
-        &assembly_source_options(&source_path, &layout),
-    )
-    .map_err(|error| error.to_string())?;
+    let output_format = target.output_format;
+    let settings = BuildSettings {
+        sdk: SdkResolver {
+            target: Some(target.triple.value.clone()),
+            sdk_roots: Vec::new(),
+        },
+        target,
+        output_format,
+        input_kind: Some(InputKind::Assembly),
+        layout,
+        layout_path,
+        default_sdk_symbols: true,
+        output_root: source_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("target"),
+        executable_name: None,
+    };
+    let image = if let Some(base_addr) = options.base_addr {
+        let assembled = ezra::vm::assemble_subset_with_options_at(
+            settings.target.triple.cpu,
+            &source,
+            base_addr,
+            &assembly_source_options(&source_path, &settings.layout),
+        )
+        .map_err(|error| error.to_string())?;
+        AssemblyBuildImage {
+            map: flat_assembly_map(&settings.layout, assembled.bytes.len(), &assembled.symbols)?,
+            bytes: assembled.bytes,
+            symbols: assembled.symbols,
+        }
+    } else {
+        build_assembly_image(&source_path, &source, &settings)?
+    };
     let output_path = options
         .output
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| source_path.with_extension(target.output_format.extension()));
-    fs::write(&output_path, &assembled.bytes)
+        .unwrap_or_else(|| source_path.with_extension(output_format.extension()));
+    let executable = build_executable_bytes(&settings, &image.bytes)?;
+    fs::write(&output_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     println!("wrote {}", output_path.display());
     if let Some(map_path) = options.map_path.as_ref().map(PathBuf::from) {
-        fs::write(
-            &map_path,
-            flat_assembly_map(&layout, assembled.bytes.len(), &assembled.symbols)?,
-        )
-        .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
+        fs::write(&map_path, image.map)
+            .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
         println!("wrote {}", map_path.display());
     }
     Ok(())
@@ -1767,6 +1791,45 @@ mod tests {
 
             assert!(!std::fs::read(output).unwrap().is_empty());
         }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assemble_file_can_write_layout_map() {
+        let root = temp_root("assemble_layout_map");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.asm");
+        let output_path = root.join("main.com");
+        let map_path = root.join("main.map");
+        std::fs::write(
+            &source_path,
+            r#"
+            section .text
+            start:
+                ld c, 00h
+                call CPM_BDOS
+            "#,
+        )
+        .unwrap();
+
+        assemble_file(&AssembleOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            output: Some(output_path.to_string_lossy().into_owned()),
+            base_addr: None,
+            layout_path: None,
+            map_path: Some(map_path.to_string_lossy().into_owned()),
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap();
+        let map = std::fs::read_to_string(map_path).unwrap();
+
+        assert_eq!(
+            std::fs::read(output_path).unwrap(),
+            [0x0E, 0x00, 0xCD, 0x05, 0x00]
+        );
+        assert!(map.contains(".text        0x000100"), "{map}");
+        assert!(map.contains("start        0x000100"), "{map}");
 
         let _ = std::fs::remove_dir_all(root);
     }

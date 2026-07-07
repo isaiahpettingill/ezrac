@@ -735,6 +735,11 @@ fn parse_addr(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32,
         Err(_) if looks_like_label_ref(text) => {
             Err(Diagnostic::new(format!("unknown assembly label `{text}`")))
         }
+        Err(error) if error.message.contains("outside the 24-bit address space") => {
+            Err(Diagnostic::new(format!(
+                "address operand `{text}` is outside the 24-bit address space"
+            )))
+        }
         Err(error) => Err(error),
     }
 }
