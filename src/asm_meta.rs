@@ -188,6 +188,9 @@ pub fn generated_instruction_len(cpu: CpuFamily, text: &str) -> Result<Option<us
     if let Some(branch) = branch_instruction(cpu, text) {
         return Ok(Some(branch.len()));
     }
+    if let Some(load) = imm24_load_instruction(cpu, text) {
+        return Ok(Some(load.len()));
+    }
     Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()))
 }
 
@@ -238,6 +241,40 @@ pub fn branch_instruction<'a>(cpu: CpuFamily, text: &'a str) -> Option<BranchIns
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Imm24LoadInstruction<'a> {
+    pub prefix: &'static [u8],
+    pub value: &'a str,
+}
+
+impl Imm24LoadInstruction<'_> {
+    pub const fn len(self) -> usize {
+        self.prefix.len() + 3
+    }
+}
+
+pub fn imm24_load_instruction<'a>(
+    cpu: CpuFamily,
+    text: &'a str,
+) -> Option<Imm24LoadInstruction<'a>> {
+    if !matches!(cpu, CpuFamily::Ez80) {
+        return None;
+    }
+    for (prefix, bytes) in IMM24_LOAD_FORMS {
+        if let Some(value) = text.strip_prefix(prefix) {
+            let value = value.trim();
+            if value.starts_with('(') {
+                return None;
+            }
+            return Some(Imm24LoadInstruction {
+                prefix: bytes,
+                value,
+            });
+        }
+    }
+    None
+}
+
 const ABSOLUTE_BRANCH_FORMS: &[(&str, u8)] = &[
     ("call nz,", 0xC4),
     ("call z,", 0xCC),
@@ -266,6 +303,15 @@ const RELATIVE_BRANCH_FORMS: &[(&str, u8)] = &[
     ("jr nc,", 0x30),
     ("jr ", 0x18),
     ("djnz ", 0x10),
+];
+
+const IMM24_LOAD_FORMS: &[(&str, &[u8])] = &[
+    ("ld bc,", &[0x01]),
+    ("ld de,", &[0x11]),
+    ("ld hl,", &[0x21]),
+    ("ld sp,", &[0x31]),
+    ("ld ix,", &[0xDD, 0x21]),
+    ("ld iy,", &[0xFD, 0x21]),
 ];
 
 fn parse_ld_operands(text: &str) -> Option<(&str, &str)> {

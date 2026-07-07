@@ -272,8 +272,6 @@ fn parse_line(line: &str) -> Option<AsmLine> {
 fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     if let Some(len) = asm_meta::generated_instruction_len(CpuFamily::Ez80, text)? {
         Ok(len)
-    } else if text.starts_with("ld sp,") {
-        Ok(4)
     } else if matches!(
         text,
         "dec sp"
@@ -317,11 +315,6 @@ fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
         || text.starts_with("ld (")
     {
         Ok(4)
-    } else if text.starts_with("ld ix,") || text.starts_with("ld iy,") {
-        Ok(5)
-    } else if text.starts_with("ld hl,") || text.starts_with("ld de,") || text.starts_with("ld bc,")
-    {
-        Ok(4)
     } else if text.starts_with("ld h,") || text.starts_with("ld a,") {
         Ok(2)
     } else if text.starts_with("xor ") {
@@ -344,9 +337,9 @@ fn emit_instruction(
     } else if let Some((load, index, addr)) = parse_direct_index_load_or_store(text)? {
         bytes.extend([index.prefix(), if load { 0x2A } else { 0x22 }]);
         push24(bytes, parse_addr(addr, labels, pc)?);
-    } else if let Some(value) = text.strip_prefix("ld sp,") {
-        bytes.push(0x31);
-        push24(bytes, parse_addr(value.trim(), labels, pc)?);
+    } else if let Some(load) = asm_meta::imm24_load_instruction(CpuFamily::Ez80, text) {
+        bytes.extend_from_slice(load.prefix);
+        push24(bytes, parse_addr(load.value, labels, pc)?);
     } else if let Some(branch) = asm_meta::branch_instruction(CpuFamily::Ez80, text) {
         bytes.push(branch.opcode);
         let target = parse_addr(branch.target, labels, pc)?;
@@ -411,15 +404,6 @@ fn emit_instruction(
         } else {
             return Err(Diagnostic::new(format!("invalid store syntax `{text}`")));
         }
-    } else if let Some(value) = text.strip_prefix("ld hl,") {
-        bytes.push(0x21);
-        push24(bytes, parse_addr(value.trim(), labels, pc)?);
-    } else if let Some(value) = text.strip_prefix("ld de,") {
-        bytes.push(0x11);
-        push24(bytes, parse_addr(value.trim(), labels, pc)?);
-    } else if let Some(value) = text.strip_prefix("ld bc,") {
-        bytes.push(0x01);
-        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(inc) = parse_inc_dec_hl_indirect(text) {
         bytes.push(if inc { 0x34 } else { 0x35 });
     } else if text == "dec sp" {
@@ -428,12 +412,6 @@ fn emit_instruction(
         bytes.push(0x33);
     } else if let Some((index, offset, opcode)) = parse_index_cb_operation(text)? {
         bytes.extend([index.prefix(), 0xCB, offset, opcode]);
-    } else if let Some(value) = text.strip_prefix("ld ix,") {
-        bytes.extend([0xDD, 0x21]);
-        push24(bytes, parse_addr(value.trim(), labels, pc)?);
-    } else if let Some(value) = text.strip_prefix("ld iy,") {
-        bytes.extend([0xFD, 0x21]);
-        push24(bytes, parse_addr(value.trim(), labels, pc)?);
     } else if let Some(value) = text.strip_prefix("ld h,") {
         bytes.push(0x26);
         bytes.push(parse_u8(value.trim())?);
