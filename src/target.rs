@@ -136,6 +136,9 @@ pub enum OutputFormat {
     CpmCom,
     IntelHex,
     RawBin,
+    Ti8ek,
+    Ti8xp,
+    Ti8xk,
 }
 
 impl OutputFormat {
@@ -144,6 +147,9 @@ impl OutputFormat {
             Self::CpmCom => "com",
             Self::IntelHex => "hex",
             Self::RawBin => "bin",
+            Self::Ti8ek => "8ek",
+            Self::Ti8xp => "8xp",
+            Self::Ti8xk => "8xk",
         }
     }
 }
@@ -178,9 +184,20 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
     ) && triple.value.split('-').any(|part| part == "cpm")
     {
         OutputFormat::CpmCom
+    } else if is_ti_calculator_target(triple) {
+        OutputFormat::Ti8xp
     } else {
         OutputFormat::RawBin
     }
+}
+
+fn is_ti_calculator_target(triple: &TargetTriple) -> bool {
+    triple.value.starts_with("ti83-z80")
+        || triple.value.starts_with("ti83plus-z80")
+        || triple.value.starts_with("ti84-z80")
+        || triple.value.starts_with("ti84plus-z80")
+        || triple.value.starts_with("ti84plusce-ez80")
+        || triple.value.starts_with("ti83premiumce-ez80")
 }
 
 pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
@@ -206,8 +223,11 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "bin" => Ok(OutputFormat::RawBin),
         "com" => Ok(OutputFormat::CpmCom),
         "hex" | "ihex" | "intel-hex" => Ok(OutputFormat::IntelHex),
+        "8ek" | "ti8ek" => Ok(OutputFormat::Ti8ek),
+        "8xp" | "ti8xp" => Ok(OutputFormat::Ti8xp),
+        "8xk" | "ti8xk" => Ok(OutputFormat::Ti8xk),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, or `hex`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `hex`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }
@@ -386,6 +406,20 @@ mod tests {
     }
 
     #[test]
+    fn ti_calculator_targets_default_to_8xp_output() {
+        for target in [
+            "ti83-z80",
+            "ti84plus-z80",
+            "ti84plusce-ez80",
+            "ti83premiumce-ez80",
+        ] {
+            let target = resolve_target_profile(Some(target)).unwrap();
+            assert_eq!(target.output_format, OutputFormat::Ti8xp);
+            assert_eq!(target.output_format.extension(), "8xp");
+        }
+    }
+
+    #[test]
     fn rejects_cpus_without_target_profiles_for_now() {
         let error = resolve_target_profile(Some("sega-genesis-m68k")).unwrap_err();
         assert!(
@@ -399,7 +433,13 @@ mod tests {
         assert_eq!(parse_output_format("bin"), Ok(OutputFormat::RawBin));
         assert_eq!(parse_output_format("com"), Ok(OutputFormat::CpmCom));
         assert_eq!(parse_output_format("hex"), Ok(OutputFormat::IntelHex));
+        assert_eq!(parse_output_format("8xp"), Ok(OutputFormat::Ti8xp));
+        assert_eq!(parse_output_format("8ek"), Ok(OutputFormat::Ti8ek));
+        assert_eq!(parse_output_format("8xk"), Ok(OutputFormat::Ti8xk));
         let error = parse_output_format("bad").unwrap_err();
-        assert!(error.contains("expected `bin`, `com`, or `hex`"), "{error}");
+        assert!(
+            error.contains("expected `bin`, `com`, `hex`, `8xp`, `8ek`, or `8xk`"),
+            "{error}"
+        );
     }
 }
