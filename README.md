@@ -8,6 +8,20 @@ This is alpha software. The language and cartridge format are still evolving, an
 
 ## Commands
 
+After installation, run commands with `ezrac`:
+
+```sh
+ezrac check <file.ezra>
+ezrac emit-asm <file.ezra>
+ezrac build <file.ezra>
+ezrac test <file.ezra>
+ezrac assemble [--base <addr>] [--output <file.bin>] <file.asm>
+ezrac layout
+ezrac header
+```
+
+For local development, use Cargo:
+
 ```sh
 cargo run -- check <file.ezra>
 cargo run -- emit-asm <file.ezra>

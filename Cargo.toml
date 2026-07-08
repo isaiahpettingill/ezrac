@@ -1,7 +1,13 @@
 [package]
-name = "ezra"
+name = "ezrac"
 version = "0.1.0"
 edition = "2024"
+description = "Compiler and tooling prototype for the EZRA language"
+license = "MIT"
+repository = "https://github.com/isaiahpettingill/ezrac"
+
+[lib]
+name = "ezra"
 
 [dependencies]
 ez80 = "0.4.4"

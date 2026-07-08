@@ -15,7 +15,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c25b08081a8bc98ca8b55094b3701238586ea0ff9a14e82e248501873a648a1"
 
 [[package]]
-name = "ezra"
+name = "ezrac"
 version = "0.1.0"
 dependencies = [
  "ez80",
