@@ -306,18 +306,28 @@ fn completion_items(document: Option<&OpenDocument>, position: Position) -> Valu
     let prefix = document
         .map(|document| completion_prefix(&document.text, position))
         .unwrap_or_default();
-    let mut items = standard_completion_items();
+    let import_context =
+        document.is_some_and(|document| is_import_completion(&document.text, position));
+    let mut items = if import_context {
+        import_completion_items()
+    } else {
+        standard_completion_items()
+    };
     if let Some(document) = document {
         let index = symbol_index(document);
         for module in &index.modules {
             items.push(completion_item(module, 9, "module"));
         }
-        for symbol in index.symbols.values() {
-            items.push(json!({
-                "label": symbol.label,
-                "kind": symbol.kind,
-                "detail": symbol.detail,
-            }));
+        if !import_context {
+            for symbol in index.symbols.values() {
+                if should_show_symbol_completion(&symbol.label) {
+                    items.push(json!({
+                        "label": symbol.label,
+                        "kind": symbol.kind,
+                        "detail": symbol.detail,
+                    }));
+                }
+            }
         }
     }
     let items = items
@@ -329,12 +339,28 @@ fn completion_items(document: Option<&OpenDocument>, position: Position) -> Valu
                     .and_then(Value::as_str)
                     .is_some_and(|label| label.starts_with(&prefix))
         })
+        .fold(BTreeMap::<String, Value>::new(), |mut items, item| {
+            if let Some(label) = item.get("label").and_then(Value::as_str) {
+                items.entry(label.to_owned()).or_insert(item);
+            }
+            items
+        })
+        .into_values()
         .collect::<Vec<_>>();
     json!({ "isIncomplete": true, "items": items })
 }
 
-fn standard_completion_items() -> Vec<Value> {
-    let mut items = vec![
+fn is_import_completion(source: &str, position: Position) -> bool {
+    let Some(line) = source.lines().nth(position.line as usize) else {
+        return false;
+    };
+    let end = byte_index_for_character(line, position.character as usize);
+    let before_cursor = line[..end].trim_start();
+    before_cursor == "import" || before_cursor.starts_with("import ")
+}
+
+fn import_completion_items() -> Vec<Value> {
+    vec![
         completion_item("import agon.console", 15, "Agon console SDK import"),
         completion_item("import agon.vdp", 15, "Agon VDP SDK import"),
         completion_item("import agon.sprites", 15, "Agon sprites SDK import"),
@@ -349,7 +375,11 @@ fn standard_completion_items() -> Vec<Value> {
         completion_item("agon.keyboard", 9, "module"),
         completion_item("agon.mouse", 9, "module"),
         completion_item("agon.gpio", 9, "module"),
-    ];
+    ]
+}
+
+fn standard_completion_items() -> Vec<Value> {
+    let mut items = Vec::new();
     for keyword in KEYWORDS {
         items.push(completion_item(keyword, 14, "keyword"));
     }
@@ -357,6 +387,10 @@ fn standard_completion_items() -> Vec<Value> {
         items.push(completion_item(ty, 25, "primitive type"));
     }
     items
+}
+
+fn should_show_symbol_completion(label: &str) -> bool {
+    !label.contains('.') || label.starts_with("agon.")
 }
 
 fn completion_item(label: &str, kind: u8, detail: &str) -> Value {
