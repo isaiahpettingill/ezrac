@@ -61,6 +61,14 @@ fn run() -> Result<(), String> {
             let options = AssembleOptions::parse(&args[1..])?;
             assemble_file(&options)
         }
+        Some("init") => {
+            let options = InitOptions::parse(&args[1..])?;
+            init_project(&options)
+        }
+        Some("install-syntax") => {
+            let options = InstallSyntaxOptions::parse(&args[1..])?;
+            install_syntax(&options)
+        }
         Some("layout") => print_layout(args.get(1).map(String::as_str)),
         Some("header") => print_header(),
         Some("-h" | "--help") | None => {
@@ -68,6 +76,145 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         Some(command) => Err(format!("unknown command `{command}`\n{}", usage())),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InitOptions {
+    path: PathBuf,
+    name: Option<String>,
+    target: String,
+    force: bool,
+}
+
+impl InitOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut path = None;
+        let mut name = None;
+        let mut target = "agonlight-mos-ez80".to_owned();
+        let mut force = false;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--name" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    name = Some(value.clone());
+                }
+                "--target" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    resolve_target_profile(Some(value))?;
+                    target = value.clone();
+                }
+                "--force" => force = true,
+                _ if path.is_none() => path = Some(PathBuf::from(arg)),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(Self {
+            path: path.unwrap_or_else(|| PathBuf::from(".")),
+            name,
+            target,
+            force,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InstallSyntaxOptions {
+    editors: Vec<SyntaxEditor>,
+    all: bool,
+    dry_run: bool,
+}
+
+impl InstallSyntaxOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut editors = Vec::new();
+        let mut all = false;
+        let mut dry_run = false;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--all" => all = true,
+                "--dry-run" => dry_run = true,
+                "--editor" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    editors.push(SyntaxEditor::parse(value)?);
+                }
+                value if !value.starts_with('-') => editors.push(SyntaxEditor::parse(value)?),
+                _ => return Err(usage()),
+            }
+        }
+        if all {
+            editors = SyntaxEditor::all().to_vec();
+        }
+        editors.sort();
+        editors.dedup();
+        if editors.is_empty() {
+            return Err(
+                "install-syntax requires `--all` or at least one editor name; supported editors: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned(),
+            );
+        }
+        Ok(Self {
+            editors,
+            all,
+            dry_run,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SyntaxEditor {
+    Vim,
+    Neovim,
+    Nano,
+    Micro,
+    Helix,
+    Vscode,
+    Zed,
+    NotepadPlusPlus,
+}
+
+impl SyntaxEditor {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "vim" => Ok(Self::Vim),
+            "neovim" | "nvim" => Ok(Self::Neovim),
+            "nano" => Ok(Self::Nano),
+            "micro" => Ok(Self::Micro),
+            "helix" | "hx" => Ok(Self::Helix),
+            "vscode" | "vs-code" | "code" => Ok(Self::Vscode),
+            "zed" => Ok(Self::Zed),
+            "notepad++" | "notepadpp" | "npp" => Ok(Self::NotepadPlusPlus),
+            _ => Err(format!(
+                "unsupported editor `{value}`; expected vim, neovim, nano, micro, helix, vscode, zed, or notepad++"
+            )),
+        }
+    }
+
+    const fn all() -> &'static [Self] {
+        &[
+            Self::Vim,
+            Self::Neovim,
+            Self::Nano,
+            Self::Micro,
+            Self::Helix,
+            Self::Vscode,
+            Self::Zed,
+            Self::NotepadPlusPlus,
+        ]
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Vim => "vim",
+            Self::Neovim => "neovim",
+            Self::Nano => "nano",
+            Self::Micro => "micro",
+            Self::Helix => "helix",
+            Self::Vscode => "vscode",
+            Self::Zed => "zed",
+            Self::NotepadPlusPlus => "notepad++",
+        }
     }
 }
 
@@ -1752,6 +1899,326 @@ fn default_layout_for_target(target: &str) -> Layout {
     }
 }
 
+fn init_project(options: &InitOptions) -> Result<(), String> {
+    let root = &options.path;
+    let project_name = options
+        .name
+        .clone()
+        .unwrap_or_else(|| default_project_name(root));
+    validate_project_name(&project_name)?;
+
+    fs::create_dir_all(root)
+        .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
+    write_scaffold_file(
+        &root.join(".gitignore"),
+        options.force,
+        "target/\n*.bin\n*.com\n*.hex\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
+    )?;
+    write_scaffold_file(
+        &root.join("Ezra.toml"),
+        options.force,
+        &format!(
+            "[project]\nname = \"{project_name}\"\n\n[build]\ninput = \"src/main.ezra\"\ntarget = \"{}\"\noutput = \"{}\"\nexecutable = \"{project_name}\"\n\n[sdk]\npaths = [\"sdk\"]\n",
+            options.target,
+            resolve_target_profile(Some(&options.target))?
+                .output_format
+                .extension()
+        ),
+    )?;
+    write_scaffold_file(
+        &root.join("README.md"),
+        options.force,
+        &format!(
+            "# {project_name}\n\nBuild with:\n\n```sh\nezrac build\n```\n\nOr from an ezrac checkout:\n\n```sh\ncargo run -- build\n```\n"
+        ),
+    )?;
+    fs::create_dir_all(root.join("src"))
+        .map_err(|error| format!("failed to create {}/src: {error}", root.display()))?;
+    fs::create_dir_all(root.join("sdk"))
+        .map_err(|error| format!("failed to create {}/sdk: {error}", root.display()))?;
+    fs::create_dir_all(root.join("assets"))
+        .map_err(|error| format!("failed to create {}/assets: {error}", root.display()))?;
+    write_scaffold_file(&root.join("sdk/.gitkeep"), options.force, "")?;
+    write_scaffold_file(&root.join("assets/.gitkeep"), options.force, "")?;
+    write_scaffold_file(
+        &root.join("src/main.ezra"),
+        options.force,
+        &initial_main_source(&options.target),
+    )?;
+    println!("initialized {}", root.display());
+    Ok(())
+}
+
+fn default_project_name(root: &Path) -> String {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != ".")
+        .unwrap_or("ezra-game")
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn validate_project_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err(
+            "project name must contain only ASCII letters, digits, underscores, or hyphens"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn initial_main_source(target: &str) -> String {
+    if target.starts_with("agonlight-mos-ez80") {
+        return "import agon.console\n\nfn main() {\n    console.print_line(\"Hello from EZRA\")\n}\n".to_owned();
+    }
+    if target.split('-').any(|part| part == "cpm") {
+        return "import cpm.console\n\nfn main() {\n    console.write('H')\n    console.write('i')\n    console.newline()\n    console.exit()\n}\n".to_owned();
+    }
+    if target.starts_with("zxspectrum-z80") {
+        return "import zx.rom\n\nfn main() {\n    zx.rom.print_char('H')\n    zx.rom.print_char('i')\n}\n".to_owned();
+    }
+    if target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80") {
+        return "import tice.lcd\n\nfn main() {\n    tice.lcd.set_first_pixel(0xFF)\n}\n"
+            .to_owned();
+    }
+    if target.starts_with("ti83-z80")
+        || target.starts_with("ti83plus-z80")
+        || target.starts_with("ti84-z80")
+        || target.starts_with("ti84plus-z80")
+    {
+        return "import ti.lcd\n\nfn main() {\n    ti.lcd.set_first_byte(0xFF)\n}\n".to_owned();
+    }
+    "fn main() {\n    return\n}\n".to_owned()
+}
+
+fn write_scaffold_file(path: &Path, force: bool, contents: &str) -> Result<(), String> {
+    if path.exists() && !force {
+        return Err(format!(
+            "refusing to overwrite {}; pass --force to replace existing scaffold files",
+            path.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    fs::write(path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn install_syntax(options: &InstallSyntaxOptions) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for editor in &options.editors {
+        match install_syntax_for_editor(*editor, options.dry_run) {
+            Ok(paths) => {
+                for path in paths {
+                    if options.dry_run {
+                        println!("would write {}", path.display());
+                    } else {
+                        println!("installed {} syntax at {}", editor.name(), path.display());
+                    }
+                }
+            }
+            Err(error) => failures.push(format!("{}: {error}", editor.name())),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "syntax installation completed with errors:\n{}",
+            failures.join("\n")
+        ))
+    }
+}
+
+fn install_syntax_for_editor(editor: SyntaxEditor, dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    match editor {
+        SyntaxEditor::Vim => install_vim_syntax(config_home()?.join(".vim"), dry_run),
+        SyntaxEditor::Neovim => install_vim_syntax(config_home()?.join(".config/nvim"), dry_run),
+        SyntaxEditor::Nano => install_nano_syntax(dry_run),
+        SyntaxEditor::Micro => install_single_syntax_file(
+            config_home()?.join(".config/micro/syntax/ezra.yaml"),
+            include_str!("../editors/micro/ezra.yaml"),
+            dry_run,
+        ),
+        SyntaxEditor::Helix => install_helix_syntax(dry_run),
+        SyntaxEditor::Vscode => install_vscode_syntax(dry_run),
+        SyntaxEditor::Zed => install_zed_syntax(dry_run),
+        SyntaxEditor::NotepadPlusPlus => install_notepadpp_syntax(dry_run),
+    }
+}
+
+fn config_home() -> Result<PathBuf, String> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "HOME is not set".to_owned())
+}
+
+fn appdata_home() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("APPDATA") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(config_home()?.join(".config"))
+}
+
+fn install_vim_syntax(root: PathBuf, dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    let files = [
+        (
+            "ftdetect/ezra.vim",
+            include_str!("../editors/vim/ftdetect/ezra.vim"),
+        ),
+        (
+            "ftplugin/ezra.vim",
+            include_str!("../editors/vim/ftplugin/ezra.vim"),
+        ),
+        (
+            "syntax/ezra.vim",
+            include_str!("../editors/vim/syntax/ezra.vim"),
+        ),
+    ];
+    write_syntax_files(root, &files, dry_run)
+}
+
+fn install_nano_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    let root = config_home()?;
+    let nanorc_dir = root.join(".nano");
+    let syntax_path = nanorc_dir.join("ezra.nanorc");
+    let mut paths = install_single_syntax_file(
+        syntax_path.clone(),
+        include_str!("../editors/nano/ezra.nanorc"),
+        dry_run,
+    )?;
+    let include_line = format!("include {}", syntax_path.display());
+    let nanorc = root.join(".nanorc");
+    if dry_run {
+        paths.push(nanorc);
+        return Ok(paths);
+    }
+    let existing = fs::read_to_string(&nanorc).unwrap_or_default();
+    if !existing.lines().any(|line| line.trim() == include_line) {
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&include_line);
+        next.push('\n');
+        fs::write(&nanorc, next)
+            .map_err(|error| format!("failed to write {}: {error}", nanorc.display()))?;
+    }
+    paths.push(nanorc);
+    Ok(paths)
+}
+
+fn install_helix_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    let root = config_home()?.join(".config/helix");
+    let files = [
+        (
+            "languages.toml",
+            include_str!("../editors/helix/languages.toml"),
+        ),
+        (
+            "runtime/queries/ezra/highlights.scm",
+            include_str!("../editors/helix/queries/highlights.scm"),
+        ),
+    ];
+    write_syntax_files(root, &files, dry_run)
+}
+
+fn install_vscode_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    let root = config_home()?.join(".vscode/extensions/ezra-language");
+    let files = [
+        (
+            "package.json",
+            include_str!("../editors/vscode/package.json"),
+        ),
+        (
+            "language-configuration.json",
+            include_str!("../editors/vscode/language-configuration.json"),
+        ),
+        (
+            "syntaxes/ezra.tmLanguage.json",
+            include_str!("../editors/vscode/syntaxes/ezra.tmLanguage.json"),
+        ),
+    ];
+    write_syntax_files(root, &files, dry_run)
+}
+
+fn install_zed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    let root = config_home()?.join(".config/zed/extensions/ezra");
+    let files = [
+        (
+            "extension.toml",
+            include_str!("../editors/zed/extension.toml"),
+        ),
+        (
+            "languages/ezra/config.toml",
+            include_str!("../editors/zed/languages/ezra/config.toml"),
+        ),
+        (
+            "languages/ezra/highlights.scm",
+            include_str!("../editors/zed/languages/ezra/highlights.scm"),
+        ),
+    ];
+    write_syntax_files(root, &files, dry_run)
+}
+
+fn install_notepadpp_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    install_single_syntax_file(
+        appdata_home()?.join("Notepad++/userDefineLangs/ezra.xml"),
+        include_str!("../editors/notepad++/ezra.xml"),
+        dry_run,
+    )
+}
+
+fn install_single_syntax_file(
+    path: PathBuf,
+    contents: &str,
+    dry_run: bool,
+) -> Result<Vec<PathBuf>, String> {
+    if !dry_run {
+        write_syntax_file(&path, contents)?;
+    }
+    Ok(vec![path])
+}
+
+fn write_syntax_files(
+    root: PathBuf,
+    files: &[(&str, &str)],
+    dry_run: bool,
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for (relative, contents) in files {
+        let path = root.join(relative);
+        if !dry_run {
+            write_syntax_file(&path, contents)?;
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn write_syntax_file(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    fs::write(path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
 fn bare_target_cpu(target: &str) -> Option<AssemblerCpu> {
     let mut parts = target.split('-');
     if parts.next()? != "bare" {
@@ -1851,7 +2318,7 @@ fn print_usage() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
 }
 
 #[cfg(test)]
@@ -2003,6 +2470,82 @@ mod tests {
 
         assert_eq!(options.stage, IrStage::Hir);
         assert_eq!(options.command.path, "game.ezra");
+    }
+
+    #[test]
+    fn init_options_parse_path_name_target_and_force() {
+        let options = InitOptions::parse(&[
+            "--name".to_owned(),
+            "cafe".to_owned(),
+            "--target".to_owned(),
+            "agonlight-mos-ez80".to_owned(),
+            "--force".to_owned(),
+            "game".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.path, PathBuf::from("game"));
+        assert_eq!(options.name.as_deref(), Some("cafe"));
+        assert_eq!(options.target, "agonlight-mos-ez80");
+        assert!(options.force);
+    }
+
+    #[test]
+    fn install_syntax_options_require_editor_selection() {
+        let error = InstallSyntaxOptions::parse(&[]).unwrap_err();
+
+        assert!(error.contains("requires `--all`"), "{error}");
+    }
+
+    #[test]
+    fn install_syntax_options_parse_selected_editors() {
+        let options = InstallSyntaxOptions::parse(&[
+            "--editor".to_owned(),
+            "vim".to_owned(),
+            "nvim".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.editors, [SyntaxEditor::Vim, SyntaxEditor::Neovim]);
+        assert!(options.dry_run);
+        assert!(!options.all);
+    }
+
+    #[test]
+    fn init_project_writes_default_scaffold() {
+        let root = temp_root("init_project");
+        init_project(&InitOptions {
+            path: root.clone(),
+            name: Some("demo".to_owned()),
+            target: "agonlight-mos-ez80".to_owned(),
+            force: false,
+        })
+        .unwrap();
+
+        let config = std::fs::read_to_string(root.join("Ezra.toml")).unwrap();
+        let main = std::fs::read_to_string(root.join("src/main.ezra")).unwrap();
+        let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+
+        assert!(config.contains("name = \"demo\""), "{config}");
+        assert!(
+            config.contains("target = \"agonlight-mos-ez80\""),
+            "{config}"
+        );
+        assert!(main.contains("import agon.console"), "{main}");
+        assert!(main.contains("console.print_line"), "{main}");
+        assert!(gitignore.contains("target/"), "{gitignore}");
+
+        let error = init_project(&InitOptions {
+            path: root.clone(),
+            name: Some("demo".to_owned()),
+            target: "agonlight-mos-ez80".to_owned(),
+            force: false,
+        })
+        .unwrap_err();
+        assert!(error.contains("refusing to overwrite"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

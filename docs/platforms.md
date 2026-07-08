@@ -1,0 +1,341 @@
+# EZRA Platform Documentation
+
+EZRA targets are selected with target triples. A target triple has this general shape:
+
+```text
+vendor-platform-cpu[-version]
+```
+
+The compiler identifies the CPU by scanning target components for one of:
+
+```text
+ez80 z80 z80n z180 i8080 8080 i8085 8085 m68k
+```
+
+Only CPUs with an implemented memory model can be resolved. `m68k` triples parse, but they are rejected because no target profile is implemented yet.
+
+## Support Levels
+
+This repository contains three different kinds of platform support:
+
+```text
+Source target      EZRA source can be parsed, lowered, assembled, and packaged for the target.
+Assembly target    Handwritten assembly can be assembled and packaged for the target.
+SDK scaffold       Built-in EZRA SDK modules exist, but target behavior may still need backend work.
+```
+
+The current production-quality source path is eZ80-oriented. Z80-family and 8080-family source targets have target profiles and layouts, but generated-code maturity varies; use `assemble` when you need exact machine control on those platforms.
+
+## Target Summary
+
+| Target pattern | CPU | Address width | Default output | Built-in SDK | Status |
+| --- | --- | ---: | --- | --- | --- |
+| `agonlight-mos-ez80` | eZ80 ADL | 24 | Agon MOS `.bin` | `agon.*` | Main source target |
+| `custom-unknown-ez80` | eZ80 ADL | 24 | `.bin` | none | Generic eZ80 source target |
+| `ezra-test-flat-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
+| `ezra-test-split-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
+| `ti84plusce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
+| `ti83premiumce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
+| `zxspectrum-z80` | Z80 | 16 | `.bin` | `zx.*` | Experimental Z80 target |
+| `ti83-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `ti83plus-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `ti84-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `ti84plus-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `cpm-*-z80` | Z80 | 16 | `.com` | `cpm.*` | Assembly examples; source backend still maturing |
+| `cpm-*-i8080` | 8080 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
+| `cpm-*-i8085` | 8085 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
+| `bare-z80` | Z80 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-z80n` | Z80N | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-z180` | Z180 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-i8080` | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-i8085` | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-ez80` | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
+
+Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
+
+## Agon Light MOS
+
+Target:
+
+```text
+agonlight-mos-ez80
+```
+
+Use this target for normal Agon MOS executables.
+
+```toml
+[build]
+target = "agonlight-mos-ez80"
+output = "bin"
+```
+
+The generated binary uses the Agon MOS executable shape:
+
+```text
+byte 0       JP 0x040045
+byte 64      "MOS", 0, 1
+byte 69      compiled program code
+entry        0x040045
+```
+
+Default layout highlights:
+
+```text
+0x040000..0x04003F   MOS executable header
+0x040045..0x05FFFF   code
+0x060000..0x06FFFF   rodata
+0x070000..0x0BFFFF   RAM
+0x0C0000..0x0DFFFF   assets
+0x0E0000..0x0EFFFF   VDP volatile area
+0x0F8000..0x0FFFFF   reserved stack window
+```
+
+Built-in SDK modules:
+
+```text
+agon.mos
+agon.console
+agon.vdp
+agon.keyboard
+agon.mouse
+agon.gpio
+```
+
+Coding guidance:
+
+```ezra
+import agon.console
+
+fn main() {
+    console.println("Hello, Agon")
+}
+```
+
+Let `main` return to MOS for normal programs. Emulator automation helpers exist in the SDK, but user-facing MOS programs should not exit through emulator-only ports.
+
+Use the SDK for MOS/VDP calls instead of hard-coding call sequences unless you are intentionally writing platform assembly. Keep hardware access in small wrapper functions so it can be replaced if the Agon ABI support changes.
+
+## Generic eZ80 And Test Targets
+
+Default target:
+
+```text
+custom-unknown-ez80
+```
+
+This target uses the generic EZRA eZ80 cartridge-style memory map and raw `.bin` output. It is useful for compiler tests, emulator experiments, and custom loaders.
+
+Test harness targets:
+
+```text
+ezra-test-flat-ez80
+ezra-test-split-ez80
+```
+
+Built-in SDK modules for test targets:
+
+```text
+harness.io
+harness.layout
+harness.memory
+```
+
+Coding guidance:
+
+Use `@cfg(target("ezra-test-flat-ez80"))` or memory-width predicates when writing tests that depend on exact addresses. Avoid depending on the generic map for deployed hardware; define a custom `.ezralayout` instead.
+
+## TI CE eZ80 Calculators
+
+Target patterns:
+
+```text
+ti84plusce-ez80
+ti83premiumce-ez80
+```
+
+Default output is `.8xp`. You can request app-style `.8ek` output with `[build].output = "8ek"` when appropriate.
+
+Built-in SDK modules:
+
+```text
+tice.os
+tice.lcd
+```
+
+Default layout starts code at `0xD1A881`, uses RAM/rodata/assets in the `0xD3xxxx` range, and exposes `TICE_VRAM_BASE` at `0xD40000`.
+
+Coding guidance:
+
+Use `tice.os` and `tice.lcd` wrappers for OS and LCD access. Keep names for TI outputs ASCII alphanumeric or `_`; `.8xp` variable names are uppercased and truncated to 8 bytes.
+
+## Classic TI Z80 Calculators
+
+Target patterns:
+
+```text
+ti83-z80
+ti83plus-z80
+ti84-z80
+ti84plus-z80
+```
+
+Default output is `.8xp`. You can request `.8xk` app-style output for classic TI targets.
+
+Built-in SDK modules:
+
+```text
+ti.os
+ti.lcd
+```
+
+Default layout starts code at `0x9D95` and exposes `TI_PLOTSSCREEN` at `0x9340`.
+
+Coding guidance:
+
+Use 16-bit pointers and addresses. Do not assume `u24` is pointer-sized. Keep source code behind `@cfg(cpu("z80"))` or `@cfg(pointer_width(16))` when sharing code with eZ80 targets.
+
+## ZX Spectrum Z80
+
+Target:
+
+```text
+zxspectrum-z80
+```
+
+Default output is raw `.bin`. Built-in SDK modules are:
+
+```text
+zx.rom
+zx.screen
+```
+
+Default layout highlights:
+
+```text
+0x0000..0x3FFF   ROM, reserved
+0x4000..0x5AFF   display, volatile
+0x5B00..0x7FFF   system, reserved
+0x8000..0xBFFF   code
+0xC000..0xCFFF   rodata
+0xD000..0xDFFF   RAM
+```
+
+Symbols include `ZX_SCREEN_BASE`, `ZX_ATTR_BASE`, `ZX_ROM_PRINT_CHAR`, and `ZX_ROM_CLS`.
+
+Coding guidance:
+
+Use ROM and screen wrappers where possible. Treat display memory as volatile and keep stack/system memory clear unless your loader and custom layout say otherwise.
+
+## CP/M 2.2
+
+Target patterns:
+
+```text
+cpm-2.2-z80
+cpm-2.2-i8080
+cpm-2.2-i8085
+```
+
+Default output is `.com`. The default load and entry address is `0x0100`, the CP/M transient program area start.
+
+Built-in SDK modules:
+
+```text
+cpm.bdos
+cpm.console
+```
+
+Current checked-in runnable examples under `examples/cpm-z80` are assembly-only. Build one with:
+
+```sh
+cargo run -- assemble --target cpm-2.2-z80 examples/cpm-z80/hello-char.asm
+```
+
+Coding guidance:
+
+Use BDOS wrappers rather than direct magic calls in shared code. Keep `.COM` programs within the transient program area and remember that address `0x0005` is the BDOS call vector. For now, prefer handwritten assembly for CP/M programs that must run reliably.
+
+## Bare Targets
+
+Target patterns:
+
+```text
+bare-ez80
+bare-z80
+bare-z80n
+bare-z180
+bare-i8080
+bare-i8085
+```
+
+Bare targets use raw `.bin` output and do not enable default SDK symbols. Layouts are generic:
+
+```text
+bare-ez80   24-bit address space, load 0x000000, stack 0xFFFFFF
+bare-*      16-bit address space, load 0x0000, stack 0xFFFF
+```
+
+Coding guidance:
+
+Provide a custom `.ezralayout` for real hardware. Define your own ports, MMIO addresses, interrupt entry points, and startup conventions. Do not assume a runtime, operating system, or default SDK.
+
+## Writing Portable EZRA
+
+Use conditional declarations for target-specific hardware:
+
+```ezra
+@cfg(cpu("ez80"))
+pub alias PtrInt = u24
+
+@cfg(any(cpu("z80"), cpu("z80n"), cpu("z180"), cpu("i8080"), cpu("i8085")))
+pub alias PtrInt = u16
+```
+
+Use pointer-width predicates when the exact CPU is less important than the address model:
+
+```ezra
+@cfg(pointer_width(24))
+pub const FAR_MEMORY: bool = true
+
+@cfg(pointer_width(16))
+pub const FAR_MEMORY: bool = false
+```
+
+Keep public APIs target-neutral and hide platform calls in private helpers:
+
+```ezra
+pub fn print_ok() {
+    platform_print_ok()
+}
+
+@cfg(target("agonlight-mos-ez80"))
+fn platform_print_ok() {
+    // call agon console wrapper
+}
+```
+
+Prefer SDK modules for OS calls, screen access, keyboard input, and exits. Use `port`, `mmio`, and inline `asm` only for functionality that does not belong in a reusable SDK wrapper yet.
+
+## Output Selection By Platform
+
+Target defaults can be overridden in `Ezra.toml`:
+
+```toml
+[build]
+target = "ti84plusce-ez80"
+output = "8xp"
+```
+
+Valid output formats are `bin`, `com`, `hex`, `8xp`, `8ek`, and `8xk`. TI app formats are target-checked: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
+
+## Adding A New Platform
+
+For a new platform on an existing CPU family:
+
+1. Choose a target triple with a supported CPU component.
+2. Add or override a `.ezralayout` with valid address ranges for the CPU address width.
+3. Add SDK source files and list their root in `[sdk].paths`, or add a built-in SDK under `toolchains/<target>/sdk` and wire it into `src/compile.rs`.
+4. Use `@cfg(target("..."))`, `@cfg(cpu("..."))`, and pointer/address-width predicates for platform-specific declarations.
+5. Build first with small programs, then add assembly or emulator tests for hardware behavior.
+
+For a new CPU family, a target profile, memory model, assembler/codegen backend, and executable packaging rules are required before it can be considered supported.
