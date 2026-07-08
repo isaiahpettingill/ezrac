@@ -32,7 +32,7 @@ fn init_screen() {
 fn draw_hud() {
     console.tab(0, 0)
     console.color(vdp.COLOR_WHITE)
-    console.print("EZRA INVADERS  A/Z LEFT  D/X RIGHT  SPACE FIRE  Q QUIT")
+    console.print("EZRA INVADERS  A/D MOVE  SPACE FIRE  Q QUIT")
 }
 
 fn clear_frame() {
@@ -69,12 +69,30 @@ fn draw_bullet() {
     vdp.line(bullet_x, bullet_y, bullet_x, bullet_y - 8)
 }
 
+fn draw_sprite_row(x0: u16, x1: u16, y: u16) {
+    vdp.line(x0, y, x1, y)
+    vdp.line(x0, y + 1, x1, y + 1)
+}
+
 fn draw_alien(x: u16, y: u16) {
-    vdp.rectangle(x, y + 12, x + 18, y)
-    vdp.line(x, y + 12, x + 9, y + 20)
-    vdp.line(x + 18, y + 12, x + 9, y + 20)
-    vdp.line(x + 4, y, x, y - 6)
-    vdp.line(x + 14, y, x + 18, y - 6)
+    draw_sprite_row(x + 4, x + 6, y)
+    draw_sprite_row(x + 16, x + 18, y)
+    draw_sprite_row(x + 6, x + 8, y + 2)
+    draw_sprite_row(x + 14, x + 16, y + 2)
+    draw_sprite_row(x + 4, x + 18, y + 4)
+    draw_sprite_row(x + 2, x + 6, y + 6)
+    draw_sprite_row(x + 8, x + 14, y + 6)
+    draw_sprite_row(x + 16, x + 20, y + 6)
+    draw_sprite_row(x, x + 22, y + 8)
+    draw_sprite_row(x, x + 2, y + 10)
+    draw_sprite_row(x + 4, x + 18, y + 10)
+    draw_sprite_row(x + 20, x + 22, y + 10)
+    draw_sprite_row(x, x + 2, y + 12)
+    draw_sprite_row(x + 4, x + 6, y + 12)
+    draw_sprite_row(x + 16, x + 18, y + 12)
+    draw_sprite_row(x + 20, x + 22, y + 12)
+    draw_sprite_row(x + 6, x + 10, y + 14)
+    draw_sprite_row(x + 14, x + 18, y + 14)
 }
 
 fn draw_aliens() {
@@ -152,7 +170,7 @@ fn update_bullet() {
 fn bullet_hits_alien(row: u8, col: u8) -> u8 {
     let x: u16 = alien_x(col)
     let y: u16 = alien_y(row)
-    if bullet_x >= x && bullet_x <= x + 18 && bullet_y >= y - 6 && bullet_y <= y + 20 {
+    if bullet_x >= x && bullet_x <= x + 22 && bullet_y >= y && bullet_y <= y + 16 {
         return 1
     }
     return 0
