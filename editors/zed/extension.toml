@@ -8,3 +8,7 @@ repository = "https://github.com/ezra/ezrac"
 
 [grammars.ezra]
 path = "../tree-sitter-ezra"
+
+[language_servers.ezra-lsp]
+name = "EZRA Language Server"
+languages = ["Ezra"]

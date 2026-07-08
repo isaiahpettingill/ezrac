@@ -5,6 +5,11 @@ file-types = ["ezra", "ezralayout"]
 comment-token = "//"
 indent = { tab-width = 4, unit = "    " }
 roots = ["Ezra.toml"]
+language-servers = ["ezra-lsp"]
+
+[language-server.ezra-lsp]
+command = "ezrac"
+args = ["lsp"]
 
 [[grammar]]
 name = "ezra"

@@ -1,12 +1,16 @@
 {
   "name": "ezra-language",
   "displayName": "Ezra Language",
-  "description": "Syntax highlighting for the EZRA language.",
+  "description": "Syntax highlighting and language server support for the EZRA language.",
   "version": "0.1.0",
   "publisher": "ezra",
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^1.82.0"
   },
+  "activationEvents": [
+    "onLanguage:ezra"
+  ],
+  "main": "./extension.js",
   "categories": [
     "Programming Languages"
   ],
@@ -31,6 +35,29 @@
         "scopeName": "source.ezra",
         "path": "./syntaxes/ezra.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Ezra",
+      "properties": {
+        "ezra.languageServer.command": {
+          "type": "string",
+          "default": "ezrac",
+          "description": "Command used to start the EZRA language server. Install ezrac with the lsp feature enabled."
+        },
+        "ezra.languageServer.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "lsp"
+          ],
+          "description": "Arguments passed to the EZRA language server command."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }
