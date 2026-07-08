@@ -1,3 +1,4 @@
+import agon.buffers
 import agon.console
 import agon.gpio
 import agon.keyboard
@@ -31,6 +32,10 @@ fn pulse_gpio_demo() {
     gpio.write_port_b(0x00)
 }
 
+fn buffer_demo() {
+    buffers.buffer_clear(1)
+}
+
 fn main() {
     console.mode(8)
     console.clear()
@@ -43,5 +48,6 @@ fn main() {
     mouse.enable()
     draw_frame()
     show_input_status()
+    buffer_demo()
     pulse_gpio_demo()
 }
