@@ -53,6 +53,8 @@ The bundled Agon SDK currently provides:
 
 These wrappers intentionally stay close to `agondev`'s MOS and VDP conventions. Advanced interrupts, keyboard vectors, audio, and full device drivers are deferred until EZRA has stronger support for those ABI shapes.
 
+For app structure guidance, see `docs/agon-apps.md`. It covers console apps, immediate-mode games/visualizations, sprite games, and graphical apps.
+
 Build the console SDK example:
 
 ```sh

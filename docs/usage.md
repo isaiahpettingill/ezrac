@@ -45,6 +45,12 @@ Install syntax highlighting for selected editors:
 ezrac install-syntax (--all | [--editor] <editor>...) [--dry-run]
 ```
 
+List documented target triples, default outputs, and SDKs:
+
+```sh
+ezrac targets
+```
+
 Validate a source file:
 
 ```sh
@@ -96,6 +102,8 @@ ezrac header
 ## Common Options
 
 `--target <triple>` selects the platform profile. If omitted, the default is `custom-unknown-ez80`.
+
+Use `ezrac targets` to list the target triples with documented layouts and SDKs. Pattern entries such as `cpm-*-z80` accept concrete versions like `cpm-2.2-z80`.
 
 `--layout <file.ezralayout>` replaces the target's default memory layout.
 

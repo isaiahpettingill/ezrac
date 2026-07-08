@@ -72,6 +72,10 @@ fn run() -> Result<(), String> {
             let options = InstallSyntaxOptions::parse(&args[1..])?;
             install_syntax(&options)
         }
+        Some("targets") => {
+            print_targets();
+            Ok(())
+        }
         Some("lsp") => run_lsp(),
         Some("layout") => print_layout(args.get(1).map(String::as_str)),
         Some("header") => print_header(),
@@ -2331,8 +2335,202 @@ fn print_usage() {
     println!("{}", usage());
 }
 
+fn print_targets() {
+    struct TargetRow {
+        triple: &'static str,
+        cpu: &'static str,
+        address_width_bits: u16,
+        output: &'static str,
+        sdk: &'static str,
+        status: &'static str,
+    }
+
+    const TARGETS: &[TargetRow] = &[
+        TargetRow {
+            triple: "agonlight-mos-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "bin",
+            sdk: "agon.*",
+            status: "main source target",
+        },
+        TargetRow {
+            triple: "custom-unknown-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "bin",
+            sdk: "none",
+            status: "generic eZ80 source target",
+        },
+        TargetRow {
+            triple: "ezra-test-flat-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "bin",
+            sdk: "harness.*",
+            status: "test harness target",
+        },
+        TargetRow {
+            triple: "ezra-test-split-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "bin",
+            sdk: "harness.*",
+            status: "test harness target",
+        },
+        TargetRow {
+            triple: "ti84plusce-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "8xp",
+            sdk: "tice.*",
+            status: "experimental TI CE target",
+        },
+        TargetRow {
+            triple: "ti83premiumce-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "8xp",
+            sdk: "tice.*",
+            status: "experimental TI CE target",
+        },
+        TargetRow {
+            triple: "zxspectrum-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "zx.*",
+            status: "experimental Z80 target",
+        },
+        TargetRow {
+            triple: "ti83-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "8xp",
+            sdk: "ti.*",
+            status: "experimental TI Z80 target",
+        },
+        TargetRow {
+            triple: "ti83plus-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "8xp",
+            sdk: "ti.*",
+            status: "experimental TI Z80 target",
+        },
+        TargetRow {
+            triple: "ti84-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "8xp",
+            sdk: "ti.*",
+            status: "experimental TI Z80 target",
+        },
+        TargetRow {
+            triple: "ti84plus-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "8xp",
+            sdk: "ti.*",
+            status: "experimental TI Z80 target",
+        },
+        TargetRow {
+            triple: "cpm-*-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "com",
+            sdk: "cpm.*",
+            status: "assembly examples; source backend maturing",
+        },
+        TargetRow {
+            triple: "cpm-*-i8080",
+            cpu: "i8080",
+            address_width_bits: 16,
+            output: "com",
+            sdk: "cpm.*",
+            status: "assembly/source scaffold",
+        },
+        TargetRow {
+            triple: "cpm-*-i8085",
+            cpu: "i8085",
+            address_width_bits: 16,
+            output: "com",
+            sdk: "cpm.*",
+            status: "assembly/source scaffold",
+        },
+        TargetRow {
+            triple: "bare-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "bare assembly/source scaffold",
+        },
+        TargetRow {
+            triple: "bare-z80n",
+            cpu: "z80n",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "bare assembly/source scaffold",
+        },
+        TargetRow {
+            triple: "bare-z180",
+            cpu: "z180",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "bare assembly/source scaffold",
+        },
+        TargetRow {
+            triple: "bare-i8080",
+            cpu: "i8080",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "bare assembly/source scaffold",
+        },
+        TargetRow {
+            triple: "bare-i8085",
+            cpu: "i8085",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "bare assembly/source scaffold",
+        },
+        TargetRow {
+            triple: "bare-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "bin",
+            sdk: "none",
+            status: "bare eZ80 target",
+        },
+    ];
+
+    println!("supported target triples:\n");
+    println!(
+        "{:<24} {:<6} {:>5} {:<7} {:<10} status",
+        "triple", "cpu", "addr", "output", "sdk"
+    );
+    for target in TARGETS {
+        println!(
+            "{:<24} {:<6} {:>4}b {:<7} {:<10} {}",
+            target.triple,
+            target.cpu,
+            target.address_width_bits,
+            target.output,
+            target.sdk,
+            target.status
+        );
+    }
+    println!(
+        "\nPatterns with `*` accept concrete versions, such as `cpm-2.2-z80`. Other triples may resolve if they contain a supported CPU family, but only listed triples have documented layouts/SDKs."
+    );
+}
+
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
 }
 
 #[cfg(test)]

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `ezrac targets` to list documented target triples, default outputs, SDK families, and support status.
+- Added an Agon app guide for console apps, games/visualizations, sprite games, and graphical apps.
+- Added small `agon.vdp` convenience helpers for mode 8 setup, drawing color selection, graphics clearing, and simple frame delays.
 - Deduplicated `ezrac lsp` completion labels and reduced noisy SDK completions outside import statements.
 - Improved `ezrac lsp` completions, hover information, and unknown-symbol diagnostics.
 - Updated Cargo dependencies, including `toml` 1.1.x compatibility for project files.

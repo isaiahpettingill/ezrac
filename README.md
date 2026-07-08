@@ -19,6 +19,7 @@ ezrac test <file.ezra>
 ezrac assemble [--base <addr>] [--output <file.bin>] <file.asm>
 ezrac init [--name <name>] [--target <triple>] [dir]
 ezrac install-syntax (--all | [--editor] <editor>...)
+ezrac targets
 ezrac lsp
 ezrac layout
 ezrac header
@@ -35,6 +36,7 @@ cargo run -- test <file.ezra>
 cargo run -- assemble [--base <addr>] [--output <file.bin>] <file.asm>
 cargo run -- init [--name <name>] [--target <triple>] [dir]
 cargo run -- install-syntax (--all | [--editor] <editor>...)
+cargo run -- targets
 cargo run --features lsp -- lsp
 cargo run -- layout
 cargo run -- header
@@ -85,13 +87,14 @@ MOS executable builds use the documented Agon format:
 
 The runtime preserves the MOS stack, enables interrupts for MOS/VDP interaction, calls `main`, and returns to MOS when `main` returns. Normal MOS programs should return rather than writing emulator-only exit ports.
 
-Examples live under `examples/agon-mos`. See `examples/agon-mos/README.md` for build and Fab Agon Emulator usage.
+Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app patterns and `examples/agon-mos/README.md` for build and Fab Agon Emulator usage.
 
 ## Project Notes
 
 - `docs/language.md` documents the currently implemented EZRA source language.
 - `docs/usage.md` documents compiler commands, project files, outputs, layouts, and SDK imports.
 - `docs/platforms.md` documents supported target profiles and platform-specific coding guidance.
+- `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
 - `CHANGELOG.md` summarizes notable development milestones.

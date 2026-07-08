@@ -96,6 +96,8 @@ Built-in SDK modules:
 agon.mos
 agon.console
 agon.vdp
+agon.buffers
+agon.sprites
 agon.keyboard
 agon.mouse
 agon.gpio
@@ -107,9 +109,11 @@ Coding guidance:
 import agon.console
 
 fn main() {
-    console.println("Hello, Agon")
+    console.print_line("Hello, Agon")
 }
 ```
+
+Run `ezrac targets` to print this repository's documented target triples, default output extensions, SDK module families, and support status.
 
 Let `main` return to MOS for normal programs. Emulator automation helpers exist in the SDK, but user-facing MOS programs should not exit through emulator-only ports.
 

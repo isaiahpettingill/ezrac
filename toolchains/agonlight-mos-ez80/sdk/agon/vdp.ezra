@@ -36,6 +36,12 @@ pub const COLOR_BRIGHT_MAGENTA: u8 = 13
 pub const COLOR_BRIGHT_CYAN: u8 = 14
 pub const COLOR_BRIGHT_WHITE: u8 = 15
 
+pub const MODE_8: u8 = 8
+pub const MODE_8_WIDTH: u16 = 320
+pub const MODE_8_HEIGHT: u16 = 240
+pub const MODE_8_RIGHT: u16 = 319
+pub const MODE_8_BOTTOM: u16 = 239
+
 pub const GCOL_SET: u8 = 0
 pub const GCOL_OR: u8 = 1
 pub const GCOL_AND: u8 = 2
@@ -84,6 +90,11 @@ pub fn screen_mode(number: u8) {
     vdu(number)
 }
 
+pub fn mode_8() {
+    screen_mode(MODE_8)
+    set_logical_coordinates()
+}
+
 pub fn cursor_home() {
     vdu(VDU_HOME)
 }
@@ -130,6 +141,15 @@ pub fn gcol(op: u8, value: u8) {
     vdu(VDU_GCOL)
     vdu(op)
     vdu(value)
+}
+
+pub fn draw_color(value: u8) {
+    gcol(GCOL_SET, value)
+}
+
+pub fn clear_graphics_color(value: u8) {
+    draw_color(value)
+    clg()
 }
 
 pub fn palette(logical: u8, physical: u8, red: u8, green: u8, blue: u8) {
@@ -266,6 +286,24 @@ pub fn wait_for_flags(mask: u8) {
         "ld a, 41h"
         "rst.lis 08h"
     }
+}
+
+pub fn busy_delay(outer_count: u16, inner_count: u16) {
+    let outer: u16 = 0
+    while outer < outer_count {
+        let inner: u16 = 0
+        while inner < inner_count {
+            asm volatile {
+                "nop"
+            }
+            inner += 1
+        }
+        outer += 1
+    }
+}
+
+pub fn frame_delay() {
+    busy_delay(28, 700)
 }
 
 pub fn vdp_exit_emulator(code: u8) {
