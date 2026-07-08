@@ -32,6 +32,7 @@ The current production-quality source path is eZ80-oriented. Z80-family and 8080
 | --- | --- | ---: | --- | --- | --- |
 | `agonlight-mos-ez80` | eZ80 ADL | 24 | Agon MOS `.bin` | `agon.*` | Main source target |
 | `custom-unknown-ez80` | eZ80 ADL | 24 | `.bin` | none | Generic eZ80 source target |
+| `ez180n-ez80` | eZ80 ADL | 24 | `.bin` | `ez180n.*` | ez180N libretro console target |
 | `ezra-test-flat-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
 | `ezra-test-split-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
 | `ti84plusce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |

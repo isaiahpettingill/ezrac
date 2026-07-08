@@ -410,6 +410,14 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(|target| target.starts_with("ez180n-ez80")) {
+        match import {
+            "ez180n.console" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ez180n-ez80/sdk/ez180n/console.ezra"),
+                "ez180n.console",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(is_ti_ce_target) {
         match import {
             "tice.os" => Some(builtin_sdk_utf8(

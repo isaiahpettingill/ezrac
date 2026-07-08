@@ -1,0 +1,7 @@
+[project]
+name = "ez180n-hello"
+
+[build]
+target = "ez180n-ez80"
+output = "bin"
+executable = "ez180n-hello"

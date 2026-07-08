@@ -2363,6 +2363,14 @@ fn print_targets() {
             status: "generic eZ80 source target",
         },
         TargetRow {
+            triple: "ez180n-ez80",
+            cpu: "ez80",
+            address_width_bits: 24,
+            output: "bin",
+            sdk: "ez180n.*",
+            status: "ez180N libretro console target",
+        },
+        TargetRow {
             triple: "ezra-test-flat-ez80",
             cpu: "ez80",
             address_width_bits: 24,

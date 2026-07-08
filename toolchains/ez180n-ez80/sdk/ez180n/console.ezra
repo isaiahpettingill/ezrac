@@ -1,0 +1,103 @@
+pub const WIDTH: u8 = 160
+pub const HEIGHT: u8 = 112
+pub const FRAMEBUFFER_BASE: u24 = 0x080000u24
+
+pub const CHAR_FIRST: u8 = 0x00
+pub const CHAR_LAST: u8 = 0xFF
+pub const CHAR_COUNT: u16 = 256
+pub const CHAR_SPACE: u8 = 0x20
+pub const CHAR_HEART: u8 = 0x03
+pub const CHAR_DIAMOND: u8 = 0x04
+pub const CHAR_CLUB: u8 = 0x05
+pub const CHAR_SPADE: u8 = 0x06
+pub const CHAR_BULLET: u8 = 0x07
+pub const CHAR_ARROW_UP: u8 = 0x18
+pub const CHAR_ARROW_DOWN: u8 = 0x19
+pub const CHAR_ARROW_RIGHT: u8 = 0x1A
+pub const CHAR_ARROW_LEFT: u8 = 0x1B
+pub const CHAR_LIGHT_SHADE: u8 = 0xB0
+pub const CHAR_MEDIUM_SHADE: u8 = 0xB1
+pub const CHAR_DARK_SHADE: u8 = 0xB2
+pub const CHAR_BOX_VERTICAL: u8 = 0xB3
+pub const CHAR_BOX_HORIZONTAL: u8 = 0xC4
+pub const CHAR_BOX_DOWN_RIGHT: u8 = 0xDA
+pub const CHAR_BOX_DOWN_LEFT: u8 = 0xBF
+pub const CHAR_BOX_UP_RIGHT: u8 = 0xC0
+pub const CHAR_BOX_UP_LEFT: u8 = 0xD9
+pub const CHAR_FULL_BLOCK: u8 = 0xDB
+pub const CHAR_LOWER_HALF: u8 = 0xDC
+pub const CHAR_LEFT_HALF: u8 = 0xDD
+pub const CHAR_RIGHT_HALF: u8 = 0xDE
+pub const CHAR_UPPER_HALF: u8 = 0xDF
+
+pub port PRESENT_PORT: u8 = 0x10
+pub port SOUND_PORT: u8 = 0x20
+pub port P1_LOW: u8 = 0x30
+pub port P1_HIGH: u8 = 0x31
+pub port P2_LOW: u8 = 0x32
+pub port P2_HIGH: u8 = 0x33
+pub port P3_LOW: u8 = 0x34
+pub port P3_HIGH: u8 = 0x35
+pub port P4_LOW: u8 = 0x36
+pub port P4_HIGH: u8 = 0x37
+
+pub volatile mmio FRAMEBUFFER: ptr<u8> = 0x080000
+
+pub const BUTTON_B: u8 = 0
+pub const BUTTON_Y: u8 = 1
+pub const BUTTON_SELECT: u8 = 2
+pub const BUTTON_START: u8 = 3
+pub const BUTTON_UP: u8 = 4
+pub const BUTTON_DOWN: u8 = 5
+pub const BUTTON_LEFT: u8 = 6
+pub const BUTTON_RIGHT: u8 = 7
+pub const BUTTON_A: u8 = 8
+pub const BUTTON_X: u8 = 9
+pub const BUTTON_L: u8 = 10
+pub const BUTTON_R: u8 = 11
+
+pub fn put_char(x: u8, y: u8, ch: u8) {
+    let offset: u24 = cast<u24>(y) * cast<u24>(WIDTH) + cast<u24>(x)
+    let cell: ptr<u8> = FRAMEBUFFER + offset
+    *cell = ch
+}
+
+pub fn fill(ch: u8) {
+    let index: u24 = 0
+    while index < 17920u24 {
+        let cell: ptr<u8> = FRAMEBUFFER + index
+        *cell = ch
+        index += 1u24
+    }
+}
+
+pub fn present() {
+    out PRESENT_PORT, 1
+}
+
+pub fn play_sound(sound: u8) {
+    out SOUND_PORT, sound
+}
+
+pub fn input_low(player: u8) -> u8 {
+    if player == 0 { return in P1_LOW }
+    if player == 1 { return in P2_LOW }
+    if player == 2 { return in P3_LOW }
+    if player == 3 { return in P4_LOW }
+    return 0
+}
+
+pub fn input_high(player: u8) -> u8 {
+    if player == 0 { return in P1_HIGH }
+    if player == 1 { return in P2_HIGH }
+    if player == 2 { return in P3_HIGH }
+    if player == 3 { return in P4_HIGH }
+    return 0
+}
+
+pub fn button_down(player: u8, button: u8) -> u8 {
+    if button < 8 {
+        return (input_low(player) >> button) & 1
+    }
+    return (input_high(player) >> (button - 8)) & 1
+}

@@ -1,0 +1,23 @@
+import ez180n.console
+
+fn draw_text(x: u8, y: u8) {
+    console.put_char(x, y, 'E')
+    console.put_char(x + 1, y, 'Z')
+    console.put_char(x + 2, y, '1')
+    console.put_char(x + 3, y, '8')
+    console.put_char(x + 4, y, '0')
+    console.put_char(x + 5, y, 'N')
+}
+
+fn main() {
+    console.fill(console.CHAR_SPACE)
+    draw_text(76, 52)
+    console.put_char(75, 54, console.CHAR_BOX_DOWN_RIGHT)
+    console.put_char(76, 54, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(77, 54, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(78, 54, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(79, 54, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(80, 54, console.CHAR_BOX_DOWN_LEFT)
+    console.play_sound(42)
+    console.present()
+}
