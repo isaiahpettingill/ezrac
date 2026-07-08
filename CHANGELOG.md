@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Deduplicated `ezrac lsp` completion labels and reduced noisy SDK completions outside import statements.
 - Improved `ezrac lsp` completions, hover information, and unknown-symbol diagnostics.
 - Updated Cargo dependencies, including `toml` 1.1.x compatibility for project files.
 - Expanded `agon.vdp` with cursor helpers, bright color constants, line helpers, filled/framed rectangles, and triangles.
