@@ -16,7 +16,7 @@ checksum = "cbe75b75e149ce2814cb6cadaa68b2f3879b4d8e562d35ed4597c37b1c42f336"
 
 [[package]]
 name = "ezrac"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ez80",
  "lsp",
