@@ -1,0 +1,258 @@
+import agon.console
+import agon.keyboard
+import agon.vdp
+
+const SCREEN_W: u16 = 320
+const PLAYER_Y: u16 = 218
+const PLAYER_STEP: u16 = 8
+const BULLET_STEP: u16 = 12
+const ALIEN_COLS: u8 = 5
+const ALIEN_ROWS: u8 = 3
+const ALIEN_COUNT: u8 = 15
+const ALIEN_SPACING_X: u16 = 38
+const ALIEN_SPACING_Y: u16 = 24
+
+global player_x: u16 = 152
+global bullet_x: u16 = 0
+global bullet_y: u16 = 0
+global bullet_active: u8 = 0
+global alien_base_x: u16 = 46
+global alien_base_y: u16 = 44
+global alien_dir: u8 = 1
+global remaining: u8 = ALIEN_COUNT
+global alive: [u8; ALIEN_COUNT] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+fn init_screen() {
+    console.mode(8)
+    console.clear()
+    console.cursor_enable(0)
+    vdp.set_logical_coordinates()
+}
+
+fn draw_hud() {
+    console.tab(0, 0)
+    console.color(vdp.COLOR_WHITE)
+    console.print("EZRA INVADERS  A/Z LEFT  D/X RIGHT  SPACE FIRE  Q QUIT")
+}
+
+fn clear_frame() {
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
+    vdp.clg()
+    draw_hud()
+}
+
+fn alien_index(row: u8, col: u8) -> u8 {
+    return (row * ALIEN_COLS) + col
+}
+
+fn alien_x(col: u8) -> u16 {
+    return alien_base_x + (cast<u16>(col) * ALIEN_SPACING_X)
+}
+
+fn alien_y(row: u8) -> u16 {
+    return alien_base_y + (cast<u16>(row) * ALIEN_SPACING_Y)
+}
+
+fn draw_player() {
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_CYAN)
+    vdp.rectangle(player_x, PLAYER_Y + 8, player_x + 24, PLAYER_Y)
+    vdp.line(player_x + 4, PLAYER_Y, player_x + 12, PLAYER_Y - 8)
+    vdp.line(player_x + 20, PLAYER_Y, player_x + 12, PLAYER_Y - 8)
+}
+
+fn draw_bullet() {
+    if bullet_active == 0 {
+        return
+    }
+
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_YELLOW)
+    vdp.line(bullet_x, bullet_y, bullet_x, bullet_y - 8)
+}
+
+fn draw_alien(x: u16, y: u16) {
+    vdp.rectangle(x, y + 12, x + 18, y)
+    vdp.line(x, y + 12, x + 9, y + 20)
+    vdp.line(x + 18, y + 12, x + 9, y + 20)
+    vdp.line(x + 4, y, x, y - 6)
+    vdp.line(x + 14, y, x + 18, y - 6)
+}
+
+fn draw_aliens() {
+    let row: u8 = 0
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_GREEN)
+    while row < ALIEN_ROWS {
+        let col: u8 = 0
+        while col < ALIEN_COLS {
+            let index: u8 = alien_index(row, col)
+            if alive[index] != 0 {
+                draw_alien(alien_x(col), alien_y(row))
+            }
+            col += 1
+        }
+        row += 1
+    }
+}
+
+fn draw_frame() {
+    clear_frame()
+    draw_aliens()
+    draw_player()
+    draw_bullet()
+}
+
+fn fire_bullet() {
+    if bullet_active != 0 {
+        return
+    }
+
+    bullet_active = 1
+    bullet_x = player_x + 12
+    bullet_y = PLAYER_Y - 12
+}
+
+fn handle_input() -> u8 {
+    let key: u8 = keyboard.ascii()
+
+    if key == 'q' || key == 'Q' {
+        return 1
+    }
+
+    if key == 'a' || key == 'A' || key == 'z' || key == 'Z' {
+        if player_x > PLAYER_STEP {
+            player_x -= PLAYER_STEP
+        }
+    }
+
+    if key == 'd' || key == 'D' || key == 'x' || key == 'X' {
+        if player_x < SCREEN_W - 32 {
+            player_x += PLAYER_STEP
+        }
+    }
+
+    if key == ' ' {
+        fire_bullet()
+    }
+
+    keyboard.clear_state()
+    return 0
+}
+
+fn update_bullet() {
+    if bullet_active == 0 {
+        return
+    }
+
+    if bullet_y > BULLET_STEP {
+        bullet_y -= BULLET_STEP
+    } else {
+        bullet_active = 0
+    }
+}
+
+fn bullet_hits_alien(row: u8, col: u8) -> u8 {
+    let x: u16 = alien_x(col)
+    let y: u16 = alien_y(row)
+    if bullet_x >= x && bullet_x <= x + 18 && bullet_y >= y - 6 && bullet_y <= y + 20 {
+        return 1
+    }
+    return 0
+}
+
+fn check_bullet_collisions() {
+    if bullet_active == 0 {
+        return
+    }
+
+    let row: u8 = 0
+    while row < ALIEN_ROWS {
+        let col: u8 = 0
+        while col < ALIEN_COLS {
+            let index: u8 = alien_index(row, col)
+            if alive[index] != 0 && bullet_hits_alien(row, col) != 0 {
+                alive[index] = 0
+                remaining -= 1
+                bullet_active = 0
+                return
+            }
+            col += 1
+        }
+        row += 1
+    }
+}
+
+fn step_aliens() {
+    if alien_dir != 0 {
+        if alien_base_x < 138 {
+            alien_base_x += 6
+        } else {
+            alien_dir = 0
+            alien_base_y += 10
+        }
+        return
+    }
+
+    if alien_base_x > 12 {
+        alien_base_x -= 6
+    } else {
+        alien_dir = 1
+        alien_base_y += 10
+    }
+}
+
+fn update_game() {
+    update_bullet()
+    check_bullet_collisions()
+    step_aliens()
+}
+
+fn delay_frame() {
+    let outer: u16 = 0
+    while outer < 28 {
+        let inner: u16 = 0
+        while inner < 700 {
+            asm volatile {
+                "nop"
+            }
+            inner += 1
+        }
+        outer += 1
+    }
+}
+
+fn show_win() {
+    console.clear()
+    console.color(vdp.COLOR_YELLOW)
+    console.print("YOU SAVED AGON!\n")
+}
+
+fn show_loss() {
+    console.clear()
+    console.color(vdp.COLOR_RED)
+    console.print("INVADERS LANDED.\n")
+}
+
+fn main() {
+    init_screen()
+    keyboard.clear_state()
+
+    loop {
+        if handle_input() != 0 {
+            return
+        }
+
+        update_game()
+        draw_frame()
+
+        if remaining == 0 {
+            show_win()
+            return
+        }
+
+        if alien_base_y > 178 {
+            show_loss()
+            return
+        }
+
+        delay_frame()
+    }
+}

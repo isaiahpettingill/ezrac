@@ -30,6 +30,14 @@ cargo run -- build examples/agon-mos/sdk-showcase/src/main.ezra
 
 It uses `agon.console`, `agon.vdp`, `agon.keyboard`, `agon.mouse`, and `agon.gpio` wrappers modeled after the AgonPlatform `agondev` MOS/VDP headers and examples.
 
+Build the Space Invaders game:
+
+```sh
+cargo run -- build examples/agon-mos/space-invaders/src/main.ezra
+```
+
+Controls are `A`/`Z` left, `D`/`X` right, `Space` fire, and `Q` quit.
+
 ## Built-In SDK
 
 The bundled Agon SDK currently provides:

@@ -1,0 +1,7 @@
+[project]
+name = "agon-mos-space-invaders"
+
+[build]
+target = "agonlight-mos-ez80"
+output = "bin"
+executable = "space-invaders"
