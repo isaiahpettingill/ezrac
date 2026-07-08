@@ -249,15 +249,21 @@ cpm.bdos
 cpm.console
 ```
 
-Current checked-in runnable examples under `examples/cpm-z80` are assembly-only. Build one with:
+Checked-in runnable examples live under `examples/cpm-z80`. Build an assembly example with:
 
 ```sh
 cargo run -- assemble --target cpm-2.2-z80 examples/cpm-z80/hello-char.asm
 ```
 
+Build the source example with:
+
+```sh
+cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/hello-source.ezra
+```
+
 Coding guidance:
 
-Use BDOS wrappers rather than direct magic calls in shared code. Keep `.COM` programs within the transient program area and remember that address `0x0005` is the BDOS call vector. For now, prefer handwritten assembly for CP/M programs that must run reliably.
+Use BDOS wrappers rather than direct magic calls in shared code. Keep `.COM` programs within the transient program area and remember that address `0x0005` is the BDOS call vector. See `docs/cpm-sdk-tracker.md` for the CP/M SDK roadmap and current gaps.
 
 ## Bare Targets
 

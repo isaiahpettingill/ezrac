@@ -1389,7 +1389,7 @@ mod tests {
             matches!(decl, Declaration::Function(function) if function.name == "cpm.console.exit")
         }));
         assert!(program.declarations.iter().any(|decl| {
-            matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
+            matches!(decl, Declaration::Function(function) if function.name == "console.key_available")
         }));
     }
 
@@ -1501,7 +1501,7 @@ mod tests {
             matches!(decl, Declaration::Function(function) if function.name == "cpm.console.exit")
         }));
         assert!(program.declarations.iter().any(|decl| {
-            matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
+            matches!(decl, Declaration::Function(function) if function.name == "console.key_available")
         }));
     }
 
@@ -1529,7 +1529,7 @@ mod tests {
             matches!(decl, Declaration::Function(function) if function.name == "cpm.console.exit")
         }));
         assert!(program.declarations.iter().any(|decl| {
-            matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
+            matches!(decl, Declaration::Function(function) if function.name == "console.key_available")
         }));
     }
 

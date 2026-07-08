@@ -1,15 +1,77 @@
-import cpm.bdos
-
 pub const LF: u8 = 10
 pub const CR: u8 = 13
 pub const CTRL_Z: u8 = 26
+pub const DIRECT_IO_POLL: u8 = 0xFF
+
+const SYSTEM_RESET: u8 = 0
+const CONSOLE_INPUT: u8 = 1
+const CONSOLE_OUTPUT: u8 = 2
+const DIRECT_CONSOLE_IO: u8 = 6
+const PRINT_STRING: u8 = 9
+const GET_CONSOLE_STATUS: u8 = 11
+
+fn call(function: u8) {
+    asm volatile(in function: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "call 0005h"
+    }
+}
+
+fn call_e(function: u8, value: u8) {
+    asm volatile(in function: u8 as reg8, in value: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "ld e, {value}"
+        "call 0005h"
+    }
+}
+
+fn call_de(function: u8, value: u16) {
+    asm volatile(in function: u8 as reg8, in value: u16 as reg16, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "ex de, {value}"
+        "call 0005h"
+    }
+}
+
+fn call_a(function: u8) -> u8 {
+    let result: u8 = 0
+    asm volatile(in function: u8 as reg8, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "call 0005h"
+        "ld {result}, a"
+    }
+    return result
+}
+
+fn call_de_a(function: u8, value: u16) -> u8 {
+    let result: u8 = 0
+    asm volatile(in function: u8 as reg8, in value: u16 as reg16, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "ex de, {value}"
+        "call 0005h"
+        "ld {result}, a"
+    }
+    return result
+}
 
 pub fn write(ch: u8) {
-    bdos.console_output(ch)
+    call_e(CONSOLE_OUTPUT, ch)
 }
 
 pub fn read() -> u8 {
-    return bdos.console_input()
+    return call_a(CONSOLE_INPUT)
+}
+
+pub fn try_read() -> u8 {
+    return call_de_a(DIRECT_CONSOLE_IO, cast<u16>(DIRECT_IO_POLL))
+}
+
+pub fn key_available() -> u8 {
+    return call_a(GET_CONSOLE_STATUS)
+}
+
+pub fn print_dollar(address: u16) {
+    call_de(PRINT_STRING, address)
 }
 
 pub fn newline() {
@@ -17,6 +79,11 @@ pub fn newline() {
     write(LF)
 }
 
+pub fn print_line_dollar(address: u16) {
+    print_dollar(address)
+    newline()
+}
+
 pub fn exit() {
-    bdos.exit()
+    call(SYSTEM_RESET)
 }

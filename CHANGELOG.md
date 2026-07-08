@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a CP/M SDK tracker, a CP/M source example, richer `cpm.console` helpers, and BDOS 9 VM test support.
 - Added `ezrac targets` to list documented target triples, default outputs, SDK families, and support status.
 - Added an Agon app guide for console apps, games/visualizations, sprite games, and graphical apps.
 - Added small `agon.vdp` convenience helpers for mode 8 setup, drawing color selection, graphics clearing, and simple frame delays.

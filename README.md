@@ -95,6 +95,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/usage.md` documents compiler commands, project files, outputs, layouts, and SDK imports.
 - `docs/platforms.md` documents supported target profiles and platform-specific coding guidance.
 - `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
+- `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
 - `CHANGELOG.md` summarizes notable development milestones.

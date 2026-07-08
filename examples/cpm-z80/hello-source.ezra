@@ -1,0 +1,8 @@
+import cpm.console
+
+fn main() {
+    console.write('H')
+    console.write('i')
+    console.newline()
+    console.exit()
+}

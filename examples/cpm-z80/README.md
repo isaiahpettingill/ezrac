@@ -1,13 +1,20 @@
 CP/M Z80 examples
 =================
 
-These examples are CP/M `.COM` programs for the `cpm-2.2-z80` target. They are
-assembly-only until EZRA source codegen has a Z80 backend.
+These examples are CP/M `.COM` programs for the `cpm-2.2-z80` target. Most are
+small assembly fixtures; `hello-source.ezra` is an EZRA source example using the
+built-in `cpm.console` SDK.
 
 Build an example:
 
 ```sh
 cargo run -- assemble --target cpm-2.2-z80 examples/cpm-z80/hello-char.asm
+```
+
+Build the source example:
+
+```sh
+cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/hello-source.ezra
 ```
 
 The default output extension for `cpm-2.2-z80` is `.com`, and the default Z80
@@ -27,6 +34,7 @@ fn main() {
 
 The SDK currently includes `cpm.bdos` and `cpm.console`. `cpm.bdos` exposes the
 standard CP/M 2.2 BDOS function numbers, generic BDOS call helpers, and named
-wrappers for console, disk, FCB, DMA, user-code, and random-record calls. EZRA
-source builds for `cpm-2.2-z80` still require the pending Z80 source backend;
-the checked-in runnable examples are assembly-only for now.
+wrappers for console, disk, FCB, DMA, user-code, and random-record calls.
+`cpm.console` exposes character I/O, console status, newline, BDOS 9
+`$`-terminated string output by raw address, and program exit helpers. See
+`docs/cpm-sdk-tracker.md` for the full SDK roadmap.

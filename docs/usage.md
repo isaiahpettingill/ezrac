@@ -281,6 +281,12 @@ Assemble a CP/M example:
 cargo run -- assemble --target cpm-2.2-z80 examples/cpm-z80/hello-char.asm
 ```
 
+Build a CP/M source example:
+
+```sh
+cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/hello-source.ezra
+```
+
 ## SDK Imports
 
 Built-in SDK modules are target-specific. They are embedded into the compiler binary from `toolchains/*/sdk`.

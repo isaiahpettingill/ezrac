@@ -218,6 +218,17 @@ fn handle_cpm_bdos_call(cpu: &mut Cpu, machine: &mut TestMachine) -> Result<bool
     match cpu.state.reg.get8(Reg8::C) {
         0 => machine.halted = true,
         2 => machine.debug_output.push(cpu.state.reg.get8(Reg8::E)),
+        9 => {
+            let mut address = cpu.state.reg.get16(Reg16::DE) as u32;
+            for _ in 0..0x1_0000 {
+                let byte = machine.peek(address);
+                if byte == b'$' {
+                    break;
+                }
+                machine.debug_output.push(byte);
+                address = address.wrapping_add(1) & 0xFFFF;
+            }
+        }
         function => {
             return Err(Diagnostic::new(format!(
                 "CP/M BDOS function {function} is not implemented by the test runner"
@@ -899,6 +910,35 @@ mod tests {
 
         assert!(run.halted, "{run:?}");
         assert_eq!(run.debug_output, b"EZRA\r\n");
+        assert_eq!(run.failure, None);
+    }
+
+    #[test]
+    fn cpm_bdos_function_9_outputs_dollar_terminated_strings() {
+        let run = run_assembly_test_with_cpu_options_at(
+            CpuFamily::Z80,
+            r#"
+                ld hl, 010Eh
+                ex de, hl
+                ld c, 9
+                call 0005h
+                ld c, 0
+                call 0005h
+            message:
+                db "EZRA CP/M$"
+            "#,
+            &TestRunOptions {
+                instruction_budget: 1_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0xFF00,
+            },
+            0x0100,
+        )
+        .unwrap();
+
+        assert!(run.halted, "{run:?}");
+        assert_eq!(run.debug_output, b"EZRA CP/M");
         assert_eq!(run.failure, None);
     }
 
