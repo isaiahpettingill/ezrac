@@ -35,12 +35,6 @@ fn draw_hud() {
     console.print("EZRA INVADERS  A/D MOVE  SPACE FIRE  Q QUIT")
 }
 
-fn clear_frame() {
-    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
-    vdp.clg()
-    draw_hud()
-}
-
 fn alien_index(row: u8, col: u8) -> u8 {
     return (row * ALIEN_COLS) + col
 }
@@ -53,11 +47,24 @@ fn alien_y(row: u8) -> u16 {
     return alien_base_y + (cast<u16>(row) * ALIEN_SPACING_Y)
 }
 
-fn draw_player() {
-    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_CYAN)
+fn draw_player_shape() {
     vdp.rectangle(player_x, PLAYER_Y + 8, player_x + 24, PLAYER_Y)
     vdp.line(player_x + 4, PLAYER_Y, player_x + 12, PLAYER_Y - 8)
     vdp.line(player_x + 20, PLAYER_Y, player_x + 12, PLAYER_Y - 8)
+}
+
+fn draw_player() {
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_CYAN)
+    draw_player_shape()
+}
+
+fn erase_player() {
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
+    draw_player_shape()
+}
+
+fn draw_bullet_shape() {
+    vdp.line(bullet_x, bullet_y, bullet_x, bullet_y - 8)
 }
 
 fn draw_bullet() {
@@ -66,7 +73,16 @@ fn draw_bullet() {
     }
 
     vdp.gcol(vdp.GCOL_SET, vdp.COLOR_YELLOW)
-    vdp.line(bullet_x, bullet_y, bullet_x, bullet_y - 8)
+    draw_bullet_shape()
+}
+
+fn erase_bullet() {
+    if bullet_active == 0 {
+        return
+    }
+
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
+    draw_bullet_shape()
 }
 
 fn draw_sprite_row(x0: u16, x1: u16, y: u16) {
@@ -95,9 +111,9 @@ fn draw_alien(x: u16, y: u16) {
     draw_sprite_row(x + 14, x + 18, y + 14)
 }
 
-fn draw_aliens() {
+fn draw_aliens_color(ink: u8) {
     let row: u8 = 0
-    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_GREEN)
+    vdp.gcol(vdp.GCOL_SET, ink)
     while row < ALIEN_ROWS {
         let col: u8 = 0
         while col < ALIEN_COLS {
@@ -111,11 +127,24 @@ fn draw_aliens() {
     }
 }
 
+fn draw_aliens() {
+    draw_aliens_color(vdp.COLOR_GREEN)
+}
+
+fn erase_aliens() {
+    draw_aliens_color(vdp.COLOR_BLACK)
+}
+
 fn draw_frame() {
-    clear_frame()
     draw_aliens()
     draw_player()
     draw_bullet()
+}
+
+fn erase_frame() {
+    erase_bullet()
+    erase_player()
+    erase_aliens()
 }
 
 fn fire_bullet() {
@@ -251,9 +280,13 @@ fn show_loss() {
 
 fn main() {
     init_screen()
+    draw_hud()
+    draw_frame()
     keyboard.clear_state()
 
     loop {
+        erase_frame()
+
         if handle_input() != 0 {
             return
         }
