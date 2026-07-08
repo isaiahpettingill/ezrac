@@ -48,7 +48,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    let value = source.parse::<toml::Value>().map_err(|error| {
+    let value = toml::from_str::<toml::Value>(source.trim_start()).map_err(|error| {
         Diagnostic::new(format!("failed to parse `{}`: {error}", path.display()))
     })?;
 
@@ -169,28 +169,27 @@ mod tests {
         let path = Path::new("/project/Ezra.toml");
         let config = parse_project_config(
             path,
-            r#"
-                [project]
-                name = "demo"
+            r#"[project]
+name = "demo"
 
-                [build]
-                input = "src/main.ezra"
-                target = "agonlight-console8-ez80-1.0"
-                output = "bin"
-                input_kind = "ezra"
-                assembler_cpu = "ez80"
-                executable = "demo"
+[build]
+input = "src/main.ezra"
+target = "agonlight-console8-ez80-1.0"
+output = "bin"
+input_kind = "ezra"
+assembler_cpu = "ez80"
+executable = "demo"
 
-                [layout]
-                file = "layouts/demo.ezralayout"
+[layout]
+file = "layouts/demo.ezralayout"
 
-                [cartridge]
-                layout = "cartridges/agon.toml"
-                manifest = "cartridges/manifest.toml"
+[cartridge]
+layout = "cartridges/agon.toml"
+manifest = "cartridges/manifest.toml"
 
-                [sdk]
-                paths = ["sdk", "../shared"]
-            "#,
+[sdk]
+paths = ["sdk", "../shared"]
+"#,
         )
         .unwrap();
 
@@ -227,10 +226,9 @@ mod tests {
     fn cartridge_config_requires_a_layout() {
         let error = parse_project_config(
             Path::new("/project/Ezra.toml"),
-            r#"
-                [cartridge]
-                manifest = "cart.toml"
-            "#,
+            r#"[cartridge]
+manifest = "cart.toml"
+"#,
         )
         .unwrap_err();
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Improved `ezrac lsp` completions, hover information, and unknown-symbol diagnostics.
+- Updated Cargo dependencies, including `toml` 1.1.x compatibility for project files.
+- Expanded `agon.vdp` with cursor helpers, bright color constants, line helpers, filled/framed rectangles, and triangles.
 - Added optional `ezrac lsp` support behind the `lsp` Cargo feature.
 - Added editor LSP integration docs and launcher support for Helix, micro, Vim/Neovim, VS Code, and Zed.
 - Added the `agonlight-mos-ez80` target profile for Agon Light MOS programs.

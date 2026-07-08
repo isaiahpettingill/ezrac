@@ -10,13 +10,13 @@ repository = "https://github.com/isaiahpettingill/ezrac"
 name = "ezra"
 
 [dependencies]
-ez80 = "0.4.4"
+ez80 = "0.4.5"
 lsp = { version = "0.1.1", optional = true }
-pest = "2.8.4"
-pest_derive = "2.8.4"
+pest = "2.8.7"
+pest_derive = "2.8.7"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
-serde_json = { version = "1.0.149", optional = true }
-toml = "0.8.23"
+serde_json = { version = "1.0.150", optional = true }
+toml = "1.1.2"
 
 [features]
 default = []

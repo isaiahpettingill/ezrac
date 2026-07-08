@@ -1,7 +1,10 @@
 pub const VDU_LF: u8 = 10
 pub const VDU_CR: u8 = 13
 pub const VDU_BELL: u8 = 7
+pub const VDU_CURSOR_LEFT: u8 = 8
+pub const VDU_CURSOR_RIGHT: u8 = 9
 pub const VDU_CLEAR: u8 = 12
+pub const VDU_CURSOR_UP: u8 = 11
 pub const VDU_CLG: u8 = 16
 pub const VDU_COLOR: u8 = 17
 pub const VDU_GCOL: u8 = 18
@@ -24,6 +27,14 @@ pub const COLOR_BLUE: u8 = 4
 pub const COLOR_MAGENTA: u8 = 5
 pub const COLOR_CYAN: u8 = 6
 pub const COLOR_WHITE: u8 = 7
+pub const COLOR_BRIGHT_BLACK: u8 = 8
+pub const COLOR_BRIGHT_RED: u8 = 9
+pub const COLOR_BRIGHT_GREEN: u8 = 10
+pub const COLOR_BRIGHT_YELLOW: u8 = 11
+pub const COLOR_BRIGHT_BLUE: u8 = 12
+pub const COLOR_BRIGHT_MAGENTA: u8 = 13
+pub const COLOR_BRIGHT_CYAN: u8 = 14
+pub const COLOR_BRIGHT_WHITE: u8 = 15
 
 pub const GCOL_SET: u8 = 0
 pub const GCOL_OR: u8 = 1
@@ -75,6 +86,22 @@ pub fn screen_mode(number: u8) {
 
 pub fn cursor_home() {
     vdu(VDU_HOME)
+}
+
+pub fn cursor_left() {
+    vdu(VDU_CURSOR_LEFT)
+}
+
+pub fn cursor_right() {
+    vdu(VDU_CURSOR_RIGHT)
+}
+
+pub fn cursor_down() {
+    vdu(VDU_LF)
+}
+
+pub fn cursor_up() {
+    vdu(VDU_CURSOR_UP)
 }
 
 pub fn cursor_tab(x: u8, y: u8) {
@@ -152,12 +179,46 @@ pub fn line(x0: u16, y0: u16, x1: u16, y1: u16) {
     line_to(x1, y1)
 }
 
+pub fn horizontal_line(left: u16, right: u16, y: u16) {
+    line(left, y, right, y)
+}
+
+pub fn vertical_line(x: u16, bottom: u16, top: u16) {
+    line(x, bottom, x, top)
+}
+
 pub fn rectangle(left: u16, bottom: u16, right: u16, top: u16) {
     move_to(left, bottom)
     line_to(right, bottom)
     line_to(right, top)
     line_to(left, top)
     line_to(left, bottom)
+}
+
+pub fn filled_rectangle(left: u16, bottom: u16, right: u16, top: u16) {
+    if top < bottom {
+        return
+    }
+
+    let y: u16 = bottom
+    while y <= top {
+        horizontal_line(left, right, y)
+        y += 1
+    }
+}
+
+pub fn framed_rectangle(left: u16, bottom: u16, right: u16, top: u16, fill_color: u8, border_color: u8) {
+    gcol(GCOL_SET, fill_color)
+    filled_rectangle(left, bottom, right, top)
+    gcol(GCOL_SET, border_color)
+    rectangle(left, bottom, right, top)
+}
+
+pub fn triangle(x0: u16, y0: u16, x1: u16, y1: u16, x2: u16, y2: u16) {
+    move_to(x0, y0)
+    line_to(x1, y1)
+    line_to(x2, y2)
+    line_to(x0, y0)
 }
 
 pub fn circle(x: u16, y: u16, radius: u16) {
