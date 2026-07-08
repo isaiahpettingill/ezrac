@@ -1,0 +1,185 @@
+pub const FORMAT_RGBA8888: u8 = 0
+pub const FORMAT_RGBA2222: u8 = 1
+pub const FORMAT_MONO_MASK: u8 = 2
+
+pub const SPRITE_SET_PIXEL: u8 = 0
+pub const SPRITE_OR: u8 = 1
+pub const SPRITE_AND: u8 = 2
+pub const SPRITE_EOR: u8 = 3
+pub const SPRITE_INVERT: u8 = 4
+pub const SPRITE_NOP: u8 = 5
+
+fn sprites_vdu(ch: u8) {
+    asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags) {
+        "ld a, {ch}"
+        "rst.lis 10h"
+    }
+}
+
+fn sprites_vdu_u16(value: u16) {
+    sprites_vdu(cast<u8>(value))
+    sprites_vdu(cast<u8>(value >> 8))
+}
+
+fn command(cmd: u8) {
+    sprites_vdu(23)
+    sprites_vdu(27)
+    sprites_vdu(cmd)
+}
+
+pub fn enable_hardware_sprites() {
+    sprites_vdu(23)
+    sprites_vdu(0)
+    sprites_vdu(0xF8)
+    sprites_vdu_u16(2)
+    sprites_vdu_u16(1)
+}
+
+pub fn select_bitmap(id: u8) {
+    command(0)
+    sprites_vdu(id)
+}
+
+pub fn select_bitmap16(buffer_id: u16) {
+    command(0x20)
+    sprites_vdu_u16(buffer_id)
+}
+
+pub fn load_bitmap_rgba8888(id: u8, width: u16, height: u16, data: ptr<u8>, len: u24) {
+    select_bitmap(id)
+    command(1)
+    sprites_vdu_u16(width)
+    sprites_vdu_u16(height)
+
+    let index: u24 = 0
+    while index < len {
+        sprites_vdu(*(data + index))
+        index += 1
+    }
+}
+
+pub fn capture_bitmap(id: u8) {
+    command(1)
+    sprites_vdu(id)
+    sprites_vdu_u16(0)
+}
+
+pub fn create_solid_bitmap(id: u8, width: u16, height: u16, color_lo: u16, color_hi: u16) {
+    select_bitmap(id)
+    command(2)
+    sprites_vdu_u16(width)
+    sprites_vdu_u16(height)
+    sprites_vdu_u16(color_lo)
+    sprites_vdu_u16(color_hi)
+}
+
+pub fn draw_bitmap(x: u16, y: u16) {
+    command(3)
+    sprites_vdu_u16(x)
+    sprites_vdu_u16(y)
+}
+
+pub fn create_bitmap_from_selected_buffer(width: u16, height: u16, pixel_format: u8) {
+    command(0x21)
+    sprites_vdu_u16(width)
+    sprites_vdu_u16(height)
+    sprites_vdu(pixel_format)
+}
+
+pub fn select_sprite(id: u8) {
+    command(4)
+    sprites_vdu(id)
+}
+
+pub fn clear_frames() {
+    command(5)
+}
+
+pub fn add_frame(bitmap_id: u8) {
+    command(6)
+    sprites_vdu(bitmap_id)
+}
+
+pub fn add_frame16(buffer_id: u16) {
+    command(0x26)
+    sprites_vdu_u16(buffer_id)
+}
+
+pub fn activate(count: u8) {
+    command(7)
+    sprites_vdu(count)
+}
+
+pub fn next_frame() {
+    command(8)
+}
+
+pub fn previous_frame() {
+    command(9)
+}
+
+pub fn select_frame(frame: u8) {
+    command(10)
+    sprites_vdu(frame)
+}
+
+pub fn show() {
+    command(11)
+}
+
+pub fn hide() {
+    command(12)
+}
+
+pub fn move_sprite_to(x: u16, y: u16) {
+    command(13)
+    sprites_vdu_u16(x)
+    sprites_vdu_u16(y)
+}
+
+pub fn move_sprite_by(dx: u16, dy: u16) {
+    command(14)
+    sprites_vdu_u16(dx)
+    sprites_vdu_u16(dy)
+}
+
+pub fn update() {
+    command(15)
+}
+
+pub fn reset_bitmaps_and_sprites() {
+    command(16)
+}
+
+pub fn reset_sprites() {
+    command(17)
+}
+
+pub fn set_gcol_mode(paint_mode: u8) {
+    command(18)
+    sprites_vdu(paint_mode)
+}
+
+pub fn set_hardware() {
+    command(19)
+}
+
+pub fn set_software() {
+    command(20)
+}
+
+pub fn replace_frame(bitmap_id: u8) {
+    command(21)
+    sprites_vdu(bitmap_id)
+}
+
+pub fn replace_frame16(buffer_id: u16) {
+    command(0x35)
+    sprites_vdu_u16(buffer_id)
+}
+
+pub fn setup_mouse_cursor(hot_x: u8, hot_y: u8) {
+    command(0x40)
+    sprites_vdu(hot_x)
+    sprites_vdu(hot_y)
+}

@@ -1,8 +1,10 @@
 import agon.console
 import agon.keyboard
+import agon.sprites
 import agon.vdp
 
 const SCREEN_W: u16 = 320
+const PLAYER_TOP: u16 = 210
 const PLAYER_Y: u16 = 218
 const PLAYER_STEP: u16 = 8
 const BULLET_STEP: u16 = 12
@@ -12,25 +14,25 @@ const ALIEN_COUNT: u8 = 15
 const ALIEN_SPACING_X: u16 = 38
 const ALIEN_SPACING_Y: u16 = 24
 const ALIEN_MOVE_RATE: u8 = 4
+const SPRITE_COUNT: u8 = 17
+
+const PLAYER_BITMAP: u8 = 0
+const BULLET_BITMAP: u8 = 1
+const ALIEN_BITMAP: u8 = 2
+const PLAYER_SPRITE: u8 = 0
+const BULLET_SPRITE: u8 = 1
+const FIRST_ALIEN_SPRITE: u8 = 2
 
 global player_x: u16 = 152
-global prev_player_x: u16 = 152
 global bullet_x: u16 = 0
 global bullet_y: u16 = 0
 global bullet_active: u8 = 0
-global prev_bullet_x: u16 = 0
-global prev_bullet_y: u16 = 0
-global prev_bullet_active: u8 = 0
 global alien_base_x: u16 = 46
 global alien_base_y: u16 = 44
-global prev_alien_base_x: u16 = 46
-global prev_alien_base_y: u16 = 44
 global alien_dir: u8 = 1
 global alien_tick: u8 = 0
-global alien_dirty: u8 = 1
 global remaining: u8 = ALIEN_COUNT
 global alive: [u8; ALIEN_COUNT] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
-global prev_alive: [u8; ALIEN_COUNT] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 
 fn init_screen() {
     console.mode(8)
@@ -49,54 +51,26 @@ fn alien_index(row: u8, col: u8) -> u8 {
     return (row * ALIEN_COLS) + col
 }
 
-fn alien_x_at(base_x: u16, col: u8) -> u16 {
-    return base_x + (cast<u16>(col) * ALIEN_SPACING_X)
-}
-
-fn alien_y_at(base_y: u16, row: u8) -> u16 {
-    return base_y + (cast<u16>(row) * ALIEN_SPACING_Y)
-}
-
 fn alien_x(col: u8) -> u16 {
-    return alien_x_at(alien_base_x, col)
+    return alien_base_x + (cast<u16>(col) * ALIEN_SPACING_X)
 }
 
 fn alien_y(row: u8) -> u16 {
-    return alien_y_at(alien_base_y, row)
+    return alien_base_y + (cast<u16>(row) * ALIEN_SPACING_Y)
 }
 
-fn draw_player_shape(x: u16) {
-    vdp.rectangle(x, PLAYER_Y + 8, x + 24, PLAYER_Y)
-    vdp.line(x + 4, PLAYER_Y, x + 12, PLAYER_Y - 8)
-    vdp.line(x + 20, PLAYER_Y, x + 12, PLAYER_Y - 8)
+fn alien_sprite_id(index: u8) -> u8 {
+    return FIRST_ALIEN_SPRITE + index
 }
 
-fn draw_player() {
-    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_CYAN)
-    draw_player_shape(player_x)
-}
-
-fn erase_player_at(x: u16) {
-    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
-    draw_player_shape(x)
+fn draw_player_shape(x: u16, y: u16) {
+    vdp.rectangle(x, y + 16, x + 24, y + 8)
+    vdp.line(x + 4, y + 8, x + 12, y)
+    vdp.line(x + 20, y + 8, x + 12, y)
 }
 
 fn draw_bullet_shape(x: u16, y: u16) {
-    vdp.line(x, y, x, y - 8)
-}
-
-fn draw_bullet() {
-    if bullet_active == 0 {
-        return
-    }
-
-    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_YELLOW)
-    draw_bullet_shape(bullet_x, bullet_y)
-}
-
-fn erase_bullet_at(x: u16, y: u16) {
-    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
-    draw_bullet_shape(x, y)
+    vdp.line(x + 1, y, x + 1, y + 8)
 }
 
 fn draw_sprite_row(x0: u16, x1: u16, y: u16) {
@@ -104,7 +78,7 @@ fn draw_sprite_row(x0: u16, x1: u16, y: u16) {
     vdp.line(x0, y + 1, x1, y + 1)
 }
 
-fn draw_alien(x: u16, y: u16) {
+fn draw_alien_shape(x: u16, y: u16) {
     draw_sprite_row(x + 4, x + 6, y)
     draw_sprite_row(x + 16, x + 18, y)
     draw_sprite_row(x + 6, x + 8, y + 2)
@@ -125,85 +99,94 @@ fn draw_alien(x: u16, y: u16) {
     draw_sprite_row(x + 14, x + 18, y + 14)
 }
 
-fn draw_aliens_color(ink: u8) {
-    let row: u8 = 0
-    vdp.gcol(vdp.GCOL_SET, ink)
-    while row < ALIEN_ROWS {
-        let col: u8 = 0
-        while col < ALIEN_COLS {
-            let index: u8 = alien_index(row, col)
-            if alive[index] != 0 {
-                draw_alien(alien_x(col), alien_y(row))
-            }
-            col += 1
-        }
-        row += 1
-    }
+fn capture_current_bitmap(id: u8, left: u16, top: u16, right: u16, bottom: u16) {
+    vdp.move_to(left, top)
+    vdp.move_to(right, bottom)
+    sprites.capture_bitmap(id)
 }
 
-fn draw_prev_aliens_color(ink: u8) {
-    let row: u8 = 0
-    vdp.gcol(vdp.GCOL_SET, ink)
-    while row < ALIEN_ROWS {
-        let col: u8 = 0
-        while col < ALIEN_COLS {
-            let index: u8 = alien_index(row, col)
-            if prev_alive[index] != 0 {
-                draw_alien(alien_x_at(prev_alien_base_x, col), alien_y_at(prev_alien_base_y, row))
-            }
-            col += 1
-        }
-        row += 1
-    }
+fn build_sprite_bitmaps() {
+    sprites.enable_hardware_sprites()
+
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_CYAN)
+    draw_player_shape(8, 32)
+    capture_current_bitmap(PLAYER_BITMAP, 8, 32, 32, 48)
+
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_YELLOW)
+    draw_bullet_shape(44, 32)
+    capture_current_bitmap(BULLET_BITMAP, 44, 32, 46, 40)
+
+    vdp.gcol(vdp.GCOL_SET, vdp.COLOR_GREEN)
+    draw_alien_shape(56, 32)
+    capture_current_bitmap(ALIEN_BITMAP, 56, 32, 78, 47)
+
+    console.clear()
 }
 
-fn draw_aliens() {
-    draw_aliens_color(vdp.COLOR_GREEN)
+fn setup_one_sprite(id: u8, bitmap_id: u8) {
+    sprites.select_sprite(id)
+    sprites.clear_frames()
+    sprites.add_frame(bitmap_id)
+    sprites.select_frame(0)
+    sprites.set_hardware()
+    sprites.show()
 }
 
-fn erase_aliens() {
-    draw_prev_aliens_color(vdp.COLOR_BLACK)
-}
-
-fn draw_frame() {
-    draw_aliens()
-    draw_player()
-    draw_bullet()
-}
-
-fn render_dirty_frame() {
-    if prev_bullet_active != 0 {
-        erase_bullet_at(prev_bullet_x, prev_bullet_y)
-    }
-
-    if prev_player_x != player_x {
-        erase_player_at(prev_player_x)
-        draw_player()
-    }
-
-    if alien_dirty != 0 {
-        erase_aliens()
-        draw_aliens()
-    }
-
-    draw_bullet()
-}
-
-fn remember_frame() {
-    prev_player_x = player_x
-    prev_bullet_x = bullet_x
-    prev_bullet_y = bullet_y
-    prev_bullet_active = bullet_active
-    prev_alien_base_x = alien_base_x
-    prev_alien_base_y = alien_base_y
+fn setup_sprites() {
+    setup_one_sprite(PLAYER_SPRITE, PLAYER_BITMAP)
+    setup_one_sprite(BULLET_SPRITE, BULLET_BITMAP)
+    sprites.hide()
 
     let index: u8 = 0
     while index < ALIEN_COUNT {
-        prev_alive[index] = alive[index]
+        setup_one_sprite(alien_sprite_id(index), ALIEN_BITMAP)
         index += 1
     }
 
-    alien_dirty = 0
+    sprites.activate(SPRITE_COUNT)
+}
+
+fn sync_player_sprite() {
+    sprites.select_sprite(PLAYER_SPRITE)
+    sprites.move_sprite_to(player_x, PLAYER_TOP)
+    sprites.show()
+}
+
+fn sync_bullet_sprite() {
+    sprites.select_sprite(BULLET_SPRITE)
+    if bullet_active == 0 {
+        sprites.hide()
+        return
+    }
+
+    sprites.move_sprite_to(bullet_x - 1, bullet_y - 8)
+    sprites.show()
+}
+
+fn sync_alien_sprites() {
+    let row: u8 = 0
+    while row < ALIEN_ROWS {
+        let col: u8 = 0
+        while col < ALIEN_COLS {
+            let index: u8 = alien_index(row, col)
+            sprites.select_sprite(alien_sprite_id(index))
+            if alive[index] != 0 {
+                sprites.move_sprite_to(alien_x(col), alien_y(row))
+                sprites.show()
+            } else {
+                sprites.hide()
+            }
+            col += 1
+        }
+        row += 1
+    }
+}
+
+fn sync_sprites() {
+    sync_player_sprite()
+    sync_bullet_sprite()
+    sync_alien_sprites()
+    sprites.update()
 }
 
 fn fire_bullet() {
@@ -278,7 +261,6 @@ fn check_bullet_collisions() {
                 alive[index] = 0
                 remaining -= 1
                 bullet_active = 0
-                alien_dirty = 1
                 return
             }
             col += 1
@@ -293,7 +275,6 @@ fn step_aliens() {
         return
     }
     alien_tick = 0
-    alien_dirty = 1
 
     if alien_dir != 0 {
         if alien_base_x < 138 {
@@ -334,12 +315,14 @@ fn delay_frame() {
 }
 
 fn show_win() {
+    sprites.reset_sprites()
     console.clear()
     console.color(vdp.COLOR_YELLOW)
     console.print("YOU SAVED AGON!\n")
 }
 
 fn show_loss() {
+    sprites.reset_sprites()
     console.clear()
     console.color(vdp.COLOR_RED)
     console.print("INVADERS LANDED.\n")
@@ -347,19 +330,20 @@ fn show_loss() {
 
 fn main() {
     init_screen()
+    build_sprite_bitmaps()
+    setup_sprites()
     draw_hud()
-    draw_frame()
-    remember_frame()
+    sync_sprites()
     keyboard.clear_state()
 
     loop {
         if handle_input() != 0 {
+            sprites.reset_sprites()
             return
         }
 
         update_game()
-        render_dirty_frame()
-        remember_frame()
+        sync_sprites()
 
         if remaining == 0 {
             show_win()

@@ -45,11 +45,12 @@ The bundled Agon SDK currently provides:
 - `agon.mos`: MOS calls for character/string output, keyboard read/clear, sysvars, VDP flags, I2C open/read/write/close, and emulator exit.
 - `agon.console`: text-mode convenience wrappers using American spelling, including `color`, `background`, cursor, tab, mode, and line printing helpers.
 - `agon.vdp`: VDU byte helpers, text color/background, palette, plotting, lines, rectangles, circles, viewports, origins, and VDP flag waits.
+- `agon.sprites`: VDP bitmap and sprite commands for loading RGBA8888 bitmaps, assigning sprite frames, showing/hiding, moving, software sprite updates, and VDP 2.12+ hardware sprite selection.
 - `agon.keyboard`: sysvar-backed keyboard state, blocking key read, clear state, locale, and repeat/LED configuration.
 - `agon.mouse`: VDU mouse control and sysvar-backed position/button/wheel/delta reads.
 - `agon.gpio`: low-level explicit port B/C/D data and direction wrappers.
 
-These wrappers intentionally stay close to `agondev`'s MOS and VDP conventions. Advanced interrupts, keyboard vectors, sprites, audio, and full device drivers are deferred until EZRA has stronger support for those ABI shapes.
+These wrappers intentionally stay close to `agondev`'s MOS and VDP conventions. Advanced interrupts, keyboard vectors, audio, and full device drivers are deferred until EZRA has stronger support for those ABI shapes.
 
 Build the console SDK example:
 

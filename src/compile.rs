@@ -391,6 +391,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/mouse.ezra"),
                 "agon.mouse",
             )),
+            "agon.sprites" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/sprites.ezra"),
+                "agon.sprites",
+            )),
             "agon.vdp" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/vdp.ezra"),
                 "agon.vdp",
