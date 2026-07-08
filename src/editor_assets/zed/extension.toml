@@ -1,0 +1,14 @@
+id = "ezra"
+name = "Ezra"
+version = "0.1.0"
+schema_version = 1
+authors = ["Ezra contributors"]
+description = "Ezra language support."
+repository = "https://github.com/ezra/ezrac"
+
+[grammars.ezra]
+path = "../tree-sitter-ezra"
+
+[language_servers.ezra-lsp]
+name = "EZRA Language Server"
+languages = ["Ezra"]

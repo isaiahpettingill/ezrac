@@ -2175,15 +2175,15 @@ fn install_zed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
     let files = [
         (
             "extension.toml",
-            include_str!("../editors/zed/extension.toml"),
+            include_str!("editor_assets/zed/extension.toml"),
         ),
         (
             "languages/ezra/config.toml",
-            include_str!("../editors/zed/languages/ezra/config.toml"),
+            include_str!("editor_assets/zed/languages/ezra/config.toml"),
         ),
         (
             "languages/ezra/highlights.scm",
-            include_str!("../editors/zed/languages/ezra/highlights.scm"),
+            include_str!("editor_assets/zed/languages/ezra/highlights.scm"),
         ),
     ];
     write_syntax_files(root, &files, dry_run)

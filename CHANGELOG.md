@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added optional `ezrac lsp` support behind the `lsp` Cargo feature.
+- Added editor LSP integration docs and launcher support for Helix, micro, Vim/Neovim, VS Code, and Zed.
 - Added the `agonlight-mos-ez80` target profile for Agon Light MOS programs.
 - Added bundled Agon SDK modules under `toolchains/agonlight-mos-ez80/sdk`.
 - Emitted Agon MOS executable wrappers with the MOS header at byte `64` and program entry at `0x040045`.
