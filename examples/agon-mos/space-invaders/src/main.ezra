@@ -11,16 +11,26 @@ const ALIEN_ROWS: u8 = 3
 const ALIEN_COUNT: u8 = 15
 const ALIEN_SPACING_X: u16 = 38
 const ALIEN_SPACING_Y: u16 = 24
+const ALIEN_MOVE_RATE: u8 = 4
 
 global player_x: u16 = 152
+global prev_player_x: u16 = 152
 global bullet_x: u16 = 0
 global bullet_y: u16 = 0
 global bullet_active: u8 = 0
+global prev_bullet_x: u16 = 0
+global prev_bullet_y: u16 = 0
+global prev_bullet_active: u8 = 0
 global alien_base_x: u16 = 46
 global alien_base_y: u16 = 44
+global prev_alien_base_x: u16 = 46
+global prev_alien_base_y: u16 = 44
 global alien_dir: u8 = 1
+global alien_tick: u8 = 0
+global alien_dirty: u8 = 1
 global remaining: u8 = ALIEN_COUNT
 global alive: [u8; ALIEN_COUNT] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+global prev_alive: [u8; ALIEN_COUNT] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 
 fn init_screen() {
     console.mode(8)
@@ -39,32 +49,40 @@ fn alien_index(row: u8, col: u8) -> u8 {
     return (row * ALIEN_COLS) + col
 }
 
+fn alien_x_at(base_x: u16, col: u8) -> u16 {
+    return base_x + (cast<u16>(col) * ALIEN_SPACING_X)
+}
+
+fn alien_y_at(base_y: u16, row: u8) -> u16 {
+    return base_y + (cast<u16>(row) * ALIEN_SPACING_Y)
+}
+
 fn alien_x(col: u8) -> u16 {
-    return alien_base_x + (cast<u16>(col) * ALIEN_SPACING_X)
+    return alien_x_at(alien_base_x, col)
 }
 
 fn alien_y(row: u8) -> u16 {
-    return alien_base_y + (cast<u16>(row) * ALIEN_SPACING_Y)
+    return alien_y_at(alien_base_y, row)
 }
 
-fn draw_player_shape() {
-    vdp.rectangle(player_x, PLAYER_Y + 8, player_x + 24, PLAYER_Y)
-    vdp.line(player_x + 4, PLAYER_Y, player_x + 12, PLAYER_Y - 8)
-    vdp.line(player_x + 20, PLAYER_Y, player_x + 12, PLAYER_Y - 8)
+fn draw_player_shape(x: u16) {
+    vdp.rectangle(x, PLAYER_Y + 8, x + 24, PLAYER_Y)
+    vdp.line(x + 4, PLAYER_Y, x + 12, PLAYER_Y - 8)
+    vdp.line(x + 20, PLAYER_Y, x + 12, PLAYER_Y - 8)
 }
 
 fn draw_player() {
     vdp.gcol(vdp.GCOL_SET, vdp.COLOR_CYAN)
-    draw_player_shape()
+    draw_player_shape(player_x)
 }
 
-fn erase_player() {
+fn erase_player_at(x: u16) {
     vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
-    draw_player_shape()
+    draw_player_shape(x)
 }
 
-fn draw_bullet_shape() {
-    vdp.line(bullet_x, bullet_y, bullet_x, bullet_y - 8)
+fn draw_bullet_shape(x: u16, y: u16) {
+    vdp.line(x, y, x, y - 8)
 }
 
 fn draw_bullet() {
@@ -73,16 +91,12 @@ fn draw_bullet() {
     }
 
     vdp.gcol(vdp.GCOL_SET, vdp.COLOR_YELLOW)
-    draw_bullet_shape()
+    draw_bullet_shape(bullet_x, bullet_y)
 }
 
-fn erase_bullet() {
-    if bullet_active == 0 {
-        return
-    }
-
+fn erase_bullet_at(x: u16, y: u16) {
     vdp.gcol(vdp.GCOL_SET, vdp.COLOR_BLACK)
-    draw_bullet_shape()
+    draw_bullet_shape(x, y)
 }
 
 fn draw_sprite_row(x0: u16, x1: u16, y: u16) {
@@ -127,12 +141,28 @@ fn draw_aliens_color(ink: u8) {
     }
 }
 
+fn draw_prev_aliens_color(ink: u8) {
+    let row: u8 = 0
+    vdp.gcol(vdp.GCOL_SET, ink)
+    while row < ALIEN_ROWS {
+        let col: u8 = 0
+        while col < ALIEN_COLS {
+            let index: u8 = alien_index(row, col)
+            if prev_alive[index] != 0 {
+                draw_alien(alien_x_at(prev_alien_base_x, col), alien_y_at(prev_alien_base_y, row))
+            }
+            col += 1
+        }
+        row += 1
+    }
+}
+
 fn draw_aliens() {
     draw_aliens_color(vdp.COLOR_GREEN)
 }
 
 fn erase_aliens() {
-    draw_aliens_color(vdp.COLOR_BLACK)
+    draw_prev_aliens_color(vdp.COLOR_BLACK)
 }
 
 fn draw_frame() {
@@ -141,10 +171,39 @@ fn draw_frame() {
     draw_bullet()
 }
 
-fn erase_frame() {
-    erase_bullet()
-    erase_player()
-    erase_aliens()
+fn render_dirty_frame() {
+    if prev_bullet_active != 0 {
+        erase_bullet_at(prev_bullet_x, prev_bullet_y)
+    }
+
+    if prev_player_x != player_x {
+        erase_player_at(prev_player_x)
+        draw_player()
+    }
+
+    if alien_dirty != 0 {
+        erase_aliens()
+        draw_aliens()
+    }
+
+    draw_bullet()
+}
+
+fn remember_frame() {
+    prev_player_x = player_x
+    prev_bullet_x = bullet_x
+    prev_bullet_y = bullet_y
+    prev_bullet_active = bullet_active
+    prev_alien_base_x = alien_base_x
+    prev_alien_base_y = alien_base_y
+
+    let index: u8 = 0
+    while index < ALIEN_COUNT {
+        prev_alive[index] = alive[index]
+        index += 1
+    }
+
+    alien_dirty = 0
 }
 
 fn fire_bullet() {
@@ -219,6 +278,7 @@ fn check_bullet_collisions() {
                 alive[index] = 0
                 remaining -= 1
                 bullet_active = 0
+                alien_dirty = 1
                 return
             }
             col += 1
@@ -228,6 +288,13 @@ fn check_bullet_collisions() {
 }
 
 fn step_aliens() {
+    alien_tick += 1
+    if alien_tick < ALIEN_MOVE_RATE {
+        return
+    }
+    alien_tick = 0
+    alien_dirty = 1
+
     if alien_dir != 0 {
         if alien_base_x < 138 {
             alien_base_x += 6
@@ -282,17 +349,17 @@ fn main() {
     init_screen()
     draw_hud()
     draw_frame()
+    remember_frame()
     keyboard.clear_state()
 
     loop {
-        erase_frame()
-
         if handle_input() != 0 {
             return
         }
 
         update_game()
-        draw_frame()
+        render_dirty_frame()
+        remember_frame()
 
         if remaining == 0 {
             show_win()
