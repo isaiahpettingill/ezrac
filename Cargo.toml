@@ -11,6 +11,13 @@ name = "ezra"
 
 [dependencies]
 ez80 = "0.4.4"
+lsp = { version = "0.1.1", optional = true }
 pest = "2.8.4"
 pest_derive = "2.8.4"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.149", optional = true }
 toml = "0.8.23"
+
+[features]
+default = []
+lsp = ["dep:lsp", "dep:serde", "dep:serde_json"]

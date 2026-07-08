@@ -19,6 +19,7 @@ ezrac test <file.ezra>
 ezrac assemble [--base <addr>] [--output <file.bin>] <file.asm>
 ezrac init [--name <name>] [--target <triple>] [dir]
 ezrac install-syntax (--all | [--editor] <editor>...)
+ezrac lsp
 ezrac layout
 ezrac header
 ```
@@ -34,6 +35,7 @@ cargo run -- test <file.ezra>
 cargo run -- assemble [--base <addr>] [--output <file.bin>] <file.asm>
 cargo run -- init [--name <name>] [--target <triple>] [dir]
 cargo run -- install-syntax (--all | [--editor] <editor>...)
+cargo run --features lsp -- lsp
 cargo run -- layout
 cargo run -- header
 ```
@@ -41,6 +43,8 @@ cargo run -- header
 `build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, CP/M `.com`, Intel HEX, and TI calculator formats; see `docs/usage.md`.
 
 `init` creates a non-destructive starter project with `.gitignore`, `Ezra.toml`, `README.md`, `src/main.ezra`, `sdk/`, and `assets/`. `install-syntax` installs syntax files for selected editors; supported editor names are `vim`, `neovim`, `nano`, `micro`, `helix`, `vscode`, `zed`, and `notepad++`.
+
+`lsp` starts the EZRA language server over stdio. It is behind the optional Cargo feature `lsp`, so default installs do not include LSP dependencies. Build or install with `--features lsp` to enable it.
 
 ## Project Files
 

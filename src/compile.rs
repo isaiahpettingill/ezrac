@@ -36,6 +36,14 @@ pub struct SdkResolver {
 }
 
 pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileReport, Diagnostic> {
+    check_source_with_sdk(source, options, &SdkResolver::default())
+}
+
+pub fn check_source_with_sdk(
+    source: &str,
+    options: &CompileOptions,
+    sdk: &SdkResolver,
+) -> Result<CompileReport, Diagnostic> {
     let root = parse_program(&options.source, source)?;
     let imports = root
         .declarations
@@ -43,13 +51,8 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
         .filter(|decl| matches!(decl, crate::ast::Declaration::Import(_)))
         .count();
     let fallback_location = source_start_location(&options.source);
-    let program = resolve_program_imports(
-        root,
-        &SdkResolver::default(),
-        &mut Vec::new(),
-        &mut HashSet::new(),
-    )
-    .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
+    let program = resolve_program_imports(root, sdk, &mut Vec::new(), &mut HashSet::new())
+        .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
     let declarations = program.declarations.len();
     let has_main = program.main_function().is_some();
 
@@ -61,7 +64,7 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
     }
     validate_main_signature(program.main_function().expect("main presence checked"))
         .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
-    emit_ez80_assembly_with_options(
+    let assembly = emit_ez80_assembly_with_options(
         &program,
         AssemblyOptions {
             debug_comments: options.debug_comments,
@@ -70,6 +73,8 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
         },
     )
     .map_err(|error| error.with_location_if_missing(fallback_location))?;
+    crate::vm::assemble_ez80_subset_at(&assembly, 0)
+        .map_err(|error| error.with_location_if_missing(source_start_location(&options.source)))?;
 
     Ok(CompileReport {
         imports,
