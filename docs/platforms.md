@@ -248,6 +248,8 @@ Built-in SDK modules:
 ```text
 cpm.bdos
 cpm.console
+cpm.dma
+cpm.fcb
 ```
 
 Checked-in runnable examples live under `examples/cpm-z80`. Build an assembly example with:

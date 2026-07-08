@@ -1,0 +1,28 @@
+import cpm.console
+import cpm.dma
+import cpm.fcb
+
+global file_control_block: [u8; 36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+fn prepare_readme_fcb() {
+    fcb.init(&file_control_block[0], fcb.DRIVE_DEFAULT)
+    fcb.set_name_char(&file_control_block[0], 0, 'R')
+    fcb.set_name_char(&file_control_block[0], 1, 'E')
+    fcb.set_name_char(&file_control_block[0], 2, 'A')
+    fcb.set_name_char(&file_control_block[0], 3, 'D')
+    fcb.set_name_char(&file_control_block[0], 4, 'M')
+    fcb.set_name_char(&file_control_block[0], 5, 'E')
+    fcb.set_extension_char(&file_control_block[0], 0, 'T')
+    fcb.set_extension_char(&file_control_block[0], 1, 'X')
+    fcb.set_extension_char(&file_control_block[0], 2, 'T')
+}
+
+fn main() {
+    prepare_readme_fcb()
+    dma.reset_default()
+    console.write('F')
+    console.write('C')
+    console.write('B')
+    console.newline()
+    console.exit()
+}

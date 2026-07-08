@@ -1,0 +1,32 @@
+pub const DEFAULT_ADDRESS: u16 = 0x0080
+pub const RECORD_SIZE: u16 = 128
+
+const DMA_SET_DMA_ADDRESS: u8 = 26
+
+fn dma_call_de(function: u8, value: u16) {
+    asm volatile(in function: u8 as reg8, in value: u16 as reg16, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, {function}"
+        "ex de, {value}"
+        "call 0005h"
+    }
+}
+
+pub fn set_address(address: u16) {
+    dma_call_de(DMA_SET_DMA_ADDRESS, address)
+}
+
+pub fn reset_default() {
+    set_address(DEFAULT_ADDRESS)
+}
+
+pub fn fill(buffer: ptr<u8>, value: u8, len: u16) {
+    let index: u16 = 0
+    while index < len {
+        *(buffer + index) = value
+        index += 1
+    }
+}
+
+pub fn clear_record(buffer: ptr<u8>) {
+    fill(buffer, 0, RECORD_SIZE)
+}

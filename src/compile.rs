@@ -480,6 +480,14 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/console.ezra"),
                 "cpm.console",
             )),
+            "cpm.dma" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/dma.ezra"),
+                "cpm.dma",
+            )),
+            "cpm.fcb" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/fcb.ezra"),
+                "cpm.fcb",
+            )),
             _ => None,
         }
     } else {
@@ -1398,6 +1406,38 @@ mod tests {
         }));
         assert!(program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "console.key_available")
+        }));
+    }
+
+    #[test]
+    fn cpm_z80_target_uses_builtin_fcb_and_dma_sdks() {
+        let source = r#"
+            import cpm.dma
+            import cpm.fcb
+
+            global file_control_block: [u8; 36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+            fn main() {
+                fcb.init(&file_control_block[0], fcb.DRIVE_DEFAULT)
+                fcb.set_name_char(&file_control_block[0], 0, 'R')
+                dma.reset_default()
+            }
+        "#;
+        let sdk = SdkResolver {
+            target: Some("cpm-2.2-z80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let program =
+            parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "fcb.init")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Function(function) if function.name == "dma.reset_default")
+        }));
+        assert!(program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Const(decl) if decl.name == "cpm.fcb.DRIVE_DEFAULT")
         }));
     }
 

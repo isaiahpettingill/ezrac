@@ -1,0 +1,100 @@
+pub const SIZE: u8 = 36
+pub const DRIVE: u8 = 0
+pub const NAME: u8 = 1
+pub const EXTENSION: u8 = 9
+pub const EXTENT_LOW: u8 = 12
+pub const SYSTEM_RESERVED_1: u8 = 13
+pub const SYSTEM_RESERVED_2: u8 = 14
+pub const RECORD_COUNT: u8 = 15
+pub const ALLOCATION_MAP: u8 = 16
+pub const CURRENT_RECORD: u8 = 32
+pub const RANDOM_RECORD: u8 = 33
+
+pub const DRIVE_DEFAULT: u8 = 0
+pub const DRIVE_A: u8 = 1
+pub const DRIVE_B: u8 = 2
+pub const DRIVE_C: u8 = 3
+pub const DRIVE_D: u8 = 4
+pub const WILDCARD: u8 = '?'
+pub const PAD: u8 = ' '
+
+pub const RESULT_OK: u8 = 0
+pub const RESULT_ERROR: u8 = 0xFF
+pub const DIRECTORY_ENTRY_SIZE: u8 = 32
+
+pub fn clear(fcb: ptr<u8>) {
+    let index: u8 = 0
+    while index < SIZE {
+        *(fcb + index) = 0
+        index += 1
+    }
+}
+
+pub fn init(fcb: ptr<u8>, drive: u8) {
+    clear(fcb)
+    set_drive(fcb, drive)
+    pad_name(fcb)
+    pad_extension(fcb)
+}
+
+pub fn set_drive(fcb: ptr<u8>, drive: u8) {
+    *(fcb + DRIVE) = drive
+}
+
+pub fn pad_name(fcb: ptr<u8>) {
+    let index: u8 = 0
+    while index < 8 {
+        set_name_char(fcb, index, PAD)
+        index += 1
+    }
+}
+
+pub fn pad_extension(fcb: ptr<u8>) {
+    let index: u8 = 0
+    while index < 3 {
+        set_extension_char(fcb, index, PAD)
+        index += 1
+    }
+}
+
+pub fn wildcard_name(fcb: ptr<u8>) {
+    let index: u8 = 0
+    while index < 8 {
+        set_name_char(fcb, index, WILDCARD)
+        index += 1
+    }
+}
+
+pub fn wildcard_extension(fcb: ptr<u8>) {
+    let index: u8 = 0
+    while index < 3 {
+        set_extension_char(fcb, index, WILDCARD)
+        index += 1
+    }
+}
+
+pub fn set_name_char(fcb: ptr<u8>, index: u8, ch: u8) {
+    if index < 8 {
+        *(fcb + NAME + index) = ch
+    }
+}
+
+pub fn set_extension_char(fcb: ptr<u8>, index: u8, ch: u8) {
+    if index < 3 {
+        *(fcb + EXTENSION + index) = ch
+    }
+}
+
+pub fn set_extent(fcb: ptr<u8>, extent: u8) {
+    *(fcb + EXTENT_LOW) = extent
+}
+
+pub fn set_current_record(fcb: ptr<u8>, record: u8) {
+    *(fcb + CURRENT_RECORD) = record
+}
+
+pub fn set_random_record(fcb: ptr<u8>, record: u24) {
+    *(fcb + RANDOM_RECORD) = cast<u8>(record)
+    *(fcb + RANDOM_RECORD + 1) = cast<u8>(record >> 8)
+    *(fcb + RANDOM_RECORD + 2) = cast<u8>(record >> 16)
+}

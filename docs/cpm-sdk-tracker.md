@@ -14,9 +14,9 @@ The current output format is `.com`, loaded at `0x0100` in the transient program
 
 - `.COM` packaging exists for CP/M targets.
 - CP/M source builds exist for Z80, 8080, and 8085 target profiles.
-- Built-in SDK modules exist for `cpm.bdos` and `cpm.console`.
+- Built-in SDK modules exist for `cpm.bdos`, `cpm.console`, `cpm.fcb`, and `cpm.dma`.
 - Assembly examples exist under `examples/cpm-z80`.
-- A source example exists at `examples/cpm-z80/hello-source.ezra`.
+- Source examples exist at `examples/cpm-z80/hello-source.ezra` and `examples/cpm-z80/file-control.ezra`.
 - The VM test harness emulates BDOS 0, 2, and 9 for basic console-output tests.
 
 ## SDK Modules
@@ -26,7 +26,7 @@ Planned module set:
 - `cpm.bdos`: raw BDOS constants and register-shaped wrappers.
 - `cpm.console`: console-oriented helpers for character, line, status, and `$`-terminated string output.
 - `cpm.fcb`: File Control Block offsets, constructors, filename helpers, extent/random-record helpers, and file result constants.
-- `cpm.dma`: default DMA address constants and helpers for setting/querying DMA buffers.
+- `cpm.dma`: default DMA address constants and helpers for setting DMA buffers.
 - `cpm.disk`: selected-disk, login-vector, read-only-vector, allocation-vector, reset/access/free-drive helpers.
 - `cpm.user`: user-code get/set helpers.
 - `cpm.serial`: reader, punch, list-device wrappers if they remain useful beyond `cpm.bdos` names.
@@ -94,14 +94,14 @@ Planned module set:
 
 ## File And Disk SDK Checklist
 
-- Define FCB offsets for drive, name, extension, extent, records, random record, and current record.
-- Provide result constants for success, not-found/error, and directory-full cases.
-- Provide helpers to clear and initialize 36-byte FCB buffers.
-- Provide helpers to set 8.3 filenames in FCBs.
+- Define FCB offsets for drive, name, extension, extent, records, random record, and current record: `cpm.fcb` done.
+- Provide result constants for success, not-found/error, and directory-full cases: partial in `cpm.fcb`.
+- Provide helpers to clear and initialize 36-byte FCB buffers: `cpm.fcb` done.
+- Provide helpers to set 8.3 filenames in FCBs: per-character helpers done; whole-name helpers pending.
 - Wrap open, close, make, delete, rename, search-first, search-next.
 - Wrap sequential read/write using the current DMA address.
 - Wrap random read/write, compute-file-size, and set-random-record.
-- Provide DMA buffer setup helpers and examples.
+- Provide DMA buffer setup helpers and examples: `cpm.dma` and `examples/cpm-z80/file-control.ezra` done.
 - Document CP/M wildcard semantics and drive numbering.
 
 ## Runtime And Tooling Checklist
