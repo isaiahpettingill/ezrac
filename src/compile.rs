@@ -495,6 +495,43 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
     }
 }
 
+/// Return the built-in SDK modules available for the selected target.
+///
+/// Keep this list derived from `builtin_sdk_source` so consumers such as the
+/// LSP cannot advertise a module that import resolution would reject.
+pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
+    const MODULES: &[&str] = &[
+        "agon.buffers",
+        "agon.console",
+        "agon.mos",
+        "agon.gpio",
+        "agon.keyboard",
+        "agon.mouse",
+        "agon.sprites",
+        "agon.vdp",
+        "ez180n.console",
+        "tice.os",
+        "tice.lcd",
+        "ti.os",
+        "ti.lcd",
+        "zx.rom",
+        "zx.screen",
+        "harness.io",
+        "harness.layout",
+        "harness.memory",
+        "cpm.bdos",
+        "cpm.console",
+        "cpm.dma",
+        "cpm.fcb",
+    ];
+
+    MODULES
+        .iter()
+        .copied()
+        .filter(|module| builtin_sdk_source(target, module).is_some())
+        .collect()
+}
+
 fn is_ti_ce_target(target: &str) -> bool {
     target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80")
 }

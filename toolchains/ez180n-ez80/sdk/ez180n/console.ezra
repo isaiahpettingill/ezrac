@@ -95,9 +95,9 @@ pub fn input_high(player: u8) -> u8 {
     return 0
 }
 
-pub fn button_down(player: u8, button: u8) -> u8 {
+pub fn button_down(player: u8, button: u8) -> bool {
     if button < 8 {
-        return (input_low(player) >> button) & 1
+        return ((input_low(player) >> button) & 1) != 0
     }
-    return (input_high(player) >> (button - 8)) & 1
+    return ((input_high(player) >> (button - 8)) & 1) != 0
 }
