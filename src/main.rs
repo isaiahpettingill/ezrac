@@ -1904,6 +1904,8 @@ fn default_layout_for_target(target: &str) -> Layout {
         Layout::ti_z80(target)
     } else if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
+    } else if target.starts_with("ez180n-ez80") {
+        Layout::ez180n()
     } else if target.starts_with("ezra-test-flat-ez80") {
         Layout::ez80_test_flat()
     } else if target.starts_with("ezra-test-split-ez80") {
@@ -1930,7 +1932,7 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
     write_scaffold_file(
         &root.join(".gitignore"),
         options.force,
-        "target/\n*.bin\n*.com\n*.hex\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
+        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
     )?;
     write_scaffold_file(
         &root.join("Ezra.toml"),
@@ -2350,7 +2352,7 @@ fn print_targets() {
             triple: "agonlight-mos-ez80",
             cpu: "ez80",
             address_width_bits: 24,
-            output: "bin",
+            output: "gaem",
             sdk: "agon.*",
             status: "main source target",
         },

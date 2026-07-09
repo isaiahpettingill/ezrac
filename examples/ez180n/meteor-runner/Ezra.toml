@@ -1,0 +1,6 @@
+[project]
+name = "ez180n-meteor-runner"
+
+[build]
+target = "ez180n-ez80"
+executable = "meteor-runner"

@@ -134,6 +134,7 @@ pub struct TargetMemoryModel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputFormat {
     CpmCom,
+    Ez180nGaem,
     IntelHex,
     RawBin,
     Ti8ek,
@@ -145,6 +146,7 @@ impl OutputFormat {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::CpmCom => "com",
+            Self::Ez180nGaem => "gaem",
             Self::IntelHex => "hex",
             Self::RawBin => "bin",
             Self::Ti8ek => "8ek",
@@ -184,6 +186,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
     ) && triple.value.split('-').any(|part| part == "cpm")
     {
         OutputFormat::CpmCom
+    } else if triple.value.starts_with("ez180n-ez80") {
+        OutputFormat::Ez180nGaem
     } else if is_ti_calculator_target(triple) {
         OutputFormat::Ti8xp
     } else {
@@ -222,12 +226,13 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
     match value {
         "bin" => Ok(OutputFormat::RawBin),
         "com" => Ok(OutputFormat::CpmCom),
+        "gaem" => Ok(OutputFormat::Ez180nGaem),
         "hex" | "ihex" | "intel-hex" => Ok(OutputFormat::IntelHex),
         "8ek" | "ti8ek" => Ok(OutputFormat::Ti8ek),
         "8xp" | "ti8xp" => Ok(OutputFormat::Ti8xp),
         "8xk" | "ti8xk" => Ok(OutputFormat::Ti8xk),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `hex`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }
@@ -420,6 +425,14 @@ mod tests {
     }
 
     #[test]
+    fn ez180n_targets_default_to_gaem_output() {
+        let target = resolve_target_profile(Some("ez180n-ez80")).unwrap();
+
+        assert_eq!(target.output_format, OutputFormat::Ez180nGaem);
+        assert_eq!(target.output_format.extension(), "gaem");
+    }
+
+    #[test]
     fn rejects_cpus_without_target_profiles_for_now() {
         let error = resolve_target_profile(Some("sega-genesis-m68k")).unwrap_err();
         assert!(
@@ -432,13 +445,14 @@ mod tests {
     fn parses_output_formats() {
         assert_eq!(parse_output_format("bin"), Ok(OutputFormat::RawBin));
         assert_eq!(parse_output_format("com"), Ok(OutputFormat::CpmCom));
+        assert_eq!(parse_output_format("gaem"), Ok(OutputFormat::Ez180nGaem));
         assert_eq!(parse_output_format("hex"), Ok(OutputFormat::IntelHex));
         assert_eq!(parse_output_format("8xp"), Ok(OutputFormat::Ti8xp));
         assert_eq!(parse_output_format("8ek"), Ok(OutputFormat::Ti8ek));
         assert_eq!(parse_output_format("8xk"), Ok(OutputFormat::Ti8xk));
         let error = parse_output_format("bad").unwrap_err();
         assert!(
-            error.contains("expected `bin`, `com`, `hex`, `8xp`, `8ek`, or `8xk`"),
+            error.contains("expected `bin`, `com`, `gaem`, `hex`, `8xp`, `8ek`, or `8xk`"),
             "{error}"
         );
     }

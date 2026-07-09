@@ -32,7 +32,7 @@ The current production-quality source path is eZ80-oriented. Z80-family and 8080
 | --- | --- | ---: | --- | --- | --- |
 | `agonlight-mos-ez80` | eZ80 ADL | 24 | Agon MOS `.bin` | `agon.*` | Main source target |
 | `custom-unknown-ez80` | eZ80 ADL | 24 | `.bin` | none | Generic eZ80 source target |
-| `ez180n-ez80` | eZ80 ADL | 24 | `.bin` | `ez180n.*` | ez180N libretro console target |
+| `ez180n-ez80` | eZ80 ADL | 24 | `.gaem` | `ez180n.*` | ez180N libretro console target |
 | `ezra-test-flat-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
 | `ezra-test-split-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
 | `ti84plusce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
@@ -119,6 +119,37 @@ Run `ezrac targets` to print this repository's documented target triples, defaul
 Let `main` return to MOS for normal programs. Emulator automation helpers exist in the SDK, but user-facing MOS programs should not exit through emulator-only ports.
 
 Use the SDK for MOS/VDP calls instead of hard-coding call sequences unless you are intentionally writing platform assembly. Keep hardware access in small wrapper functions so it can be replaced if the Agon ABI support changes.
+
+## ez180N Libretro Console
+
+Target:
+
+```text
+ez180n-ez80
+```
+
+The `ez180n-ez80` target emits raw `.gaem` files that load directly in the ez180N libretro core. Its default layout keeps the compiler's required metadata header just before the console load address and starts executable code at `0x010000`, matching the core's raw cartridge loader.
+
+Built-in SDK modules:
+
+```text
+ez180n.console
+```
+
+Coding guidance:
+
+```ezra
+import ez180n.console
+
+fn main() {
+    console.fill(console.CHAR_SPACE)
+    console.put_char(76, 52, 'E')
+    console.put_char(77, 52, 'Z')
+    console.present()
+}
+```
+
+Use `console.present()` after framebuffer writes, `console.play_sound(id)` for the beeper port, and `console.button_down(player, button)` for joypad input.
 
 ## Generic eZ80 And Test Targets
 

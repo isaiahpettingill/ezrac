@@ -308,6 +308,77 @@ impl Layout {
         }
     }
 
+    pub fn ez180n() -> Self {
+        Self {
+            name: "ez180n".to_owned(),
+            load: Address24::new(0x00_FFC0),
+            entry: Address24::new(0x01_0000),
+            stack: EZRA_STACK_TOP,
+            regions: vec![
+                region("low", 0x00_0000, 0x00_FFBF, &[RegionFlags::RESERVED]),
+                region("header", 0x00_FFC0, 0x00_FFFF, &[RegionFlags::READ]),
+                region(
+                    "code",
+                    0x01_0000,
+                    0x01_FFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x02_0000, 0x03_FFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x04_0000,
+                    0x07_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "vram",
+                    0x08_0000,
+                    0x0B_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::VOLATILE],
+                ),
+                region(
+                    "audio",
+                    0x0C_0000,
+                    0x0F_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::VOLATILE],
+                ),
+                region("assets", 0x10_0000, 0xDF_FFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xE0_0000,
+                    0xEF_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xF0_0000,
+                    0xFF_FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "header", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x00_FFC0)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x01_0000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x01_0000)),
+                symbol("EZRA_STACK_TOP", EZRA_STACK_TOP),
+                symbol("EZRA_RAM_BASE", EZRA_RAM_BASE),
+                symbol("EZRA_VRAM_BASE", EZRA_VRAM_BASE),
+                symbol("EZRA_AUDIO_BASE", EZRA_AUDIO_BASE),
+                symbol("EZRA_ASSET_BASE", EZRA_ASSET_BASE),
+                symbol("EZRA_RODATA_BASE", EZRA_RODATA_BASE),
+            ],
+        }
+    }
+
     pub fn agon_light_mos() -> Self {
         Self {
             name: "agon_light_mos".to_owned(),
@@ -1315,6 +1386,19 @@ mod tests {
     }
 
     #[test]
+    fn ez180n_layout_places_text_at_console_load_address() {
+        let layout = Layout::ez180n();
+
+        assert_eq!(layout.validate(), Ok(()));
+        assert_eq!(layout.load.get(), 0x00_FFC0);
+        assert_eq!(layout.entry.get(), 0x01_0000);
+        assert_eq!(
+            layout_symbol_value(&layout, "EZRA_CODE_BASE"),
+            Some(0x01_0000)
+        );
+    }
+
+    #[test]
     fn z80_default_layout_validates_and_stays_in_16_bit_address_space() {
         let layout = Layout::z80_default();
 
@@ -1606,4 +1690,13 @@ mod tests {
 
         assert!(error.message.contains("outside the 24-bit address space"));
     }
+}
+
+#[cfg(test)]
+fn layout_symbol_value(layout: &Layout, name: &str) -> Option<u32> {
+    layout
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == name)
+        .map(|symbol| symbol.value.get())
 }
