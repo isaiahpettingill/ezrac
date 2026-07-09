@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.7
+
+- Added the `ez180n-ez80` `.gaem` output target layout for out-of-the-box ez180N fantasy console cartridges.
+- Added an ez180N Meteor Runner example and updated ez180N examples for the 80x56 framebuffer.
+- Documented the ez180N libretro console target and SDK usage.
+
 - Added `cpm.fcb` and `cpm.dma` SDK modules plus a CP/M FCB/DMA source example.
 - Added a CP/M SDK tracker, a CP/M source example, richer `cpm.console` helpers, and BDOS 9 VM test support.
 - Added `ezrac targets` to list documented target triples, default outputs, SDK families, and support status.
