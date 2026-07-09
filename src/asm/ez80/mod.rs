@@ -1102,19 +1102,22 @@ fn parse_index_offset(text: &str) -> Result<u8, Diagnostic> {
     }
     let (sign, digits) = text.split_at(1);
     let magnitude = parse_number(digits.trim())?;
-    if magnitude > 0x7F {
+    let in_range = match sign {
+        "+" => magnitude <= 0x7F,
+        "-" => magnitude <= 0x80,
+        _ => false,
+    };
+    if !in_range {
         return Err(Diagnostic::new(format!(
             "index displacement `{text}` is outside signed 8-bit range"
         )));
     }
-    let value = match sign {
-        "+" => magnitude as i8,
-        "-" => -(magnitude as i8),
-        _ => {
-            return Err(Diagnostic::new(format!("invalid ix displacement `{text}`")));
-        }
+    let value = if sign == "-" {
+        -(magnitude as i16)
+    } else {
+        magnitude as i16
     };
-    Ok(value as u8)
+    Ok((value as i8) as u8)
 }
 
 fn parse_index_cb_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
@@ -1880,6 +1883,25 @@ mod tests {
                 "{syntax}"
             );
             assert_ez80_emulator_decodes(syntax, &bytes);
+        }
+    }
+
+    #[test]
+    fn indexed_displacements_cover_the_full_signed_byte_range() {
+        assert_eq!(
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld a, (ix-128)").unwrap(),
+            Some(vec![0xDD, 0x7E, 0x80])
+        );
+        assert_eq!(
+            encode_generated_instruction(AssemblerCpu::Ez80, "ld (iy+127), a").unwrap(),
+            Some(vec![0xFD, 0x77, 0x7F])
+        );
+        for syntax in ["ld a, (ix+128)", "ld a, (iy-129)"] {
+            let error = encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap_err();
+            assert!(
+                error.message.contains("outside signed 8-bit range"),
+                "{error}"
+            );
         }
     }
 

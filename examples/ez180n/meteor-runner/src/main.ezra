@@ -193,19 +193,19 @@ fn reset_game() {
 }
 
 fn handle_input() {
-    if console.button_down(0, console.BUTTON_LEFT) != 0 {
+    if console.button_down(0, console.BUTTON_LEFT) {
         if ship_x > LEFT_WALL + 3 {
             ship_x -= 1
         }
     }
 
-    if console.button_down(0, console.BUTTON_RIGHT) != 0 {
+    if console.button_down(0, console.BUTTON_RIGHT) {
         if ship_x < RIGHT_WALL - 3 {
             ship_x += 1
         }
     }
 
-    if console.button_down(0, console.BUTTON_A) != 0 {
+    if console.button_down(0, console.BUTTON_A) {
         if crashed != 0 {
             reset_game()
         }

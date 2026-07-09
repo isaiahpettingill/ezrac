@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.13
+
+- Fixed eZ80 indexed addressing at the full signed displacement boundary, including `-128`.
+- Fixed two-pass assembly of mode-suffixed instructions with label operands.
+- Kept imported SDK member completion available while the document contains incomplete syntax.
+- Fixed nested-call signature help and UTF-16 LSP position/range handling.
+- Fixed the ez180N Meteor Runner example after the console button API changed to `bool`.
+
 ## 0.1.12
 
 - Keep LSP completion available for recoverable local symbols while an in-progress edit leaves an `if` or `while` statement syntactically incomplete.

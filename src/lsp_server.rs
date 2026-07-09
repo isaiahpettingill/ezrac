@@ -384,9 +384,7 @@ fn completion_text_edit(
     };
     let start = Position {
         line: position.line,
-        character: position
-            .character
-            .saturating_sub(prefix.chars().count() as u32),
+        character: position.character.saturating_sub(utf16_len(prefix)),
     };
     if let Some(object) = item.as_object_mut() {
         object.insert(
@@ -508,20 +506,41 @@ fn call_at_position(source: &str, position: Position) -> Option<(String, usize)>
         .chain(std::iter::once(&line[..end]))
         .collect::<Vec<_>>()
         .join("\n");
-    let open = before.rfind('(')?;
-    let mut depth = 0usize;
-    let mut active_parameter = 0usize;
-    for ch in before[open + 1..].chars() {
+    let mut calls = Vec::<(usize, usize)>::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut chars = before.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if let Some(end_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == end_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+            chars.next();
+            while chars.next().is_some_and(|(_, next)| next != '\n') {}
+            continue;
+        }
         match ch {
-            '(' => depth += 1,
-            ')' if depth > 0 => depth -= 1,
-            ',' if depth == 0 => active_parameter += 1,
+            '\'' | '"' => quote = Some(ch),
+            '(' => calls.push((index, 0)),
+            ')' => {
+                calls.pop();
+            }
+            ',' => {
+                if let Some((_, active_parameter)) = calls.last_mut() {
+                    *active_parameter += 1;
+                }
+            }
             _ => {}
         }
     }
-    if depth != 0 {
-        return None;
-    }
+    let (open, active_parameter) = calls.last().copied()?;
     let before_open = before[..open].trim_end();
     let end = before_open.len();
     let start = before_open
@@ -543,12 +562,39 @@ fn symbol_index(document: &OpenDocument) -> SymbolIndex {
         Err(_) => add_recovery_symbols(&mut index, &document.text),
     }
     if let Some(sdk) = sdk.as_ref() {
-        if let Ok(program) = parse_and_resolve_imports_with_sdk(&document.path, &document.text, sdk)
-        {
-            add_program_symbols(&mut index, &program.declarations);
+        match parse_and_resolve_imports_with_sdk(&document.path, &document.text, sdk) {
+            Ok(program) => add_program_symbols(&mut index, &program.declarations),
+            Err(_) => add_recovery_import_symbols(&mut index, document, sdk),
         }
     }
     index
+}
+
+fn add_recovery_import_symbols(
+    index: &mut SymbolIndex,
+    document: &OpenDocument,
+    sdk: &SdkResolver,
+) {
+    let imports = document
+        .text
+        .lines()
+        .filter_map(|line| {
+            let line = line.split("//").next()?.trim();
+            let module = line.strip_prefix("import ")?.trim();
+            let end = module
+                .char_indices()
+                .take_while(|(_, ch)| is_symbol_char(*ch))
+                .last()
+                .map(|(index, ch)| index + ch.len_utf8())?;
+            Some(module[..end].to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    for import in imports {
+        let source = format!("import {import}\nfn main() {{}}\n");
+        if let Ok(program) = parse_and_resolve_imports_with_sdk(&document.path, &source, sdk) {
+            add_program_symbols(index, &program.declarations);
+        }
+    }
 }
 
 /// Keep completion useful while the user is in the middle of an edit that
@@ -1133,10 +1179,22 @@ fn symbol_at_position(source: &str, position: Position) -> Option<String> {
 }
 
 fn byte_index_for_character(line: &str, character: usize) -> usize {
-    line.char_indices()
-        .nth(character)
-        .map(|(index, _)| index)
-        .unwrap_or(line.len())
+    let mut utf16_offset = 0usize;
+    for (index, ch) in line.char_indices() {
+        if utf16_offset >= character {
+            return index;
+        }
+        let next = utf16_offset + ch.len_utf16();
+        if character < next {
+            return index;
+        }
+        utf16_offset = next;
+    }
+    line.len()
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.encode_utf16().count() as u32
 }
 
 fn is_symbol_char(ch: char) -> bool {
@@ -1161,11 +1219,11 @@ fn range_for_symbol(source: &str, symbol: &str) -> Option<Range> {
                 return Some(Range {
                     start: Position {
                         line: line_index as u32,
-                        character: line[..start].chars().count() as u32,
+                        character: utf16_len(&line[..start]),
                     },
                     end: Position {
                         line: line_index as u32,
-                        character: line[..end].chars().count() as u32,
+                        character: utf16_len(&line[..end]),
                     },
                 });
             }
@@ -1246,7 +1304,7 @@ fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnost
         range: error
             .location
             .as_ref()
-            .map(source_location_to_range)
+            .map(|location| source_location_to_range(&document.text, location))
             .map_or_else(
                 || diagnostic_fallback_range(document, &error.message),
                 |range| range,
@@ -1303,19 +1361,39 @@ fn range_for_line(source: &str, line_index: usize) -> Range {
         },
         end: Position {
             line: line_index as u32,
-            character: line.chars().count().max(1) as u32,
+            character: utf16_len(line).max(1),
         },
     }
 }
 
-fn source_location_to_range(location: &SourceLocation) -> Range {
-    let line = location.line.saturating_sub(1) as u32;
-    let character = location.column.saturating_sub(1) as u32;
+fn source_location_to_range(source: &str, location: &SourceLocation) -> Range {
+    let line_index = location.line.saturating_sub(1);
+    let source_line = source.lines().nth(line_index).unwrap_or_default();
+    let scalar_column = location.column.saturating_sub(1);
+    let byte_start = source_line
+        .char_indices()
+        .nth(scalar_column)
+        .map(|(index, _)| index)
+        .unwrap_or(source_line.len());
+    let byte_end = source_line[byte_start..]
+        .char_indices()
+        .nth(1)
+        .map(|(index, _)| byte_start + index)
+        .unwrap_or(source_line.len());
+    let character = utf16_len(&source_line[..byte_start]);
+    let end_character = if byte_end > byte_start {
+        utf16_len(&source_line[..byte_end])
+    } else {
+        character
+    };
     Range {
-        start: Position { line, character },
+        start: Position {
+            line: line_index as u32,
+            character,
+        },
         end: Position {
-            line,
-            character: character + 1,
+            line: line_index as u32,
+            character: end_character,
         },
     }
 }
@@ -1523,23 +1601,52 @@ mod tests {
 
     #[test]
     fn signature_help_tracks_call_parameter_index() {
+        let call_line = "fn main() { add(1, ) }";
+        let cursor = call_line.rfind(')').unwrap();
         let document = OpenDocument {
             path: PathBuf::from("signature.ezra"),
-            text: "fn add(left: u8, right: u8) -> u8 { return left + right }\nfn main() { add(1, ) }\n"
-                .to_owned(),
+            text: format!(
+                "fn add(left: u8, right: u8) -> u8 {{ return left + right }}\n{call_line}\n"
+            ),
             version: None,
         };
         let result = signature_help(
             Some(&document),
             Position {
                 line: 1,
-                character: 22,
+                character: utf16_len(&call_line[..cursor]),
             },
         );
         assert_eq!(result["activeParameter"], 1);
         assert_eq!(
             result["signatures"][0]["parameters"][1]["label"],
             "right: u8"
+        );
+    }
+
+    #[test]
+    fn signature_help_tracks_the_outer_call_after_a_nested_call() {
+        let call_line = "fn main() { outer(inner(1), ) }";
+        let cursor = call_line.rfind(')').unwrap();
+        let document = OpenDocument {
+            path: PathBuf::from("nested-signature.ezra"),
+            text: format!(
+                "fn inner(value: u8) -> u8 {{ return value }}\nfn outer(first: u8, second: u8) {{}}\n{call_line}\n"
+            ),
+            version: None,
+        };
+        let result = signature_help(
+            Some(&document),
+            Position {
+                line: 2,
+                character: utf16_len(&call_line[..cursor]),
+            },
+        );
+        assert_eq!(result["activeParameter"], 1);
+        assert!(
+            result["signatures"][0]["label"]
+                .as_str()
+                .is_some_and(|label| label.starts_with("fn outer("))
         );
     }
 
@@ -1589,5 +1696,80 @@ mod tests {
                     .any(|item| item.get("label").and_then(Value::as_str) == Some("counter"))
             }));
         }
+    }
+
+    #[test]
+    fn completion_keeps_imported_members_when_control_flow_is_incomplete() {
+        let root = std::env::temp_dir().join(format!(
+            "ezrac-lsp-incomplete-import-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Ezra.toml"),
+            "[build]\ntarget = \"ez180n-ez80\"\n",
+        )
+        .unwrap();
+        let line = "    while ez180n.console.pu";
+        let document = OpenDocument {
+            path: root.join("src/main.ezra"),
+            text: format!("import ez180n.console\nfn main() {{\n{line}\n}}\n"),
+            version: None,
+        };
+        let items = completion_items(
+            Some(&document),
+            Position {
+                line: 2,
+                character: utf16_len(line),
+            },
+        );
+        assert!(items["items"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("label").and_then(Value::as_str) == Some("ez180n.console.put_char")
+            })
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lsp_positions_use_utf16_code_units() {
+        assert_eq!(byte_index_for_character("😀co", 2), "😀".len());
+        assert_eq!(byte_index_for_character("😀co", 4), "😀co".len());
+
+        let line = "    \"😀\" co";
+        let document = OpenDocument {
+            path: PathBuf::from("utf16-completion.ezra"),
+            text: format!("fn main() {{\n    let counter: u8 = 0\n{line}\n}}\n"),
+            version: None,
+        };
+        let items = completion_items(
+            Some(&document),
+            Position {
+                line: 2,
+                character: utf16_len(line),
+            },
+        );
+        let counter = items["items"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some("counter"))
+            })
+            .unwrap();
+        assert_eq!(counter["textEdit"]["range"]["start"]["character"], 9);
+        assert_eq!(counter["textEdit"]["range"]["end"]["character"], 11);
+
+        let range = source_location_to_range(
+            "😀x",
+            &SourceLocation {
+                file: PathBuf::from("utf16.ezra"),
+                line: 1,
+                column: 2,
+            },
+        );
+        assert_eq!(range.start.character, 2);
+        assert_eq!(range.end.character, 3);
     }
 }

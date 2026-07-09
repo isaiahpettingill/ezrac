@@ -687,7 +687,10 @@ fn emit_instruction(
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
-    if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
+    if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
+        bytes.push(prefix);
+        emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
+    } else if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
         bytes.extend(generated);
     } else if let Some(branch) = asm_meta::branch_instruction(cpu, text) {
         bytes.push(branch.opcode);
@@ -1574,6 +1577,24 @@ mod tests {
             bytes,
             [
                 0x40, 0x00, 0x49, 0x47, 0x52, 0xEE, 0x55, 0x5B, 0xED, 0x39, 0x0C
+            ]
+        );
+    }
+
+    #[test]
+    fn assembles_mode_suffixed_relocatable_operands() {
+        let asm = r#"
+            ld.lil hl, target
+            jp.lil target
+        target:
+            ret
+        "#;
+        let bytes = assemble_ez80_subset_at(asm, EZRA_LOAD_ADDR.get()).unwrap();
+
+        assert_eq!(
+            bytes,
+            [
+                0x5B, 0x21, 0x0A, 0x00, 0x01, 0x5B, 0xC3, 0x0A, 0x00, 0x01, 0xC9,
             ]
         );
     }
