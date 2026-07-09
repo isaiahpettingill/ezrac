@@ -538,8 +538,9 @@ fn symbol_index(document: &OpenDocument) -> SymbolIndex {
     let sdk = sdk_for_path(&document.path).ok();
     let mut index = SymbolIndex::default();
     add_builtin_modules(&mut index, sdk.as_ref());
-    if let Ok(program) = parse_program(&document.path, &document.text) {
-        add_program_symbols(&mut index, &program.declarations);
+    match parse_program(&document.path, &document.text) {
+        Ok(program) => add_program_symbols(&mut index, &program.declarations),
+        Err(_) => add_recovery_symbols(&mut index, &document.text),
     }
     if let Some(sdk) = sdk.as_ref() {
         if let Ok(program) = parse_and_resolve_imports_with_sdk(&document.path, &document.text, sdk)
@@ -548,6 +549,91 @@ fn symbol_index(document: &OpenDocument) -> SymbolIndex {
         }
     }
     index
+}
+
+/// Keep completion useful while the user is in the middle of an edit that
+/// makes the document temporarily unparsable. This deliberately captures only
+/// simple declarations; the full parser remains the source of truth whenever
+/// it succeeds.
+fn add_recovery_symbols(index: &mut SymbolIndex, source: &str) {
+    for raw_line in source.lines() {
+        let line = raw_line.split("//").next().unwrap_or_default().trim();
+        add_recovery_function_symbols(index, line);
+        for keyword in [
+            "let", "const", "global", "port", "mmio", "embed", "alias", "struct",
+        ] {
+            let Some(rest) = line
+                .strip_prefix(keyword)
+                .and_then(|rest| rest.strip_prefix(' '))
+            else {
+                continue;
+            };
+            let Some(name) = recovery_identifier(rest) else {
+                continue;
+            };
+            add_symbol(
+                index,
+                SymbolInfo {
+                    label: name.to_owned(),
+                    kind: if keyword == "struct" { 23 } else { 6 },
+                    detail: format!("{keyword} {name}"),
+                },
+            );
+        }
+    }
+}
+
+fn add_recovery_function_symbols(index: &mut SymbolIndex, line: &str) {
+    let Some((_, rest)) = line.split_once("fn ") else {
+        return;
+    };
+    let Some(name) = recovery_identifier(rest) else {
+        return;
+    };
+    let signature = rest
+        .split_once('{')
+        .map(|(signature, _)| signature)
+        .unwrap_or(rest)
+        .trim();
+    add_symbol(
+        index,
+        SymbolInfo {
+            label: name.to_owned(),
+            kind: 3,
+            detail: format!("fn {signature}"),
+        },
+    );
+
+    let Some((_, params)) = rest.split_once('(') else {
+        return;
+    };
+    for parameter in params.split(',') {
+        let Some(name) = recovery_identifier(parameter.trim()) else {
+            continue;
+        };
+        add_symbol(
+            index,
+            SymbolInfo {
+                label: name.to_owned(),
+                kind: 6,
+                detail: format!("parameter {name}"),
+            },
+        );
+    }
+}
+
+fn recovery_identifier(text: &str) -> Option<&str> {
+    let end = text
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_')
+        .last()
+        .map(|(index, ch)| index + ch.len_utf8())?;
+    let identifier = &text[..end];
+    identifier
+        .chars()
+        .next()
+        .filter(|ch| ch.is_ascii_alphabetic() || *ch == '_')
+        .map(|_| identifier)
 }
 
 fn add_builtin_modules(index: &mut SymbolIndex, sdk: Option<&SdkResolver>) {
@@ -1471,5 +1557,37 @@ mod tests {
         assert_eq!(diagnostic.range.start.line, 1);
         assert_eq!(diagnostic.range.end.line, 1);
         assert!(diagnostic.range.end.character > diagnostic.range.start.character);
+    }
+
+    #[test]
+    fn completion_keeps_locals_when_an_if_or_while_is_incomplete() {
+        for (source, position) in [
+            (
+                "fn main() {\n    let counter: u8 = 0\n    if co\n}\n",
+                Position {
+                    line: 2,
+                    character: 9,
+                },
+            ),
+            (
+                "fn main() {\n    let counter: u8 = 0\n    while co\n}\n",
+                Position {
+                    line: 2,
+                    character: 12,
+                },
+            ),
+        ] {
+            let document = OpenDocument {
+                path: PathBuf::from("incomplete-control-flow.ezra"),
+                text: source.to_owned(),
+                version: None,
+            };
+            let items = completion_items(Some(&document), position);
+            assert!(items["items"].as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.get("label").and_then(Value::as_str) == Some("counter"))
+            }));
+        }
     }
 }

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.12
+
+- Keep LSP completion available for recoverable local symbols while an in-progress edit leaves an `if` or `while` statement syntactically incomplete.
+
 ## 0.1.11
 
 - Added LSP signature help with active parameter tracking and argument-list completion triggers.
