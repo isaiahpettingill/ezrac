@@ -89,23 +89,32 @@ fn draw_meteors() {
     }
 }
 
+fn clear_row(y: u8) {
+    let x: u8 = 0
+    while x < console.WIDTH {
+        console.put_char(x, y, console.CHAR_SPACE)
+        x += 1
+    }
+}
+
+fn clear_header() {
+    clear_row(0)
+    clear_row(1)
+    clear_row(2)
+    clear_row(3)
+}
+
 fn draw_title() {
-    console.put_char(31, 1, 'E')
-    console.put_char(32, 1, 'Z')
-    console.put_char(33, 1, 'R')
-    console.put_char(34, 1, 'A')
-    console.put_char(36, 1, 'M')
-    console.put_char(37, 1, 'E')
-    console.put_char(38, 1, 'T')
-    console.put_char(39, 1, 'E')
-    console.put_char(40, 1, 'O')
-    console.put_char(41, 1, 'R')
-    console.put_char(43, 1, 'R')
-    console.put_char(44, 1, 'U')
-    console.put_char(45, 1, 'N')
-    console.put_char(46, 1, 'N')
-    console.put_char(47, 1, 'E')
-    console.put_char(48, 1, 'R')
+    clear_header()
+    console.put_char(35, 1, 'M')
+    console.put_char(36, 1, 'E')
+    console.put_char(37, 1, 'T')
+    console.put_char(38, 1, 'E')
+    console.put_char(39, 1, 'O')
+    console.put_char(40, 1, 'R')
+    console.put_char(42, 1, 'R')
+    console.put_char(43, 1, 'U')
+    console.put_char(44, 1, 'N')
 
     console.put_char(29, 53, 'D')
     console.put_char(30, 53, 'P')
@@ -155,7 +164,6 @@ fn draw_crash() {
 
 fn render() {
     console.fill(console.CHAR_SPACE)
-    draw_title()
     draw_box()
     draw_stars()
     put_score()
@@ -164,6 +172,7 @@ fn render() {
     if crashed != 0 {
         draw_crash()
     }
+    draw_title()
     console.present()
 }
 
