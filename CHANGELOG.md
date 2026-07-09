@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.11
+
+- Added LSP signature help with active parameter tracking and argument-list completion triggers.
+- Report LSP diagnostics on relevant source ranges when compiler diagnostics lack precise locations.
+- Made SDK import completion target-aware and fixed ez180N console button results to use `bool`.
+
 ## 0.1.7
 
 - Added the `ez180n-ez80` `.gaem` output target layout for out-of-the-box ez180N fantasy console cartridges.
