@@ -4,3 +4,5 @@
 /examples/**/*.asm
 /examples/**/*.map
 /examples/**/*.bin
+/examples/**/*.gaem
+/examples/**/captures/
