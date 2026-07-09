@@ -4030,7 +4030,13 @@ impl Emitter {
                 self.emit_struct_initializer(variable, ty, value)
             }
             _ => {
-                self.emit_expr_to_width(value, variable.width()?)?;
+                let width = variable.width()?;
+                if width == ValueWidth::U24 {
+                    if let Ok(value) = self.eval_i64_with_local_constants(value) {
+                        self.validate_value_width_for_target((value as u32) & 0xFF_FFFF, width)?;
+                    }
+                }
+                self.emit_expr_to_width(value, width)?;
                 self.emit_store_width(variable);
                 Ok(())
             }
@@ -7053,11 +7059,13 @@ impl Emitter {
     }
 
     fn value_for_width(&self, expr: &Expr, width: ValueWidth) -> Result<u32, Diagnostic> {
-        match width {
+        let value = match width {
             ValueWidth::U8 => self.u8(expr).map(u32::from),
             ValueWidth::U16 => self.u16(expr).map(u32::from),
             ValueWidth::U24 => self.u24(expr),
-        }
+        }?;
+        self.validate_value_width_for_target(value, width)?;
+        Ok(value)
     }
 
     fn eval_i64_with_local_constants(&self, expr: &Expr) -> Result<i64, Diagnostic> {
@@ -7137,7 +7145,23 @@ impl Emitter {
         self.symbols.validate_value_for_type(value, &resolved)?;
         let bits = u32::from(width.bytes()) * 8;
         let mask = (1_i128 << bits) - 1;
-        Ok(((value as i128) & mask) as u32)
+        let value = ((value as i128) & mask) as u32;
+        self.validate_value_width_for_target(value, width)?;
+        Ok(value)
+    }
+
+    fn validate_value_width_for_target(
+        &self,
+        value: u32,
+        width: ValueWidth,
+    ) -> Result<(), Diagnostic> {
+        if is_z80_family_16bit(self.cpu) && width == ValueWidth::U24 && value > 0xFFFF {
+            return Err(Diagnostic::new(format!(
+                "24-bit value 0x{value:06X} cannot be encoded for 16-bit target `{}`",
+                self.cpu.as_str()
+            )));
+        }
+        Ok(())
     }
 
     fn type_is_signed(&self, ty: &Type) -> Result<bool, Diagnostic> {

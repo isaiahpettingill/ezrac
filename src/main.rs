@@ -5127,6 +5127,40 @@ mod tests {
     }
 
     #[test]
+    fn z80_source_rejects_24bit_literals_before_assembly() {
+        let root = temp_root("z80_source_u24_literal");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("game.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                fn main() {
+                    let value: u24 = 0x010000
+                    test.pass()
+                }
+            "#,
+        )
+        .unwrap();
+
+        let options = CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("zxspectrum-z80".to_owned()),
+        };
+        let error = test_source_with_command_options(&options).unwrap_err();
+
+        assert!(
+            error.contains("24-bit value 0x010000 cannot be encoded for 16-bit target `z80`"),
+            "{error}"
+        );
+        assert!(!error.contains("<assembly>"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn z80_source_emits_z80_assembly_without_ez80_adl_forms() {
         let root = temp_root("z80_source_asm");
         std::fs::create_dir_all(&root).unwrap();
