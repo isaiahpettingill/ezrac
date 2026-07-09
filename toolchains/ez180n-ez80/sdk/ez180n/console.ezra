@@ -1,5 +1,5 @@
-pub const WIDTH: u8 = 160
-pub const HEIGHT: u8 = 112
+pub const WIDTH: u8 = 80
+pub const HEIGHT: u8 = 56
 pub const FRAMEBUFFER_BASE: u24 = 0x080000u24
 
 pub const CHAR_FIRST: u8 = 0x00
@@ -64,7 +64,7 @@ pub fn put_char(x: u8, y: u8, ch: u8) {
 
 pub fn fill(ch: u8) {
     let index: u24 = 0
-    while index < 17920u24 {
+    while index < 4480u24 {
         let cell: ptr<u8> = FRAMEBUFFER + index
         *cell = ch
         index += 1u24

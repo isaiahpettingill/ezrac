@@ -128,7 +128,7 @@ Target:
 ez180n-ez80
 ```
 
-The `ez180n-ez80` target emits raw `.gaem` files that load directly in the ez180N libretro core. Its default layout keeps the compiler's required metadata header just before the console load address and starts executable code at `0x010000`, matching the core's raw cartridge loader.
+The `ez180n-ez80` target emits raw `.gaem` files that load directly in the ez180N libretro core. Its default layout keeps the compiler's required metadata header just before the console load address and starts executable code at `0x010000`, matching the core's raw cartridge loader. The console exposes an `80x56` character framebuffer at `0x080000`.
 
 Built-in SDK modules:
 

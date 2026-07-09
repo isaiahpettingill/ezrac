@@ -1,11 +1,11 @@
 import ez180n.console
 
-const LEFT_WALL: u8 = 48
-const RIGHT_WALL: u8 = 111
-const TOP_WALL: u8 = 10
-const BOTTOM_WALL: u8 = 102
-const PLAYER_Y: u8 = 94
-const SHIP_START_X: u8 = 79
+const LEFT_WALL: u8 = 24
+const RIGHT_WALL: u8 = 55
+const TOP_WALL: u8 = 5
+const BOTTOM_WALL: u8 = 51
+const PLAYER_Y: u8 = 47
+const SHIP_START_X: u8 = 39
 const MAX_METEORS: u8 = 8
 const HUD_Y: u8 = 5
 const DELAY_TICKS: u16 = 2400
@@ -14,9 +14,9 @@ global ship_x: u8 = SHIP_START_X
 global score: u16 = 0
 global tick: u8 = 0
 global crashed: u8 = 0
-global meteor_x: [u8; MAX_METEORS] = [53, 62, 73, 84, 94, 103, 58, 99]
-global meteor_y: [u8; MAX_METEORS] = [14, 24, 35, 47, 59, 70, 82, 93]
-global meteor_speed: [u8; MAX_METEORS] = [1, 2, 1, 3, 2, 1, 2, 3]
+global meteor_x: [u8; MAX_METEORS] = [26, 31, 36, 42, 47, 51, 29, 49]
+global meteor_y: [u8; MAX_METEORS] = [7, 12, 17, 23, 29, 35, 41, 46]
+global meteor_speed: [u8; MAX_METEORS] = [1, 1, 1, 2, 1, 1, 1, 2]
 
 fn put_digit(x: u8, y: u8, value: u16, divisor: u16) {
     let digit: u8 = cast<u8>((value / divisor) % 10)
@@ -24,15 +24,15 @@ fn put_digit(x: u8, y: u8, value: u16, divisor: u16) {
 }
 
 fn put_score() {
-    console.put_char(51, HUD_Y, 'S')
-    console.put_char(52, HUD_Y, 'C')
-    console.put_char(53, HUD_Y, 'O')
-    console.put_char(54, HUD_Y, 'R')
-    console.put_char(55, HUD_Y, 'E')
-    put_digit(57, HUD_Y, score, 1000)
-    put_digit(58, HUD_Y, score, 100)
-    put_digit(59, HUD_Y, score, 10)
-    put_digit(60, HUD_Y, score, 1)
+    console.put_char(25, HUD_Y, 'S')
+    console.put_char(26, HUD_Y, 'C')
+    console.put_char(27, HUD_Y, 'O')
+    console.put_char(28, HUD_Y, 'R')
+    console.put_char(29, HUD_Y, 'E')
+    put_digit(31, HUD_Y, score, 1000)
+    put_digit(32, HUD_Y, score, 100)
+    put_digit(33, HUD_Y, score, 10)
+    put_digit(34, HUD_Y, score, 1)
 }
 
 fn draw_box() {
@@ -57,14 +57,14 @@ fn draw_box() {
 }
 
 fn draw_stars() {
-    console.put_char(55, 18, '.')
-    console.put_char(68, 29, '.')
-    console.put_char(101, 31, '.')
-    console.put_char(88, 43, '.')
-    console.put_char(59, 55, '.')
-    console.put_char(107, 67, '.')
-    console.put_char(72, 79, '.')
-    console.put_char(96, 88, '.')
+    console.put_char(27, 9, '.')
+    console.put_char(34, 14, '.')
+    console.put_char(50, 15, '.')
+    console.put_char(44, 21, '.')
+    console.put_char(29, 27, '.')
+    console.put_char(53, 33, '.')
+    console.put_char(36, 39, '.')
+    console.put_char(48, 44, '.')
 }
 
 fn draw_ship() {
@@ -90,67 +90,67 @@ fn draw_meteors() {
 }
 
 fn draw_title() {
-    console.put_char(66, 2, 'E')
-    console.put_char(67, 2, 'Z')
-    console.put_char(68, 2, 'R')
-    console.put_char(69, 2, 'A')
-    console.put_char(71, 2, 'M')
-    console.put_char(72, 2, 'E')
-    console.put_char(73, 2, 'T')
-    console.put_char(74, 2, 'E')
-    console.put_char(75, 2, 'O')
-    console.put_char(76, 2, 'R')
-    console.put_char(78, 2, 'R')
-    console.put_char(79, 2, 'U')
-    console.put_char(80, 2, 'N')
-    console.put_char(81, 2, 'N')
-    console.put_char(82, 2, 'E')
-    console.put_char(83, 2, 'R')
+    console.put_char(31, 1, 'E')
+    console.put_char(32, 1, 'Z')
+    console.put_char(33, 1, 'R')
+    console.put_char(34, 1, 'A')
+    console.put_char(36, 1, 'M')
+    console.put_char(37, 1, 'E')
+    console.put_char(38, 1, 'T')
+    console.put_char(39, 1, 'E')
+    console.put_char(40, 1, 'O')
+    console.put_char(41, 1, 'R')
+    console.put_char(43, 1, 'R')
+    console.put_char(44, 1, 'U')
+    console.put_char(45, 1, 'N')
+    console.put_char(46, 1, 'N')
+    console.put_char(47, 1, 'E')
+    console.put_char(48, 1, 'R')
 
-    console.put_char(67, 106, 'D')
-    console.put_char(68, 106, 'P')
-    console.put_char(69, 106, 'A')
-    console.put_char(70, 106, 'D')
-    console.put_char(72, 106, 'M')
-    console.put_char(73, 106, 'O')
-    console.put_char(74, 106, 'V')
-    console.put_char(75, 106, 'E')
-    console.put_char(78, 106, 'A')
-    console.put_char(80, 106, 'R')
-    console.put_char(81, 106, 'E')
-    console.put_char(82, 106, 'S')
-    console.put_char(83, 106, 'T')
-    console.put_char(84, 106, 'A')
-    console.put_char(85, 106, 'R')
-    console.put_char(86, 106, 'T')
+    console.put_char(29, 53, 'D')
+    console.put_char(30, 53, 'P')
+    console.put_char(31, 53, 'A')
+    console.put_char(32, 53, 'D')
+    console.put_char(34, 53, 'M')
+    console.put_char(35, 53, 'O')
+    console.put_char(36, 53, 'V')
+    console.put_char(37, 53, 'E')
+    console.put_char(40, 53, 'A')
+    console.put_char(42, 53, 'R')
+    console.put_char(43, 53, 'E')
+    console.put_char(44, 53, 'S')
+    console.put_char(45, 53, 'T')
+    console.put_char(46, 53, 'A')
+    console.put_char(47, 53, 'R')
+    console.put_char(48, 53, 'T')
 }
 
 fn draw_crash() {
-    console.put_char(70, 48, 'S')
-    console.put_char(71, 48, 'H')
-    console.put_char(72, 48, 'I')
-    console.put_char(73, 48, 'P')
-    console.put_char(75, 48, 'L')
-    console.put_char(76, 48, 'O')
-    console.put_char(77, 48, 'S')
-    console.put_char(78, 48, 'T')
+    console.put_char(35, 24, 'S')
+    console.put_char(36, 24, 'H')
+    console.put_char(37, 24, 'I')
+    console.put_char(38, 24, 'P')
+    console.put_char(40, 24, 'L')
+    console.put_char(41, 24, 'O')
+    console.put_char(42, 24, 'S')
+    console.put_char(43, 24, 'T')
 
-    console.put_char(65, 51, 'P')
-    console.put_char(66, 51, 'R')
-    console.put_char(67, 51, 'E')
-    console.put_char(68, 51, 'S')
-    console.put_char(69, 51, 'S')
-    console.put_char(71, 51, 'A')
-    console.put_char(73, 51, 'T')
-    console.put_char(74, 51, 'O')
-    console.put_char(76, 51, 'R')
-    console.put_char(77, 51, 'E')
-    console.put_char(78, 51, 'L')
-    console.put_char(79, 51, 'A')
-    console.put_char(80, 51, 'U')
-    console.put_char(81, 51, 'N')
-    console.put_char(82, 51, 'C')
-    console.put_char(83, 51, 'H')
+    console.put_char(30, 27, 'P')
+    console.put_char(31, 27, 'R')
+    console.put_char(32, 27, 'E')
+    console.put_char(33, 27, 'S')
+    console.put_char(34, 27, 'S')
+    console.put_char(36, 27, 'A')
+    console.put_char(38, 27, 'T')
+    console.put_char(39, 27, 'O')
+    console.put_char(41, 27, 'R')
+    console.put_char(42, 27, 'E')
+    console.put_char(43, 27, 'L')
+    console.put_char(44, 27, 'A')
+    console.put_char(45, 27, 'U')
+    console.put_char(46, 27, 'N')
+    console.put_char(47, 27, 'C')
+    console.put_char(48, 27, 'H')
 }
 
 fn render() {
@@ -172,14 +172,14 @@ fn reset_game() {
     score = 0
     tick = 0
     crashed = 0
-    meteor_y[0] = 14
-    meteor_y[1] = 24
-    meteor_y[2] = 35
-    meteor_y[3] = 47
-    meteor_y[4] = 59
-    meteor_y[5] = 70
-    meteor_y[6] = 82
-    meteor_y[7] = 93
+    meteor_y[0] = 7
+    meteor_y[1] = 12
+    meteor_y[2] = 17
+    meteor_y[3] = 23
+    meteor_y[4] = 29
+    meteor_y[5] = 35
+    meteor_y[6] = 41
+    meteor_y[7] = 46
     console.play_sound(36)
 }
 
@@ -205,7 +205,7 @@ fn handle_input() {
 
 fn wrap_meteor(index: u8) {
     meteor_y[index] = TOP_WALL + 2
-    meteor_x[index] = LEFT_WALL + 4 + ((meteor_x[index] + 17 + tick) % 56)
+    meteor_x[index] = LEFT_WALL + 4 + ((meteor_x[index] + 17 + tick) % 24)
     score += 1
 }
 

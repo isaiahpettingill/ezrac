@@ -11,13 +11,13 @@ fn draw_text(x: u8, y: u8) {
 
 fn main() {
     console.fill(console.CHAR_SPACE)
-    draw_text(76, 52)
-    console.put_char(75, 54, console.CHAR_BOX_DOWN_RIGHT)
-    console.put_char(76, 54, console.CHAR_BOX_HORIZONTAL)
-    console.put_char(77, 54, console.CHAR_BOX_HORIZONTAL)
-    console.put_char(78, 54, console.CHAR_BOX_HORIZONTAL)
-    console.put_char(79, 54, console.CHAR_BOX_HORIZONTAL)
-    console.put_char(80, 54, console.CHAR_BOX_DOWN_LEFT)
+    draw_text(37, 25)
+    console.put_char(36, 27, console.CHAR_BOX_DOWN_RIGHT)
+    console.put_char(37, 27, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(38, 27, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(39, 27, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(40, 27, console.CHAR_BOX_HORIZONTAL)
+    console.put_char(41, 27, console.CHAR_BOX_DOWN_LEFT)
     console.play_sound(42)
     console.present()
 }
