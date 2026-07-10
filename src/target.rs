@@ -140,6 +140,7 @@ pub enum OutputFormat {
     Ti8ek,
     Ti8xp,
     Ti8xk,
+    ZxSpectrumTap,
 }
 
 impl OutputFormat {
@@ -152,6 +153,7 @@ impl OutputFormat {
             Self::Ti8ek => "8ek",
             Self::Ti8xp => "8xp",
             Self::Ti8xk => "8xk",
+            Self::ZxSpectrumTap => "tap",
         }
     }
 }
@@ -190,6 +192,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::Ez180nGaem
     } else if is_ti_calculator_target(triple) {
         OutputFormat::Ti8xp
+    } else if triple.value.starts_with("zxspectrum-z80") {
+        OutputFormat::ZxSpectrumTap
     } else {
         OutputFormat::RawBin
     }
@@ -231,8 +235,9 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "8ek" | "ti8ek" => Ok(OutputFormat::Ti8ek),
         "8xp" | "ti8xp" => Ok(OutputFormat::Ti8xp),
         "8xk" | "ti8xk" => Ok(OutputFormat::Ti8xk),
+        "tap" | "zxtap" | "spectrum-tap" => Ok(OutputFormat::ZxSpectrumTap),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }
@@ -370,6 +375,7 @@ mod tests {
         assert_eq!(z80.triple.cpu, CpuFamily::Z80);
         assert_eq!(z80.memory.pointer_width_bits, 16);
         assert_eq!(z80.memory.address_width_bits, 16);
+        assert_eq!(z80.output_format, OutputFormat::ZxSpectrumTap);
     }
 
     #[test]
@@ -450,9 +456,10 @@ mod tests {
         assert_eq!(parse_output_format("8xp"), Ok(OutputFormat::Ti8xp));
         assert_eq!(parse_output_format("8ek"), Ok(OutputFormat::Ti8ek));
         assert_eq!(parse_output_format("8xk"), Ok(OutputFormat::Ti8xk));
+        assert_eq!(parse_output_format("tap"), Ok(OutputFormat::ZxSpectrumTap));
         let error = parse_output_format("bad").unwrap_err();
         assert!(
-            error.contains("expected `bin`, `com`, `gaem`, `hex`, `8xp`, `8ek`, or `8xk`"),
+            error.contains("expected `bin`, `com`, `gaem`, `hex`, `tap`, `8xp`, `8ek`, or `8xk`"),
             "{error}"
         );
     }

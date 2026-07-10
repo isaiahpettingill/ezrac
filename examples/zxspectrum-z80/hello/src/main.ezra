@@ -1,0 +1,9 @@
+import zx.rom
+import zx.screen
+
+fn main() {
+    screen.border(1)
+    rom.print_char('H')
+    rom.print_char('i')
+    rom.print_char('!')
+}

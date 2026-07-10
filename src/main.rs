@@ -1471,6 +1471,9 @@ fn build_executable_bytes(
     if settings.output_format == OutputFormat::Ti8xp {
         return ti8xp_bytes(settings, output_path, code);
     }
+    if settings.output_format == OutputFormat::ZxSpectrumTap {
+        return zx_spectrum_tap_bytes(settings, output_path, code);
+    }
     if matches!(
         settings.output_format,
         OutputFormat::Ti8ek | OutputFormat::Ti8xk
@@ -1527,6 +1530,71 @@ fn ti8xp_bytes(
     out.extend_from_slice(&data);
     push16_le(&mut out, checksum);
     Ok(out)
+}
+
+fn zx_spectrum_tap_bytes(
+    settings: &BuildSettings,
+    output_path: Option<&Path>,
+    code: &[u8],
+) -> Result<Vec<u8>, String> {
+    if !settings.target.triple.value.starts_with("zxspectrum-z80") {
+        return Err(format!(
+            "target `{}` does not support ZX Spectrum .tap output",
+            settings.target.triple.value
+        ));
+    }
+    let load = u16::try_from(settings.layout.load.get())
+        .map_err(|_| "ZX Spectrum load address exceeds 16-bit address space".to_owned())?;
+    let length = u16::try_from(code.len())
+        .map_err(|_| "ZX Spectrum CODE block exceeds 65535 bytes".to_owned())?;
+
+    let mut header = Vec::with_capacity(17);
+    header.push(3); // CODE header
+    header.extend_from_slice(&zx_tap_name(settings, output_path));
+    header.extend_from_slice(&length.to_le_bytes());
+    header.extend_from_slice(&load.to_le_bytes());
+    header.extend_from_slice(&0u16.to_le_bytes());
+
+    let mut out = Vec::with_capacity(4 + header.len() + code.len());
+    push_zx_tap_block(&mut out, 0x00, &header)?;
+    push_zx_tap_block(&mut out, 0xFF, code)?;
+    Ok(out)
+}
+
+fn zx_tap_name(settings: &BuildSettings, output_path: Option<&Path>) -> [u8; 10] {
+    let raw = settings
+        .executable_name
+        .as_deref()
+        .or_else(|| {
+            output_path
+                .and_then(|path| path.file_stem())
+                .and_then(|stem| stem.to_str())
+        })
+        .unwrap_or("EZRA");
+    let mut name = [b' '; 10];
+    for (slot, ch) in name.iter_mut().zip(raw.chars()) {
+        *slot = if ch.is_ascii_alphanumeric() || ch == '_' {
+            ch.to_ascii_uppercase() as u8
+        } else {
+            b'_'
+        };
+    }
+    name
+}
+
+fn push_zx_tap_block(out: &mut Vec<u8>, flag: u8, data: &[u8]) -> Result<(), String> {
+    let block_len = data
+        .len()
+        .checked_add(2)
+        .ok_or_else(|| "ZX Spectrum TAP block is too large".to_owned())?;
+    let block_len = u16::try_from(block_len)
+        .map_err(|_| "ZX Spectrum TAP block exceeds 65535 bytes".to_owned())?;
+    out.extend_from_slice(&block_len.to_le_bytes());
+    out.push(flag);
+    out.extend_from_slice(data);
+    let checksum = data.iter().fold(flag, |checksum, byte| checksum ^ byte);
+    out.push(checksum);
+    Ok(())
 }
 
 fn ti_app_bytes(
@@ -2060,7 +2128,7 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
     write_scaffold_file(
         &root.join(".gitignore"),
         options.force,
-        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
+        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.tap\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
     )?;
     write_scaffold_file(
         &root.join("Ezra.toml"),
@@ -3365,10 +3433,11 @@ mod tests {
         })
         .unwrap();
         let map = std::fs::read_to_string(outputs.map).unwrap();
-        let bin = std::fs::read(outputs.executable).unwrap();
+        let tape = std::fs::read(outputs.executable).unwrap();
 
         assert!(map.contains(".text        0x000220"), "{map}");
-        assert_eq!(bin[0x20], 0xC9);
+        assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x0200);
+        assert_eq!(tape[21 + 3 + 0x20], 0xC9);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4179,7 +4248,7 @@ mod tests {
     }
 
     #[test]
-    fn zxspectrum_source_build_uses_sdk_and_writes_flat_binary() {
+    fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
         let root = temp_root("zxspectrum_sdk_build");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("game.ezra");
@@ -4208,14 +4277,43 @@ mod tests {
 
         let asm = std::fs::read_to_string(outputs.asm).unwrap();
         let map = std::fs::read_to_string(outputs.map).unwrap();
-        let bin = std::fs::read(outputs.executable).unwrap();
+        let tape = std::fs::read(&outputs.executable).unwrap();
         assert!(asm.contains("; target: Z80"), "{asm}");
         assert!(asm.contains("out (0FEh), a"), "{asm}");
         assert!(asm.contains("rst 10h"), "{asm}");
         assert!(map.contains(".text        0x008000"), "{map}");
-        assert_eq!(&bin[0..3], &[0xF3, 0x31, 0x00]);
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("tap")
+        );
+        assert_eq!(u16::from_le_bytes([tape[0], tape[1]]), 19);
+        assert_eq!(tape[2], 0x00);
+        assert_eq!(tape[3], 3);
+        assert!(u16::from_le_bytes([tape[14], tape[15]]) > 0);
+        assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x8000);
+        let data_block = 21;
+        assert_eq!(tape[data_block + 2], 0xFF);
+        assert_eq!(&tape[data_block + 3..data_block + 6], &[0xF3, 0x31, 0x00]);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn spectrum_tap_preserves_a_custom_load_address() {
+        let mut settings = resolve_build_settings(
+            &CommandOptions {
+                path: "game.ezra".to_owned(),
+                debug_comments: false,
+                default_sdk_symbols: true,
+                layout_path: None,
+                target: Some("zxspectrum-z80".to_owned()),
+            },
+            Path::new("game.ezra"),
+        )
+        .unwrap();
+        settings.layout.load = Address24::new(0x8001);
+        let tape = zx_spectrum_tap_bytes(&settings, None, &[0x00]).unwrap();
+        assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x8001);
     }
 
     #[test]

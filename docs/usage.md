@@ -117,6 +117,10 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 
+## ZX Spectrum Output
+
+`zxspectrum-z80` builds produce a `.tap` containing a standard CODE header and data block. The code loads and starts at `0x8000`, so common Spectrum emulators can load the tape directly. If the emulator does not auto-start CODE blocks, use `LOAD "" CODE` followed by `RANDOMIZE USR 32768`.
+
 ## Initializing Projects
 
 Use `init` to create a starter project:
