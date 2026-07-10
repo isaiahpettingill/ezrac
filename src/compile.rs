@@ -48,12 +48,27 @@ pub fn check_source_diagnostics_with_sdk(
     options: &CompileOptions,
     sdk: &SdkResolver,
 ) -> Vec<Diagnostic> {
+    check_source_diagnostics_with_sdk_and_overrides(source, options, sdk, &HashMap::new())
+}
+
+pub fn check_source_diagnostics_with_sdk_and_overrides(
+    source: &str,
+    options: &CompileOptions,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Vec<Diagnostic> {
     let root = match parse_program(&options.source, source) {
         Ok(program) => program,
         Err(error) => return vec![error],
     };
     let source_program = root.clone();
-    let resolved = match resolve_program_imports(root, sdk, &mut Vec::new(), &mut HashSet::new()) {
+    let resolved = match resolve_program_imports(
+        root,
+        sdk,
+        &mut Vec::new(),
+        &mut HashSet::new(),
+        source_overrides,
+    ) {
         Ok(program) => program,
         Err(error) => return vec![locate_source_diagnostic(error, source, &options.source)],
     };
@@ -63,7 +78,7 @@ pub fn check_source_diagnostics_with_sdk(
         source,
         options.default_sdk_symbols,
     );
-    if let Err(error) = check_source_with_sdk(source, options, sdk)
+    if let Err(error) = check_source_with_sdk_and_overrides(source, options, sdk, source_overrides)
         && !diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message == error.message)
@@ -78,6 +93,15 @@ pub fn check_source_with_sdk(
     options: &CompileOptions,
     sdk: &SdkResolver,
 ) -> Result<CompileReport, Diagnostic> {
+    check_source_with_sdk_and_overrides(source, options, sdk, &HashMap::new())
+}
+
+fn check_source_with_sdk_and_overrides(
+    source: &str,
+    options: &CompileOptions,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Result<CompileReport, Diagnostic> {
     let root = parse_program(&options.source, source)?;
     let imports = root
         .declarations
@@ -85,8 +109,14 @@ pub fn check_source_with_sdk(
         .filter(|decl| matches!(decl, crate::ast::Declaration::Import(_)))
         .count();
     let fallback_location = source_start_location(&options.source);
-    let program = resolve_program_imports(root, sdk, &mut Vec::new(), &mut HashSet::new())
-        .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
+    let program = resolve_program_imports(
+        root,
+        sdk,
+        &mut Vec::new(),
+        &mut HashSet::new(),
+        source_overrides,
+    )
+    .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
     let declarations = program.declarations.len();
     let has_main = program.main_function().is_some();
 
@@ -442,7 +472,7 @@ pub fn parse_and_resolve_imports_with_sdk(
     let root = parse_program(path, source)?;
     let mut stack = Vec::new();
     let mut seen = HashSet::new();
-    resolve_program_imports(root, sdk, &mut stack, &mut seen)
+    resolve_program_imports(root, sdk, &mut stack, &mut seen, &HashMap::new())
 }
 
 pub fn resolve_import_source(
@@ -458,6 +488,7 @@ fn resolve_program_imports(
     sdk: &SdkResolver,
     stack: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
+    source_overrides: &HashMap<PathBuf, String>,
 ) -> Result<Program, Diagnostic> {
     let path = normalize_path(&program.source_path);
     if stack.contains(&path) {
@@ -491,6 +522,7 @@ fn resolve_program_imports(
             continue;
         };
         let (import_path, source) = read_import_source(&program.source_path, import, sdk)?;
+        let source = source_override(source_overrides, &import_path).unwrap_or(source);
         let mut imported = parse_program(&import_path, &source)?;
         imported.declarations = active_declarations(imported.declarations, sdk)?;
         let short_module = import.rsplit('.').next().unwrap_or(import);
@@ -501,7 +533,7 @@ fn resolve_program_imports(
             <= 1;
         let module_aliases =
             module_alias_declarations(import, &imported.declarations, include_short_aliases);
-        let imported = resolve_program_imports(imported, sdk, stack, seen)?;
+        let imported = resolve_program_imports(imported, sdk, stack, seen, source_overrides)?;
         let imported_declarations = imported
             .declarations
             .into_iter()
@@ -530,6 +562,13 @@ fn resolve_program_imports(
         source_text: program.source_text,
         declarations,
     })
+}
+
+fn source_override(source_overrides: &HashMap<PathBuf, String>, path: &Path) -> Option<String> {
+    source_overrides
+        .get(path)
+        .or_else(|| source_overrides.get(&normalize_path(path)))
+        .cloned()
 }
 
 fn reject_import_declaration_collisions(
@@ -1546,6 +1585,37 @@ mod tests {
         let diagnostics = check_source_diagnostics_with_sdk(source, &options, &sdk);
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn diagnostics_use_unsaved_import_source_overrides() {
+        let root = temp_root("source_overrides");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("main.ezra");
+        let import_path = root.join("lib/math.ezra");
+        let source = "import lib.math\nfn main() { lib.math.increment(1) }\n";
+        std::fs::write(&main_path, source).unwrap();
+        std::fs::write(
+            &import_path,
+            "pub fn increment(value: u8) -> u8 { return value + 1 }\n",
+        )
+        .unwrap();
+        let overrides = HashMap::from([(import_path.clone(), "pub fn increment(".to_owned())]);
+
+        let diagnostics = check_source_diagnostics_with_sdk_and_overrides(
+            source,
+            &CompileOptions {
+                source: main_path,
+                debug_comments: false,
+                default_sdk_symbols: true,
+            },
+            &SdkResolver::default(),
+            &overrides,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span.as_ref().unwrap().file, import_path);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

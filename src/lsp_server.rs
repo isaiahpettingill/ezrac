@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
@@ -7,8 +7,9 @@ use std::{
 use ezra::{
     ast::{Declaration, Expr, Function, Stmt, Type},
     compile::{
-        CompileOptions, SdkResolver, builtin_sdk_modules, check_source_diagnostics_with_sdk,
-        parse_and_resolve_imports_with_sdk, resolve_import_source,
+        CompileOptions, SdkResolver, builtin_sdk_modules,
+        check_source_diagnostics_with_sdk_and_overrides, parse_and_resolve_imports_with_sdk,
+        resolve_import_source,
     },
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
     parser::parse_program,
@@ -22,6 +23,7 @@ use serde_json::{Value, json};
 #[derive(Default)]
 struct Server {
     documents: BTreeMap<String, OpenDocument>,
+    published_diagnostic_uris: BTreeSet<String>,
     shutdown_requested: bool,
 }
 
@@ -54,6 +56,7 @@ struct DefinitionInfo {
 #[derive(Deserialize)]
 struct Message {
     id: Option<Value>,
+    #[serde(default)]
     method: String,
     #[serde(default)]
     params: Value,
@@ -174,12 +177,16 @@ impl Server {
         message: Message,
         output: &mut impl Write,
     ) -> Result<bool, String> {
+        if message.method.is_empty() {
+            return Ok(false);
+        }
         match message.method.as_str() {
             "initialize" => {
                 if let Some(id) = message.id {
                     write_response(output, id, initialize_result())?;
                 }
             }
+            "initialized" => register_file_watchers(output)?,
             "shutdown" => {
                 self.shutdown_requested = true;
                 if let Some(id) = message.id {
@@ -261,10 +268,7 @@ impl Server {
                 }
             }
             "workspace/didChangeWatchedFiles" => {
-                let uris = self.documents.keys().cloned().collect::<Vec<_>>();
-                for uri in uris {
-                    self.publish_diagnostics(&uri, output)?;
-                }
+                self.publish_workspace_diagnostics(output)?;
             }
             _ => {
                 if let Some(id) = message.id {
@@ -288,7 +292,7 @@ impl Server {
                 version: Some(params.text_document.version),
             },
         );
-        self.publish_diagnostics(&uri, output)
+        self.publish_workspace_diagnostics(output)
     }
 
     fn did_change(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
@@ -300,37 +304,134 @@ impl Server {
             document.text = change.text;
             document.version = params.text_document.version;
         }
-        self.publish_diagnostics(&params.text_document.uri, output)
+        self.publish_workspace_diagnostics(output)
     }
 
     fn did_close(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
         let params: DidCloseParams = serde_json::from_value(params)
             .map_err(|error| format!("invalid didClose params: {error}"))?;
         self.documents.remove(&params.text_document.uri);
-        write_notification(
-            output,
-            TextDocumentPublishDiagnostics::METHOD,
-            json!({ "uri": params.text_document.uri, "diagnostics": [] }),
-        )
+        self.publish_workspace_diagnostics(output)
     }
 
-    fn publish_diagnostics(&self, uri: &str, output: &mut impl Write) -> Result<(), String> {
-        let Some(document) = self.documents.get(uri) else {
-            return Ok(());
-        };
-        let diagnostics = check_document_diagnostics(document)
+    fn publish_workspace_diagnostics(&mut self, output: &mut impl Write) -> Result<(), String> {
+        let source_overrides = self
+            .documents
+            .values()
+            .map(|document| {
+                (
+                    normalize_document_path(&document.path),
+                    document.text.clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut roots = BTreeSet::new();
+        let mut configuration_errors = Vec::new();
+        for document in self.documents.values() {
+            match project_source_path(&document.path) {
+                Ok(path) => {
+                    roots.insert(normalize_document_path(&path));
+                }
+                Err(error) => configuration_errors.push((document.path.clone(), error)),
+            }
+        }
+
+        let mut diagnostics = configuration_errors;
+        for path in roots {
+            let source = source_overrides
+                .get(&path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(&path).ok());
+            let Some(source) = source else {
+                diagnostics.push((
+                    path.clone(),
+                    Diagnostic::new(format!("failed to read `{}`", path.display())),
+                ));
+                continue;
+            };
+            let sdk = match sdk_for_path(&path) {
+                Ok(sdk) => sdk,
+                Err(error) => {
+                    diagnostics.push((path.clone(), error));
+                    continue;
+                }
+            };
+            diagnostics.extend(
+                check_source_diagnostics_with_sdk_and_overrides(
+                    &source,
+                    &CompileOptions {
+                        source: path.clone(),
+                        debug_comments: false,
+                        default_sdk_symbols: true,
+                    },
+                    &sdk,
+                    &source_overrides,
+                )
+                .into_iter()
+                .map(|diagnostic| {
+                    let diagnostic_path = diagnostic
+                        .span
+                        .as_ref()
+                        .map(|span| span.file.clone())
+                        .unwrap_or_else(|| path.clone());
+                    (diagnostic_path, diagnostic)
+                }),
+            );
+        }
+
+        let mut publications = self
+            .documents
             .iter()
-            .map(|diagnostic| diagnostic_to_lsp(document, diagnostic))
-            .collect::<Vec<_>>();
-        write_notification(
-            output,
-            TextDocumentPublishDiagnostics::METHOD,
-            json!({
-                "uri": uri,
-                "version": document.version,
-                "diagnostics": diagnostics,
-            }),
-        )
+            .map(|(uri, document)| {
+                (
+                    uri.clone(),
+                    (document.text.clone(), document.version, Vec::new()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (path, diagnostic) in diagnostics {
+            let normalized = normalize_document_path(&path);
+            let (uri, source, version) = self
+                .documents
+                .iter()
+                .find(|(_, document)| normalize_document_path(&document.path) == normalized)
+                .map(|(uri, document)| (uri.clone(), document.text.clone(), document.version))
+                .unwrap_or_else(|| {
+                    (
+                        path_to_uri(&path),
+                        std::fs::read_to_string(&path).unwrap_or_default(),
+                        None,
+                    )
+                });
+            publications
+                .entry(uri)
+                .or_insert_with(|| (source.clone(), version, Vec::new()))
+                .2
+                .push(diagnostic_to_lsp_source(&source, &path, &diagnostic));
+        }
+
+        let current = publications.keys().cloned().collect::<BTreeSet<_>>();
+        for uri in self
+            .published_diagnostic_uris
+            .difference(&current)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            write_notification(
+                output,
+                TextDocumentPublishDiagnostics::METHOD,
+                json!({ "uri": uri, "diagnostics": [] }),
+            )?;
+        }
+        for (uri, (_, version, diagnostics)) in publications {
+            write_notification(
+                output,
+                TextDocumentPublishDiagnostics::METHOD,
+                json!({ "uri": uri, "version": version, "diagnostics": diagnostics }),
+            )?;
+        }
+        self.published_diagnostic_uris = current;
+        Ok(())
     }
 
     fn workspace_symbols(&self, query: &str) -> Value {
@@ -351,12 +452,13 @@ impl Server {
     }
 }
 
+#[cfg(test)]
 fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
     let sdk = match sdk_for_path(&document.path) {
         Ok(sdk) => sdk,
         Err(error) => return vec![error],
     };
-    check_source_diagnostics_with_sdk(
+    ezra::compile::check_source_diagnostics_with_sdk(
         &document.text,
         &CompileOptions {
             source: document.path.clone(),
@@ -365,6 +467,27 @@ fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
         },
         &sdk,
     )
+}
+
+fn project_source_path(path: &Path) -> Result<PathBuf, Diagnostic> {
+    let project = load_nearest_project_config(path)?;
+    Ok(project
+        .and_then(|project| {
+            (project.input_kind.as_deref() != Some("assembly"))
+                .then_some(project.input)
+                .flatten()
+        })
+        .unwrap_or_else(|| path.to_path_buf()))
+}
+
+fn normalize_document_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        }
+    })
 }
 
 fn sdk_for_path(path: &Path) -> Result<SdkResolver, Diagnostic> {
@@ -404,6 +527,30 @@ fn initialize_result() -> Value {
         },
         "serverInfo": { "name": "ezrac", "version": env!("CARGO_PKG_VERSION") }
     })
+}
+
+fn register_file_watchers(output: &mut impl Write) -> Result<(), String> {
+    write_json(
+        output,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "ezrac-register-watchers",
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "ezrac-workspace-files",
+                    "method": "workspace/didChangeWatchedFiles",
+                    "registerOptions": {
+                        "watchers": [
+                            { "globPattern": "**/Ezra.toml" },
+                            { "globPattern": "**/*.ezra" },
+                            { "globPattern": "**/*.ezralayout" }
+                        ]
+                    }
+                }]
+            }
+        }),
+    )
 }
 
 fn completion_items(document: Option<&OpenDocument>, position: Position) -> Value {
@@ -1516,14 +1663,24 @@ const KEYWORDS: &[&str] = &[
 
 const PRIMITIVE_TYPES: &[&str] = &["u8", "i8", "u16", "i16", "u24", "i24", "ptr", "bytes"];
 
+#[cfg(test)]
 fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnostic {
+    diagnostic_to_lsp_source(&document.text, &document.path, error)
+}
+
+fn diagnostic_to_lsp_source(source: &str, path: &Path, error: &Diagnostic) -> LspDiagnostic {
+    let fallback_document = OpenDocument {
+        path: path.to_path_buf(),
+        text: source.to_owned(),
+        version: None,
+    };
     LspDiagnostic {
         range: error
             .span
             .as_ref()
-            .filter(|span| span.file == document.path)
-            .map(|span| source_span_to_range(&document.text, span))
-            .unwrap_or_else(|| diagnostic_fallback_range(document, &error.message)),
+            .filter(|span| normalize_document_path(&span.file) == normalize_document_path(path))
+            .map(|span| source_span_to_range(source, span))
+            .unwrap_or_else(|| diagnostic_fallback_range(&fallback_document, &error.message)),
         severity: 1,
         source: "ezrac",
         message: error.message.clone(),
@@ -2029,6 +2186,91 @@ mod tests {
         assert_eq!(capabilities["documentSymbolProvider"], true);
         assert_eq!(capabilities["workspaceSymbolProvider"], true);
         assert_eq!(capabilities["semanticTokensProvider"]["full"], true);
+    }
+
+    #[test]
+    fn initialized_registers_project_file_watchers_and_responses_are_ignored() {
+        let mut server = Server::default();
+        let mut output = Vec::new();
+        server
+            .handle_message(
+                Message {
+                    id: None,
+                    method: "initialized".to_owned(),
+                    params: Value::Null,
+                },
+                &mut output,
+            )
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("client/registerCapability"));
+        assert!(output.contains("**/Ezra.toml"));
+        assert!(output.contains("**/*.ezra"));
+        assert!(output.contains("**/*.ezralayout"));
+
+        let mut output = Vec::new();
+        server
+            .handle_message(
+                Message {
+                    id: Some(json!("ezrac-register-watchers")),
+                    method: String::new(),
+                    params: Value::Null,
+                },
+                &mut output,
+            )
+            .unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn workspace_diagnostics_use_unsaved_imports_and_publish_the_import_uri() {
+        let root = std::env::temp_dir().join(format!(
+            "ezrac-lsp-workspace-diagnostics-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(
+            root.join("Ezra.toml"),
+            "[build]\ninput = \"src/main.ezra\"\ntarget = \"ez80\"\n",
+        )
+        .unwrap();
+        let main_path = root.join("src/main.ezra");
+        let import_path = root.join("src/lib/math.ezra");
+        let main_source = "import lib.math\nfn main() { let value: u8 = lib.math.increment(1) }\n";
+        fs::write(&main_path, main_source).unwrap();
+        fs::write(
+            &import_path,
+            "pub fn increment(value: u8) -> u8 { return value + 1 }\n",
+        )
+        .unwrap();
+        let main_uri = path_to_uri(&main_path);
+        let import_uri = path_to_uri(&import_path);
+        let mut server = Server::default();
+        server.documents.insert(
+            main_uri.clone(),
+            OpenDocument {
+                path: main_path,
+                text: main_source.to_owned(),
+                version: Some(1),
+            },
+        );
+        server.documents.insert(
+            import_uri.clone(),
+            OpenDocument {
+                path: import_path,
+                text: "pub fn increment(".to_owned(),
+                version: Some(2),
+            },
+        );
+
+        let mut output = Vec::new();
+        server.publish_workspace_diagnostics(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(&format!("\"uri\":\"{import_uri}\"")));
+        assert!(output.contains("diagnostics"));
+        assert!(!output.contains("missing required `fn main()`"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -12,7 +12,14 @@ function activate(context) {
     'ezraLanguageServer',
     'EZRA Language Server',
     { command, args },
-    { documentSelector: [{ scheme: 'file', language: 'ezra' }] }
+    {
+      documentSelector: [{ scheme: 'file', language: 'ezra' }],
+      synchronize: {
+        fileEvents: vscode.workspace.createFileSystemWatcher(
+          '**/{Ezra.toml,*.ezra,*.ezralayout}'
+        )
+      }
+    }
   );
 
   context.subscriptions.push(client);

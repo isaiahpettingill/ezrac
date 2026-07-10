@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Added LSP go-to-definition across local and imported declarations, document/workspace symbols, semantic tokens, and watched-file invalidation.
+- Added LSP go-to-definition across local and imported declarations, document/workspace symbols, semantic tokens, watched-file registration, and project diagnostics that honor unsaved imports.
 
 ## 0.1.13
 
