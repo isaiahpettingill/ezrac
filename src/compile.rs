@@ -494,12 +494,18 @@ fn resolve_program_imports(
         let module_aliases =
             module_alias_declarations(import, &imported.declarations, include_short_aliases);
         let imported = resolve_program_imports(imported, sdk, stack, seen)?;
-        declarations.extend(
-            imported
-                .declarations
-                .into_iter()
-                .filter(|declaration| !is_entry_function(declaration)),
-        );
+        let imported_declarations = imported
+            .declarations
+            .into_iter()
+            .filter(|declaration| !is_entry_function(declaration))
+            .collect::<Vec<_>>();
+        reject_import_declaration_collisions(
+            &declarations,
+            &imported_declarations,
+            &import_path,
+            &source,
+        )?;
+        declarations.extend(imported_declarations);
         declarations.extend(module_aliases);
     }
     stack.pop();
@@ -516,6 +522,31 @@ fn resolve_program_imports(
         source_text: program.source_text,
         declarations,
     })
+}
+
+fn reject_import_declaration_collisions(
+    existing: &[Declaration],
+    incoming: &[Declaration],
+    import_path: &Path,
+    source: &str,
+) -> Result<(), Diagnostic> {
+    let existing = existing
+        .iter()
+        .filter_map(declaration_name)
+        .collect::<HashSet<_>>();
+    for declaration in incoming {
+        let Some(name) = declaration_name(declaration) else {
+            continue;
+        };
+        if existing.contains(name) {
+            let message = format!("duplicate imported declaration `{name}`");
+            let diagnostic = diagnostic_span(import_path, source, &message)
+                .map(|span| Diagnostic::at_span(span, message.clone()))
+                .unwrap_or_else(|| Diagnostic::new(message));
+            return Err(diagnostic);
+        }
+    }
+    Ok(())
 }
 
 fn validate_main_signature(main: &Function) -> Result<(), Diagnostic> {
@@ -2114,6 +2145,32 @@ mod tests {
         assert!(!program.declarations.iter().any(|decl| {
             matches!(decl, Declaration::Function(function) if function.name == "math.sub")
         }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn duplicate_imported_declarations_report_the_conflicting_module() {
+        let root = temp_root("duplicate_imported_declarations");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("game.ezra");
+        let second_path = root.join("lib/second.ezra");
+        std::fs::write(root.join("lib/first.ezra"), "pub const VALUE: u8 = 1\n").unwrap();
+        std::fs::write(&second_path, "pub const VALUE: u8 = 2\n").unwrap();
+        let source = "import lib.first\nimport lib.second\nfn main() {}\n";
+        std::fs::write(&main_path, source).unwrap();
+
+        let error = load_program(&main_path).unwrap_err();
+
+        assert_eq!(error.message, "duplicate imported declaration `VALUE`");
+        assert_eq!(
+            error.location(),
+            Some(SourceLocation {
+                file: second_path,
+                line: 1,
+                column: 11,
+            })
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
