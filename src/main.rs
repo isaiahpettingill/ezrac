@@ -1065,6 +1065,12 @@ struct AssemblySectionSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ExpandedAssembly {
+    text: String,
+    line_origins: Vec<SourceLocation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PlacedAssemblySection {
     name: String,
     start: u32,
@@ -1077,9 +1083,11 @@ fn build_assembly_image(
     settings: &BuildSettings,
 ) -> Result<AssemblyBuildImage, String> {
     let assembly = expand_assembly_includes(source_path, assembly)?;
-    let sections = split_assembly_sections(&assembly);
-    let section_bases = placed_assembly_section_bases(source_path, settings, &sections)?;
+    let sections = split_assembly_sections(&assembly.text);
+    let section_bases =
+        placed_assembly_section_bases(source_path, settings, &sections, &assembly.line_origins)?;
     let mut options = assembly_source_options(source_path, &settings.layout);
+    options.line_origins = assembly.line_origins;
     options.section_bases = section_bases
         .iter()
         .map(|(name, start, _)| ezra::vm::AssemblySymbol {
@@ -1089,7 +1097,7 @@ fn build_assembly_image(
         .collect();
     let assembled = ezra::vm::assemble_subset_with_options_at(
         settings.assembler_cpu,
-        &assembly,
+        &assembly.text,
         settings.layout.load.get(),
         &options,
     )
@@ -1127,6 +1135,7 @@ fn placed_assembly_section_bases(
     source_path: &Path,
     settings: &BuildSettings,
     sections: &[AssemblySectionSource],
+    line_origins: &[SourceLocation],
 ) -> Result<Vec<(String, u32, usize)>, String> {
     let mut lengths = BTreeMap::new();
     for section in sections {
@@ -1135,6 +1144,7 @@ fn placed_assembly_section_bases(
             &section.source,
             &ezra::vm::AssemblerSourceOptions {
                 source_path: Some(source_path.to_path_buf()),
+                line_origins: line_origins.to_vec(),
                 ..ezra::vm::AssemblerSourceOptions::default()
             },
         )
@@ -1216,27 +1226,80 @@ fn split_assembly_sections(assembly: &str) -> Vec<AssemblySectionSource> {
         .collect()
 }
 
-fn expand_assembly_includes(source_path: &Path, assembly: &str) -> Result<String, String> {
-    let mut out = String::new();
+fn expand_assembly_includes(
+    source_path: &Path,
+    assembly: &str,
+) -> Result<ExpandedAssembly, String> {
+    let mut expanded = ExpandedAssembly {
+        text: String::new(),
+        line_origins: Vec::new(),
+    };
+    let root = normalize_include_path(source_path);
+    expand_assembly_file(&root, assembly, &mut vec![root.clone()], &mut expanded)?;
+    Ok(expanded)
+}
+
+fn expand_assembly_file(
+    source_path: &Path,
+    assembly: &str,
+    stack: &mut Vec<PathBuf>,
+    expanded: &mut ExpandedAssembly,
+) -> Result<(), String> {
     let base = source_path.parent().unwrap_or_else(|| Path::new("."));
-    for line in assembly.lines() {
+    for (line_index, line) in assembly.lines().enumerate() {
         let trimmed = line.split(';').next().unwrap_or("").trim();
         if let Some(include) = trimmed.strip_prefix("include ") {
-            let include = include.trim().trim_matches('"');
-            let include_path = base.join(include);
-            let included = fs::read_to_string(&include_path).map_err(|error| {
-                format!("failed to read include {}: {error}", include_path.display())
-            })?;
-            out.push_str(&included);
-            if !included.ends_with('\n') {
-                out.push('\n');
+            let include = include.trim();
+            let Some(include) = include
+                .strip_prefix('"')
+                .and_then(|include| include.strip_suffix('"'))
+            else {
+                return Err(format!(
+                    "{}:{}: invalid include syntax; expected include \"path\"",
+                    source_path.display(),
+                    line_index + 1
+                ));
+            };
+            let include_path = normalize_include_path(&base.join(include));
+            if let Some(cycle_start) = stack.iter().position(|path| path == &include_path) {
+                let mut cycle = stack[cycle_start..]
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>();
+                cycle.push(include_path.display().to_string());
+                return Err(format!(
+                    "{}:{}: assembly include cycle: {}",
+                    source_path.display(),
+                    line_index + 1,
+                    cycle.join(" -> ")
+                ));
             }
+            let included = fs::read_to_string(&include_path).map_err(|error| {
+                format!(
+                    "{}:{}: failed to read include {}: {error}",
+                    source_path.display(),
+                    line_index + 1,
+                    include_path.display()
+                )
+            })?;
+            stack.push(include_path.clone());
+            expand_assembly_file(&include_path, &included, stack, expanded)?;
+            stack.pop();
         } else {
-            out.push_str(line);
-            out.push('\n');
+            expanded.text.push_str(line);
+            expanded.text.push('\n');
+            expanded.line_origins.push(SourceLocation {
+                file: source_path.to_path_buf(),
+                line: line_index + 1,
+                column: 1,
+            });
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+fn normalize_include_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn validate_assembled_section_fit(
@@ -1369,6 +1432,7 @@ fn assembly_source_options(
             })
             .collect(),
         section_bases: Vec::new(),
+        line_origins: Vec::new(),
     }
 }
 
@@ -3190,6 +3254,68 @@ mod tests {
         assert!(map.contains(".text        0x000100"), "{map}");
         assert!(map.contains(".rodata      0x008000"), "{map}");
         assert!(map.contains("start        0x000100"), "{map}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assembly_includes_expand_recursively_with_origins_and_cycles() {
+        let root = temp_root("nested_assembly_includes");
+        let lib = root.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let source_path = root.join("main.asm");
+        let outer_path = lib.join("outer.inc");
+        let inner_path = lib.join("inner.inc");
+        std::fs::write(&source_path, "include \"lib/outer.inc\"\n").unwrap();
+        std::fs::write(&outer_path, "include \"inner.inc\"\n").unwrap();
+        std::fs::write(&inner_path, "section .text\nret\n").unwrap();
+
+        let source = std::fs::read_to_string(&source_path).unwrap();
+        let expanded = expand_assembly_includes(&source_path, &source).unwrap();
+        assert_eq!(expanded.text, "section .text\nret\n");
+        assert_eq!(
+            expanded.line_origins[1].file,
+            inner_path.canonicalize().unwrap()
+        );
+        assert_eq!(expanded.line_origins[1].line, 2);
+
+        std::fs::write(&inner_path, "include \"outer.inc\"\n").unwrap();
+        let error = expand_assembly_includes(&source_path, &source).unwrap_err();
+        assert!(error.contains("assembly include cycle"), "{error}");
+        assert!(error.contains("outer.inc"), "{error}");
+        assert!(error.contains("inner.inc"), "{error}");
+
+        std::fs::write(&outer_path, "include \"missing.inc\"\n").unwrap();
+        let error = expand_assembly_includes(&source_path, &source).unwrap_err();
+        assert!(error.contains("outer.inc:1"), "{error}");
+        assert!(error.contains("missing.inc"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assembly_errors_in_nested_includes_report_included_file() {
+        let root = temp_root("nested_assembly_diagnostic");
+        let lib = root.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let source_path = root.join("main.asm");
+        std::fs::write(&source_path, "include \"lib/outer.inc\"\n").unwrap();
+        std::fs::write(lib.join("outer.inc"), "include \"bad.inc\"\n").unwrap();
+        std::fs::write(lib.join("bad.inc"), "; first line\nnot_an_instruction\n").unwrap();
+
+        let error = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Assembly),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(error.contains("bad.inc:2:1"), "{error}");
+        assert!(error.contains("not_an_instruction"), "{error}");
 
         let _ = std::fs::remove_dir_all(root);
     }

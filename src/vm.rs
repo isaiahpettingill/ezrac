@@ -46,6 +46,7 @@ pub struct AssemblerSourceOptions {
     pub source_path: Option<PathBuf>,
     pub symbols: Vec<AssemblySymbol>,
     pub section_bases: Vec<AssemblySymbol>,
+    pub line_origins: Vec<SourceLocation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -641,6 +642,15 @@ fn parse_quoted_bytes(value: &str) -> Option<Vec<u8>> {
 }
 
 fn line_location(instruction: &LocatedAsmLine, options: &AssemblerSourceOptions) -> SourceLocation {
+    if let Some(origin) = options.line_origins.get(instruction.line.saturating_sub(1)) {
+        return SourceLocation {
+            file: origin.file.clone(),
+            line: origin.line,
+            column: origin
+                .column
+                .saturating_add(instruction.column.saturating_sub(1)),
+        };
+    }
     SourceLocation {
         file: options
             .source_path
