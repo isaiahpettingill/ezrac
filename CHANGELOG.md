@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.16
+
+- Added statement-scoped semantic diagnostics so independent errors in function bodies can be reported with useful source locations.
+- Added default ZX Spectrum `.tap` output, tape validation coverage, and a loadable Spectrum hello-world example.
+- Added safe TBIR expression optimization with boolean-literal folding, algebraic identity rewrites, optimization reporting, and validation-preserving dead-statement markers.
+
 ## 0.1.15
 
 - Preserved imported source provenance through resolution so semantic diagnostics and multiple unknown-reference errors point into the correct module.
