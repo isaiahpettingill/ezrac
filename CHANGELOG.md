@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.19
+
+- Added separate `gameboy-dmg-lr35902` and `gameboy-color-lr35902` assembly-only targets with valid ROM-only `.gb` packaging and checksums.
+- Added complete documented LR35902 base and CB opcode assembly coverage without accepting unsupported Z80 instructions.
+- Added a vendorable Game Boy assembly macro SDK for common DMG and CGB hardware programming idioms.
+
 ## 0.1.18
 
 - Added target-independent handwritten-assembly preprocessing with vendorable includes, defines, CPU/target conditionals, parameterized macros, and hygienic macro-local labels.

@@ -119,7 +119,7 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, and `.8080` are treated as assembly.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Supported modes are `i8080`, `i8085`, `z80`, `z80n`, `z180`, and `ez80`.
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Supported modes are `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`.
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 

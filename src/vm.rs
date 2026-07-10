@@ -337,6 +337,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::I8080 => CpuMode::I8080,
         CpuFamily::I8085 => CpuMode::I8085,
         CpuFamily::M68k => CpuMode::Z80,
+        CpuFamily::Lr35902 => CpuMode::Z80,
     }
 }
 
@@ -881,10 +882,19 @@ fn eval_atom(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, 
     if let Some(value) = labels.get(text).copied() {
         return Ok(value);
     }
+    if let Some(value) = labels
+        .iter()
+        .find_map(|(name, value)| name.eq_ignore_ascii_case(text).then_some(*value))
+    {
+        return Ok(value);
+    }
     parse_number(text)
 }
 
 fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
+    if cpu == AssemblerCpu::Lr35902 {
+        return Ok(encode_lr35902(text, &HashMap::new(), 0, false)?.len());
+    }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -899,7 +909,9 @@ fn emit_instruction(
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
-    if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
+    if cpu == AssemblerCpu::Lr35902 {
+        bytes.extend(encode_lr35902(text, labels, pc, true)?);
+    } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
     } else if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
@@ -928,6 +940,407 @@ fn emit_instruction(
         )));
     }
     Ok(())
+}
+
+fn encode_lr35902(
+    text: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<Vec<u8>, Diagnostic> {
+    let text = text.trim().to_ascii_lowercase();
+    let text = text.as_str();
+    let fixed: Option<&[u8]> = match text {
+        "nop" => Some(&[0x00][..]),
+        "rlca" => Some(&[0x07]),
+        "rrca" => Some(&[0x0F]),
+        "stop" => Some(&[0x10, 0x00]),
+        "rla" => Some(&[0x17]),
+        "rra" => Some(&[0x1F]),
+        "daa" => Some(&[0x27]),
+        "cpl" => Some(&[0x2F]),
+        "scf" => Some(&[0x37]),
+        "ccf" => Some(&[0x3F]),
+        "halt" => Some(&[0x76]),
+        "ret" => Some(&[0xC9]),
+        "reti" => Some(&[0xD9]),
+        "jp hl" | "jp (hl)" => Some(&[0xE9]),
+        "di" => Some(&[0xF3]),
+        "ld sp, hl" => Some(&[0xF9]),
+        "ei" => Some(&[0xFB]),
+        _ => None,
+    };
+    if let Some(bytes) = fixed {
+        return Ok(bytes.to_vec());
+    }
+
+    if let Some((operation, operand)) = split_mnemonic(text) {
+        if let Some(code) = lr_cb_operation(operation, operand)? {
+            return Ok(vec![0xCB, code]);
+        }
+        if let Some(code) = lr_inc_dec(operation, operand) {
+            return Ok(vec![code]);
+        }
+        if operation == "ld" {
+            return encode_lr_load(operand, labels, pc, resolve);
+        }
+        if operation == "ldi" {
+            return encode_lr_load(&operand.replace("(hl)", "(hl+)"), labels, pc, resolve);
+        }
+        if operation == "ldd" {
+            return encode_lr_load(&operand.replace("(hl)", "(hl-)"), labels, pc, resolve);
+        }
+        if operation == "ldh" {
+            let Some((dst, src)) = operand.split_once(',') else {
+                return Err(Diagnostic::new(format!("invalid ldh syntax `{operand}`")));
+            };
+            let (dst, src) = (dst.trim(), src.trim());
+            if dst == "(c)" && src == "a" {
+                return Ok(vec![0xE2]);
+            }
+            if dst == "a" && src == "(c)" {
+                return Ok(vec![0xF2]);
+            }
+            let (opcode, value) = if dst.starts_with('(') && src == "a" {
+                (0xE0, &dst[1..dst.len() - 1])
+            } else if dst == "a" && src.starts_with('(') {
+                (0xF0, &src[1..src.len() - 1])
+            } else {
+                return Err(Diagnostic::new(format!("invalid ldh syntax `{operand}`")));
+            };
+            let address = lr_value(value, labels, pc, resolve)?;
+            let offset = if address >= 0xFF00 {
+                address - 0xFF00
+            } else {
+                address
+            };
+            let offset = u8::try_from(offset).map_err(|_| {
+                Diagnostic::new(format!("LDH address `{value}` is outside FF00h..FFFFh"))
+            })?;
+            return Ok(vec![opcode, offset]);
+        }
+        if let Some(bytes) = encode_lr_alu(operation, operand, labels, pc, resolve)? {
+            return Ok(bytes);
+        }
+        if let Some(bytes) = encode_lr_control(operation, operand, labels, pc, resolve)? {
+            return Ok(bytes);
+        }
+        if matches!(operation, "push" | "pop") {
+            let register = lr_stack_register(operand).ok_or_else(|| {
+                Diagnostic::new(format!("invalid LR35902 stack register `{operand}`"))
+            })?;
+            return Ok(vec![
+                if operation == "push" { 0xC5 } else { 0xC1 } + register * 0x10,
+            ]);
+        }
+    }
+    Err(Diagnostic::new(format!(
+        "assembler does not support LR35902 instruction `{text}`"
+    )))
+}
+
+fn split_mnemonic(text: &str) -> Option<(&str, &str)> {
+    text.split_once(char::is_whitespace)
+        .map(|(op, rest)| (op, rest.trim()))
+}
+
+fn lr_r8(value: &str) -> Option<u8> {
+    match value.trim() {
+        "b" => Some(0),
+        "c" => Some(1),
+        "d" => Some(2),
+        "e" => Some(3),
+        "h" => Some(4),
+        "l" => Some(5),
+        "(hl)" => Some(6),
+        "a" => Some(7),
+        _ => None,
+    }
+}
+
+fn lr_r16(value: &str) -> Option<u8> {
+    match value.trim() {
+        "bc" => Some(0),
+        "de" => Some(1),
+        "hl" => Some(2),
+        "sp" => Some(3),
+        _ => None,
+    }
+}
+
+fn lr_stack_register(value: &str) -> Option<u8> {
+    match value.trim() {
+        "bc" => Some(0),
+        "de" => Some(1),
+        "hl" => Some(2),
+        "af" => Some(3),
+        _ => None,
+    }
+}
+
+fn lr_condition(value: &str) -> Option<u8> {
+    match value.trim() {
+        "nz" => Some(0),
+        "z" => Some(1),
+        "nc" => Some(2),
+        "c" => Some(3),
+        _ => None,
+    }
+}
+
+fn lr_cb_operation(operation: &str, operand: &str) -> Result<Option<u8>, Diagnostic> {
+    if matches!(operation, "bit" | "res" | "set") {
+        let Some((bit, register)) = operand.split_once(',') else {
+            return Ok(None);
+        };
+        let bit = bit
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| Diagnostic::new(format!("invalid bit index `{bit}`")))?;
+        if bit > 7 {
+            return Err(Diagnostic::new(format!("bit index {bit} is outside 0..7")));
+        }
+        let register = lr_r8(register)
+            .ok_or_else(|| Diagnostic::new(format!("invalid LR35902 register `{register}`")))?;
+        let base = match operation {
+            "bit" => 0x40,
+            "res" => 0x80,
+            _ => 0xC0,
+        };
+        return Ok(Some(base + bit * 8 + register));
+    }
+    let row = match operation {
+        "rlc" => 0,
+        "rrc" => 1,
+        "rl" => 2,
+        "rr" => 3,
+        "sla" => 4,
+        "sra" => 5,
+        "swap" => 6,
+        "srl" => 7,
+        _ => return Ok(None),
+    };
+    let register = lr_r8(operand)
+        .ok_or_else(|| Diagnostic::new(format!("invalid LR35902 register `{operand}`")))?;
+    Ok(Some(row * 8 + register))
+}
+
+fn lr_inc_dec(operation: &str, operand: &str) -> Option<u8> {
+    let increment = operation == "inc";
+    if !increment && operation != "dec" {
+        return None;
+    }
+    if let Some(register) = lr_r8(operand) {
+        return Some((if increment { 0x04 } else { 0x05 }) + register * 8);
+    }
+    lr_r16(operand).map(|register| (if increment { 0x03 } else { 0x0B }) + register * 0x10)
+}
+
+fn lr_value(
+    expr: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<u32, Diagnostic> {
+    if resolve {
+        eval_expr(expr.trim(), labels, pc)
+    } else {
+        Ok(0)
+    }
+}
+
+fn lr_u8(
+    expr: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<u8, Diagnostic> {
+    let value = lr_value(expr, labels, pc, resolve)?;
+    u8::try_from(value).map_err(|_| Diagnostic::new(format!("value {expr} is outside u8 range")))
+}
+
+fn lr_u16(
+    expr: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<[u8; 2], Diagnostic> {
+    let value = lr_value(expr, labels, pc, resolve)?;
+    let value = u16::try_from(value)
+        .map_err(|_| Diagnostic::new(format!("value {expr} is outside u16 range")))?;
+    Ok(value.to_le_bytes())
+}
+
+fn encode_lr_load(
+    operand: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<Vec<u8>, Diagnostic> {
+    let Some((dst, src)) = operand.split_once(',') else {
+        return Err(Diagnostic::new(format!("invalid ld syntax `{operand}`")));
+    };
+    let (dst, src) = (dst.trim(), src.trim());
+    if let (Some(dst), Some(src)) = (lr_r8(dst), lr_r8(src)) {
+        if dst == 6 && src == 6 {
+            return Err(Diagnostic::new("use `halt`, not `ld (hl), (hl)`"));
+        }
+        return Ok(vec![0x40 + dst * 8 + src]);
+    }
+    if let Some(dst) = lr_r8(dst)
+        && !src.starts_with('(')
+    {
+        let value = lr_u8(src, labels, pc, resolve)?;
+        return Ok(vec![0x06 + dst * 8, value]);
+    }
+    if dst == "hl" && (src.starts_with("sp+") || src.starts_with("sp-")) {
+        return Ok(vec![0xF8, parse_lr_signed(&src[2..])? as u8]);
+    }
+    if let Some(register) = lr_r16(dst) {
+        if dst == "sp" && src == "hl" {
+            return Ok(vec![0xF9]);
+        }
+        let value = lr_u16(src, labels, pc, resolve)?;
+        return Ok(vec![0x01 + register * 0x10, value[0], value[1]]);
+    }
+    let indirect = match (dst, src) {
+        ("(bc)", "a") => Some(0x02),
+        ("(de)", "a") => Some(0x12),
+        ("(hl+)", "a") | ("(hli)", "a") => Some(0x22),
+        ("(hl-)", "a") | ("(hld)", "a") => Some(0x32),
+        ("a", "(bc)") => Some(0x0A),
+        ("a", "(de)") => Some(0x1A),
+        ("a", "(hl+)") | ("a", "(hli)") => Some(0x2A),
+        ("a", "(hl-)") | ("a", "(hld)") => Some(0x3A),
+        _ => None,
+    };
+    if let Some(opcode) = indirect {
+        return Ok(vec![opcode]);
+    }
+    if dst == "(c)" && src == "a" {
+        return Ok(vec![0xE2]);
+    }
+    if dst == "a" && src == "(c)" {
+        return Ok(vec![0xF2]);
+    }
+    if dst.starts_with('(') && dst.ends_with(')') {
+        let address = &dst[1..dst.len() - 1];
+        let value = lr_u16(address, labels, pc, resolve)?;
+        return match src {
+            "a" => Ok(vec![0xEA, value[0], value[1]]),
+            "sp" => Ok(vec![0x08, value[0], value[1]]),
+            _ => Err(Diagnostic::new(format!("invalid LR35902 load `{operand}`"))),
+        };
+    }
+    if dst == "a" && src.starts_with('(') && src.ends_with(')') {
+        let value = lr_u16(&src[1..src.len() - 1], labels, pc, resolve)?;
+        return Ok(vec![0xFA, value[0], value[1]]);
+    }
+    Err(Diagnostic::new(format!("invalid LR35902 load `{operand}`")))
+}
+
+fn encode_lr_alu(
+    operation: &str,
+    operand: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if operation == "add" && operand.starts_with("hl,") {
+        let register = lr_r16(operand[3..].trim())
+            .ok_or_else(|| Diagnostic::new(format!("invalid add operand `{operand}`")))?;
+        return Ok(Some(vec![0x09 + register * 0x10]));
+    }
+    if operation == "add" && operand.starts_with("sp,") {
+        return Ok(Some(vec![
+            0xE8,
+            parse_lr_signed(operand[3..].trim())? as u8,
+        ]));
+    }
+    let (row, source) = match operation {
+        "add" => (0, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        "adc" => (1, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        "sub" => (2, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        "sbc" => (3, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        "and" => (4, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        "xor" => (5, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        "or" => (6, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        "cp" => (7, operand.strip_prefix("a,").unwrap_or(operand).trim()),
+        _ => return Ok(None),
+    };
+    if let Some(register) = lr_r8(source) {
+        return Ok(Some(vec![0x80 + row * 8 + register]));
+    }
+    Ok(Some(vec![
+        0xC6 + row * 8,
+        lr_u8(source, labels, pc, resolve)?,
+    ]))
+}
+
+fn encode_lr_control(
+    operation: &str,
+    operand: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if operation == "rst" {
+        let vector = lr_u8(operand, labels, pc, resolve)?;
+        if vector > 0x38 || vector % 8 != 0 {
+            return Err(Diagnostic::new(
+                "LR35902 restart vector must be 00h..38h in steps of 8",
+            ));
+        }
+        return Ok(Some(vec![0xC7 + vector]));
+    }
+    if operation == "ret" {
+        return Ok(lr_condition(operand).map(|condition| vec![0xC0 + condition * 8]));
+    }
+    if !matches!(operation, "jr" | "jp" | "call") {
+        return Ok(None);
+    }
+    let (condition, target) = operand
+        .split_once(',')
+        .map_or((None, operand), |(condition, target)| {
+            (lr_condition(condition), target.trim())
+        });
+    if operand.contains(',') && condition.is_none() {
+        return Err(Diagnostic::new(format!(
+            "invalid branch condition `{operand}`"
+        )));
+    }
+    if operation == "jr" {
+        let opcode = condition.map_or(0x18, |condition| 0x20 + condition * 8);
+        let target = lr_value(target, labels, pc, resolve)?;
+        let offset = if resolve {
+            relative_offset(pc, target)?
+        } else {
+            0
+        };
+        return Ok(Some(vec![opcode, offset]));
+    }
+    let value = lr_u16(target, labels, pc, resolve)?;
+    let opcode = match (operation, condition) {
+        ("jp", None) => 0xC3,
+        ("call", None) => 0xCD,
+        ("jp", Some(c)) => 0xC2 + c * 8,
+        ("call", Some(c)) => 0xC4 + c * 8,
+        _ => unreachable!(),
+    };
+    Ok(Some(vec![opcode, value[0], value[1]]))
+}
+
+fn parse_lr_signed(text: &str) -> Result<i8, Diagnostic> {
+    let text = text.trim();
+    let value = if let Some(rest) = text.strip_prefix('-') {
+        -(parse_number(rest)? as i32)
+    } else if let Some(rest) = text.strip_prefix('+') {
+        parse_number(rest)? as i32
+    } else {
+        parse_number(text)? as i32
+    };
+    i8::try_from(value)
+        .map_err(|_| Diagnostic::new(format!("signed byte `{text}` is outside -128..127")))
 }
 
 fn push16(bytes: &mut Vec<u8>, value: u32) -> Result<(), Diagnostic> {
@@ -1094,6 +1507,132 @@ mod tests {
             .unwrap();
 
         assert_eq!(bytes, [0xCD, 0x05, 0x00, 0xC3, 0x06, 0x01, 0xC9]);
+    }
+
+    #[test]
+    fn lr35902_assembler_covers_every_documented_opcode() {
+        let mut base = HashSet::new();
+        let mut cb = HashSet::new();
+        let mut add = |syntax: String| {
+            let bytes = assemble_subset_at(CpuFamily::Lr35902, &syntax, 0)
+                .unwrap_or_else(|error| panic!("{syntax}: {error}"));
+            if bytes[0] == 0xCB {
+                cb.insert(bytes[1]);
+            } else {
+                base.insert(bytes[0]);
+            }
+        };
+        for syntax in [
+            "nop",
+            "rlca",
+            "ld (1234h), sp",
+            "rrca",
+            "stop",
+            "rla",
+            "jr 2",
+            "rra",
+            "daa",
+            "cpl",
+            "scf",
+            "ccf",
+            "halt",
+            "jp 1234h",
+            "ret",
+            "call 1234h",
+            "reti",
+            "ldh (80h), a",
+            "ldh (c), a",
+            "add sp, 1",
+            "jp hl",
+            "ld (1234h), a",
+            "ldh a, (80h)",
+            "ldh a, (c)",
+            "di",
+            "ld hl, sp+1",
+            "ld sp, hl",
+            "ld a, (1234h)",
+            "ei",
+        ] {
+            add(syntax.to_owned());
+        }
+        let r8 = ["b", "c", "d", "e", "h", "l", "(hl)", "a"];
+        let r16 = ["bc", "de", "hl", "sp"];
+        let memory = ["(bc)", "(de)", "(hl+)", "(hl-)"];
+        for (index, register) in r16.iter().enumerate() {
+            add(format!("ld {register}, 1234h"));
+            add(format!("inc {register}"));
+            add(format!("dec {register}"));
+            add(format!("add hl, {register}"));
+            add(format!("ld {}, a", memory[index]));
+            add(format!("ld a, {}", memory[index]));
+        }
+        for register in r8 {
+            add(format!("inc {register}"));
+            add(format!("dec {register}"));
+            add(format!("ld {register}, 12h"));
+        }
+        for dst in r8 {
+            for src in r8 {
+                if !(dst == "(hl)" && src == "(hl)") {
+                    add(format!("ld {dst}, {src}"));
+                }
+            }
+        }
+        for (operation, explicit_a) in [
+            ("add", true),
+            ("adc", true),
+            ("sub", false),
+            ("sbc", true),
+            ("and", false),
+            ("xor", false),
+            ("or", false),
+            ("cp", false),
+        ] {
+            for register in r8 {
+                add(if explicit_a {
+                    format!("{operation} a, {register}")
+                } else {
+                    format!("{operation} {register}")
+                });
+            }
+            add(if explicit_a {
+                format!("{operation} a, 12h")
+            } else {
+                format!("{operation} 12h")
+            });
+        }
+        for condition in ["nz", "z", "nc", "c"] {
+            add(format!("jr {condition}, 2"));
+            add(format!("ret {condition}"));
+            add(format!("jp {condition}, 1234h"));
+            add(format!("call {condition}, 1234h"));
+        }
+        for register in ["bc", "de", "hl", "af"] {
+            add(format!("push {register}"));
+            add(format!("pop {register}"));
+        }
+        for vector in (0..=0x38).step_by(8) {
+            add(format!("rst {vector}"));
+        }
+        for operation in ["rlc", "rrc", "rl", "rr", "sla", "sra", "swap", "srl"] {
+            for register in r8 {
+                add(format!("{operation} {register}"));
+            }
+        }
+        for operation in ["bit", "res", "set"] {
+            for bit in 0..8 {
+                for register in r8 {
+                    add(format!("{operation} {bit}, {register}"));
+                }
+            }
+        }
+        let invalid = [
+            0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD,
+        ];
+        // 244 executable base instructions plus the CB prefix itself.
+        assert_eq!(base.len(), 244);
+        assert!(invalid.into_iter().all(|opcode| !base.contains(&opcode)));
+        assert_eq!(cb.len(), 256);
     }
 
     #[test]

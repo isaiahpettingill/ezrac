@@ -632,6 +632,36 @@ impl Layout {
         }
     }
 
+    pub fn game_boy_lr35902() -> Self {
+        Self {
+            name: "game_boy_lr35902".to_owned(),
+            load: Address24::new(0x0150),
+            entry: Address24::new(0x0150),
+            stack: Address24::new(0xFFFE),
+            regions: vec![region(
+                "rom",
+                0x0150,
+                0x7FFF,
+                &[RegionFlags::READ, RegionFlags::EXECUTE],
+            )],
+            sections: vec![
+                section(".header", "rom", 1),
+                section(".text", "rom", 1),
+                section(".rodata", "rom", 1),
+                section(".data", "rom", 1),
+                section(".bss", "rom", 1),
+                section(".assets", "rom", 1),
+                section(".scratch", "rom", 1),
+            ],
+            symbols: vec![
+                symbol("GB_ENTRY", Address24::new(0x0150)),
+                symbol("GB_STACK_TOP", Address24::new(0xFFFE)),
+                symbol("GB_SERIAL_DATA", Address24::new(0xFF01)),
+                symbol("GB_SERIAL_CONTROL", Address24::new(0xFF02)),
+            ],
+        }
+    }
+
     pub fn zx_spectrum_z80() -> Self {
         Self {
             name: "zx_spectrum_z80".to_owned(),

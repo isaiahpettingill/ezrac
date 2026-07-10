@@ -26,6 +26,7 @@ pub enum CpuFamily {
     M68k,
     I8080,
     I8085,
+    Lr35902,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +37,7 @@ pub enum AssemblerCpu {
     Z80N,
     Z180,
     Ez80,
+    Lr35902,
 }
 
 impl AssemblerCpu {
@@ -47,8 +49,9 @@ impl AssemblerCpu {
             "z80n" => Ok(Self::Z80N),
             "z180" => Ok(Self::Z180),
             "ez80" => Ok(Self::Ez80),
+            "lr35902" | "gameboy" | "gb" => Ok(Self::Lr35902),
             _ => Err(format!(
-                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, or ez80"
+                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, or lr35902"
             )),
         }
     }
@@ -61,6 +64,7 @@ impl AssemblerCpu {
             Self::Z80N => "z80n",
             Self::Z180 => "z180",
             Self::Ez80 => "ez80",
+            Self::Lr35902 => "lr35902",
         }
     }
 
@@ -71,6 +75,7 @@ impl AssemblerCpu {
             Self::Z180 => Some(CpuFamily::Z80),
             Self::Ez80 => Some(CpuFamily::Ez80),
             Self::I8080 | Self::I8085 => None,
+            Self::Lr35902 => None,
         }
     }
 
@@ -93,6 +98,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::I8080 => Self::I8080,
             CpuFamily::I8085 => Self::I8085,
             CpuFamily::M68k => Self::Ez80,
+            CpuFamily::Lr35902 => Self::Lr35902,
         }
     }
 }
@@ -107,6 +113,7 @@ impl CpuFamily {
             Self::M68k => "m68k",
             Self::I8080 => "i8080",
             Self::I8085 => "i8085",
+            Self::Lr35902 => "lr35902",
         }
     }
 }
@@ -141,6 +148,7 @@ pub enum OutputFormat {
     Ti8xp,
     Ti8xk,
     ZxSpectrumTap,
+    GameBoyGb,
 }
 
 impl OutputFormat {
@@ -154,6 +162,7 @@ impl OutputFormat {
             Self::Ti8xp => "8xp",
             Self::Ti8xk => "8xk",
             Self::ZxSpectrumTap => "tap",
+            Self::GameBoyGb => "gb",
         }
     }
 }
@@ -194,6 +203,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::Ti8xp
     } else if triple.value.starts_with("zxspectrum-z80") {
         OutputFormat::ZxSpectrumTap
+    } else if triple.value.starts_with("gameboy-") {
+        OutputFormat::GameBoyGb
     } else {
         OutputFormat::RawBin
     }
@@ -222,6 +233,10 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
+        CpuFamily::Lr35902 => Some(TargetMemoryModel {
+            pointer_width_bits: 16,
+            address_width_bits: 16,
+        }),
         CpuFamily::M68k => None,
     }
 }
@@ -236,8 +251,9 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "8xp" | "ti8xp" => Ok(OutputFormat::Ti8xp),
         "8xk" | "ti8xk" => Ok(OutputFormat::Ti8xk),
         "tap" | "zxtap" | "spectrum-tap" => Ok(OutputFormat::ZxSpectrumTap),
+        "gb" | "gameboy" | "gameboy-gb" => Ok(OutputFormat::GameBoyGb),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }
@@ -261,6 +277,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "m68k" => Some(CpuFamily::M68k),
             "i8080" | "8080" => Some(CpuFamily::I8080),
             "i8085" | "8085" => Some(CpuFamily::I8085),
+            "lr35902" => Some(CpuFamily::Lr35902),
             _ => None,
         })
         .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;
@@ -457,10 +474,27 @@ mod tests {
         assert_eq!(parse_output_format("8ek"), Ok(OutputFormat::Ti8ek));
         assert_eq!(parse_output_format("8xk"), Ok(OutputFormat::Ti8xk));
         assert_eq!(parse_output_format("tap"), Ok(OutputFormat::ZxSpectrumTap));
+        assert_eq!(parse_output_format("gb"), Ok(OutputFormat::GameBoyGb));
         let error = parse_output_format("bad").unwrap_err();
         assert!(
-            error.contains("expected `bin`, `com`, `gaem`, `hex`, `tap`, `8xp`, `8ek`, or `8xk`"),
+            error.contains(
+                "expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `8xp`, `8ek`, or `8xk`"
+            ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn resolves_game_boy_assembly_targets() {
+        for target in ["gameboy-dmg-lr35902", "gameboy-color-lr35902"] {
+            let profile = resolve_target_profile(Some(target)).unwrap();
+            assert_eq!(profile.triple.cpu, CpuFamily::Lr35902);
+            assert_eq!(profile.memory.address_width_bits, 16);
+            assert_eq!(profile.output_format, OutputFormat::GameBoyGb);
+            assert_eq!(
+                AssemblerCpu::from(profile.triple.cpu),
+                AssemblerCpu::Lr35902
+            );
+        }
     }
 }

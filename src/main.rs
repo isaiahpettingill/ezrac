@@ -559,6 +559,9 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         executable_name: None,
     };
     let image = if let Some(base_addr) = options.base_addr {
+        if settings.output_format == OutputFormat::GameBoyGb && base_addr != 0x0150 {
+            return Err("Game Boy assembly must use base address 0x0150".to_owned());
+        }
         let assembly = preprocess_assembly(
             &source_path,
             &source,
@@ -1749,6 +1752,9 @@ fn build_executable_bytes(
     if settings.output_format == OutputFormat::ZxSpectrumTap {
         return zx_spectrum_tap_bytes(settings, output_path, code);
     }
+    if settings.output_format == OutputFormat::GameBoyGb {
+        return game_boy_rom_bytes(settings, output_path, code);
+    }
     if matches!(
         settings.output_format,
         OutputFormat::Ti8ek | OutputFormat::Ti8xk
@@ -1764,6 +1770,76 @@ fn build_executable_bytes(
         return build_agon_mos_executable(settings.layout.entry.get(), code);
     }
     Ok(code.to_vec())
+}
+
+fn game_boy_rom_bytes(
+    settings: &BuildSettings,
+    output_path: Option<&Path>,
+    code: &[u8],
+) -> Result<Vec<u8>, String> {
+    if !settings.target.triple.value.starts_with("gameboy-") {
+        return Err(format!(
+            "target `{}` does not support Game Boy .gb output",
+            settings.target.triple.value
+        ));
+    }
+    if settings.layout.load.get() != 0x0150 || settings.layout.entry.get() != 0x0150 {
+        return Err("Game Boy ROM layouts must load and enter at 0x0150".to_owned());
+    }
+    const ROM_SIZE: usize = 0x8000;
+    const CODE_OFFSET: usize = 0x0150;
+    if code.len() > ROM_SIZE - CODE_OFFSET {
+        return Err("Game Boy ROM-only code exceeds 32 KiB cartridge capacity".to_owned());
+    }
+    let mut rom = vec![0xFF; ROM_SIZE];
+    rom[0x0100..0x0104].copy_from_slice(&[0xC3, 0x50, 0x01, 0x00]);
+    rom[0x0104..0x0134].copy_from_slice(&[
+        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00,
+        0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD,
+        0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB,
+        0xB9, 0x33, 0x3E,
+    ]);
+    let title = settings
+        .executable_name
+        .as_deref()
+        .or_else(|| {
+            output_path
+                .and_then(|path| path.file_stem())
+                .and_then(|name| name.to_str())
+        })
+        .unwrap_or("EZRA");
+    rom[0x0134..0x0144].fill(0);
+    for (slot, ch) in rom[0x0134..0x0143].iter_mut().zip(title.bytes()) {
+        *slot = if ch.is_ascii_alphanumeric() || ch == b' ' {
+            ch
+        } else {
+            b'_'
+        };
+    }
+    rom[0x0143] = if settings.target.triple.value.starts_with("gameboy-color-") {
+        0xC0
+    } else {
+        0x00
+    };
+    rom[0x0144..0x0146].copy_from_slice(b"00");
+    rom[0x0146] = 0x00;
+    rom[0x0147] = 0x00;
+    rom[0x0148] = 0x00;
+    rom[0x0149] = 0x00;
+    rom[0x014A] = 0x01;
+    rom[0x014B] = 0x33;
+    rom[0x014C] = 0x00;
+    rom[CODE_OFFSET..CODE_OFFSET + code.len()].copy_from_slice(code);
+    rom[0x014D] = rom[0x0134..=0x014C].iter().fold(0u8, |checksum, byte| {
+        checksum.wrapping_sub(*byte).wrapping_sub(1)
+    });
+    let checksum = rom
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matches!(*index, 0x014E | 0x014F))
+        .fold(0u16, |sum, (_, byte)| sum.wrapping_add(u16::from(*byte)));
+    rom[0x014E..0x0150].copy_from_slice(&checksum.to_be_bytes());
+    Ok(rom)
 }
 
 fn ti8xp_bytes(
@@ -2369,6 +2445,8 @@ fn default_layout_for_target(target: &str) -> Layout {
         }
     } else if target.starts_with("zxspectrum-z80") {
         Layout::zx_spectrum_z80()
+    } else if target.starts_with("gameboy-") {
+        Layout::game_boy_lr35902()
     } else if is_ti_ce_target(target) {
         Layout::ti_ce_ez80(target)
     } else if is_ti_z80_target(target) {
@@ -2403,7 +2481,7 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
     write_scaffold_file(
         &root.join(".gitignore"),
         options.force,
-        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.tap\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
+        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.tap\n*.gb\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
     )?;
     write_scaffold_file(
         &root.join("Ezra.toml"),
@@ -2884,6 +2962,22 @@ fn print_targets() {
             status: "experimental Z80 target",
         },
         TargetRow {
+            triple: "gameboy-dmg-lr35902",
+            cpu: "lr35902",
+            address_width_bits: 16,
+            output: "gb",
+            sdk: "vendored asm/gb",
+            status: "assembly-only DMG target",
+        },
+        TargetRow {
+            triple: "gameboy-color-lr35902",
+            cpu: "lr35902",
+            address_width_bits: 16,
+            output: "gb",
+            sdk: "vendored asm/gb",
+            status: "assembly-only CGB target",
+        },
+        TargetRow {
             triple: "ti83-z80",
             cpu: "z80",
             address_width_bits: 16,
@@ -3343,6 +3437,79 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn game_boy_targets_write_valid_dmg_and_cgb_roms() {
+        let root = temp_root("game_boy_roms");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.asm");
+        std::fs::write(
+            &source_path,
+            "di\nld sp, 0FFFEh\nld a, 81h\nldh (02h), a\nhalt\n",
+        )
+        .unwrap();
+        for (target, cgb_flag) in [
+            ("gameboy-dmg-lr35902", 0x00),
+            ("gameboy-color-lr35902", 0xC0),
+        ] {
+            let output = root.join(format!("{target}.gb"));
+            assemble_file(&AssembleOptions {
+                path: source_path.to_string_lossy().into_owned(),
+                output: Some(output.to_string_lossy().into_owned()),
+                base_addr: None,
+                assembler_cpu: None,
+                layout_path: None,
+                map_path: None,
+                target: Some(target.to_owned()),
+            })
+            .unwrap();
+            let rom = std::fs::read(output).unwrap();
+            assert_eq!(rom.len(), 0x8000);
+            assert_eq!(&rom[0x0100..0x0104], &[0xC3, 0x50, 0x01, 0x00]);
+            assert_eq!(rom[0x0143], cgb_flag);
+            assert_eq!(&rom[0x0150..0x0155], &[0xF3, 0x31, 0xFE, 0xFF, 0x3E]);
+            let header = rom[0x0134..=0x014C]
+                .iter()
+                .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+            assert_eq!(rom[0x014D], header);
+            let global = rom
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !matches!(*index, 0x014E | 0x014F))
+                .fold(0u16, |sum, (_, byte)| sum.wrapping_add(u16::from(*byte)));
+            assert_eq!(&rom[0x014E..0x0150], &global.to_be_bytes());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn game_boy_vendored_sdk_macros_preprocess_and_assemble() {
+        let sdk =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/gameboy-lr35902/sdk/asm/gb");
+        let source_path = sdk.join("fixture.asm");
+        let source = r#"
+            include "color.inc"
+            %GB_AUDIO_ENABLE
+            %GB_TIMER_START 0, 0, 5
+            %GB_JOYPAD_READ_DPAD
+            %GB_SERIAL_START 65
+            %GBC_VRAM_BANK 1
+            %GBC_WRAM_BANK 2
+            %GBC_BG_COLOR_LOW 80h, 1Fh
+            halt
+        "#;
+        let expanded = preprocess_assembly(
+            &source_path,
+            source,
+            "gameboy-color-lr35902",
+            AssemblerCpu::Lr35902,
+        )
+        .unwrap();
+        let bytes =
+            ezra::vm::assemble_subset_at(CpuFamily::Lr35902, &expanded.text, 0x0150).unwrap();
+        assert!(!bytes.is_empty());
+        assert_eq!(bytes.last(), Some(&0x76));
     }
 
     #[test]

@@ -38,6 +38,8 @@ The current production-quality source path is eZ80-oriented. Z80-family and 8080
 | `ti84plusce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
 | `ti83premiumce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
 | `zxspectrum-z80` | Z80 | 16 | `.bin` | `zx.*` | Experimental Z80 target |
+| `gameboy-dmg-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | Assembly-only DMG target |
+| `gameboy-color-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | Assembly-only CGB target |
 | `ti83-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
 | `ti83plus-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
 | `ti84-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
@@ -262,6 +264,43 @@ Coding guidance:
 
 Use ROM and screen wrappers where possible. Treat display memory as volatile and keep stack/system memory clear unless your loader and custom layout say otherwise.
 
+## Nintendo Game Boy
+
+Targets:
+
+```text
+gameboy-dmg-lr35902
+gameboy-color-lr35902
+```
+
+These are assembly-only targets with a dedicated LR35902 assembler. They do
+not inherit Z80-only instructions or EZRA source code generation. Both produce
+32 KiB ROM-only `.gb` cartridges with the Nintendo logo, entry stub, title,
+DMG/CGB compatibility flag, and valid header/global checksums. Code begins at
+`0x0150`; the ROM header occupies `0x0100..0x014F`.
+
+The assembler covers all 244 executable base instructions and all 256
+CB-prefixed instructions. It uses Z80-style parentheses for memory operands,
+including Game Boy forms such as `ld a, (hl+)`, `ldh (rSC), a`, `swap a`, and
+`stop`. Unsupported Z80 instructions such as `out`, `exx`, IX/IY, and ED
+instructions are rejected.
+
+Vendor `toolchains/gameboy-lr35902/sdk/asm/gb` into a project and include
+`hardware.inc`, or `color.inc` for CGB helpers. The macro SDK includes hardware
+registers and common patterns for interrupts, LCD/VRAM, DMA, input, timers,
+serial, sound, banking, CGB palettes, memory banks, HDMA, and speed switching.
+Hardware timing constraints remain explicit.
+
+See `docs/gameboy-assembly.md` for a complete assembly example, instruction
+syntax, ROM behavior, SDK scope, and hardware caveats.
+
+```toml
+[build]
+input = "src/main.asm"
+input_kind = "assembly"
+target = "gameboy-dmg-lr35902"
+```
+
 ## CP/M 2.2
 
 Target patterns:
@@ -370,7 +409,7 @@ target = "ti84plusce-ez80"
 output = "8xp"
 ```
 
-Valid output formats are `bin`, `com`, `hex`, `8xp`, `8ek`, and `8xk`. TI app formats are target-checked: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
+Valid output formats are `bin`, `com`, `hex`, `tap`, `gb`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output is target-checked, as are TI app formats: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
 
 ## Adding A New Platform
 
