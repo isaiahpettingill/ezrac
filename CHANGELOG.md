@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.14
+
 - Added LSP go-to-definition across local and imported declarations, document/workspace symbols, semantic tokens, watched-file registration, and project diagnostics that honor unsaved imports.
 - Expanded LSP completion for struct fields, cfg predicates and target values, exposed layout symbols to completion/hover, and made bundled SDK definitions navigable as real cached source files.
 
