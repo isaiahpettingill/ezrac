@@ -10,7 +10,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl,
         Function, Place, Program, Stmt, Type, UnaryOp,
     },
-    diagnostic::{Diagnostic, diagnostic_span},
+    diagnostic::{Diagnostic, diagnostic_span, source_token_spans},
     hir::HirProgram,
     target::{
         Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE,
@@ -94,10 +94,31 @@ fn locate_program_diagnostic(program: &Program, error: Diagnostic) -> Diagnostic
     if error.location().is_some() {
         return error;
     }
-    program
-        .source_text
-        .as_deref()
-        .and_then(|source| diagnostic_span(&program.source_path, source, &error.message))
+    let quoted = error
+        .message
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    let matching_units = program
+        .source_units
+        .iter()
+        .filter(|unit| {
+            quoted
+                .iter()
+                .any(|token| !source_token_spans(&unit.path, &unit.text, token).is_empty())
+        })
+        .collect::<Vec<_>>();
+    let unit = (matching_units.len() == 1)
+        .then(|| matching_units[0])
+        .or_else(|| {
+            program
+                .source_units
+                .iter()
+                .find(|unit| unit.path == program.source_path)
+        });
+    unit.and_then(|unit| diagnostic_span(&unit.path, &unit.text, &error.message))
         .map(|span| error.clone().with_span_if_missing(span))
         .unwrap_or(error)
 }

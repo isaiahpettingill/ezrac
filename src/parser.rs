@@ -7,8 +7,8 @@ use crate::{
     ast::{
         AccessPath, AccessSegment, AliasDecl, AsmInput, AsmOutput, AssignOp, BinaryOp,
         CfgPredicate, ConstDecl, Declaration, EmbedDecl, EmbedSource, Expr, ExternFunction,
-        Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, Stmt, StructDecl, Type,
-        UnaryOp,
+        Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, SourceUnit, Stmt,
+        StructDecl, Type, UnaryOp,
     },
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
 };
@@ -42,6 +42,10 @@ pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
     Ok(Program {
         source_path: file.to_path_buf(),
         source_text: Some(original_source.to_owned()),
+        source_units: vec![SourceUnit {
+            path: file.to_path_buf(),
+            text: original_source.to_owned(),
+        }],
         declarations,
     })
 }

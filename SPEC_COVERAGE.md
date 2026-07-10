@@ -39,7 +39,7 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 | 38. Assembly output | Partial | Generated/standalone assembly, CPU modes, global section linking, includes, maps, and formats are tested. | Exhaustive UM0077 enumeration remains #4. |
 | 39. Test runner | Partial | Deterministic Z80-family execution supports budgets, memory, ports, traps, stacks, and CI status. | Multi-file architecture-neutral runner remains #59. |
 | 40. Compiler pipeline | Partial | AST → HIR → TBIR → assembly → assembler → layout is explicit and dumpable with safe optimization tests. | New backends and advanced passes remain #14–#16 and #49–#66. |
-| 41. Diagnostics | Partial | Structured spans, UTF-16 LSP ranges, multi-reference errors, import/include origins, and CLI locations are tested. | AST-native semantic spans and full multi-error type checking remain. |
+| 41. Diagnostics | Partial | Structured spans, UTF-16 LSP ranges, cross-file multi-reference errors, import/include provenance, and CLI locations are tested. | AST-native semantic spans and full multi-error type checking remain. |
 | 42. Grammar sketch | Implemented | `src/ezra.pest` is the executable grammar with parser tests. | Prose must follow grammar changes. |
 | 43. Design rules | Partial | Explicit widths, target profiles, strict casts, SDK ownership, readable assembly, and deterministic tests are enforced. | Future backends and broader SDKs remain incomplete. |
 

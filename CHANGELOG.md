@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.15
+
+- Preserved imported source provenance through resolution so semantic diagnostics and multiple unknown-reference errors point into the correct module.
+
 ## 0.1.14
 
 - Added LSP go-to-definition across local and imported declarations, document/workspace symbols, semantic tokens, watched-file registration, and project diagnostics that honor unsaved imports.

@@ -4,7 +4,14 @@ use std::path::PathBuf;
 pub struct Program {
     pub source_path: PathBuf,
     pub source_text: Option<String>,
+    pub source_units: Vec<SourceUnit>,
     pub declarations: Vec<Declaration>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnit {
+    pub path: PathBuf,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

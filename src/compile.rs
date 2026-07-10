@@ -78,6 +78,19 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
         source,
         options.default_sdk_symbols,
     );
+    for unit in &resolved.source_units {
+        if normalize_path(&unit.path) == normalize_path(&source_program.source_path) {
+            continue;
+        }
+        if let Ok(program) = parse_program(&unit.path, &unit.text) {
+            diagnostics.extend(collect_reference_diagnostics(
+                &program,
+                &resolved,
+                &unit.text,
+                options.default_sdk_symbols,
+            ));
+        }
+    }
     if let Err(error) = check_source_with_sdk_and_overrides(source, options, sdk, source_overrides)
         && !diagnostics
             .iter()
@@ -506,6 +519,7 @@ fn resolve_program_imports(
         return Ok(Program {
             source_path: program.source_path,
             source_text: program.source_text,
+            source_units: Vec::new(),
             declarations: Vec::new(),
         });
     }
@@ -517,6 +531,7 @@ fn resolve_program_imports(
     let short_module_counts = direct_import_short_module_counts(&program);
     stack.push(path);
     let mut declarations = Vec::new();
+    let mut source_units = Vec::new();
     for declaration in &program.declarations {
         let Declaration::Import(import) = declaration else {
             continue;
@@ -534,6 +549,7 @@ fn resolve_program_imports(
         let module_aliases =
             module_alias_declarations(import, &imported.declarations, include_short_aliases);
         let imported = resolve_program_imports(imported, sdk, stack, seen, source_overrides)?;
+        source_units.extend(imported.source_units.iter().cloned());
         let imported_declarations = imported
             .declarations
             .into_iter()
@@ -556,10 +572,12 @@ fn resolve_program_imports(
             .into_iter()
             .filter(|decl| !matches!(decl, Declaration::Import(_))),
     );
+    source_units.extend(program.source_units);
 
     Ok(Program {
         source_path: program.source_path,
         source_text: program.source_text,
+        source_units,
         declarations,
     })
 }
@@ -1615,6 +1633,46 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span.as_ref().unwrap().file, import_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn semantic_diagnostics_preserve_imported_module_provenance() {
+        let root = temp_root("import_diagnostic_provenance");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let main_path = root.join("main.ezra");
+        let import_path = root.join("lib/broken.ezra");
+        let source = "import lib.broken\nfn main() {}\n";
+        std::fs::write(&main_path, source).unwrap();
+        std::fs::write(
+            &import_path,
+            "pub fn helper() {\n    missing_one()\n    missing_two()\n}\n",
+        )
+        .unwrap();
+
+        let diagnostics = check_source_diagnostics(
+            source,
+            &CompileOptions {
+                source: main_path,
+                debug_comments: false,
+                default_sdk_symbols: true,
+            },
+        );
+
+        let imported = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.file == import_path)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(imported.len(), 2, "{diagnostics:#?}");
+        assert_eq!(imported[0].message, "unknown function `missing_one`");
+        assert_eq!(imported[1].message, "unknown function `missing_two`");
+        assert_eq!(imported[0].span.as_ref().unwrap().start.line, 2);
+        assert_eq!(imported[1].span.as_ref().unwrap().start.line, 3);
         let _ = std::fs::remove_dir_all(root);
     }
 
