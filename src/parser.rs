@@ -36,7 +36,7 @@ pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
         .filter(|pair| pair.as_rule() != Rule::EOI)
         .map(|pair| {
             let span = pair_span(file, &pair);
-            build_decl(pair).map_err(|error| error.with_span_if_missing(span))
+            build_decl(file, pair).map_err(|error| error.with_span_if_missing(span))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Program {
@@ -142,7 +142,7 @@ fn line_contains_assignment_op(line: &str) -> bool {
     false
 }
 
-fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
+fn build_decl(file: &Path, pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
     match pair.as_rule() {
         Rule::decl => {
             let mut predicates = Vec::new();
@@ -150,7 +150,7 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
             for inner in pair.into_inner() {
                 match inner.as_rule() {
                     Rule::cfg_attr => predicates.push(build_cfg_attr(inner)?),
-                    _ => declaration = Some(build_decl(inner)?),
+                    _ => declaration = Some(build_decl(file, inner)?),
                 }
             }
             let declaration = declaration
@@ -175,7 +175,7 @@ fn build_decl(pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
         Rule::global_decl => build_global(pair).map(Declaration::Global),
         Rule::struct_decl => build_struct(pair).map(Declaration::Struct),
         Rule::extern_decl => build_extern(pair).map(Declaration::ExternAsmFunction),
-        Rule::fn_decl => build_fn(pair).map(Declaration::Function),
+        Rule::fn_decl => build_fn(file, pair).map(Declaration::Function),
         _ => unreachable!("unexpected decl rule {:?}", pair.as_rule()),
     }
 }
@@ -449,13 +449,14 @@ fn build_mmio(pair: Pair<'_, Rule>) -> Result<MmioDecl, Diagnostic> {
     })
 }
 
-fn build_fn(pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
+fn build_fn(file: &Path, pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
     let mut public = false;
     let mut attrs = Vec::new();
     let mut name = None;
     let mut params = Vec::new();
     let mut return_type = None;
     let mut body = None;
+    let mut body_spans = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -469,7 +470,11 @@ fn build_fn(pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
             Rule::ident => name = Some(inner.as_str().to_owned()),
             Rule::params => params = build_params(inner)?,
             Rule::ret_ty => return_type = Some(build_type(inner.into_inner().next().unwrap())?),
-            Rule::block => body = Some(build_block(inner)?),
+            Rule::block => {
+                let (statements, spans) = build_block(file, inner)?;
+                body = Some(statements);
+                body_spans = spans;
+            }
             _ => {}
         }
     }
@@ -481,6 +486,7 @@ fn build_fn(pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
         params,
         return_type,
         body: body.unwrap_or_default(),
+        body_spans,
     })
 }
 
@@ -521,58 +527,86 @@ fn build_params(pair: Pair<'_, Rule>) -> Result<Vec<Param>, Diagnostic> {
         .collect()
 }
 
-fn build_block(pair: Pair<'_, Rule>) -> Result<Vec<Stmt>, Diagnostic> {
-    pair.into_inner().map(build_stmt).collect()
+fn build_block(
+    file: &Path,
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<Stmt>, Vec<crate::ast::StmtSpan>), Diagnostic> {
+    let mut statements = Vec::new();
+    let mut spans = Vec::new();
+    for statement in pair.into_inner() {
+        let (statement, span) = build_stmt(file, statement)?;
+        statements.push(statement);
+        spans.push(span);
+    }
+    Ok((statements, spans))
 }
 
-fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
-    match pair.as_rule() {
+fn build_stmt(
+    file: &Path,
+    pair: Pair<'_, Rule>,
+) -> Result<(Stmt, crate::ast::StmtSpan), Diagnostic> {
+    let span = pair_span(file, &pair);
+    let (statement, children) = match pair.as_rule() {
         Rule::let_stmt => {
             let mut inner = pair.into_inner();
-            Ok(Stmt::Let {
-                name: inner.next().unwrap().as_str().to_owned(),
-                ty: build_type(inner.next().unwrap())?,
-                value: build_expr(inner.next().unwrap())?,
-            })
+            (
+                Stmt::Let {
+                    name: inner.next().unwrap().as_str().to_owned(),
+                    ty: build_type(inner.next().unwrap())?,
+                    value: build_expr(inner.next().unwrap())?,
+                },
+                Vec::new(),
+            )
         }
         Rule::assign_stmt => {
             let mut inner = pair.into_inner();
-            Ok(Stmt::Assign {
-                target: build_place(inner.next().unwrap())?,
-                op: build_assign_op(inner.next().unwrap().as_str()),
-                value: build_expr(inner.next().unwrap())?,
-            })
+            (
+                Stmt::Assign {
+                    target: build_place(inner.next().unwrap())?,
+                    op: build_assign_op(inner.next().unwrap().as_str()),
+                    value: build_expr(inner.next().unwrap())?,
+                },
+                Vec::new(),
+            )
         }
         Rule::if_stmt => {
             let mut inner = pair.into_inner();
             let condition = build_expr(inner.next().unwrap())?;
-            let then_body = build_block(inner.next().unwrap())?;
-            let else_body = match inner.next() {
-                Some(pair) if pair.as_rule() == Rule::if_stmt => vec![build_stmt(pair)?],
-                Some(block) => build_block(block)?,
-                None => Vec::new(),
+            let (then_body, mut children) = build_block(file, inner.next().unwrap())?;
+            let (else_body, else_spans) = match inner.next() {
+                Some(pair) if pair.as_rule() == Rule::if_stmt => {
+                    let (statement, span) = build_stmt(file, pair)?;
+                    (vec![statement], vec![span])
+                }
+                Some(block) => build_block(file, block)?,
+                None => (Vec::new(), Vec::new()),
             };
-            Ok(Stmt::If {
-                condition,
-                then_body,
-                else_body,
-            })
+            children.extend(else_spans);
+            (
+                Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                },
+                children,
+            )
         }
         Rule::while_stmt => {
             let mut inner = pair.into_inner();
-            Ok(Stmt::While {
-                condition: build_expr(inner.next().unwrap())?,
-                body: build_block(inner.next().unwrap())?,
-            })
+            let condition = build_expr(inner.next().unwrap())?;
+            let (body, children) = build_block(file, inner.next().unwrap())?;
+            (Stmt::While { condition, body }, children)
         }
-        Rule::loop_stmt => Ok(Stmt::Loop {
-            body: build_block(pair.into_inner().next().unwrap())?,
-        }),
-        Rule::break_stmt => Ok(Stmt::Break),
-        Rule::continue_stmt => Ok(Stmt::Continue),
-        Rule::return_stmt => Ok(Stmt::Return(
-            pair.into_inner().next().map(build_expr).transpose()?,
-        )),
+        Rule::loop_stmt => {
+            let (body, children) = build_block(file, pair.into_inner().next().unwrap())?;
+            (Stmt::Loop { body }, children)
+        }
+        Rule::break_stmt => (Stmt::Break, Vec::new()),
+        Rule::continue_stmt => (Stmt::Continue, Vec::new()),
+        Rule::return_stmt => (
+            Stmt::Return(pair.into_inner().next().map(build_expr).transpose()?),
+            Vec::new(),
+        ),
         Rule::asm_stmt => {
             let mut volatile = false;
             let mut inputs = Vec::new();
@@ -600,24 +634,34 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, Diagnostic> {
                     _ => {}
                 }
             }
-            Ok(Stmt::Asm {
-                volatile,
-                inputs,
-                outputs,
-                clobbers,
-                lines,
-            })
+            (
+                Stmt::Asm {
+                    volatile,
+                    inputs,
+                    outputs,
+                    clobbers,
+                    lines,
+                },
+                Vec::new(),
+            )
         }
         Rule::out_stmt => {
             let mut inner = pair.into_inner();
-            Ok(Stmt::Out {
-                port: inner.next().unwrap().as_str().to_owned(),
-                value: build_expr(inner.next().unwrap())?,
-            })
+            (
+                Stmt::Out {
+                    port: inner.next().unwrap().as_str().to_owned(),
+                    value: build_expr(inner.next().unwrap())?,
+                },
+                Vec::new(),
+            )
         }
-        Rule::expr_stmt => Ok(Stmt::Expr(build_expr(pair.into_inner().next().unwrap())?)),
+        Rule::expr_stmt => (
+            Stmt::Expr(build_expr(pair.into_inner().next().unwrap())?),
+            Vec::new(),
+        ),
         _ => unreachable!("unexpected stmt rule {:?}", pair.as_rule()),
-    }
+    };
+    Ok((statement, crate::ast::StmtSpan { span, children }))
 }
 
 fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {

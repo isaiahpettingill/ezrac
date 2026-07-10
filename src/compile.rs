@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{
+    asm::ez80::emitter::collect_ez80_semantic_diagnostics,
     asm::{AssemblyOptions, emit_ez80_assembly_with_options},
     ast::{
         AccessPath, AccessSegment, CfgPredicate, Declaration, EmbedSource, Expr, Function, Place,
@@ -91,6 +92,21 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
             ));
         }
     }
+    for diagnostic in collect_ez80_semantic_diagnostics(
+        &resolved,
+        AssemblyOptions {
+            debug_comments: options.debug_comments,
+            default_sdk_symbols: options.default_sdk_symbols,
+            ..AssemblyOptions::default()
+        },
+    ) {
+        if !diagnostics
+            .iter()
+            .any(|existing| diagnostic_is_covered_by(existing, &diagnostic))
+        {
+            diagnostics.push(diagnostic);
+        }
+    }
     if let Err(error) = check_source_with_sdk_and_overrides(source, options, sdk, source_overrides)
         && !diagnostics
             .iter()
@@ -99,6 +115,19 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
         diagnostics.push(error);
     }
     diagnostics
+}
+
+fn diagnostic_is_covered_by(existing: &Diagnostic, candidate: &Diagnostic) -> bool {
+    if existing.message != candidate.message {
+        return false;
+    }
+    let (Some(existing), Some(candidate)) = (&existing.span, &candidate.span) else {
+        return false;
+    };
+    existing.file == candidate.file
+        && (candidate.start.line, candidate.start.column)
+            <= (existing.start.line, existing.start.column)
+        && (existing.end.line, existing.end.column) <= (candidate.end.line, candidate.end.column)
 }
 
 pub fn check_source_with_sdk(
@@ -1584,6 +1613,30 @@ mod tests {
         assert_eq!((first.end.line, first.end.column), (2, 16));
         assert_eq!((second.start.line, second.start.column), (3, 5));
         assert_eq!((second.end.line, second.end.column), (3, 16));
+    }
+
+    #[test]
+    fn check_collects_independent_body_diagnostics_with_statement_spans() {
+        let options = CompileOptions {
+            source: PathBuf::from("body-errors.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        };
+        let source = "fn helper() { test.pass(1) }\nfn main() {\n    let value: u8 = true\n}\n";
+
+        let diagnostics = check_source_diagnostics(source, &options);
+
+        let arity = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message == "test.pass requires no arguments")
+            .unwrap();
+        assert_eq!(arity.span.as_ref().unwrap().start.line, 1);
+        let type_error = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message.contains("type mismatch"))
+            .unwrap();
+        assert_eq!(type_error.span.as_ref().unwrap().start.line, 3);
+        assert!(diagnostics.len() >= 2, "{diagnostics:#?}");
     }
 
     #[test]

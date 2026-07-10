@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::diagnostic::SourceSpan;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
     pub source_path: PathBuf,
@@ -128,6 +130,13 @@ pub struct Function {
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     pub body: Vec<Stmt>,
+    pub body_spans: Vec<StmtSpan>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StmtSpan {
+    pub span: SourceSpan,
+    pub children: Vec<StmtSpan>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

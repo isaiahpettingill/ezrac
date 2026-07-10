@@ -90,6 +90,47 @@ pub fn emit_ez80_assembly_with_options(
     result.map_err(|error| locate_program_diagnostic(program, error))
 }
 
+pub fn collect_ez80_semantic_diagnostics(
+    program: &Program,
+    options: AssemblyOptions,
+) -> Vec<Diagnostic> {
+    let symbols = match Symbols::from_program(program, options.clone()) {
+        Ok(symbols) => symbols,
+        Err(error) => return vec![error],
+    };
+    let mut diagnostics = Vec::new();
+    for declaration in &program.declarations {
+        let Declaration::Function(function) = declaration else {
+            continue;
+        };
+        collect_stmt_call_diagnostics(
+            &function.body,
+            &function.body_spans,
+            &symbols.functions,
+            &mut diagnostics,
+        );
+
+        let mut emitter = Emitter::new(
+            symbols.clone(),
+            options.clone(),
+            recursive_call_edges(program, &symbols.functions),
+        );
+        emitter.disable_dead_code_elimination();
+        if let Err(error) = emitter.emit_function(function) {
+            let span = function.body_spans.first().map(|span| span.span.clone());
+            let error = span
+                .map(|span| error.clone().with_span_if_missing(span))
+                .unwrap_or(error);
+            if !diagnostics.iter().any(|diagnostic| {
+                diagnostic.message == error.message && diagnostic.span == error.span
+            }) {
+                diagnostics.push(error);
+            }
+        }
+    }
+    diagnostics
+}
+
 fn locate_program_diagnostic(program: &Program, error: Diagnostic) -> Diagnostic {
     if error.location().is_some() {
         return error;
@@ -8349,6 +8390,69 @@ fn validate_stmt_calls(
         }
     }
     Ok(())
+}
+
+fn collect_stmt_call_diagnostics(
+    stmts: &[Stmt],
+    spans: &[crate::ast::StmtSpan],
+    functions: &HashMap<String, FunctionSig>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (index, stmt) in stmts.iter().enumerate() {
+        let span = spans.get(index).map(|span| span.span.clone());
+        let result = match stmt {
+            Stmt::Let { value, .. } => validate_expr_calls(value, functions),
+            Stmt::Assign { target, value, .. } => validate_place_calls(target, functions)
+                .and_then(|_| validate_expr_calls(value, functions)),
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let result = validate_expr_calls(condition, functions);
+                let children = spans
+                    .get(index)
+                    .map_or(&[][..], |span| span.children.as_slice());
+                collect_stmt_call_diagnostics(
+                    then_body,
+                    &children[..children.len().min(then_body.len())],
+                    functions,
+                    diagnostics,
+                );
+                collect_stmt_call_diagnostics(
+                    else_body,
+                    &children[children.len().min(then_body.len())..],
+                    functions,
+                    diagnostics,
+                );
+                result
+            }
+            Stmt::While { condition, body } => {
+                let result = validate_expr_calls(condition, functions);
+                let children = spans
+                    .get(index)
+                    .map_or(&[][..], |span| span.children.as_slice());
+                collect_stmt_call_diagnostics(body, children, functions, diagnostics);
+                result
+            }
+            Stmt::Loop { body } => {
+                let children = spans
+                    .get(index)
+                    .map_or(&[][..], |span| span.children.as_slice());
+                collect_stmt_call_diagnostics(body, children, functions, diagnostics);
+                Ok(())
+            }
+            Stmt::Return(Some(expr)) | Stmt::Expr(expr) => validate_expr_calls(expr, functions),
+            Stmt::Out { value, .. } => validate_expr_calls(value, functions),
+            Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => Ok(()),
+        };
+        if let Err(error) = result {
+            diagnostics.push(
+                span.map(|span| error.clone().with_span_if_missing(span))
+                    .unwrap_or(error),
+            );
+        }
+    }
 }
 
 fn validate_place_calls(
