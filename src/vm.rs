@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
 };
@@ -45,6 +45,7 @@ pub struct AssemblySymbol {
 pub struct AssemblerSourceOptions {
     pub source_path: Option<PathBuf>,
     pub symbols: Vec<AssemblySymbol>,
+    pub section_bases: Vec<AssemblySymbol>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -292,10 +293,21 @@ pub fn assemble_subset_with_options_at(
         .filter_map(|(index, line)| parse_line(index + 1, line))
         .collect::<Vec<_>>();
     let mut labels = BTreeMap::new();
+    let mut declared_names = HashSet::new();
     for symbol in &options.symbols {
         labels.insert(symbol.name.clone(), symbol.addr);
+        declared_names.insert(symbol.name.clone());
     }
-    let mut pc = base_addr & 0xFF_FFFF;
+    let mut pending_equates = Vec::new();
+    let begins_with_section = instructions
+        .first()
+        .is_some_and(|line| matches!(line.kind, AsmLine::Section(_)));
+    let default_pc = if begins_with_section {
+        base_addr
+    } else {
+        section_base(options, ".text").unwrap_or(base_addr)
+    } & 0xFF_FFFF;
+    let mut pc = default_pc;
 
     for instruction in &instructions {
         match &instruction.kind {
@@ -309,27 +321,30 @@ pub fn assemble_subset_with_options_at(
                         ),
                     ));
                 }
-                if labels.insert(name.clone(), pc).is_some() {
+                if !declared_names.insert(name.clone()) {
                     return Err(line_diagnostic(
                         instruction,
                         options,
                         format!("duplicate assembly label `{name}`"),
                     ));
                 }
+                labels.insert(name.clone(), pc);
             }
             AsmLine::Equ { name, expr } => {
-                let value = eval_expr(expr, &labels.clone().into_iter().collect(), pc).map_err(
-                    |error| error.with_location_if_missing(line_location(instruction, options)),
-                )?;
-                if labels.insert(name.clone(), value).is_some() {
+                if !declared_names.insert(name.clone()) {
                     return Err(line_diagnostic(
                         instruction,
                         options,
                         format!("duplicate assembly symbol `{name}`"),
                     ));
                 }
+                pending_equates.push((instruction.clone(), name.clone(), expr.clone(), pc));
             }
-            AsmLine::Section(_) => {}
+            AsmLine::Section(name) => {
+                if let Some(base) = section_base(options, name) {
+                    pc = base;
+                }
+            }
             AsmLine::Org(expr) => {
                 pc = eval_expr(expr, &labels.clone().into_iter().collect(), pc).map_err(
                     |error| error.with_location_if_missing(line_location(instruction, options)),
@@ -351,6 +366,28 @@ pub fn assemble_subset_with_options_at(
         }
     }
 
+    while !pending_equates.is_empty() {
+        let known = labels.clone().into_iter().collect::<HashMap<_, _>>();
+        let mut unresolved = Vec::new();
+        let mut progress = false;
+        for (instruction, name, expr, equ_pc) in pending_equates {
+            match eval_expr(&expr, &known, equ_pc) {
+                Ok(value) => {
+                    labels.insert(name, value);
+                    progress = true;
+                }
+                Err(_) => unresolved.push((instruction, name, expr, equ_pc)),
+            }
+        }
+        if !progress {
+            let (instruction, _, expr, equ_pc) = &unresolved[0];
+            return Err(eval_expr(expr, &known, *equ_pc)
+                .unwrap_err()
+                .with_location_if_missing(line_location(instruction, options)));
+        }
+        pending_equates = unresolved;
+    }
+
     let symbols = labels
         .iter()
         .map(|(name, addr)| AssemblySymbol {
@@ -361,9 +398,21 @@ pub fn assemble_subset_with_options_at(
     let labels = labels.into_iter().collect::<HashMap<_, _>>();
     let mut bytes = Vec::new();
     let mut pc = base_addr & 0xFF_FFFF;
+    if default_pc != pc {
+        append_org_padding(&mut bytes, pc, default_pc)?;
+        pc = default_pc;
+    }
     for instruction in instructions {
         match &instruction.kind {
-            AsmLine::Label(_) | AsmLine::Equ { .. } | AsmLine::Section(_) => {}
+            AsmLine::Label(_) | AsmLine::Equ { .. } => {}
+            AsmLine::Section(name) => {
+                if let Some(base) = section_base(options, name) {
+                    append_org_padding(&mut bytes, pc, base).map_err(|error| {
+                        error.with_location_if_missing(line_location(&instruction, options))
+                    })?;
+                    pc = base;
+                }
+            }
             AsmLine::Org(expr) => {
                 let new_pc = eval_expr(expr, &labels, pc).map_err(|error| {
                     error.with_location_if_missing(line_location(&instruction, options))
@@ -395,6 +444,43 @@ pub fn assemble_subset_with_options_at(
         }
     }
     Ok(AssembledProgram { bytes, symbols })
+}
+
+fn section_base(options: &AssemblerSourceOptions, name: &str) -> Option<u32> {
+    options
+        .section_bases
+        .iter()
+        .find(|section| section.name == name)
+        .map(|section| section.addr)
+}
+
+pub fn measure_assembly(cpu: AssemblerCpu, assembly: &str) -> Result<usize, Diagnostic> {
+    measure_assembly_with_options(cpu, assembly, &AssemblerSourceOptions::default())
+}
+
+pub fn measure_assembly_with_options(
+    cpu: AssemblerCpu,
+    assembly: &str,
+    options: &AssemblerSourceOptions,
+) -> Result<usize, Diagnostic> {
+    let mut len = 0usize;
+    for instruction in assembly
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| parse_line(index + 1, line))
+    {
+        let item_len = match instruction.kind {
+            AsmLine::Data(ref values) => data_len(values),
+            AsmLine::Instruction(ref text) => instruction_len(cpu, text).map_err(|error| {
+                error.with_location_if_missing(line_location(&instruction, options))
+            })?,
+            AsmLine::Label(_) | AsmLine::Equ { .. } | AsmLine::Section(_) | AsmLine::Org(_) => 0,
+        };
+        len = len
+            .checked_add(item_len)
+            .ok_or_else(|| Diagnostic::new("assembly size exceeds host addressable memory"))?;
+    }
+    Ok(len)
 }
 
 fn checked_assembly_pc_advance(pc: u32, len: u32) -> Result<u32, Diagnostic> {

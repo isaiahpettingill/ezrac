@@ -916,7 +916,16 @@ fn write_assembly_build_artifacts(
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, image.map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let executable = build_executable_bytes(settings, &image.bytes, Some(&executable_path))?;
+    let executable = if settings
+        .target
+        .triple
+        .value
+        .starts_with("agonlight-mos-ez80")
+    {
+        apply_agon_mos_header(settings.layout.entry.get(), image.bytes)?
+    } else {
+        build_executable_bytes(settings, &image.bytes, Some(&executable_path))?
+    };
     fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
@@ -1069,58 +1078,133 @@ fn build_assembly_image(
 ) -> Result<AssemblyBuildImage, String> {
     let assembly = expand_assembly_includes(source_path, assembly)?;
     let sections = split_assembly_sections(&assembly);
+    let section_bases = placed_assembly_section_bases(source_path, settings, &sections)?;
+    let mut options = assembly_source_options(source_path, &settings.layout);
+    options.section_bases = section_bases
+        .iter()
+        .map(|(name, start, _)| ezra::vm::AssemblySymbol {
+            name: name.clone(),
+            addr: *start,
+        })
+        .collect();
+    let assembled = ezra::vm::assemble_subset_with_options_at(
+        settings.assembler_cpu,
+        &assembly,
+        settings.layout.load.get(),
+        &options,
+    )
+    .map_err(|error| error.to_string())?;
     let mut placed = Vec::new();
-    let mut symbols = Vec::new();
-
-    for section in sections {
-        let start = assembly_section_start(&settings.layout, &section.name)?;
-        let assembled = ezra::vm::assemble_subset_with_options_at(
-            settings.assembler_cpu,
-            &section.source,
-            start,
-            &assembly_source_options(source_path, &settings.layout),
-        )
-        .map_err(|error| error.to_string())?;
-        validate_assembled_section_fit(
-            &settings.layout,
-            &section.name,
-            start,
-            assembled.bytes.len(),
-        )?;
-        symbols.extend(assembled.symbols);
+    for (name, start, len) in section_bases {
+        validate_assembled_section_fit(&settings.layout, &name, start, len)?;
+        let offset = usize::try_from(start.saturating_sub(settings.layout.load.get()))
+            .map_err(|_| "assembly image exceeds host addressable memory".to_owned())?;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| "assembly image exceeds host addressable memory".to_owned())?;
+        if end > assembled.bytes.len() {
+            return Err(format!(
+                "assembled section `{name}` extends beyond the linked image"
+            ));
+        }
         placed.push(PlacedAssemblySection {
-            name: section.name,
+            name,
             start,
-            bytes: assembled.bytes,
+            bytes: assembled.bytes[offset..end].to_vec(),
         });
     }
 
     let bytes = assembly_image_bytes(settings, &placed)?;
-    let map = assembly_section_map(&placed, &symbols);
+    let map = assembly_section_map(&placed, &assembled.symbols);
     Ok(AssemblyBuildImage {
         bytes,
         map,
-        symbols,
+        symbols: assembled.symbols,
     })
+}
+
+fn placed_assembly_section_bases(
+    source_path: &Path,
+    settings: &BuildSettings,
+    sections: &[AssemblySectionSource],
+) -> Result<Vec<(String, u32, usize)>, String> {
+    let mut lengths = BTreeMap::new();
+    for section in sections {
+        let len = ezra::vm::measure_assembly_with_options(
+            settings.assembler_cpu,
+            &section.source,
+            &ezra::vm::AssemblerSourceOptions {
+                source_path: Some(source_path.to_path_buf()),
+                ..ezra::vm::AssemblerSourceOptions::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        lengths.insert(section.name.clone(), len);
+    }
+    for name in lengths.keys() {
+        if !settings
+            .layout
+            .sections
+            .iter()
+            .any(|section| &section.name == name)
+        {
+            return Err(format!(
+                "assembly section `{name}` is not defined by layout `{}`",
+                settings.layout.name
+            ));
+        }
+    }
+
+    let mut cursors = BTreeMap::<String, u32>::new();
+    let mut placed = Vec::new();
+    for section in &settings.layout.sections {
+        let Some(len) = lengths.get(&section.name).copied() else {
+            continue;
+        };
+        let region = settings
+            .layout
+            .regions
+            .iter()
+            .find(|region| region.name == section.region)
+            .ok_or_else(|| {
+                format!(
+                    "layout section `{}` targets unknown region `{}`",
+                    section.name, section.region
+                )
+            })?;
+        let cursor = cursors
+            .entry(region.name.clone())
+            .or_insert(region.start.get());
+        let start = if section.name == ".text" {
+            settings.layout.entry.get()
+        } else {
+            align_u32(*cursor, section.align)?
+        };
+        let len_u32 = u32::try_from(len)
+            .map_err(|_| format!("section `{}` exceeds 24-bit address space", section.name))?;
+        *cursor = start
+            .checked_add(len_u32)
+            .ok_or_else(|| format!("section `{}` exceeds 24-bit address space", section.name))?;
+        placed.push((section.name.clone(), start, len));
+    }
+    Ok(placed)
 }
 
 fn split_assembly_sections(assembly: &str) -> Vec<AssemblySectionSource> {
     let mut sections = BTreeMap::<String, Vec<String>>::new();
     let mut current = ".text".to_owned();
     sections.entry(current.clone()).or_default();
-    for line in assembly.lines() {
+    for (line_index, line) in assembly.lines().enumerate() {
         let trimmed = line.split(';').next().unwrap_or("").trim();
         if let Some(section) = trimmed.strip_prefix("section ") {
             current = section.trim().to_owned();
-            sections
-                .entry(current.clone())
-                .or_default()
-                .push(String::new());
+            let lines = sections.entry(current.clone()).or_default();
+            lines.resize(line_index, String::new());
+            lines.push(String::new());
         } else {
-            sections
-                .entry(current.clone())
-                .or_default()
-                .push(line.to_owned());
+            let lines = sections.entry(current.clone()).or_default();
+            lines.resize(line_index, String::new());
+            lines.push(line.to_owned());
         }
     }
     sections
@@ -1153,33 +1237,6 @@ fn expand_assembly_includes(source_path: &Path, assembly: &str) -> Result<String
         }
     }
     Ok(out)
-}
-
-fn assembly_section_start(layout: &Layout, name: &str) -> Result<u32, String> {
-    if name == ".text" {
-        return Ok(layout.entry.get());
-    }
-    let section = layout
-        .sections
-        .iter()
-        .find(|section| section.name == name)
-        .ok_or_else(|| {
-            format!(
-                "assembly section `{name}` is not defined by layout `{}`",
-                layout.name
-            )
-        })?;
-    let region = layout
-        .regions
-        .iter()
-        .find(|region| region.name == section.region)
-        .ok_or_else(|| {
-            format!(
-                "layout section `{name}` targets unknown region `{}`",
-                section.region
-            )
-        })?;
-    align_u32(region.start.get(), section.align)
 }
 
 fn validate_assembled_section_fit(
@@ -1231,13 +1288,7 @@ fn assembly_image_bytes(
     settings: &BuildSettings,
     sections: &[PlacedAssemblySection],
 ) -> Result<Vec<u8>, String> {
-    if settings.output_format == OutputFormat::CpmCom
-        || settings
-            .target
-            .triple
-            .value
-            .starts_with("agonlight-mos-ez80")
-    {
+    if settings.output_format == OutputFormat::CpmCom {
         return Ok(sections
             .iter()
             .find(|section| section.name == ".text")
@@ -1317,6 +1368,7 @@ fn assembly_source_options(
                 addr: symbol.value.get(),
             })
             .collect(),
+        section_bases: Vec::new(),
     }
 }
 
@@ -1555,6 +1607,23 @@ fn build_agon_mos_executable(entry: u32, code: &[u8]) -> Result<Vec<u8>, String>
     out.push(1);
     out.extend_from_slice(code);
     Ok(out)
+}
+
+fn apply_agon_mos_header(entry: u32, mut image: Vec<u8>) -> Result<Vec<u8>, String> {
+    if entry > Address24::MAX {
+        return Err(format!(
+            "Agon MOS entry address 0x{entry:X} is outside the 24-bit address space"
+        ));
+    }
+    image.resize(image.len().max(69), 0);
+    image[0..4].copy_from_slice(&[
+        0xC3,
+        (entry & 0xFF) as u8,
+        ((entry >> 8) & 0xFF) as u8,
+        ((entry >> 16) & 0xFF) as u8,
+    ]);
+    image[64..69].copy_from_slice(b"MOS\0\x01");
+    Ok(image)
 }
 
 #[cfg(test)]
@@ -3200,6 +3269,66 @@ mod tests {
         assert_eq!(bin[0], 0xC3);
         assert_eq!(&bin[64..67], b"MOS");
         assert_eq!(bin[69], 0xC9);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agon_assembly_links_cross_section_symbols_and_preserves_sections() {
+        let root = temp_root("build_asm_agon_sections");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.asm");
+        std::fs::write(
+            &source_path,
+            r#"section .header
+                db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0A5h
+            section .text
+            TEXT_DATA equ rodata_value
+            start:
+                ld hl, TEXT_DATA
+                ld de, data_value
+                ret
+            section .rodata
+            rodata_value:
+                db 0AAh, 0BBh
+            section .data
+            data_value:
+                db 0CCh, 0DDh
+            section .bss
+            bss_value:
+                db 0EEh
+            section .assets
+            asset_value:
+                db 0F0h
+            "#,
+        )
+        .unwrap();
+
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Assembly),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("agonlight-mos-ez80".to_owned()),
+        })
+        .unwrap();
+        let bin = std::fs::read(outputs.executable).unwrap();
+        let map = std::fs::read_to_string(outputs.map).unwrap();
+
+        assert_eq!(&bin[64..69], b"MOS\0\x01");
+        assert_eq!(bin[10], 0xA5);
+        assert_eq!(&bin[0x20_000..0x20_002], &[0xAA, 0xBB]);
+        assert_eq!(&bin[0x30_000..0x30_002], &[0xCC, 0xDD]);
+        assert_eq!(bin[0x30_010], 0xEE);
+        assert_eq!(bin[0x80_000], 0xF0);
+        assert!(map.contains("rodata_value 0x060000"), "{map}");
+        assert!(map.contains("TEXT_DATA    0x060000"), "{map}");
+        assert!(map.contains("data_value   0x070000"), "{map}");
+        assert!(map.contains("bss_value    0x070010"), "{map}");
+        assert_eq!(&bin[69..73], &[0x21, 0x00, 0x00, 0x06]);
+        assert_eq!(&bin[73..77], &[0x11, 0x00, 0x00, 0x07]);
 
         let _ = std::fs::remove_dir_all(root);
     }
