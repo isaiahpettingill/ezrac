@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.17
+
+- Added ez180N console frame-tick synchronization through `console.frame_tick()` and `console.wait_tick()`.
+
 ## 0.1.16
 
 - Added statement-scoped semantic diagnostics so independent errors in function bodies can be reported with useful source locations.
