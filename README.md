@@ -6,6 +6,8 @@ EZRA is a small compiled language for explicit, low-level game and hobby-compute
 
 This is alpha software. The language, target profiles, and cartridge formats are still evolving. Use `docs/language.md`, `docs/usage.md`, and `docs/platforms.md` for current implemented behavior; `spec.md` is the broader design document.
 
+Implementation status for every specification section is tracked in [`SPEC_COVERAGE.md`](SPEC_COVERAGE.md).
+
 ## Commands
 
 After installation, run commands with `ezrac`:
