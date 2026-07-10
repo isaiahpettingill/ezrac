@@ -85,6 +85,8 @@ pub enum TbirEffect {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TbirOptimizationReport {
     pub constant_folds: usize,
+    pub algebraic_simplifications: usize,
+    pub constant_propagations: usize,
     pub dead_statements_marked: usize,
     pub inline_candidates: Vec<String>,
     pub tail_call_candidates: Vec<String>,
@@ -203,7 +205,7 @@ mod tests {
         let program = parse_program(
             Path::new("test.ezra"),
             r#"
-                inline fn helper() -> u8 { return 1 + 2 }
+                inline fn helper() -> bool { return !false }
                 fn main() {
                     return
                     helper()

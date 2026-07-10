@@ -13,8 +13,10 @@ pub fn text(program: &TbirProgram) -> String {
         program.target.has_cache
     ));
     out.push_str(&format!(
-        "optimizations: constant_folds={} dead_marked={} inline_candidates={:?} tail_calls={:?}\n",
+        "optimizations: constant_folds={} algebraic_simplifications={} constant_propagations={} dead_removed={} inline_candidates={:?} tail_calls={:?}\n",
         program.optimizations.constant_folds,
+        program.optimizations.algebraic_simplifications,
+        program.optimizations.constant_propagations,
         program.optimizations.dead_statements_marked,
         program.optimizations.inline_candidates,
         program.optimizations.tail_call_candidates

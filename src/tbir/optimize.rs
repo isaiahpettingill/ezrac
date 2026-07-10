@@ -1,23 +1,52 @@
-use crate::ast::{BinaryOp, Declaration, Expr, Function, Program, Stmt, UnaryOp};
+use std::collections::HashMap;
+
+use crate::ast::{
+    AccessPath, AccessSegment, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, UnaryOp,
+};
 
 use super::TbirOptimizationReport;
 
 pub fn optimize_program(program: &Program) -> (Program, TbirOptimizationReport) {
+    let mut program = program.clone();
     let mut report = TbirOptimizationReport::default();
-    for declaration in &program.declarations {
-        analyze_declaration(declaration, &mut report);
+    for declaration in &mut program.declarations {
+        optimize_declaration(declaration, &mut report);
     }
-    (program.clone(), report)
+    (program, report)
 }
 
-fn analyze_declaration(declaration: &Declaration, report: &mut TbirOptimizationReport) {
+fn optimize_declaration(declaration: &mut Declaration, report: &mut TbirOptimizationReport) {
     match declaration {
-        Declaration::Cfg { declaration, .. } => analyze_declaration(declaration, report),
-        Declaration::Function(function) => analyze_function(function, report),
-        Declaration::Const(decl) => count_foldable_expr(&decl.value, report),
-        Declaration::Port(decl) => count_foldable_expr(&decl.value, report),
-        Declaration::Mmio(decl) => count_foldable_expr(&decl.value, report),
-        Declaration::Global(decl) => count_foldable_expr(&decl.value, report),
+        Declaration::Cfg { declaration, .. } => optimize_declaration(declaration, report),
+        Declaration::Function(function) => optimize_function(function, report),
+        Declaration::Const(decl) => {
+            decl.value = optimize_expr(
+                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                &HashMap::new(),
+                report,
+            )
+        }
+        Declaration::Port(decl) => {
+            decl.value = optimize_expr(
+                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                &HashMap::new(),
+                report,
+            )
+        }
+        Declaration::Mmio(decl) => {
+            decl.value = optimize_expr(
+                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                &HashMap::new(),
+                report,
+            )
+        }
+        Declaration::Global(decl) => {
+            decl.value = optimize_expr(
+                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                &HashMap::new(),
+                report,
+            )
+        }
         Declaration::Embed(_)
         | Declaration::Import(_)
         | Declaration::Alias(_)
@@ -26,99 +55,245 @@ fn analyze_declaration(declaration: &Declaration, report: &mut TbirOptimizationR
     }
 }
 
-fn analyze_function(function: &Function, report: &mut TbirOptimizationReport) {
+fn optimize_function(function: &mut Function, report: &mut TbirOptimizationReport) {
     if function.attrs.iter().any(|attr| attr == "inline") {
         report.inline_candidates.push(function.name.clone());
     }
-    analyze_stmts(&function.body, report);
+    let mut constants = HashMap::new();
+    function.body = optimize_stmts(std::mem::take(&mut function.body), &mut constants, report);
 }
 
-fn analyze_stmts(stmts: &[Stmt], report: &mut TbirOptimizationReport) {
+fn optimize_stmts(
+    stmts: Vec<Stmt>,
+    constants: &mut HashMap<String, Expr>,
+    report: &mut TbirOptimizationReport,
+) -> Vec<Stmt> {
+    let mut output = Vec::with_capacity(stmts.len());
     let mut terminated = false;
     for stmt in stmts {
         if terminated {
             report.dead_statements_marked += 1;
-            continue;
         }
-        analyze_stmt(stmt, report);
-        terminated = matches!(stmt, Stmt::Return(_) | Stmt::Break | Stmt::Continue);
+        let stmt = optimize_stmt(stmt, constants, report);
+        terminated |= terminates(&stmt);
+        output.push(stmt);
     }
+    output
 }
 
-fn analyze_stmt(stmt: &Stmt, report: &mut TbirOptimizationReport) {
+fn optimize_stmt(
+    stmt: Stmt,
+    constants: &mut HashMap<String, Expr>,
+    report: &mut TbirOptimizationReport,
+) -> Stmt {
     match stmt {
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => count_foldable_expr(value, report),
+        Stmt::Let { name, ty, value } => {
+            let value = optimize_expr(value, constants, report);
+            // Locals can be mutated indirectly or by a loop body. Substitution needs
+            // alias and control-flow analysis, so only fold the initializer for now.
+            constants.remove(&name);
+            Stmt::Let { name, ty, value }
+        }
+        Stmt::Assign { target, op, value } => {
+            let target = optimize_place(target, constants, report);
+            let value = optimize_expr(value, constants, report);
+            constants.clear();
+            Stmt::Assign { target, op, value }
+        }
         Stmt::If {
             condition,
             then_body,
             else_body,
         } => {
-            count_foldable_expr(condition, report);
-            analyze_stmts(then_body, report);
-            analyze_stmts(else_body, report);
+            let condition = optimize_expr(condition, constants, report);
+            let mut then_constants = constants.clone();
+            let mut else_constants = constants.clone();
+            let then_body = optimize_stmts(then_body, &mut then_constants, report);
+            let else_body = optimize_stmts(else_body, &mut else_constants, report);
+            constants.clear();
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            }
         }
         Stmt::While { condition, body } => {
-            count_foldable_expr(condition, report);
-            analyze_stmts(body, report);
+            let condition = optimize_expr(condition, constants, report);
+            let mut body_constants = constants.clone();
+            let body = optimize_stmts(body, &mut body_constants, report);
+            constants.clear();
+            Stmt::While { condition, body }
         }
-        Stmt::Loop { body } => analyze_stmts(body, report),
-        Stmt::Return(Some(value)) | Stmt::Out { value, .. } | Stmt::Expr(value) => {
-            count_foldable_expr(value, report)
+        Stmt::Loop { body } => {
+            let mut body_constants = constants.clone();
+            let body = optimize_stmts(body, &mut body_constants, report);
+            constants.clear();
+            Stmt::Loop { body }
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        Stmt::Return(value) => {
+            Stmt::Return(value.map(|value| optimize_expr(value, constants, report)))
+        }
+        Stmt::Out { port, value } => Stmt::Out {
+            port,
+            value: optimize_expr(value, constants, report),
+        },
+        Stmt::Expr(value) => {
+            let value = optimize_expr(value, constants, report);
+            if expr_can_mutate(&value) {
+                constants.clear();
+            }
+            Stmt::Expr(value)
+        }
+        Stmt::Asm { .. } => {
+            constants.clear();
+            stmt
+        }
+        Stmt::Break | Stmt::Continue => stmt,
     }
 }
 
-fn count_foldable_expr(expr: &Expr, report: &mut TbirOptimizationReport) {
-    match expr {
+fn optimize_place(
+    place: Place,
+    constants: &HashMap<String, Expr>,
+    report: &mut TbirOptimizationReport,
+) -> Place {
+    match place {
+        Place::Index { name, index } => Place::Index {
+            name,
+            index: Box::new(optimize_expr(*index, constants, report)),
+        },
+        Place::Access(path) => Place::Access(optimize_access(path, constants, report)),
+        Place::Deref(expr) => Place::Deref(Box::new(optimize_expr(*expr, constants, report))),
+        Place::Ident(_) | Place::Field { .. } => place,
+    }
+}
+
+fn optimize_expr(
+    mut expr: Expr,
+    constants: &HashMap<String, Expr>,
+    report: &mut TbirOptimizationReport,
+) -> Expr {
+    expr = match expr {
+        Expr::Ident(name) => Expr::Ident(name),
+        Expr::Array(values) => Expr::Array(
+            values
+                .into_iter()
+                .map(|value| optimize_expr(value, constants, report))
+                .collect(),
+        ),
+        Expr::Index { name, index } => Expr::Index {
+            name,
+            index: Box::new(optimize_expr(*index, constants, report)),
+        },
+        Expr::AddressOfIndex { name, index } => Expr::AddressOfIndex {
+            name,
+            index: Box::new(optimize_expr(*index, constants, report)),
+        },
+        Expr::Access(path) => Expr::Access(optimize_access(path, constants, report)),
+        Expr::AddressOfAccess(path) => {
+            Expr::AddressOfAccess(optimize_access(path, constants, report))
+        }
+        Expr::StructInit { ty, fields } => Expr::StructInit {
+            ty,
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| (name, optimize_expr(value, constants, report)))
+                .collect(),
+        },
+        Expr::Deref(value) => Expr::Deref(Box::new(optimize_expr(*value, constants, report))),
+        Expr::Call { path, args } => Expr::Call {
+            path,
+            args: args
+                .into_iter()
+                .map(|arg| optimize_expr(arg, constants, report))
+                .collect(),
+        },
         Expr::Unary { op, expr } => {
-            count_foldable_expr(expr, report);
-            if fold_unary(*op, expr).is_some() {
+            let expr = optimize_expr(*expr, constants, report);
+            if let Some(value) = fold_unary(op, &expr) {
                 report.constant_folds += 1;
-            }
-        }
-        Expr::Binary { left, op, right } => {
-            count_foldable_expr(left, report);
-            count_foldable_expr(right, report);
-            if fold_binary(left, *op, right).is_some() {
-                report.constant_folds += 1;
-            }
-        }
-        Expr::Array(values) => values
-            .iter()
-            .for_each(|value| count_foldable_expr(value, report)),
-        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } | Expr::Deref(index) => {
-            count_foldable_expr(index, report)
-        }
-        Expr::Access(path) | Expr::AddressOfAccess(path) => {
-            for segment in &path.segments {
-                if let crate::ast::AccessSegment::Index(index) = segment {
-                    count_foldable_expr(index, report);
+                value
+            } else {
+                Expr::Unary {
+                    op,
+                    expr: Box::new(expr),
                 }
             }
         }
-        Expr::StructInit { fields, .. } => fields
-            .iter()
-            .for_each(|(_, value)| count_foldable_expr(value, report)),
-        Expr::Call { args, .. } => args.iter().for_each(|arg| count_foldable_expr(arg, report)),
-        Expr::Cast { expr, .. } => count_foldable_expr(expr, report),
+        Expr::Binary { left, op, right } => {
+            let left = optimize_expr(*left, constants, report);
+            let right = optimize_expr(*right, constants, report);
+            if let Some(value) = fold_binary(&left, op, &right) {
+                report.constant_folds += 1;
+                value
+            } else if let Some(value) = simplify_binary(&left, op, &right) {
+                report.algebraic_simplifications += 1;
+                value
+            } else {
+                Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }
+            }
+        }
+        Expr::Cast { ty, expr } => Expr::Cast {
+            ty,
+            expr: Box::new(optimize_expr(*expr, constants, report)),
+        },
         Expr::Int(_)
         | Expr::TypedInt(_, _)
         | Expr::Bool(_)
         | Expr::Char(_)
         | Expr::String(_)
-        | Expr::Ident(_)
         | Expr::In(_)
         | Expr::Field { .. }
         | Expr::AddressOfField { .. }
-        | Expr::AddressOf(_) => {}
+        | Expr::AddressOf(_) => expr,
+    };
+    expr
+}
+
+fn optimize_access(
+    mut path: AccessPath,
+    constants: &HashMap<String, Expr>,
+    report: &mut TbirOptimizationReport,
+) -> AccessPath {
+    path.segments = path
+        .segments
+        .into_iter()
+        .map(|segment| match segment {
+            AccessSegment::Index(index) => {
+                AccessSegment::Index(Box::new(optimize_expr(*index, constants, report)))
+            }
+            AccessSegment::Field(field) => AccessSegment::Field(field),
+        })
+        .collect();
+    path
+}
+
+fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
+    match (left, op, right) {
+        (
+            value,
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr,
+            Expr::Int(0),
+        ) => Some(value.clone()),
+        (value, BinaryOp::Mul | BinaryOp::Div, Expr::Int(1)) => Some(value.clone()),
+        (Expr::Int(0), BinaryOp::Add | BinaryOp::BitOr | BinaryOp::BitXor, value) => {
+            Some(value.clone())
+        }
+        _ => None,
     }
 }
 
 fn fold_unary(op: UnaryOp, expr: &Expr) -> Option<Expr> {
     match (op, expr) {
-        (UnaryOp::Neg, Expr::Int(value)) => value.checked_neg().map(Expr::Int),
-        (UnaryOp::BitNot, Expr::Int(value)) => Some(Expr::Int(!value)),
         (UnaryOp::Not, Expr::Bool(value)) => Some(Expr::Bool(!value)),
         _ => None,
     }
@@ -126,7 +301,6 @@ fn fold_unary(op: UnaryOp, expr: &Expr) -> Option<Expr> {
 
 fn fold_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
     match (left, right) {
-        (Expr::Int(left), Expr::Int(right)) => fold_int_binary(*left, op, *right),
         (Expr::Bool(left), Expr::Bool(right)) => match op {
             BinaryOp::And => Some(Expr::Bool(*left && *right)),
             BinaryOp::Or => Some(Expr::Bool(*left || *right)),
@@ -138,29 +312,103 @@ fn fold_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
     }
 }
 
-fn fold_int_binary(left: i64, op: BinaryOp, right: i64) -> Option<Expr> {
-    match op {
-        BinaryOp::Mul => left.checked_mul(right).map(Expr::Int),
-        BinaryOp::Div if right != 0 => left.checked_div(right).map(Expr::Int),
-        BinaryOp::Mod if right != 0 => left.checked_rem(right).map(Expr::Int),
-        BinaryOp::Add => left.checked_add(right).map(Expr::Int),
-        BinaryOp::Sub => left.checked_sub(right).map(Expr::Int),
-        BinaryOp::Shl if (0..64).contains(&right) => left.checked_shl(right as u32).map(Expr::Int),
-        BinaryOp::Shr if (0..64).contains(&right) => left.checked_shr(right as u32).map(Expr::Int),
-        BinaryOp::Lt => Some(Expr::Bool(left < right)),
-        BinaryOp::Le => Some(Expr::Bool(left <= right)),
-        BinaryOp::Gt => Some(Expr::Bool(left > right)),
-        BinaryOp::Ge => Some(Expr::Bool(left >= right)),
-        BinaryOp::Eq => Some(Expr::Bool(left == right)),
-        BinaryOp::Ne => Some(Expr::Bool(left != right)),
-        BinaryOp::BitAnd => Some(Expr::Int(left & right)),
-        BinaryOp::BitXor => Some(Expr::Int(left ^ right)),
-        BinaryOp::BitOr => Some(Expr::Int(left | right)),
-        BinaryOp::And
-        | BinaryOp::Or
-        | BinaryOp::Div
-        | BinaryOp::Mod
-        | BinaryOp::Shl
-        | BinaryOp::Shr => None,
+fn expr_can_mutate(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { .. })
+}
+
+fn terminates(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Return(_) | Stmt::Break | Stmt::Continue)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::parser::parse_program;
+
+    use super::*;
+
+    #[test]
+    fn folds_simplifies_and_marks_dead_statements_without_skipping_validation() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            "fn main() { let n: bool = !false let answer: bool = n return test.pass() test.fail(1) }",
+        )
+        .unwrap();
+        let (program, report) = optimize_program(&program);
+        let main = program.main_function().unwrap();
+
+        assert_eq!(report.constant_folds, 1);
+        assert_eq!(report.constant_propagations, 0);
+        assert_eq!(report.dead_statements_marked, 1);
+        assert!(matches!(
+            main.body[0],
+            Stmt::Let {
+                value: Expr::Bool(true),
+                ..
+            }
+        ));
+        assert!(matches!(
+            main.body[1],
+            Stmt::Let {
+                value: Expr::Ident(_),
+                ..
+            }
+        ));
+        assert_eq!(main.body.len(), 4);
+    }
+
+    #[test]
+    fn folds_constant_branches_without_hiding_validation() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            "fn main() { if false { test.fail(1) } else { test.pass() } while false { test.fail(2) } }",
+        )
+        .unwrap();
+        let (program, _report) = optimize_program(&program);
+        let main = program.main_function().unwrap();
+
+        assert_eq!(main.body.len(), 2);
+        assert!(matches!(
+            main.body[0],
+            Stmt::If {
+                condition: Expr::Bool(false),
+                ..
+            }
+        ));
+        assert!(matches!(
+            main.body[1],
+            Stmt::While {
+                condition: Expr::Bool(false),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn simplifies_identity_operations_on_runtime_values() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            "fn helper(value: u8) -> u8 { let answer: u8 = value * 1 return answer } fn main() {}",
+        )
+        .unwrap();
+        let (program, report) = optimize_program(&program);
+        let helper = program
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Function(function) if function.name == "helper" => Some(function),
+                _ => None,
+            })
+            .unwrap();
+
+        assert!(report.algebraic_simplifications >= 1);
+        assert!(matches!(
+            helper.body[0],
+            Stmt::Let {
+                value: Expr::Ident(_),
+                ..
+            }
+        ));
     }
 }
