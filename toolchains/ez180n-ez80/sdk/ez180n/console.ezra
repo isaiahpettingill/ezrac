@@ -32,6 +32,7 @@ pub const CHAR_UPPER_HALF: u8 = 0xDF
 
 pub port PRESENT_PORT: u8 = 0x10
 pub port SOUND_PORT: u8 = 0x20
+pub port TICK_PORT: u8 = 0x40
 pub port P1_LOW: u8 = 0x30
 pub port P1_HIGH: u8 = 0x31
 pub port P2_LOW: u8 = 0x32
@@ -77,6 +78,18 @@ pub fn present() {
 
 pub fn play_sound(sound: u8) {
     out SOUND_PORT, sound
+}
+
+pub fn frame_tick() -> u8 {
+    return in TICK_PORT
+}
+
+pub fn wait_tick() {
+    let previous: u8 = in TICK_PORT
+    let current: u8 = previous
+    while current == previous {
+        current = in TICK_PORT
+    }
 }
 
 pub fn input_low(player: u8) -> u8 {

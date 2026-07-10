@@ -149,7 +149,7 @@ fn main() {
 }
 ```
 
-Use `console.present()` after framebuffer writes, `console.play_sound(id)` for the beeper port, and `console.button_down(player, button)` for joypad input.
+Use `console.present()` after framebuffer writes, `console.play_sound(id)` for the beeper port, and `console.button_down(player, button)` for joypad input. Call `console.wait_tick()` to wait for the next 60 Hz console tick before the next game update.
 
 ## Generic eZ80 And Test Targets
 

@@ -8,8 +8,6 @@ const PLAYER_Y: u8 = 47
 const SHIP_START_X: u8 = 39
 const MAX_METEORS: u8 = 8
 const HUD_Y: u8 = 5
-const DELAY_TICKS: u16 = 2400
-
 global ship_x: u8 = SHIP_START_X
 global score: u16 = 0
 global tick: u8 = 0
@@ -247,13 +245,6 @@ fn check_collision() {
     }
 }
 
-fn delay() {
-    let spin: u16 = 0
-    while spin < DELAY_TICKS {
-        spin += 1
-    }
-}
-
 fn main() {
     reset_game()
     loop {
@@ -264,6 +255,6 @@ fn main() {
             check_collision()
         }
         render()
-        delay()
+        console.wait_tick()
     }
 }
