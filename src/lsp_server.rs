@@ -554,14 +554,20 @@ fn register_file_watchers(output: &mut impl Write) -> Result<(), String> {
 }
 
 fn completion_items(document: Option<&OpenDocument>, position: Position) -> Value {
-    let prefix = document
+    let mut prefix = document
         .map(|document| completion_prefix(&document.text, position))
         .unwrap_or_default();
     let import_context =
         document.is_some_and(|document| is_import_completion(&document.text, position));
     let sdk = document.and_then(|document| sdk_for_path(&document.path).ok());
+    let cfg_value = document.and_then(|document| cfg_value_completion(&document.text, position));
+    if let Some((value_prefix, _)) = &cfg_value {
+        prefix.clone_from(value_prefix);
+    }
     let mut items = if import_context {
         import_completion_items(sdk.as_ref())
+    } else if let Some((_, values)) = cfg_value {
+        values
     } else {
         standard_completion_items()
     };
@@ -571,6 +577,7 @@ fn completion_items(document: Option<&OpenDocument>, position: Position) -> Valu
             items.push(completion_item(module, 9, "module"));
         }
         if !import_context {
+            items.extend(field_completion_items(document, &prefix, position));
             for symbol in index.symbols.values() {
                 if should_show_symbol_completion(&symbol.label) {
                     items.push(json!({
@@ -601,6 +608,119 @@ fn completion_items(document: Option<&OpenDocument>, position: Position) -> Valu
         .map(|item| completion_text_edit(item, prefix.as_str(), position, import_context))
         .collect::<Vec<_>>();
     json!({ "isIncomplete": true, "items": items })
+}
+
+fn cfg_value_completion(source: &str, position: Position) -> Option<(String, Vec<Value>)> {
+    let line = source.lines().nth(position.line as usize)?;
+    let end = byte_index_for_character(line, position.character as usize);
+    let before = &line[..end];
+    let quote = before.rfind('"')?;
+    let call = before[..quote].trim_end();
+    let name = call
+        .strip_suffix('(')?
+        .trim_end()
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .next_back()?;
+    let values: &[&str] = match name {
+        "target" => DOCUMENTED_TARGETS,
+        "cpu" => &["ez80", "z80", "z80n", "z180", "i8080", "i8085"],
+        "pointer_width" | "address_width" => &["16", "24"],
+        _ => return None,
+    };
+    let prefix = before[quote + 1..].to_owned();
+    Some((
+        prefix,
+        values
+            .iter()
+            .map(|value| completion_item(value, 12, "cfg value"))
+            .collect(),
+    ))
+}
+
+fn field_completion_items(document: &OpenDocument, prefix: &str, position: Position) -> Vec<Value> {
+    let Some(root) = prefix.strip_suffix('.') else {
+        return Vec::new();
+    };
+    let mut recovered = document.text.clone();
+    let program = parse_program(&document.path, &document.text).or_else(|_| {
+        let offset = source_offset(&document.text, position);
+        recovered.insert_str(offset, "__ezra_completion");
+        parse_program(&document.path, &recovered)
+    });
+    let Ok(program) = program else {
+        return Vec::new();
+    };
+    let mut binding_types = BTreeMap::<String, String>::new();
+    for declaration in &program.declarations {
+        if let Declaration::Global(declaration) = declaration {
+            binding_types.insert(declaration.name.clone(), type_text(&declaration.ty));
+        }
+        if let Declaration::Function(function) = declaration {
+            binding_types.extend(
+                function
+                    .params
+                    .iter()
+                    .map(|param| (param.name.clone(), type_text(&param.ty))),
+            );
+            collect_binding_types(&function.body, &mut binding_types);
+        }
+    }
+    let Some(struct_name) = binding_types.get(root) else {
+        return Vec::new();
+    };
+    program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Struct(declaration) if declaration.name == *struct_name => {
+                Some(&declaration.fields)
+            }
+            _ => None,
+        })
+        .into_iter()
+        .flatten()
+        .map(|field| {
+            completion_item(
+                &format!("{root}.{}", field.name),
+                5,
+                &format!("{}: {}", field.name, type_text(&field.ty)),
+            )
+        })
+        .collect()
+}
+
+fn source_offset(source: &str, position: Position) -> usize {
+    let mut offset = 0;
+    for (line_index, line) in source.split_inclusive('\n').enumerate() {
+        if line_index == position.line as usize {
+            let line = line.strip_suffix('\n').unwrap_or(line);
+            return offset + byte_index_for_character(line, position.character as usize);
+        }
+        offset += line.len();
+    }
+    source.len()
+}
+
+fn collect_binding_types(stmts: &[Stmt], output: &mut BTreeMap<String, String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, ty, .. } => {
+                output.insert(name.clone(), type_text(ty));
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_binding_types(then_body, output);
+                collect_binding_types(else_body, output);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_binding_types(body, output);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn completion_text_edit(
@@ -661,6 +781,9 @@ fn standard_completion_items() -> Vec<Value> {
     }
     for ty in PRIMITIVE_TYPES {
         items.push(completion_item(ty, 25, "primitive type"));
+    }
+    for predicate in CFG_PREDICATES {
+        items.push(completion_item(predicate, 3, "cfg predicate"));
     }
     items
 }
@@ -1054,7 +1177,21 @@ fn add_import_definitions(
         let Ok(program) = parse_program(&path, &imported_source) else {
             continue;
         };
+        let Some(definition_path) = navigable_import_path(&path, &imported_source) else {
+            continue;
+        };
         let short = import.rsplit('.').next().unwrap_or(&import);
+        let module_definition = DefinitionInfo {
+            uri: path_to_uri(&definition_path),
+            range: range_for_line(&imported_source, 0),
+        };
+        index
+            .definitions
+            .insert(import.clone(), module_definition.clone());
+        index
+            .definitions
+            .entry(short.to_owned())
+            .or_insert(module_definition);
         for declaration in &program.declarations {
             let Some(symbol) = declaration_symbol(declaration) else {
                 continue;
@@ -1063,7 +1200,7 @@ fn add_import_definitions(
                 continue;
             };
             let definition = DefinitionInfo {
-                uri: path_to_uri(&path),
+                uri: path_to_uri(&definition_path),
                 range,
             };
             index
@@ -1081,6 +1218,21 @@ fn add_import_definitions(
         }
         add_import_definitions(index, &path, &imported_source, sdk, seen);
     }
+}
+
+fn navigable_import_path(path: &Path, source: &str) -> Option<PathBuf> {
+    let Ok(relative) = path.strip_prefix("builtin-sdk") else {
+        return Some(path.to_path_buf());
+    };
+    let cache_path = std::env::temp_dir()
+        .join("ezrac-builtin-sdk")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join(relative);
+    if std::fs::read_to_string(&cache_path).ok().as_deref() != Some(source) {
+        std::fs::create_dir_all(cache_path.parent()?).ok()?;
+        std::fs::write(&cache_path, source).ok()?;
+    }
+    Some(cache_path)
 }
 
 fn source_imports(source: &str) -> Vec<String> {
@@ -1233,6 +1385,16 @@ fn add_builtin_modules(index: &mut SymbolIndex, sdk: Option<&SdkResolver>) {
             index.modules.insert(prefix);
         }
         index.modules.insert(module.to_owned());
+    }
+    for symbol in LAYOUT_SYMBOLS {
+        add_symbol(
+            index,
+            SymbolInfo {
+                label: (*symbol).to_owned(),
+                kind: 21,
+                detail: format!("layout symbol {symbol}"),
+            },
+        );
     }
 }
 
@@ -1663,6 +1825,58 @@ const KEYWORDS: &[&str] = &[
 
 const PRIMITIVE_TYPES: &[&str] = &["u8", "i8", "u16", "i16", "u24", "i24", "ptr", "bytes"];
 
+const CFG_PREDICATES: &[&str] = &[
+    "target",
+    "target_family",
+    "cpu",
+    "vendor",
+    "os",
+    "pointer_width",
+    "address_width",
+    "feature",
+    "debug",
+    "release",
+    "all",
+    "any",
+    "not",
+];
+
+const LAYOUT_SYMBOLS: &[&str] = &[
+    "EZRA_LOAD_ADDR",
+    "EZRA_ENTRY_ADDR",
+    "EZRA_CODE_BASE",
+    "EZRA_STACK_TOP",
+    "EZRA_RAM_BASE",
+    "EZRA_VRAM_BASE",
+    "EZRA_AUDIO_BASE",
+    "EZRA_ASSET_BASE",
+    "EZRA_RODATA_BASE",
+];
+
+const DOCUMENTED_TARGETS: &[&str] = &[
+    "agonlight-mos-ez80",
+    "custom-unknown-ez80",
+    "ez180n-ez80",
+    "ezra-test-flat-ez80",
+    "ezra-test-split-ez80",
+    "ti84plusce-ez80",
+    "ti83premiumce-ez80",
+    "zxspectrum-z80",
+    "ti83-z80",
+    "ti83plus-z80",
+    "ti84-z80",
+    "ti84plus-z80",
+    "cpm-2.2-z80",
+    "cpm-2.2-i8080",
+    "cpm-2.2-i8085",
+    "bare-z80",
+    "bare-z80n",
+    "bare-z180",
+    "bare-i8080",
+    "bare-i8085",
+    "bare-ez80",
+];
+
 #[cfg(test)]
 fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnostic {
     diagnostic_to_lsp_source(&document.text, &document.path, error)
@@ -1848,6 +2062,11 @@ fn uri_to_path(uri: &str) -> Result<PathBuf, String> {
 fn path_to_uri(path: &Path) -> String {
     let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let normalized = absolute.to_string_lossy().replace('\\', "/");
+    let normalized = normalized
+        .strip_prefix("//?/UNC/")
+        .map(|path| format!("//{path}"))
+        .or_else(|| normalized.strip_prefix("//?/").map(str::to_owned))
+        .unwrap_or(normalized);
     let mut encoded = String::with_capacity(normalized.len());
     for byte in normalized.bytes() {
         match byte {
@@ -2105,6 +2324,83 @@ mod tests {
     }
 
     #[test]
+    fn completion_includes_fields_and_cfg_values_during_incomplete_edits() {
+        let field_line = "fn main(player: Player) { player.";
+        let document = OpenDocument {
+            path: PathBuf::from("field-completion.ezra"),
+            text: format!("struct Player {{ x: u8 y: u8 }}\n{field_line}\n}}\n"),
+            version: None,
+        };
+        let fields = completion_items(
+            Some(&document),
+            Position {
+                line: 1,
+                character: utf16_len(field_line),
+            },
+        );
+        let labels = fields["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(labels.contains("player.x"), "{labels:#?}");
+        assert!(labels.contains("player.y"), "{labels:#?}");
+
+        let cfg_line = "@cfg(target(\"agon";
+        let cfg_document = OpenDocument {
+            path: PathBuf::from("cfg-completion.ezra"),
+            text: format!("{cfg_line}\nfn main() {{}}\n"),
+            version: None,
+        };
+        let targets = completion_items(
+            Some(&cfg_document),
+            Position {
+                line: 0,
+                character: utf16_len(cfg_line),
+            },
+        );
+        let agon = targets["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "agonlight-mos-ez80")
+            .unwrap();
+        assert_eq!(agon["textEdit"]["newText"], "agonlight-mos-ez80");
+        assert_eq!(agon["textEdit"]["range"]["start"]["character"], 13);
+    }
+
+    #[test]
+    fn layout_symbols_are_available_for_completion_and_hover() {
+        let line = "fn main() { let address: u24 = EZRA_RAM_BASE }";
+        let document = OpenDocument {
+            path: PathBuf::from("layout-symbol.ezra"),
+            text: format!("{line}\n"),
+            version: None,
+        };
+        let completion = completion_items(
+            Some(&document),
+            Position {
+                line: 0,
+                character: 38,
+            },
+        );
+        assert!(
+            completion["items"]
+                .as_array()
+                .is_some_and(|items| { items.iter().any(|item| item["label"] == "EZRA_RAM_BASE") })
+        );
+        let hover = hover(
+            Some(&document),
+            Position {
+                line: 0,
+                character: 39,
+            },
+        );
+        assert!(hover.to_string().contains("layout symbol EZRA_RAM_BASE"));
+    }
+
+    #[test]
     fn completion_keeps_imported_members_when_control_flow_is_incomplete() {
         let root = std::env::temp_dir().join(format!(
             "ezrac-lsp-incomplete-import-{}",
@@ -2312,6 +2608,54 @@ mod tests {
         assert_eq!(imported["uri"], path_to_uri(&imported_path));
         assert_eq!(imported["range"]["start"]["line"], 0);
         assert_eq!(imported["range"]["start"]["character"], 7);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn definition_materializes_bundled_sdk_sources_for_navigation() {
+        let root =
+            std::env::temp_dir().join(format!("ezrac-lsp-sdk-definition-{}", std::process::id()));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Ezra.toml"),
+            "[build]\ntarget = \"ez180n-ez80\"\n",
+        )
+        .unwrap();
+        let line = "fn main() { ez180n.console.put_char(0, 0, 0) }";
+        let document = OpenDocument {
+            path: root.join("src/main.ezra"),
+            text: format!("import ez180n.console\n{line}\n"),
+            version: None,
+        };
+
+        let result = definition(
+            Some(&document),
+            Position {
+                line: 1,
+                character: 30,
+            },
+        );
+        let path = uri_to_path(result["uri"].as_str().unwrap()).unwrap();
+        assert!(path.exists(), "{}", path.display());
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("pub fn put_char")
+        );
+
+        let module = definition(
+            Some(&document),
+            Position {
+                line: 0,
+                character: 12,
+            },
+        );
+        assert!(
+            uri_to_path(module["uri"].as_str().unwrap())
+                .unwrap()
+                .exists()
+        );
 
         let _ = fs::remove_dir_all(root);
     }
