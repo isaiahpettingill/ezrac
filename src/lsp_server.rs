@@ -8,7 +8,7 @@ use ezra::{
     ast::{Declaration, Expr, Function, Stmt, Type},
     compile::{
         CompileOptions, SdkResolver, builtin_sdk_modules, check_source_diagnostics_with_sdk,
-        parse_and_resolve_imports_with_sdk,
+        parse_and_resolve_imports_with_sdk, resolve_import_source,
     },
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
     parser::parse_program,
@@ -42,6 +42,13 @@ struct SymbolInfo {
 struct SymbolIndex {
     symbols: BTreeMap<String, SymbolInfo>,
     modules: BTreeSet<String>,
+    definitions: BTreeMap<String, DefinitionInfo>,
+}
+
+#[derive(Clone)]
+struct DefinitionInfo {
+    uri: String,
+    range: Range,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +109,18 @@ struct HoverParams {
     #[serde(rename = "textDocument")]
     text_document: TextDocumentIdentifier,
     position: Position,
+}
+
+#[derive(Deserialize)]
+struct DocumentParams {
+    #[serde(rename = "textDocument")]
+    text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceSymbolParams {
+    #[serde(default)]
+    query: String,
 }
 
 #[derive(Deserialize)]
@@ -204,6 +223,49 @@ impl Server {
                     write_response(output, id, result)?;
                 }
             }
+            "textDocument/definition" => {
+                if let Some(id) = message.id {
+                    let params: CompletionParams = serde_json::from_value(message.params)
+                        .map_err(|error| format!("invalid definition params: {error}"))?;
+                    let result = definition(
+                        self.documents.get(&params.text_document.uri),
+                        params.position,
+                    );
+                    write_response(output, id, result)?;
+                }
+            }
+            "textDocument/documentSymbol" => {
+                if let Some(id) = message.id {
+                    let params: DocumentParams = serde_json::from_value(message.params)
+                        .map_err(|error| format!("invalid document symbol params: {error}"))?;
+                    let result = document_symbols(
+                        self.documents.get(&params.text_document.uri),
+                        &params.text_document.uri,
+                    );
+                    write_response(output, id, result)?;
+                }
+            }
+            "workspace/symbol" => {
+                if let Some(id) = message.id {
+                    let params: WorkspaceSymbolParams = serde_json::from_value(message.params)
+                        .map_err(|error| format!("invalid workspace symbol params: {error}"))?;
+                    write_response(output, id, self.workspace_symbols(&params.query))?;
+                }
+            }
+            "textDocument/semanticTokens/full" => {
+                if let Some(id) = message.id {
+                    let params: DocumentParams = serde_json::from_value(message.params)
+                        .map_err(|error| format!("invalid semantic token params: {error}"))?;
+                    let result = semantic_tokens(self.documents.get(&params.text_document.uri));
+                    write_response(output, id, result)?;
+                }
+            }
+            "workspace/didChangeWatchedFiles" => {
+                let uris = self.documents.keys().cloned().collect::<Vec<_>>();
+                for uri in uris {
+                    self.publish_diagnostics(&uri, output)?;
+                }
+            }
             _ => {
                 if let Some(id) = message.id {
                     write_error(output, id, -32601, "method not found")?;
@@ -270,6 +332,23 @@ impl Server {
             }),
         )
     }
+
+    fn workspace_symbols(&self, query: &str) -> Value {
+        let mut symbols = BTreeMap::new();
+        for (uri, document) in &self.documents {
+            for symbol in document_symbol_values(document, uri) {
+                let Some(name) = symbol.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if query.is_empty() || name.contains(query) {
+                    symbols
+                        .entry((uri.clone(), name.to_owned()))
+                        .or_insert(symbol);
+                }
+            }
+        }
+        Value::Array(symbols.into_values().collect())
+    }
 }
 
 fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
@@ -308,6 +387,16 @@ fn initialize_result() -> Value {
             "textDocumentSync": 1,
             "completionProvider": { "triggerCharacters": completion_trigger_characters() },
             "hoverProvider": true,
+            "definitionProvider": true,
+            "documentSymbolProvider": true,
+            "workspaceSymbolProvider": true,
+            "semanticTokensProvider": {
+                "legend": {
+                    "tokenTypes": ["namespace", "type", "function", "variable", "keyword", "number", "string", "comment", "operator"],
+                    "tokenModifiers": []
+                },
+                "full": true
+            },
             "signatureHelpProvider": {
                 "triggerCharacters": ["(", ","],
                 "retriggerCharacters": [","]
@@ -464,6 +553,161 @@ fn hover_markdown(value: &str) -> Value {
     json!({ "contents": { "kind": "markdown", "value": value } })
 }
 
+fn definition(document: Option<&OpenDocument>, position: Position) -> Value {
+    let Some(document) = document else {
+        return Value::Null;
+    };
+    let Some(symbol) = symbol_at_position(&document.text, position) else {
+        return Value::Null;
+    };
+    let index = symbol_index(document);
+    index
+        .definitions
+        .get(&symbol)
+        .map(|definition| {
+            json!({
+                "uri": definition.uri,
+                "range": definition.range,
+            })
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn document_symbols(document: Option<&OpenDocument>, uri: &str) -> Value {
+    document
+        .map(|document| Value::Array(document_symbol_values(document, uri)))
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+fn document_symbol_values(document: &OpenDocument, uri: &str) -> Vec<Value> {
+    let index = symbol_index(document);
+    index
+        .symbols
+        .values()
+        .filter_map(|symbol| {
+            let definition = index.definitions.get(&symbol.label)?;
+            (definition.uri == uri || definition.uri == path_to_uri(&document.path)).then(|| {
+                json!({
+                    "name": symbol.label,
+                    "kind": symbol.kind,
+                    "location": { "uri": uri, "range": definition.range },
+                    "containerName": "EZRA",
+                })
+            })
+        })
+        .collect()
+}
+
+fn semantic_tokens(document: Option<&OpenDocument>) -> Value {
+    let Some(document) = document else {
+        return json!({ "data": [] });
+    };
+    let index = symbol_index(document);
+    let mut tokens = Vec::<(u32, u32, u32, u32)>::new();
+    for (line_index, line) in document.text.lines().enumerate() {
+        collect_line_semantic_tokens(line, line_index as u32, &index, &mut tokens);
+    }
+    let mut data = Vec::with_capacity(tokens.len() * 5);
+    let mut previous_line = 0;
+    let mut previous_start = 0;
+    for (line, start, len, kind) in tokens {
+        let delta_line = line - previous_line;
+        let delta_start = if delta_line == 0 {
+            start - previous_start
+        } else {
+            start
+        };
+        data.extend([delta_line, delta_start, len, kind, 0]);
+        previous_line = line;
+        previous_start = start;
+    }
+    json!({ "data": data })
+}
+
+fn collect_line_semantic_tokens(
+    line: &str,
+    line_index: u32,
+    index: &SymbolIndex,
+    tokens: &mut Vec<(u32, u32, u32, u32)>,
+) {
+    let mut chars = line.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+            tokens.push((
+                line_index,
+                utf16_len(&line[..start]),
+                utf16_len(&line[start..]),
+                7,
+            ));
+            break;
+        }
+        if matches!(ch, '"' | '\'') {
+            let quote = ch;
+            let mut end = start + ch.len_utf8();
+            let mut escaped = false;
+            for (offset, next) in chars.by_ref() {
+                end = offset + next.len_utf8();
+                if escaped {
+                    escaped = false;
+                } else if next == '\\' {
+                    escaped = true;
+                } else if next == quote {
+                    break;
+                }
+            }
+            tokens.push((
+                line_index,
+                utf16_len(&line[..start]),
+                utf16_len(&line[start..end]),
+                6,
+            ));
+            continue;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            let mut end = start + ch.len_utf8();
+            while let Some((offset, next)) = chars.peek().copied() {
+                if !next.is_ascii_alphanumeric() && next != '_' {
+                    break;
+                }
+                chars.next();
+                end = offset + next.len_utf8();
+            }
+            let word = &line[start..end];
+            let kind = if KEYWORDS.contains(&word) {
+                4
+            } else if PRIMITIVE_TYPES.contains(&word) {
+                1
+            } else if word.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+                5
+            } else if index.modules.contains(word) {
+                0
+            } else {
+                index
+                    .symbols
+                    .get(word)
+                    .map_or(3, |symbol| match symbol.kind {
+                        3 => 2,
+                        23 | 25 => 1,
+                        _ => 3,
+                    })
+            };
+            tokens.push((line_index, utf16_len(&line[..start]), utf16_len(word), kind));
+            continue;
+        }
+        if "+-*/%=&|^!<>".contains(ch) {
+            tokens.push((
+                line_index,
+                utf16_len(&line[..start]),
+                ch.len_utf16() as u32,
+                8,
+            ));
+        }
+    }
+}
+
 fn signature_help(document: Option<&OpenDocument>, position: Position) -> Value {
     let Some(document) = document else {
         return Value::Null;
@@ -557,7 +801,15 @@ fn symbol_index(document: &OpenDocument) -> SymbolIndex {
     let mut index = SymbolIndex::default();
     add_builtin_modules(&mut index, sdk.as_ref());
     match parse_program(&document.path, &document.text) {
-        Ok(program) => add_program_symbols(&mut index, &program.declarations),
+        Ok(program) => {
+            add_program_symbols(&mut index, &program.declarations);
+            add_source_definitions(
+                &mut index,
+                &document.path,
+                &document.text,
+                &program.declarations,
+            );
+        }
         Err(_) => add_recovery_symbols(&mut index, &document.text),
     }
     if let Some(sdk) = sdk.as_ref() {
@@ -565,8 +817,155 @@ fn symbol_index(document: &OpenDocument) -> SymbolIndex {
             Ok(program) => add_program_symbols(&mut index, &program.declarations),
             Err(_) => add_recovery_import_symbols(&mut index, document, sdk),
         }
+        add_import_definitions(
+            &mut index,
+            &document.path,
+            &document.text,
+            sdk,
+            &mut BTreeSet::new(),
+        );
     }
     index
+}
+
+fn add_source_definitions(
+    index: &mut SymbolIndex,
+    path: &Path,
+    source: &str,
+    declarations: &[Declaration],
+) {
+    let mut names = BTreeSet::new();
+    collect_definition_names(declarations, &mut names);
+    let uri = path_to_uri(path);
+    for name in names {
+        if let Some(range) = range_for_symbol(source, &name) {
+            index.definitions.insert(
+                name,
+                DefinitionInfo {
+                    uri: uri.clone(),
+                    range,
+                },
+            );
+        }
+    }
+}
+
+fn collect_definition_names(declarations: &[Declaration], names: &mut BTreeSet<String>) {
+    for declaration in declarations {
+        if let Some(symbol) = declaration_symbol(declaration) {
+            names.insert(symbol.label);
+        }
+        if let Declaration::Function(function) = declaration {
+            names.extend(function.params.iter().map(|param| param.name.clone()));
+            collect_stmt_definition_names(&function.body, names);
+        }
+    }
+}
+
+fn collect_stmt_definition_names(stmts: &[Stmt], names: &mut BTreeSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_stmt_definition_names(then_body, names);
+                collect_stmt_definition_names(else_body, names);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_stmt_definition_names(body, names)
+            }
+            Stmt::Asm {
+                inputs, outputs, ..
+            } => {
+                names.extend(inputs.iter().map(|input| input.name.clone()));
+                names.extend(outputs.iter().map(|output| output.name.clone()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn add_import_definitions(
+    index: &mut SymbolIndex,
+    importer: &Path,
+    source: &str,
+    sdk: &SdkResolver,
+    seen: &mut BTreeSet<PathBuf>,
+) {
+    for import in source_imports(source) {
+        let Ok((path, imported_source)) = resolve_import_source(importer, &import, sdk) else {
+            continue;
+        };
+        if path.to_string_lossy().starts_with('<') || !seen.insert(path.clone()) {
+            continue;
+        }
+        let Ok(program) = parse_program(&path, &imported_source) else {
+            continue;
+        };
+        let short = import.rsplit('.').next().unwrap_or(&import);
+        for declaration in &program.declarations {
+            let Some(symbol) = declaration_symbol(declaration) else {
+                continue;
+            };
+            let Some(range) = range_for_symbol(&imported_source, &symbol.label) else {
+                continue;
+            };
+            let definition = DefinitionInfo {
+                uri: path_to_uri(&path),
+                range,
+            };
+            index
+                .definitions
+                .entry(symbol.label.clone())
+                .or_insert_with(|| definition.clone());
+            if declaration_is_public(declaration) {
+                index
+                    .definitions
+                    .insert(format!("{short}.{}", symbol.label), definition.clone());
+                index
+                    .definitions
+                    .insert(format!("{import}.{}", symbol.label), definition);
+            }
+        }
+        add_import_definitions(index, &path, &imported_source, sdk, seen);
+    }
+}
+
+fn source_imports(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let line = line.split("//").next()?.trim();
+            let module = line.strip_prefix("import ")?.trim();
+            let end = module
+                .char_indices()
+                .take_while(|(_, ch)| is_symbol_char(*ch))
+                .last()
+                .map(|(index, ch)| index + ch.len_utf8())?;
+            Some(module[..end].to_owned())
+        })
+        .collect()
+}
+
+fn declaration_is_public(declaration: &Declaration) -> bool {
+    match declaration {
+        Declaration::Cfg { declaration, .. } => declaration_is_public(declaration),
+        Declaration::Import(_) => true,
+        Declaration::Const(decl) => decl.public,
+        Declaration::Alias(decl) => decl.public,
+        Declaration::Port(decl) => decl.public,
+        Declaration::Mmio(decl) => decl.public,
+        Declaration::Embed(decl) => decl.public,
+        Declaration::Global(decl) => decl.public,
+        Declaration::Struct(decl) => decl.public,
+        Declaration::ExternAsmFunction(decl) => decl.public,
+        Declaration::Function(decl) => decl.public,
+    }
 }
 
 fn add_recovery_import_symbols(
@@ -1289,6 +1688,25 @@ fn uri_to_path(uri: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("unsupported file URI `{uri}`"))
 }
 
+fn path_to_uri(path: &Path) -> String {
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let normalized = absolute.to_string_lossy().replace('\\', "/");
+    let mut encoded = String::with_capacity(normalized.len());
+    for byte in normalized.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                encoded.push(char::from(byte))
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    if encoded.starts_with('/') {
+        format!("file://{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1602,5 +2020,94 @@ mod tests {
         );
         assert_eq!(range.start.character, 2);
         assert_eq!(range.end.character, 3);
+    }
+
+    #[test]
+    fn initialize_advertises_navigation_and_semantic_tokens() {
+        let capabilities = &initialize_result()["capabilities"];
+        assert_eq!(capabilities["definitionProvider"], true);
+        assert_eq!(capabilities["documentSymbolProvider"], true);
+        assert_eq!(capabilities["workspaceSymbolProvider"], true);
+        assert_eq!(capabilities["semanticTokensProvider"]["full"], true);
+    }
+
+    #[test]
+    fn definition_finds_local_and_imported_declarations() {
+        let root =
+            std::env::temp_dir().join(format!("ezrac-lsp-definition-{}", std::process::id()));
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(root.join("Ezra.toml"), "[build]\ntarget = \"ez80\"\n").unwrap();
+        let imported_path = root.join("src/lib/math.ezra");
+        fs::write(
+            &imported_path,
+            "pub fn increment(value: u8) -> u8 { return value + 1 }\n",
+        )
+        .unwrap();
+        let source = "import lib.math\nfn helper(value: u8) -> u8 { return value }\nfn main() { helper(lib.math.increment(1)) }\n";
+        let document = OpenDocument {
+            path: root.join("src/main.ezra"),
+            text: source.to_owned(),
+            version: None,
+        };
+
+        let helper = definition(
+            Some(&document),
+            Position {
+                line: 2,
+                character: 14,
+            },
+        );
+        assert_eq!(helper["range"]["start"]["line"], 1);
+        assert_eq!(helper["range"]["start"]["character"], 3);
+
+        let imported = definition(
+            Some(&document),
+            Position {
+                line: 2,
+                character: 25,
+            },
+        );
+        assert_eq!(imported["uri"], path_to_uri(&imported_path));
+        assert_eq!(imported["range"]["start"]["line"], 0);
+        assert_eq!(imported["range"]["start"]["character"], 7);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn symbols_and_semantic_tokens_cover_an_open_document() {
+        let path =
+            std::env::temp_dir().join(format!("ezrac-lsp-symbols-{}.ezra", std::process::id()));
+        let uri = path_to_uri(&path);
+        let document = OpenDocument {
+            path,
+            text: "const LIMIT: u8 = 3\nfn run(value: u8) { let current: u8 = value + LIMIT }\n"
+                .to_owned(),
+            version: None,
+        };
+        let symbols = document_symbols(Some(&document), &uri);
+        let names = symbols
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|symbol| symbol["name"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(names.contains("LIMIT"));
+        assert!(names.contains("run"));
+        assert!(names.contains("value"));
+        assert!(names.contains("current"));
+
+        let data = semantic_tokens(Some(&document))["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert!(!data.is_empty());
+        assert_eq!(data.len() % 5, 0);
+        let kinds = data.iter().skip(3).step_by(5).copied().collect::<Vec<_>>();
+        assert!(kinds.contains(&4));
+        assert!(kinds.contains(&2));
+        assert!(kinds.contains(&5));
     }
 }

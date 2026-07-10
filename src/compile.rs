@@ -445,6 +445,14 @@ pub fn parse_and_resolve_imports_with_sdk(
     resolve_program_imports(root, sdk, &mut stack, &mut seen)
 }
 
+pub fn resolve_import_source(
+    importer: &Path,
+    import: &str,
+    sdk: &SdkResolver,
+) -> Result<(PathBuf, String), Diagnostic> {
+    read_import_source(importer, import, sdk)
+}
+
 fn resolve_program_imports(
     mut program: Program,
     sdk: &SdkResolver,
