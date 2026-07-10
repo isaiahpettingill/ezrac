@@ -31,6 +31,56 @@ pub struct InstructionAnalysis {
     pub effects: InstructionEffects,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionCoverage {
+    pub syntax: String,
+    pub cpu: AssemblerCpu,
+    pub bytes: Vec<u8>,
+    pub effects: InstructionEffects,
+    pub exact_metadata: bool,
+    pub vm_sizing_supported: bool,
+}
+
+const GENERATED_COVERAGE_FORMS: &[&str] = &[
+    "nop",
+    "mov a, b",
+    "mvi a, 7Fh",
+    "lxi h, 1234h",
+    "jmp 1234h",
+    "rim",
+    "sim",
+    "ld b, a",
+    "ld a, 7Fh",
+    "ld hl, 1234h",
+    "ld a, (1234h)",
+    "ld (1234h), a",
+    "ld c, (ix+2)",
+    "ld (iy-1), e",
+    "ld ixh, 12h",
+    "inc c",
+    "inc hl",
+    "add a, c",
+    "add hl, de",
+    "xor 55h",
+    "srl a",
+    "bit 3, (hl)",
+    "set 7, (ix-6)",
+    "in a, (34h)",
+    "out (34h), a",
+    "in0 b, (12h)",
+    "out0 (34h), a",
+    "mlt bc",
+    "nextreg 12h, a",
+    "tstio 34h",
+    "ld hl, 040000h",
+    "ld (040003h), sp",
+    "jp 040000h",
+    "jr .done",
+    "call nz, 040000h",
+    "rst.lis 10h",
+    "out0.lil (0Ch), a",
+];
+
 /// Analyze one source instruction through the same module that owns opcode encoding.
 pub fn analyze_instruction(
     cpu: AssemblerCpu,
@@ -39,6 +89,46 @@ pub fn analyze_instruction(
     Ok(InstructionAnalysis {
         encoded_len: generated_instruction_len(cpu, text)?,
         effects: instruction_effects(text),
+    })
+}
+
+pub fn instruction_coverage(cpu: AssemblerCpu) -> Result<Vec<InstructionCoverage>, Diagnostic> {
+    let mut coverage = Vec::new();
+    for instruction in instruction_set(cpu) {
+        coverage.push(coverage_row(
+            cpu,
+            instruction.syntax,
+            instruction.bytes.to_vec(),
+            true,
+        )?);
+    }
+    for syntax in GENERATED_COVERAGE_FORMS {
+        let Ok(Some(bytes)) = encode_generated_instruction(cpu, syntax) else {
+            continue;
+        };
+        if coverage.iter().any(|row| row.syntax == *syntax) {
+            continue;
+        }
+        coverage.push(coverage_row(cpu, syntax, bytes, false)?);
+    }
+    coverage.sort_by(|left, right| left.syntax.cmp(&right.syntax));
+    Ok(coverage)
+}
+
+fn coverage_row(
+    cpu: AssemblerCpu,
+    syntax: &str,
+    bytes: Vec<u8>,
+    exact_metadata: bool,
+) -> Result<InstructionCoverage, Diagnostic> {
+    let vm_sizing_supported = generated_instruction_len(cpu, syntax)? == Some(bytes.len());
+    Ok(InstructionCoverage {
+        syntax: syntax.to_owned(),
+        cpu,
+        bytes,
+        effects: instruction_effects(syntax),
+        exact_metadata,
+        vm_sizing_supported,
     })
 }
 
@@ -522,6 +612,9 @@ pub fn generated_instruction_len(
     {
         return Ok(Some(len + 1));
     }
+    if let Some(bytes) = encode_generated_instruction(cpu, text)? {
+        return Ok(Some(bytes.len()));
+    }
     if let Some(branch) = branch_instruction(cpu, text) {
         return Ok(Some(branch.encoded_len()));
     }
@@ -531,7 +624,7 @@ pub fn generated_instruction_len(
     if let Some(load) = imm24_load_instruction(cpu, text) {
         return Ok(Some(load.encoded_len()));
     }
-    Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()))
+    Ok(None)
 }
 
 fn asm_line_uses_ports(line: &str) -> bool {
@@ -808,9 +901,13 @@ pub fn branch_instruction<'a>(cpu: AssemblerCpu, text: &'a str) -> Option<Branch
     }
     for (prefix, opcode) in ABSOLUTE_BRANCH_FORMS {
         if let Some(target) = text.strip_prefix(prefix) {
+            let target = target.trim();
+            if target.starts_with('(') {
+                continue;
+            }
             return Some(BranchInstruction {
                 opcode: *opcode,
-                target: target.trim(),
+                target,
                 width: if cpu == AssemblerCpu::Ez80 {
                     BranchWidth::Absolute24
                 } else {
@@ -2393,5 +2490,30 @@ mod tests {
         let comment = instruction_effects("nop ; ix and out are only words in a comment");
         assert!(comment.referenced_special_registers.is_empty());
         assert!(!comment.uses_ports);
+    }
+
+    #[test]
+    fn machine_readable_coverage_agrees_with_encoding_and_vm_sizing() {
+        for cpu in [
+            AssemblerCpu::I8080,
+            AssemblerCpu::I8085,
+            AssemblerCpu::Z80,
+            AssemblerCpu::Z80N,
+            AssemblerCpu::Z180,
+            AssemblerCpu::Ez80,
+        ] {
+            let coverage = instruction_coverage(cpu).unwrap();
+            assert!(!coverage.is_empty(), "{cpu:?}");
+            for row in coverage {
+                assert!(row.vm_sizing_supported, "{cpu:?}: {}", row.syntax);
+                assert_eq!(
+                    encode_generated_instruction(cpu, &row.syntax).unwrap(),
+                    Some(row.bytes.clone()),
+                    "{cpu:?}: {}",
+                    row.syntax
+                );
+                assert_eq!(row.effects, instruction_effects(&row.syntax));
+            }
+        }
     }
 }

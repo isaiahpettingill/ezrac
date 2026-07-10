@@ -30,8 +30,9 @@ Priority 2: close common eZ80/Z80 gaps.
 
 Priority 3: make coverage auditable.
 
-- A generated opcode table test suite cross-checking all accepted mnemonics against UM0077 encodings.
-- A machine-readable coverage table that distinguishes accepted syntax, emitted bytes, VM execution support, and inline-asm clobber inference.
+- `instruction_coverage(cpu)` now exposes machine-readable rows containing accepted syntax, emitted bytes, CPU mode, exact/generated provenance, VM sizing support, and inline-assembly effects.
+- The generated coverage test checks every exposed row against the encoder, VM sizing path, and clobber/effect analyzer for all six supported CPU modes.
+- Expand the concrete generated-form corpus until it exhaustively cross-checks all accepted UM0077 operand combinations, not only the currently documented representative forms.
 - Golden tests for standalone `ezra assemble` inputs used by examples and target SDKs.
 
 Longer-term direction:
