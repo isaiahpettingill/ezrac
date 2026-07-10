@@ -15,6 +15,49 @@ pub struct InstructionSpec {
     pub bytes: &'static [u8],
 }
 
+/// Architecture metadata shared by assembly sizing, validation, and inline-asm codegen.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InstructionEffects {
+    pub modified_registers: Vec<&'static str>,
+    pub referenced_special_registers: Vec<&'static str>,
+    pub changes_flags: bool,
+    pub uses_memory: bool,
+    pub uses_ports: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionAnalysis {
+    pub encoded_len: Option<usize>,
+    pub effects: InstructionEffects,
+}
+
+/// Analyze one source instruction through the same module that owns opcode encoding.
+pub fn analyze_instruction(
+    cpu: AssemblerCpu,
+    text: &str,
+) -> Result<InstructionAnalysis, Diagnostic> {
+    Ok(InstructionAnalysis {
+        encoded_len: generated_instruction_len(cpu, text)?,
+        effects: instruction_effects(text),
+    })
+}
+
+pub fn instruction_effects(line: &str) -> InstructionEffects {
+    let lower = line.to_ascii_lowercase();
+    let lower = lower.split(';').next().unwrap_or_default();
+    let mut effects = InstructionEffects::default();
+    for register in ["ix", "iy", "sp"] {
+        if asm_line_mentions_word(lower, register) {
+            effects.referenced_special_registers.push(register);
+        }
+    }
+    effects.uses_ports = asm_line_uses_ports(lower);
+    effects.uses_memory = asm_line_uses_memory(lower);
+    effects.modified_registers = asm_line_modified_registers(lower);
+    effects.changes_flags = asm_line_clobbers_flags(lower);
+    effects
+}
+
 const Z80_PLUS: &[AssemblerCpu] = &[
     AssemblerCpu::Z80,
     AssemblerCpu::Z80N,
@@ -222,11 +265,11 @@ pub fn encode_generated_instruction(
     if !cpu.supports_z80_syntax() {
         return Ok(None);
     }
-    if let Some((prefix, base)) = ez80_mode_suffixed_instruction(cpu, text) {
-        if let Some(mut bytes) = encode_generated_instruction(cpu, &base)? {
-            bytes.insert(0, prefix);
-            return Ok(Some(bytes));
-        }
+    if let Some((prefix, base)) = ez80_mode_suffixed_instruction(cpu, text)
+        && let Some(mut bytes) = encode_generated_instruction(cpu, &base)?
+    {
+        bytes.insert(0, prefix);
+        return Ok(Some(bytes));
     }
     if let Some(instruction) = exact_instruction(cpu, text) {
         return Ok(Some(instruction.bytes.to_vec()));
@@ -256,15 +299,17 @@ pub fn encode_generated_instruction(
         if let (Some(dst), Some(src)) = (parse_hl_indirect(dst), reg8_code(src)) {
             return Ok(Some(vec![0x40 + dst * 8 + src]));
         }
-        if let Some(dst) = parse_hl_indirect(dst) {
-            if reg8_code(src).is_none() && !src.starts_with('(') {
-                return Ok(Some(vec![0x06 + dst * 8, parse_u8(src)?]));
-            }
+        if let Some(dst) = parse_hl_indirect(dst)
+            && reg8_code(src).is_none()
+            && !src.starts_with('(')
+        {
+            return Ok(Some(vec![0x06 + dst * 8, parse_u8(src)?]));
         }
-        if let Some(dst) = reg8_code(dst) {
-            if reg8_code(src).is_none() && is_numeric_literal(src) {
-                return Ok(Some(vec![ld_reg8_imm_opcode(dst), parse_u8(src)?]));
-            }
+        if let Some(dst) = reg8_code(dst)
+            && reg8_code(src).is_none()
+            && is_numeric_literal(src)
+        {
+            return Ok(Some(vec![ld_reg8_imm_opcode(dst), parse_u8(src)?]));
         }
     }
     if let Some((inc, register)) = parse_inc_dec_reg8(text) {
@@ -468,25 +513,243 @@ pub fn generated_instruction_len(
 ) -> Result<Option<usize>, Diagnostic> {
     if matches!(cpu, AssemblerCpu::I8080 | AssemblerCpu::I8085) {
         if let Some(branch) = branch_instruction(cpu, text) {
-            return Ok(Some(branch.len()));
+            return Ok(Some(branch.encoded_len()));
         }
         return Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()));
     }
-    if let Some((_prefix, base)) = ez80_mode_suffixed_instruction(cpu, text) {
-        if let Some(len) = generated_instruction_len(cpu, &base)? {
-            return Ok(Some(len + 1));
-        }
+    if let Some((_prefix, base)) = ez80_mode_suffixed_instruction(cpu, text)
+        && let Some(len) = generated_instruction_len(cpu, &base)?
+    {
+        return Ok(Some(len + 1));
     }
     if let Some(branch) = branch_instruction(cpu, text) {
-        return Ok(Some(branch.len()));
+        return Ok(Some(branch.encoded_len()));
     }
     if let Some(direct) = direct24_instruction(cpu, text) {
-        return Ok(Some(direct.len()));
+        return Ok(Some(direct.encoded_len()));
     }
     if let Some(load) = imm24_load_instruction(cpu, text) {
-        return Ok(Some(load.len()));
+        return Ok(Some(load.encoded_len()));
     }
     Ok(encode_generated_instruction(cpu, text)?.map(|bytes| bytes.len()))
+}
+
+fn asm_line_uses_ports(line: &str) -> bool {
+    let mnemonic_uses_ports = asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, _)| {
+        let mnemonic = asm_base_mnemonic(mnemonic);
+        matches!(
+            mnemonic,
+            "ini" | "inir" | "ind" | "indr" | "outi" | "otir" | "outd" | "otdr"
+        )
+    });
+    mnemonic_uses_ports
+        || asm_line_mentions_word(line, "out")
+        || asm_line_mentions_word(line, "out0")
+        || asm_line_mentions_word(line, "in")
+        || asm_line_mentions_word(line, "in0")
+}
+
+fn asm_line_uses_memory(line: &str) -> bool {
+    asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, operands)| {
+        let mnemonic = asm_base_mnemonic(mnemonic);
+        matches!(
+            mnemonic,
+            "ldi"
+                | "ldir"
+                | "ldd"
+                | "lddr"
+                | "cpi"
+                | "cpir"
+                | "cpd"
+                | "cpdr"
+                | "ini"
+                | "inir"
+                | "ind"
+                | "indr"
+                | "outi"
+                | "otir"
+                | "outd"
+                | "otdr"
+        ) || (mnemonic == "ld" && operands.contains('('))
+    })
+}
+
+fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
+    let Some((raw_mnemonic, operands)) = asm_line_mnemonic_and_operands(line) else {
+        return Vec::new();
+    };
+    let mnemonic = asm_base_mnemonic(raw_mnemonic);
+    let first = asm_first_operand(operands);
+    match mnemonic {
+        "ld" | "lea" | "in" | "in0" => asm_operand_register(first).into_iter().collect(),
+        "push" => vec!["sp"],
+        "pop" => {
+            let mut registers: Vec<_> = asm_operand_register(first).into_iter().collect();
+            registers.push("sp");
+            registers
+        }
+        "inc" | "dec" | "rl" | "rlc" | "rr" | "rrc" | "sla" | "sra" | "srl" => {
+            asm_operand_register(first).into_iter().collect()
+        }
+        "add" | "adc" | "sbc" => match asm_operand_register(first) {
+            Some(register) => vec![register],
+            None => vec!["a"],
+        },
+        "sub" | "and" | "or" | "xor" | "cpl" | "daa" | "neg" | "rla" | "rlca" | "rra" | "rrca" => {
+            vec!["a"]
+        }
+        "res" | "set" => asm_second_operand(operands)
+            .and_then(asm_operand_register)
+            .into_iter()
+            .collect(),
+        "ex" => operands
+            .split(',')
+            .filter_map(asm_operand_register)
+            .collect(),
+        "exx" => vec!["bc", "de", "hl"],
+        "call" => vec!["af", "bc", "de", "hl"],
+        // Mode-suffixed restart services have service-specific ABIs. Their
+        // explicit clobber list is authoritative; the opcode cannot infer it.
+        "rst" if raw_mnemonic.contains('.') => Vec::new(),
+        "rst" => vec!["af", "bc", "de", "hl"],
+        "ldi" | "ldir" | "ldd" | "lddr" => vec!["bc", "de", "hl"],
+        "cpi" | "cpir" | "cpd" | "cpdr" => vec!["bc", "hl"],
+        "ini" | "inir" | "ind" | "indr" | "outi" | "otir" | "outd" | "otdr" => {
+            vec!["bc", "hl"]
+        }
+        "mlt" => asm_operand_register(first).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn asm_line_clobbers_flags(line: &str) -> bool {
+    let Some((mnemonic, _)) = asm_line_mnemonic_and_operands(line) else {
+        return false;
+    };
+    let mnemonic = asm_base_mnemonic(mnemonic);
+    matches!(
+        mnemonic,
+        "adc"
+            | "add"
+            | "and"
+            | "bit"
+            | "ccf"
+            | "cp"
+            | "cpl"
+            | "daa"
+            | "dec"
+            | "inc"
+            | "neg"
+            | "or"
+            | "rl"
+            | "rla"
+            | "rlc"
+            | "rlca"
+            | "rr"
+            | "rra"
+            | "rrc"
+            | "rrca"
+            | "sbc"
+            | "scf"
+            | "sla"
+            | "sra"
+            | "srl"
+            | "sub"
+            | "xor"
+            | "ldi"
+            | "ldir"
+            | "ldd"
+            | "lddr"
+            | "cpi"
+            | "cpir"
+            | "cpd"
+            | "cpdr"
+            | "ini"
+            | "inir"
+            | "ind"
+            | "indr"
+            | "outi"
+            | "otir"
+            | "outd"
+            | "otdr"
+    )
+}
+
+fn asm_line_mnemonic_and_operands(line: &str) -> Option<(&str, &str)> {
+    let mut text = line.split(';').next().unwrap_or_default().trim_start();
+    if let Some((label, rest)) = text.split_once(':')
+        && !label.chars().any(char::is_whitespace)
+    {
+        text = rest.trim_start();
+    }
+    let mnemonic_end = text
+        .find(|ch: char| ch.is_ascii_whitespace())
+        .unwrap_or(text.len());
+    if mnemonic_end == 0 {
+        return None;
+    }
+    Some((&text[..mnemonic_end], text[mnemonic_end..].trim_start()))
+}
+
+fn asm_base_mnemonic(mnemonic: &str) -> &str {
+    mnemonic
+        .rsplit_once('.')
+        .map(|(base, _)| base)
+        .unwrap_or(mnemonic)
+}
+
+fn asm_first_operand(operands: &str) -> &str {
+    operands
+        .split_once(',')
+        .map(|(first, _)| first)
+        .unwrap_or(operands)
+        .trim()
+}
+
+fn asm_second_operand(operands: &str) -> Option<&str> {
+    operands.split_once(',').map(|(_, second)| second.trim())
+}
+
+fn asm_operand_register(operand: &str) -> Option<&'static str> {
+    match operand
+        .trim()
+        .trim_end_matches(',')
+        .trim_end_matches(':')
+        .trim()
+    {
+        "a" => Some("a"),
+        "f" => Some("f"),
+        "af" => Some("af"),
+        "b" => Some("b"),
+        "c" => Some("c"),
+        "bc" => Some("bc"),
+        "d" => Some("d"),
+        "e" => Some("e"),
+        "de" => Some("de"),
+        "h" => Some("h"),
+        "l" => Some("l"),
+        "hl" => Some("hl"),
+        "ix" => Some("ix"),
+        "iy" => Some("iy"),
+        "sp" => Some("sp"),
+        _ => None,
+    }
+}
+
+fn asm_line_mentions_word(line: &str, word: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = line[start..].find(word) {
+        let index = start + offset;
+        let before = line[..index].chars().next_back();
+        let after = line[index + word.len()..].chars().next();
+        let is_word =
+            |ch: Option<char>| matches!(ch, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_');
+        if !is_word(before) && !is_word(after) {
+            return true;
+        }
+        start = index + word.len();
+    }
+    false
 }
 
 pub fn ez80_mode_suffixed_instruction(cpu: AssemblerCpu, text: &str) -> Option<(u8, String)> {
@@ -527,7 +790,7 @@ pub enum BranchWidth {
 }
 
 impl BranchInstruction<'_> {
-    pub const fn len(self) -> usize {
+    pub const fn encoded_len(self) -> usize {
         match self.width {
             BranchWidth::Relative8 => 2,
             BranchWidth::Absolute16 => 3,
@@ -575,7 +838,7 @@ pub struct Imm24LoadInstruction<'a> {
 }
 
 impl Imm24LoadInstruction<'_> {
-    pub const fn len(self) -> usize {
+    pub const fn encoded_len(self) -> usize {
         self.prefix.len() + 3
     }
 }
@@ -609,7 +872,7 @@ pub struct Direct24Instruction<'a> {
 }
 
 impl Direct24Instruction<'_> {
-    pub const fn len(self) -> usize {
+    pub const fn encoded_len(self) -> usize {
         self.prefix.len() + 3
     }
 }
@@ -1004,10 +1267,11 @@ fn parse_index_instruction(text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
         if let (Some((prefix, offset)), Some(src)) = (parse_index_indirect(dst)?, reg8_code(src)) {
             return Ok(Some(vec![prefix, 0x70 + src, offset]));
         }
-        if let Some((prefix, offset)) = parse_index_indirect(dst)? {
-            if reg8_code(src).is_none() && parse_index_indirect(src)?.is_none() {
-                return Ok(Some(vec![prefix, 0x36, offset, parse_u8(src)?]));
-            }
+        if let Some((prefix, offset)) = parse_index_indirect(dst)?
+            && reg8_code(src).is_none()
+            && parse_index_indirect(src)?.is_none()
+        {
+            return Ok(Some(vec![prefix, 0x36, offset, parse_u8(src)?]));
         }
     }
     if let Some((inc, operand)) = parse_inc_dec_operand(text) {
@@ -2096,11 +2360,38 @@ mod tests {
         let call = branch_instruction(AssemblerCpu::Ez80, "call nz, _main").unwrap();
         assert_eq!(call.opcode, 0xC4);
         assert_eq!(call.target, "_main");
-        assert_eq!(call.len(), 4);
+        assert_eq!(call.encoded_len(), 4);
 
         let jr = branch_instruction(AssemblerCpu::Ez80, "jr z, .done").unwrap();
         assert_eq!(jr.opcode, 0x28);
         assert_eq!(jr.target, ".done");
-        assert_eq!(jr.len(), 2);
+        assert_eq!(jr.encoded_len(), 2);
+    }
+
+    #[test]
+    fn instruction_analysis_unifies_encoding_and_codegen_effects() {
+        let out = analyze_instruction(AssemblerCpu::Ez80, "out0 (0Ch), a").unwrap();
+        assert_eq!(out.encoded_len, Some(3));
+        assert!(out.effects.uses_ports);
+        assert!(!out.effects.uses_memory);
+
+        let block = analyze_instruction(AssemblerCpu::Ez80, "ldir").unwrap();
+        assert_eq!(block.encoded_len, Some(2));
+        assert!(block.effects.uses_memory);
+        assert!(block.effects.changes_flags);
+        assert_eq!(block.effects.modified_registers, ["bc", "de", "hl"]);
+
+        let indexed = analyze_instruction(AssemblerCpu::Ez80, "ld a, (ix+2)").unwrap();
+        assert_eq!(indexed.encoded_len, Some(3));
+        assert_eq!(indexed.effects.referenced_special_registers, ["ix"]);
+        assert_eq!(indexed.effects.modified_registers, ["a"]);
+
+        let suffixed = analyze_instruction(AssemblerCpu::Ez80, "out0.lil (0Ch), a").unwrap();
+        assert_eq!(suffixed.encoded_len, Some(4));
+        assert!(suffixed.effects.uses_ports);
+
+        let comment = instruction_effects("nop ; ix and out are only words in a comment");
+        assert!(comment.referenced_special_registers.is_empty());
+        assert!(!comment.uses_ports);
     }
 }

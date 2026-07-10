@@ -10,7 +10,7 @@ use crate::{
         Function, GlobalDecl, MmioDecl, Param, Place, PortDecl, Program, Stmt, StructDecl, Type,
         UnaryOp,
     },
-    diagnostic::{Diagnostic, SourceLocation},
+    diagnostic::{Diagnostic, SourcePosition, SourceSpan},
 };
 
 #[derive(Parser)]
@@ -18,6 +18,7 @@ use crate::{
 struct EzraParser;
 
 pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
+    let original_source = source;
     let normalized;
     let source = if needs_implicit_deref_assignment_separators(source) {
         normalized = insert_implicit_deref_assignment_separators(source);
@@ -34,12 +35,13 @@ pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
         .into_inner()
         .filter(|pair| pair.as_rule() != Rule::EOI)
         .map(|pair| {
-            let location = pair_location(file, &pair);
-            build_decl(pair).map_err(|error| error.with_location_if_missing(location))
+            let span = pair_span(file, &pair);
+            build_decl(pair).map_err(|error| error.with_span_if_missing(span))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Program {
         source_path: file.to_path_buf(),
+        source_text: Some(original_source.to_owned()),
         declarations,
     })
 }
@@ -1078,32 +1080,42 @@ fn parse_escaped(text: &str) -> Result<String, Diagnostic> {
 }
 
 fn pest_error(file: &Path, error: pest::error::Error<Rule>) -> Diagnostic {
-    let (line, column) = match error.line_col {
-        pest::error::LineColLocation::Pos((line, column)) => (line, column),
-        pest::error::LineColLocation::Span((line, column), _) => (line, column),
+    let ((line, column), (end_line, end_column)) = match error.line_col {
+        pest::error::LineColLocation::Pos((line, column)) => {
+            ((line, column), (line, column.saturating_add(1)))
+        }
+        pest::error::LineColLocation::Span(start, end) => (start, end),
     };
-    Diagnostic::at(
-        SourceLocation {
+    Diagnostic::at_span(
+        SourceSpan {
             file: file.to_path_buf(),
-            line,
-            column,
+            start: SourcePosition { line, column },
+            end: SourcePosition {
+                line: end_line,
+                column: end_column,
+            },
         },
         error.to_string(),
     )
 }
 
-fn pair_location(file: &Path, pair: &Pair<'_, Rule>) -> SourceLocation {
+fn pair_span(file: &Path, pair: &Pair<'_, Rule>) -> SourceSpan {
     let (line, column) = pair.as_span().start_pos().line_col();
-    SourceLocation {
+    let (end_line, end_column) = pair.as_span().end_pos().line_col();
+    SourceSpan {
         file: file.to_path_buf(),
-        line,
-        column,
+        start: SourcePosition { line, column },
+        end: SourcePosition {
+            line: end_line,
+            column: end_column,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostic::SourceLocation;
 
     #[test]
     fn parses_main_with_out() {
@@ -1479,7 +1491,7 @@ mod tests {
 
         assert_eq!(error.message, "unknown escape `\\q`");
         assert_eq!(
-            error.location,
+            error.location(),
             Some(SourceLocation {
                 file: Path::new("game.ezra").to_path_buf(),
                 line: 1,
@@ -1498,7 +1510,7 @@ mod tests {
             "character literal must contain exactly one byte"
         );
         assert_eq!(
-            error.location,
+            error.location(),
             Some(SourceLocation {
                 file: Path::new("game.ezra").to_path_buf(),
                 line: 1,

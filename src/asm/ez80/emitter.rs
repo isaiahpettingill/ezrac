@@ -5,15 +5,17 @@ use std::{
 };
 
 use crate::{
+    asm::ez80::analyze_instruction,
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl,
         Function, Place, Program, Stmt, Type, UnaryOp,
     },
-    diagnostic::Diagnostic,
+    diagnostic::{Diagnostic, diagnostic_span},
     hir::HirProgram,
     target::{
-        Address24, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
-        EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
+        Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE,
+        EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP,
+        EZRA_VRAM_BASE,
     },
     tbir::TbirProgram,
 };
@@ -81,8 +83,23 @@ pub fn emit_ez80_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
-    let checked = CheckedEz80Program::from_program(program, &options)?;
-    emit_ez80_assembly_from_checked(program, &checked, options)
+    let result = (|| {
+        let checked = CheckedEz80Program::from_program(program, &options)?;
+        emit_ez80_assembly_from_checked(program, &checked, options)
+    })();
+    result.map_err(|error| locate_program_diagnostic(program, error))
+}
+
+fn locate_program_diagnostic(program: &Program, error: Diagnostic) -> Diagnostic {
+    if error.location().is_some() {
+        return error;
+    }
+    program
+        .source_text
+        .as_deref()
+        .and_then(|source| diagnostic_span(&program.source_path, source, &error.message))
+        .map(|span| error.clone().with_span_if_missing(span))
+        .unwrap_or(error)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,10 +145,8 @@ pub fn emit_ez80_assembly_from_checked(
         let Declaration::Function(function) = declaration else {
             continue;
         };
-        if function.name != "main" {
-            if emitted_functions.contains(&function.name) {
-                emitter.emit_function(function)?;
-            }
+        if function.name != "main" && emitted_functions.contains(&function.name) {
+            emitter.emit_function(function)?;
         }
     }
     emitter.emit_required_sections();
@@ -389,10 +404,10 @@ fn translate_8080_ld(dst: &str, src: &str) -> Result<String, Diagnostic> {
             return Ok(format!("shld {dst}"));
         }
     }
-    if let Some(src) = unwrap_asm_indirect(src) {
-        if dst == "hl" {
-            return Ok(format!("lhld {src}"));
-        }
+    if let Some(src) = unwrap_asm_indirect(src)
+        && dst == "hl"
+    {
+        return Ok(format!("lhld {src}"));
     }
     if dst == "(bc)" && src == "a" {
         return Ok("stax b".to_owned());
@@ -880,12 +895,12 @@ impl Symbols {
                     is_interrupt,
                 },
             );
-            if let Declaration::Function(function) = declaration {
-                if is_inlinable_function(function) {
-                    symbols
-                        .inline_functions
-                        .insert(function.name.clone(), function.clone());
-                }
+            if let Declaration::Function(function) = declaration
+                && is_inlinable_function(function)
+            {
+                symbols
+                    .inline_functions
+                    .insert(function.name.clone(), function.clone());
             }
         }
 
@@ -1212,15 +1227,15 @@ impl Symbols {
                 decl.name
             ))
         })?;
-        if let Some(original) = module_alias_original_name(&decl.name) {
-            if let Some(embed) = self.embeds.get(original).cloned() {
-                self.register_embed_properties(
-                    &decl.name,
-                    embed.variable,
-                    embed.variable.len.unwrap_or(0),
-                );
-                return Ok(());
-            }
+        if let Some(original) = module_alias_original_name(&decl.name)
+            && let Some(embed) = self.embeds.get(original).cloned()
+        {
+            self.register_embed_properties(
+                &decl.name,
+                embed.variable,
+                embed.variable.len.unwrap_or(0),
+            );
+            return Ok(());
         }
         let bytes = self.embed_bytes(&decl.source, &program.source_path)?;
         let len = u32::try_from(bytes.len())
@@ -1249,14 +1264,14 @@ impl Symbols {
         decl: &crate::ast::GlobalDecl,
         program: &Program,
     ) -> Result<(), Diagnostic> {
-        if let Some(original) = module_alias_original_name(&decl.name) {
-            if let Some(variable) = self.globals.get(original).copied() {
-                self.globals.insert(decl.name.clone(), variable);
-                if let Some(ty) = self.global_types.get(original).cloned() {
-                    self.global_types.insert(decl.name.clone(), ty);
-                }
-                return Ok(());
+        if let Some(original) = module_alias_original_name(&decl.name)
+            && let Some(variable) = self.globals.get(original).copied()
+        {
+            self.globals.insert(decl.name.clone(), variable);
+            if let Some(ty) = self.global_types.get(original).cloned() {
+                self.global_types.insert(decl.name.clone(), ty);
             }
+            return Ok(());
         }
         self.ensure_type_const_dependencies_evaluated(&decl.ty, program)?;
         let variable = self.alloc_storage(&decl.ty)?;
@@ -1401,7 +1416,7 @@ impl Symbols {
                     field.name
                 )));
             }
-            offset += u32::from(size);
+            offset += size;
         }
         Ok(StructLayout {
             size: offset,
@@ -3076,15 +3091,15 @@ impl Emitter {
                 else_body,
             } => {
                 self.ensure_expr_is_bool(condition, "if condition")?;
-                if self.eliminate_dead_code {
-                    if let Ok(value) = self.eval_i64_with_local_constants(condition) {
-                        if value == 0 {
-                            self.emit_block(else_body)?;
-                        } else {
-                            self.emit_block(then_body)?;
-                        }
-                        return Ok(());
+                if self.eliminate_dead_code
+                    && let Ok(value) = self.eval_i64_with_local_constants(condition)
+                {
+                    if value == 0 {
+                        self.emit_block(else_body)?;
+                    } else {
+                        self.emit_block(then_body)?;
                     }
+                    return Ok(());
                 }
                 let else_label = self.next_label("else");
                 let end_label = self.next_label("endif");
@@ -3100,13 +3115,13 @@ impl Emitter {
             Stmt::While { condition, body } => {
                 self.ensure_expr_is_bool(condition, "while condition")?;
                 let mut condition_is_always_true = false;
-                if self.eliminate_dead_code {
-                    if let Ok(value) = self.eval_i64_with_local_constants(condition) {
-                        if value == 0 {
-                            return Ok(());
-                        }
-                        condition_is_always_true = true;
+                if self.eliminate_dead_code
+                    && let Ok(value) = self.eval_i64_with_local_constants(condition)
+                {
+                    if value == 0 {
+                        return Ok(());
                     }
+                    condition_is_always_true = true;
                 }
                 let start_label = self.next_label("while");
                 let end_label = self.next_label("endwhile");
@@ -3247,16 +3262,24 @@ impl Emitter {
         if !clobbers.is_empty() {
             self.line(&format!("    ; clobber {}", clobbers.join(", ")));
         }
-        if inputs.iter().any(|input| input.class == "mem")
-            || outputs.iter().any(|output| output.class == "mem")
+        if (inputs.iter().any(|input| input.class == "mem")
+            || outputs.iter().any(|output| output.class == "mem"))
+            && !asm_clobbers_include(clobbers, "memory")
         {
-            if !asm_clobbers_include(clobbers, "memory") {
-                return Err(Diagnostic::new(
-                    "inline asm uses memory without declaring clobber `memory`",
-                ));
-            }
+            return Err(Diagnostic::new(
+                "inline asm uses memory without declaring clobber `memory`",
+            ));
         }
-        validate_inline_asm_clobbers(clobbers, lines, self.current_function_is_naked())?;
+        let substituted_lines = lines
+            .iter()
+            .map(|line| substitute_inline_asm_operands(line, &operands))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_inline_asm_clobbers(
+            clobbers,
+            &substituted_lines,
+            self.current_function_is_naked(),
+            self.cpu.into(),
+        )?;
 
         for input in inputs {
             self.emit_inline_asm_input_load(input)?;
@@ -3269,11 +3292,8 @@ impl Emitter {
         if preserve_iy {
             self.line("    push iy");
         }
-        for line in lines {
-            self.line(&format!(
-                "    {}",
-                substitute_inline_asm_operands(line, &operands)?
-            ));
+        for line in &substituted_lines {
+            self.line(&format!("    {line}"));
         }
         if preserve_iy {
             self.line("    pop iy");
@@ -3853,13 +3873,13 @@ impl Emitter {
                 self.invalidate_readonly_pointer_alias(name);
                 let variable = self.variable(name)?;
                 let ty = self.variable_type(name).cloned();
-                if op == AssignOp::Set {
-                    if let Some(ty) = ty.as_ref() {
-                        self.emit_storage_initializer(variable, ty, value)?;
-                        self.record_local_constant(name, ty, value);
-                        self.record_readonly_pointer_alias(name, value);
-                        return Ok(());
-                    }
+                if op == AssignOp::Set
+                    && let Some(ty) = ty.as_ref()
+                {
+                    self.emit_storage_initializer(variable, ty, value)?;
+                    self.record_local_constant(name, ty, value);
+                    self.record_readonly_pointer_alias(name, value);
+                    return Ok(());
                 }
                 let signed = self
                     .variable_type(name)
@@ -3932,7 +3952,7 @@ impl Emitter {
             )));
         }
         for index in 0..len {
-            let element_addr = variable.addr + index * u32::from(element_size);
+            let element_addr = variable.addr + index * element_size;
             let element = self.symbols.storage_at(element_addr, &element_ty)?;
             if let Some(value) = values.get(index as usize) {
                 self.validate_expr_assignable_to_type(value, &element_ty)?;
@@ -4031,10 +4051,10 @@ impl Emitter {
             }
             _ => {
                 let width = variable.width()?;
-                if width == ValueWidth::U24 {
-                    if let Ok(value) = self.eval_i64_with_local_constants(value) {
-                        self.validate_value_width_for_target((value as u32) & 0xFF_FFFF, width)?;
-                    }
+                if width == ValueWidth::U24
+                    && let Ok(value) = self.eval_i64_with_local_constants(value)
+                {
+                    self.validate_value_width_for_target((value as u32) & 0xFF_FFFF, width)?;
                 }
                 self.emit_expr_to_width(value, width)?;
                 self.emit_store_width(variable);
@@ -4308,23 +4328,22 @@ impl Emitter {
             temps.push(temp);
         }
 
-        if let Some(function) = self.symbols.inline_functions.get(name).cloned() {
-            if !self
+        if let Some(function) = self.symbols.inline_functions.get(name).cloned()
+            && !self
                 .inline_expansion_stack
                 .iter()
                 .any(|inline| inline == name)
-            {
-                self.inline_expansion_stack.push(name.to_owned());
-                let inlined = (|| {
-                    if self.emit_inline_return_call(&function, &temps)? {
-                        return Ok(true);
-                    }
-                    self.emit_inline_void_call(&function, &temps)
-                })();
-                self.inline_expansion_stack.pop();
-                if inlined? {
-                    return Ok(());
+        {
+            self.inline_expansion_stack.push(name.to_owned());
+            let inlined = (|| {
+                if self.emit_inline_return_call(&function, &temps)? {
+                    return Ok(true);
                 }
+                self.emit_inline_void_call(&function, &temps)
+            })();
+            self.inline_expansion_stack.pop();
+            if inlined? {
+                return Ok(());
             }
         }
         let saved_variables = self.recursive_call_saved_variables(name);
@@ -4543,17 +4562,15 @@ impl Emitter {
             self.emit_cast_to_type(expr, ty)?;
             return Ok(());
         }
-        if !self.is_pointer_arithmetic_expr(expr)? {
-            if let Ok(value) = self.eval_i64_with_local_constants(expr) {
-                let value = self.value_for_type(value, ty, width)?;
-                match width {
-                    ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
-                    ValueWidth::U16 | ValueWidth::U24 => {
-                        self.line(&format!("    ld hl, {value:06X}h"))
-                    }
-                }
-                return Ok(());
+        if !self.is_pointer_arithmetic_expr(expr)?
+            && let Ok(value) = self.eval_i64_with_local_constants(expr)
+        {
+            let value = self.value_for_type(value, ty, width)?;
+            match width {
+                ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
+                ValueWidth::U16 | ValueWidth::U24 => self.line(&format!("    ld hl, {value:06X}h")),
             }
+            return Ok(());
         }
         self.emit_expr_to_width(expr, width)
     }
@@ -4572,23 +4589,21 @@ impl Emitter {
         let width = self.symbols.type_width(ty)?;
         let target_type = self.symbols.resolved_type(ty)?;
         let source_type = self.symbols.resolved_type(&self.expr_type(expr)?)?;
-        if !self.is_pointer_arithmetic_expr(expr)? {
-            if let Ok(value) = self.eval_i64_with_local_constants(expr) {
-                let bits = u32::from(width.bytes()) * 8;
-                let mask = (1_i128 << bits) - 1;
-                let value = if type_is_bool(&target_type) {
-                    u32::from(value != 0)
-                } else {
-                    ((value as i128) & mask) as u32
-                };
-                match width {
-                    ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
-                    ValueWidth::U16 | ValueWidth::U24 => {
-                        self.line(&format!("    ld hl, {value:06X}h"))
-                    }
-                }
-                return Ok(());
+        if !self.is_pointer_arithmetic_expr(expr)?
+            && let Ok(value) = self.eval_i64_with_local_constants(expr)
+        {
+            let bits = u32::from(width.bytes()) * 8;
+            let mask = (1_i128 << bits) - 1;
+            let value = if type_is_bool(&target_type) {
+                u32::from(value != 0)
+            } else {
+                ((value as i128) & mask) as u32
+            };
+            match width {
+                ValueWidth::U8 => self.line(&format!("    ld a, {value:02X}h")),
+                ValueWidth::U16 | ValueWidth::U24 => self.line(&format!("    ld hl, {value:06X}h")),
             }
+            return Ok(());
         }
         let source_width = self.expr_width(expr)?;
         match width {
@@ -6148,7 +6163,7 @@ impl Emitter {
         self.line("    add a, a");
         self.line(&format!("    ld ({:06X}h), a", variable.addr));
         for offset in 1..variable.size {
-            let addr = variable.addr + offset as u32;
+            let addr = variable.addr + offset;
             self.line(&format!("    ld a, ({addr:06X}h)"));
             self.line("    rl a");
             self.line(&format!("    ld ({addr:06X}h), a"));
@@ -6157,7 +6172,7 @@ impl Emitter {
 
     fn emit_shift_memory_right_once(&mut self, variable: Variable, signed: bool) {
         for offset in (0..variable.size).rev() {
-            let addr = variable.addr + offset as u32;
+            let addr = variable.addr + offset;
             self.line(&format!("    ld a, ({addr:06X}h)"));
             if offset == variable.size - 1 {
                 if signed {
@@ -6388,10 +6403,7 @@ impl Emitter {
                 self.line("    inc hl");
             }
             self.line("    ld a, (hl)");
-            self.line(&format!(
-                "    ld ({:06X}h), a",
-                variable.addr + offset as u32
-            ));
+            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
         }
     }
 
@@ -6400,10 +6412,7 @@ impl Emitter {
             if offset != 0 {
                 self.line("    inc hl");
             }
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                variable.addr + offset as u32
-            ));
+            self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
             self.line("    ld (hl), a");
         }
     }
@@ -6428,8 +6437,8 @@ impl Emitter {
 
     fn emit_copy_storage_bytes(&mut self, source: Variable, target: Variable) {
         for offset in 0..source.size {
-            self.line(&format!("    ld a, ({:06X}h)", source.addr + offset as u32));
-            self.line(&format!("    ld ({:06X}h), a", target.addr + offset as u32));
+            self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
+            self.line(&format!("    ld ({:06X}h), a", target.addr + offset));
         }
     }
 
@@ -6493,7 +6502,7 @@ impl Emitter {
         let element_type = self.array_element_type(name)?;
         self.symbols
             .storage_at(
-                array.addr + index_value as u32 * element_size as u32,
+                array.addr + index_value as u32 * element_size,
                 &element_type,
             )
             .map(Some)
@@ -6668,10 +6677,9 @@ impl Emitter {
                         )));
                     }
                     let element_size = self.symbols.type_size(&element)?;
-                    variable = self.symbols.storage_at(
-                        variable.addr + index_value as u32 * element_size as u32,
-                        &element,
-                    )?;
+                    variable = self
+                        .symbols
+                        .storage_at(variable.addr + index_value as u32 * element_size, &element)?;
                     ty = *element;
                 }
             }
@@ -6819,12 +6827,12 @@ impl Emitter {
         path: &str,
     ) -> Result<(), Diagnostic> {
         let len = self.symbols.array_len(len)?;
-        if let Ok(index_value) = self.symbols.eval_i64(index) {
-            if index_value < 0 || index_value as u32 >= len {
-                return Err(Diagnostic::new(format!(
-                    "array index {index_value} is out of bounds for `{path}` length {len}",
-                )));
-            }
+        if let Ok(index_value) = self.symbols.eval_i64(index)
+            && (index_value < 0 || index_value as u32 >= len)
+        {
+            return Err(Diagnostic::new(format!(
+                "array index {index_value} is out of bounds for `{path}` length {len}",
+            )));
         }
         Ok(())
     }
@@ -6916,7 +6924,7 @@ impl Emitter {
                         self.line("    inc hl");
                     }
                     self.line("    ld a, (hl)");
-                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset));
                 }
                 self.emit_load_width(result);
             }
@@ -7939,12 +7947,11 @@ impl Emitter {
             {
                 best = Some((candidate.clone(), index + 1));
             }
-            if let Some((_, original)) = candidate.split_once('.') {
-                if self.named_value_type(original).is_some()
-                    || self.symbols.embed_property_value(original).is_some()
-                {
-                    best = Some((original.to_owned(), index + 1));
-                }
+            if let Some((_, original)) = candidate.split_once('.')
+                && (self.named_value_type(original).is_some()
+                    || self.symbols.embed_property_value(original).is_some())
+            {
+                best = Some((original.to_owned(), index + 1));
             }
         }
 
@@ -8086,10 +8093,9 @@ impl Emitter {
             self.current_readonly_pointer_aliases_mut().remove(name);
             return;
         };
-        if self.readonly_embed_name_for_addr(addr).is_some() {
-            self.current_readonly_pointer_aliases_mut()
-                .insert(name.to_owned(), addr);
-        } else if self.readonly_string_literal_for_addr(addr).is_some() {
+        if self.readonly_embed_name_for_addr(addr).is_some()
+            || self.readonly_string_literal_for_addr(addr).is_some()
+        {
             self.current_readonly_pointer_aliases_mut()
                 .insert(name.to_owned(), addr);
         } else {
@@ -8198,7 +8204,7 @@ fn alloc_from_cursor(cursor: &mut u32, align: u32, size: u32) -> Result<Variable
     Ok(variable)
 }
 
-fn section_cursor<'a>(cursors: &'a mut Vec<(String, u32)>, section: &str) -> &'a mut u32 {
+fn section_cursor<'a>(cursors: &'a mut [(String, u32)], section: &str) -> &'a mut u32 {
     let index = cursors
         .iter()
         .position(|(name, _)| name == section)
@@ -8599,31 +8605,31 @@ fn collect_stmt_calls_with_symbols(
                 else_body,
             } => {
                 collect_expr_calls(condition, calls);
-                if let Some(symbols) = symbols {
-                    if let Ok(value) = symbols.eval_i64(condition) {
-                        if value == 0 {
-                            collect_stmt_calls_with_symbols(else_body, calls, Some(symbols));
-                        } else {
-                            collect_stmt_calls_with_symbols(then_body, calls, Some(symbols));
-                        }
-                        if stmt_terminates_current_block(stmt) {
-                            break;
-                        }
-                        continue;
+                if let Some(symbols) = symbols
+                    && let Ok(value) = symbols.eval_i64(condition)
+                {
+                    if value == 0 {
+                        collect_stmt_calls_with_symbols(else_body, calls, Some(symbols));
+                    } else {
+                        collect_stmt_calls_with_symbols(then_body, calls, Some(symbols));
                     }
+                    if stmt_terminates_current_block(stmt) {
+                        break;
+                    }
+                    continue;
                 }
                 collect_stmt_calls_with_symbols(then_body, calls, symbols);
                 collect_stmt_calls_with_symbols(else_body, calls, symbols);
             }
             Stmt::While { condition, body } => {
                 collect_expr_calls(condition, calls);
-                if let Some(symbols) = symbols {
-                    if symbols.eval_i64(condition).is_ok_and(|value| value == 0) {
-                        if stmt_terminates_current_block(stmt) {
-                            break;
-                        }
-                        continue;
+                if let Some(symbols) = symbols
+                    && symbols.eval_i64(condition).is_ok_and(|value| value == 0)
+                {
+                    if stmt_terminates_current_block(stmt) {
+                        break;
                     }
+                    continue;
                 }
                 collect_stmt_calls_with_symbols(body, calls, symbols);
             }
@@ -9420,12 +9426,12 @@ where
     if type_is_signed(left_type) != type_is_signed(right_type) {
         return Err(Diagnostic::new("signed/unsigned mix without cast"));
     }
-    if let Some((left_width, right_width)) = widths() {
-        if left_width != right_width {
-            return Err(Diagnostic::new(
-                "comparison operands must have same width without cast",
-            ));
-        }
+    if let Some((left_width, right_width)) = widths()
+        && left_width != right_width
+    {
+        return Err(Diagnostic::new(
+            "comparison operands must have same width without cast",
+        ));
     }
     Ok(())
 }
@@ -9473,6 +9479,7 @@ fn validate_inline_asm_clobbers(
     clobbers: &[String],
     lines: &[String],
     allow_sp_clobber: bool,
+    cpu: AssemblerCpu,
 ) -> Result<(), Diagnostic> {
     let mut seen = HashSet::new();
     for clobber in clobbers {
@@ -9493,31 +9500,30 @@ fn validate_inline_asm_clobbers(
         ));
     }
     for line in lines {
-        let lower = line.to_ascii_lowercase();
-        for register in ["ix", "iy", "sp"] {
-            if asm_line_mentions_word(&lower, register) && !asm_clobbers_include(clobbers, register)
-            {
+        let effects = analyze_instruction(cpu, line)?.effects;
+        for register in effects.referenced_special_registers {
+            if !asm_clobbers_include(clobbers, register) {
                 return Err(Diagnostic::new(format!(
                     "inline asm uses `{register}` without declaring clobber `{register}`"
                 )));
             }
         }
-        if asm_line_uses_ports(&lower) && !asm_clobbers_include(clobbers, "ports") {
+        if effects.uses_ports && !asm_clobbers_include(clobbers, "ports") {
             return Err(Diagnostic::new(
                 "inline asm uses ports without declaring clobber `ports`",
             ));
         }
-        if asm_line_clobbers_flags(&lower) && !asm_clobbers_include_flags(clobbers) {
+        if effects.changes_flags && !asm_clobbers_include_flags(clobbers) {
             return Err(Diagnostic::new(
                 "inline asm changes flags without declaring clobber `flags`",
             ));
         }
-        if asm_line_uses_memory(&lower) && !asm_clobbers_include(clobbers, "memory") {
+        if effects.uses_memory && !asm_clobbers_include(clobbers, "memory") {
             return Err(Diagnostic::new(
                 "inline asm uses memory without declaring clobber `memory`",
             ));
         }
-        for register in asm_line_modified_registers(&lower) {
+        for register in effects.modified_registers {
             if !asm_clobbers_include_register(clobbers, register) {
                 return Err(Diagnostic::new(format!(
                     "inline asm modifies `{register}` without declaring clobber `{register}`"
@@ -9579,220 +9585,6 @@ fn asm_clobbers_include_register(clobbers: &[String], register: &str) -> bool {
         "hl" => asm_clobbers_include(clobbers, "h") && asm_clobbers_include(clobbers, "l"),
         _ => false,
     }
-}
-
-fn asm_line_uses_ports(line: &str) -> bool {
-    let mnemonic_uses_ports = asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, _)| {
-        matches!(
-            mnemonic,
-            "ini" | "inir" | "ind" | "indr" | "outi" | "otir" | "outd" | "otdr"
-        )
-    });
-    mnemonic_uses_ports
-        || asm_line_mentions_word(line, "out")
-        || asm_line_mentions_word(line, "out0")
-        || asm_line_mentions_word(line, "in")
-        || asm_line_mentions_word(line, "in0")
-}
-
-fn asm_line_uses_memory(line: &str) -> bool {
-    asm_line_mnemonic_and_operands(line).is_some_and(|(mnemonic, operands)| {
-        matches!(
-            mnemonic,
-            "ldi"
-                | "ldir"
-                | "ldd"
-                | "lddr"
-                | "cpi"
-                | "cpir"
-                | "cpd"
-                | "cpdr"
-                | "ini"
-                | "inir"
-                | "ind"
-                | "indr"
-                | "outi"
-                | "otir"
-                | "outd"
-                | "otdr"
-        ) || (mnemonic == "ld" && operands.contains('('))
-    })
-}
-
-fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
-    let Some((mnemonic, operands)) = asm_line_mnemonic_and_operands(line) else {
-        return Vec::new();
-    };
-    let first = asm_first_operand(operands);
-    match mnemonic {
-        "ld" | "lea" | "in" | "in0" => asm_operand_register(first).into_iter().collect(),
-        "push" => vec!["sp"],
-        "pop" => {
-            let mut registers: Vec<_> = asm_operand_register(first).into_iter().collect();
-            registers.push("sp");
-            registers
-        }
-        "inc" | "dec" | "rl" | "rlc" | "rr" | "rrc" | "sla" | "sra" | "srl" => {
-            asm_operand_register(first).into_iter().collect()
-        }
-        "add" | "adc" | "sbc" => match asm_operand_register(first) {
-            Some(register) => vec![register],
-            None => vec!["a"],
-        },
-        "sub" | "and" | "or" | "xor" | "cpl" | "daa" | "neg" | "rla" | "rlca" | "rra" | "rrca" => {
-            vec!["a"]
-        }
-        "res" | "set" => asm_second_operand(operands)
-            .and_then(asm_operand_register)
-            .into_iter()
-            .collect(),
-        "ex" => asm_line_exchange_registers(operands),
-        "exx" => vec!["bc", "de", "hl"],
-        "call" | "rst" => vec!["af", "bc", "de", "hl"],
-        "ldi" | "ldir" | "ldd" | "lddr" => vec!["bc", "de", "hl"],
-        "cpi" | "cpir" | "cpd" | "cpdr" => vec!["bc", "hl"],
-        "ini" | "inir" | "ind" | "indr" | "outi" | "otir" | "outd" | "otdr" => {
-            vec!["bc", "hl"]
-        }
-        "mlt" => asm_operand_register(first).into_iter().collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn asm_line_clobbers_flags(line: &str) -> bool {
-    let Some((mnemonic, _)) = asm_line_mnemonic_and_operands(line) else {
-        return false;
-    };
-    matches!(
-        mnemonic,
-        "adc"
-            | "add"
-            | "and"
-            | "bit"
-            | "ccf"
-            | "cp"
-            | "cpl"
-            | "daa"
-            | "dec"
-            | "inc"
-            | "neg"
-            | "or"
-            | "rl"
-            | "rla"
-            | "rlc"
-            | "rlca"
-            | "rr"
-            | "rra"
-            | "rrc"
-            | "rrca"
-            | "sbc"
-            | "scf"
-            | "sla"
-            | "sra"
-            | "srl"
-            | "sub"
-            | "xor"
-            | "ldi"
-            | "ldir"
-            | "ldd"
-            | "lddr"
-            | "cpi"
-            | "cpir"
-            | "cpd"
-            | "cpdr"
-            | "ini"
-            | "inir"
-            | "ind"
-            | "indr"
-            | "outi"
-            | "otir"
-            | "outd"
-            | "otdr"
-    )
-}
-
-fn asm_line_mnemonic_and_operands(line: &str) -> Option<(&str, &str)> {
-    let mut text = line.trim_start();
-    if let Some((label, rest)) = text.split_once(':') {
-        if !label.chars().any(char::is_whitespace) {
-            text = rest.trim_start();
-        }
-    }
-    let mnemonic_end = text
-        .find(|ch: char| ch.is_ascii_whitespace())
-        .unwrap_or(text.len());
-    if mnemonic_end == 0 {
-        return None;
-    }
-    let mnemonic = &text[..mnemonic_end];
-    let operands = text[mnemonic_end..].trim_start();
-    Some((mnemonic, operands))
-}
-
-fn asm_first_operand(operands: &str) -> &str {
-    operands
-        .split_once(',')
-        .map(|(first, _)| first)
-        .unwrap_or(operands)
-        .trim()
-}
-
-fn asm_second_operand(operands: &str) -> Option<&str> {
-    operands.split_once(',').map(|(_, second)| second.trim())
-}
-
-fn asm_operand_register(operand: &str) -> Option<&'static str> {
-    let register = operand
-        .trim()
-        .trim_end_matches(',')
-        .trim_end_matches(':')
-        .trim();
-    match register {
-        "a" => Some("a"),
-        "f" => Some("f"),
-        "af" => Some("af"),
-        "b" => Some("b"),
-        "c" => Some("c"),
-        "bc" => Some("bc"),
-        "d" => Some("d"),
-        "e" => Some("e"),
-        "de" => Some("de"),
-        "h" => Some("h"),
-        "l" => Some("l"),
-        "hl" => Some("hl"),
-        "ix" => Some("ix"),
-        "iy" => Some("iy"),
-        "sp" => Some("sp"),
-        _ => None,
-    }
-}
-
-fn asm_line_exchange_registers(operands: &str) -> Vec<&'static str> {
-    let mut registers = Vec::new();
-    for operand in operands.split(',') {
-        if let Some(register) = asm_operand_register(operand) {
-            registers.push(register);
-        }
-    }
-    registers
-}
-
-fn asm_line_mentions_word(line: &str, word: &str) -> bool {
-    let mut start = 0;
-    while let Some(offset) = line[start..].find(word) {
-        let index = start + offset;
-        let before = line[..index].chars().next_back();
-        let after = line[index + word.len()..].chars().next();
-        if !is_asm_word_char(before) && !is_asm_word_char(after) {
-            return true;
-        }
-        start = index + word.len();
-    }
-    false
-}
-
-fn is_asm_word_char(ch: Option<char>) -> bool {
-    matches!(ch, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn substitute_inline_asm_operands(
@@ -14742,9 +14534,13 @@ section .text
 
     #[test]
     fn rejects_unknown_inline_asm_clobbers() {
-        let error =
-            validate_inline_asm_clobbers(&["scratch".to_owned()], &["nop".to_owned()], false)
-                .unwrap_err();
+        let error = validate_inline_asm_clobbers(
+            &["scratch".to_owned()],
+            &["nop".to_owned()],
+            false,
+            AssemblerCpu::Ez80,
+        )
+        .unwrap_err();
 
         assert_eq!(error.message, "unknown inline asm clobber `scratch`");
     }

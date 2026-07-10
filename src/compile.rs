@@ -10,7 +10,7 @@ use crate::{
         AccessPath, AccessSegment, CfgPredicate, Declaration, EmbedSource, Expr, Function, Place,
         Program, Stmt, Type,
     },
-    diagnostic::{Diagnostic, SourceLocation},
+    diagnostic::{Diagnostic, SourceLocation, diagnostic_span, source_token_spans},
     parser::parse_program,
     target::{DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple},
 };
@@ -39,6 +39,40 @@ pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileRep
     check_source_with_sdk(source, options, &SdkResolver::default())
 }
 
+pub fn check_source_diagnostics(source: &str, options: &CompileOptions) -> Vec<Diagnostic> {
+    check_source_diagnostics_with_sdk(source, options, &SdkResolver::default())
+}
+
+pub fn check_source_diagnostics_with_sdk(
+    source: &str,
+    options: &CompileOptions,
+    sdk: &SdkResolver,
+) -> Vec<Diagnostic> {
+    let root = match parse_program(&options.source, source) {
+        Ok(program) => program,
+        Err(error) => return vec![error],
+    };
+    let source_program = root.clone();
+    let resolved = match resolve_program_imports(root, sdk, &mut Vec::new(), &mut HashSet::new()) {
+        Ok(program) => program,
+        Err(error) => return vec![locate_source_diagnostic(error, source, &options.source)],
+    };
+    let mut diagnostics = collect_reference_diagnostics(
+        &source_program,
+        &resolved,
+        source,
+        options.default_sdk_symbols,
+    );
+    if let Err(error) = check_source_with_sdk(source, options, sdk)
+        && !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == error.message)
+    {
+        diagnostics.push(error);
+    }
+    diagnostics
+}
+
 pub fn check_source_with_sdk(
     source: &str,
     options: &CompileOptions,
@@ -52,7 +86,7 @@ pub fn check_source_with_sdk(
         .count();
     let fallback_location = source_start_location(&options.source);
     let program = resolve_program_imports(root, sdk, &mut Vec::new(), &mut HashSet::new())
-        .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
+        .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
     let declarations = program.declarations.len();
     let has_main = program.main_function().is_some();
 
@@ -63,7 +97,7 @@ pub fn check_source_with_sdk(
         ));
     }
     validate_main_signature(program.main_function().expect("main presence checked"))
-        .map_err(|error| error.with_location_if_missing(fallback_location.clone()))?;
+        .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
     let assembly = emit_ez80_assembly_with_options(
         &program,
         AssemblyOptions {
@@ -72,7 +106,7 @@ pub fn check_source_with_sdk(
             ..AssemblyOptions::default()
         },
     )
-    .map_err(|error| error.with_location_if_missing(fallback_location))?;
+    .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
     crate::vm::assemble_ez80_subset_at(&assembly, 0)
         .map_err(|error| error.with_location_if_missing(source_start_location(&options.source)))?;
 
@@ -81,6 +115,300 @@ pub fn check_source_with_sdk(
         declarations,
         has_main,
     })
+}
+
+fn locate_source_diagnostic(error: Diagnostic, source: &str, path: &Path) -> Diagnostic {
+    if error.location().is_some() {
+        return error;
+    }
+    diagnostic_span(path, source, &error.message)
+        .map(|span| error.clone().with_span_if_missing(span))
+        .unwrap_or_else(|| error.with_location_if_missing(source_start_location(path)))
+}
+
+struct ReferenceDiagnostics<'a> {
+    file: &'a Path,
+    source: &'a str,
+    occurrences: HashMap<String, usize>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl ReferenceDiagnostics<'_> {
+    fn push(&mut self, name: &str, message: String) {
+        let occurrence = self.occurrences.entry(name.to_owned()).or_default();
+        let spans = source_token_spans(self.file, self.source, name);
+        let span = spans.get(*occurrence).or_else(|| spans.last()).cloned();
+        *occurrence += 1;
+        let diagnostic = span
+            .map(|span| Diagnostic::at_span(span, message.clone()))
+            .unwrap_or_else(|| Diagnostic::new(message));
+        self.diagnostics.push(diagnostic);
+    }
+}
+
+fn collect_reference_diagnostics(
+    source_program: &Program,
+    resolved: &Program,
+    source: &str,
+    default_sdk_symbols: bool,
+) -> Vec<Diagnostic> {
+    let globals = resolved
+        .declarations
+        .iter()
+        .filter_map(declaration_name)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let mut output = ReferenceDiagnostics {
+        file: &source_program.source_path,
+        source,
+        occurrences: HashMap::new(),
+        diagnostics: Vec::new(),
+    };
+    for declaration in &source_program.declarations {
+        collect_declaration_references(declaration, &globals, default_sdk_symbols, &mut output);
+    }
+    output.diagnostics
+}
+
+fn collect_declaration_references(
+    declaration: &Declaration,
+    globals: &HashSet<String>,
+    default_sdk_symbols: bool,
+    output: &mut ReferenceDiagnostics<'_>,
+) {
+    match declaration {
+        Declaration::Const(decl) => {
+            collect_expr_references(&decl.value, globals, default_sdk_symbols, output)
+        }
+        Declaration::Port(decl) => {
+            collect_expr_references(&decl.value, globals, default_sdk_symbols, output)
+        }
+        Declaration::Mmio(decl) => {
+            collect_expr_references(&decl.value, globals, default_sdk_symbols, output)
+        }
+        Declaration::Global(decl) => {
+            collect_expr_references(&decl.value, globals, default_sdk_symbols, output)
+        }
+        Declaration::Function(function) => {
+            let mut names = globals.clone();
+            names.extend(function.params.iter().map(|param| param.name.clone()));
+            collect_local_names(&function.body, &mut names);
+            collect_stmt_references(&function.body, &names, default_sdk_symbols, output);
+        }
+        Declaration::Cfg { declaration, .. } => {
+            collect_declaration_references(declaration, globals, default_sdk_symbols, output)
+        }
+        Declaration::Embed(_)
+        | Declaration::Import(_)
+        | Declaration::Alias(_)
+        | Declaration::Struct(_)
+        | Declaration::ExternAsmFunction(_) => {}
+    }
+}
+
+fn collect_local_names(stmts: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_local_names(then_body, names);
+                collect_local_names(else_body, names);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => collect_local_names(body, names),
+            Stmt::Asm { outputs, .. } => {
+                names.extend(outputs.iter().map(|output| output.name.clone()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_stmt_references(
+    stmts: &[Stmt],
+    names: &HashSet<String>,
+    default_sdk_symbols: bool,
+    output: &mut ReferenceDiagnostics<'_>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) => {
+                collect_expr_references(value, names, default_sdk_symbols, output)
+            }
+            Stmt::Assign { target, value, .. } => {
+                collect_place_references(target, names, default_sdk_symbols, output);
+                collect_expr_references(value, names, default_sdk_symbols, output);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_references(condition, names, default_sdk_symbols, output);
+                collect_stmt_references(then_body, names, default_sdk_symbols, output);
+                collect_stmt_references(else_body, names, default_sdk_symbols, output);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_references(condition, names, default_sdk_symbols, output);
+                collect_stmt_references(body, names, default_sdk_symbols, output);
+            }
+            Stmt::Loop { body } => {
+                collect_stmt_references(body, names, default_sdk_symbols, output)
+            }
+            Stmt::Out { port, value } => {
+                push_unknown_reference(port, false, names, default_sdk_symbols, output);
+                collect_expr_references(value, names, default_sdk_symbols, output);
+            }
+            Stmt::Expr(expr) => collect_expr_references(expr, names, default_sdk_symbols, output),
+            Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_place_references(
+    place: &Place,
+    names: &HashSet<String>,
+    default_sdk_symbols: bool,
+    output: &mut ReferenceDiagnostics<'_>,
+) {
+    match place {
+        Place::Ident(name) => {
+            push_unknown_reference(name, false, names, default_sdk_symbols, output)
+        }
+        Place::Index { name, index } => {
+            push_unknown_reference(name, false, names, default_sdk_symbols, output);
+            collect_expr_references(index, names, default_sdk_symbols, output);
+        }
+        Place::Field { base, field } => {
+            push_unknown_field(base, field, names, default_sdk_symbols, output)
+        }
+        Place::Access(path) => {
+            push_unknown_access_path(path, names, default_sdk_symbols, output);
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_expr_references(index, names, default_sdk_symbols, output);
+                }
+            }
+        }
+        Place::Deref(expr) => collect_expr_references(expr, names, default_sdk_symbols, output),
+    }
+}
+
+fn collect_expr_references(
+    expr: &Expr,
+    names: &HashSet<String>,
+    default_sdk_symbols: bool,
+    output: &mut ReferenceDiagnostics<'_>,
+) {
+    match expr {
+        Expr::Ident(name) | Expr::In(name) | Expr::AddressOf(name) => {
+            push_unknown_reference(name, false, names, default_sdk_symbols, output)
+        }
+        Expr::Index { name, index } | Expr::AddressOfIndex { name, index } => {
+            push_unknown_reference(name, false, names, default_sdk_symbols, output);
+            collect_expr_references(index, names, default_sdk_symbols, output);
+        }
+        Expr::Field { base, field } | Expr::AddressOfField { base, field } => {
+            push_unknown_field(base, field, names, default_sdk_symbols, output)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            push_unknown_access_path(path, names, default_sdk_symbols, output);
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_expr_references(index, names, default_sdk_symbols, output);
+                }
+            }
+        }
+        Expr::StructInit { ty, fields } => {
+            push_unknown_reference(ty, false, names, default_sdk_symbols, output);
+            for (_, value) in fields {
+                collect_expr_references(value, names, default_sdk_symbols, output);
+            }
+        }
+        Expr::Call { path, args } => {
+            push_unknown_reference(&path.join("."), true, names, default_sdk_symbols, output);
+            for arg in args {
+                collect_expr_references(arg, names, default_sdk_symbols, output);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            collect_expr_references(expr, names, default_sdk_symbols, output)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_references(left, names, default_sdk_symbols, output);
+            collect_expr_references(right, names, default_sdk_symbols, output);
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_references(value, names, default_sdk_symbols, output);
+            }
+        }
+        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::String(_) => {}
+    }
+}
+
+fn push_unknown_access_path(
+    path: &AccessPath,
+    names: &HashSet<String>,
+    default_sdk_symbols: bool,
+    output: &mut ReferenceDiagnostics<'_>,
+) {
+    if names.contains(&path.root) {
+        return;
+    }
+    let mut qualified = path.root.clone();
+    for segment in &path.segments {
+        let AccessSegment::Field(field) = segment else {
+            break;
+        };
+        qualified.push('.');
+        qualified.push_str(field);
+    }
+    push_unknown_reference(&qualified, false, names, default_sdk_symbols, output);
+}
+
+fn push_unknown_field(
+    base: &str,
+    field: &str,
+    names: &HashSet<String>,
+    default_sdk_symbols: bool,
+    output: &mut ReferenceDiagnostics<'_>,
+) {
+    if names.contains(base) {
+        return;
+    }
+    push_unknown_reference(
+        &format!("{base}.{field}"),
+        false,
+        names,
+        default_sdk_symbols,
+        output,
+    );
+}
+
+fn push_unknown_reference(
+    name: &str,
+    function: bool,
+    names: &HashSet<String>,
+    default_sdk_symbols: bool,
+    output: &mut ReferenceDiagnostics<'_>,
+) {
+    if names.contains(name)
+        || default_sdk_symbols
+            && matches!(
+                name.split('.').next(),
+                Some("test" | "debug" | "mem" | "ezra")
+            )
+    {
+        return;
+    }
+    let kind = if function { "function" } else { "value" };
+    output.push(name, format!("unknown {kind} `{name}`"));
 }
 
 fn source_start_location(path: &Path) -> SourceLocation {
@@ -138,6 +466,7 @@ fn resolve_program_imports(
     if !seen.insert(path.clone()) {
         return Ok(Program {
             source_path: program.source_path,
+            source_text: program.source_text,
             declarations: Vec::new(),
         });
     }
@@ -184,6 +513,7 @@ fn resolve_program_imports(
 
     Ok(Program {
         source_path: program.source_path,
+        source_text: program.source_text,
         declarations,
     })
 }
@@ -582,9 +912,7 @@ fn module_alias_declarations(
     if include_short_aliases {
         prefixes.push(short_module.to_owned());
     }
-    if short_module != import {
-        prefixes.push(import.to_owned());
-    } else if !include_short_aliases {
+    if short_module != import || !include_short_aliases {
         prefixes.push(import.to_owned());
     }
     declarations
@@ -1085,7 +1413,10 @@ mod tests {
         let error = check_source("const X: u8 = 1\n", &options).unwrap_err();
 
         assert_eq!(error.message, "missing required `fn main()`");
-        assert_eq!(error.location, Some(source_start_location(&options.source)));
+        assert_eq!(
+            error.location(),
+            Some(source_start_location(&options.source))
+        );
     }
 
     #[test]
@@ -1117,14 +1448,65 @@ mod tests {
 
         assert_eq!(mismatch.message, "value 256 is outside u8 range");
         assert_eq!(
-            mismatch.location,
-            Some(source_start_location(&options.source))
+            mismatch.location(),
+            Some(SourceLocation {
+                file: options.source.clone(),
+                line: 1,
+                column: 25,
+            })
         );
+        assert_eq!(mismatch.span.as_ref().unwrap().end.column, 31);
         assert_eq!(bad_call.message, "unknown function `missing`");
         assert_eq!(
-            bad_call.location,
-            Some(source_start_location(&options.source))
+            bad_call.location(),
+            Some(SourceLocation {
+                file: options.source.clone(),
+                line: 1,
+                column: 15,
+            })
         );
+        assert_eq!(bad_call.span.as_ref().unwrap().end.column, 22);
+    }
+
+    #[test]
+    fn check_collects_multiple_reference_diagnostics_with_distinct_spans() {
+        let options = CompileOptions {
+            source: PathBuf::from("multi-error.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        };
+        let source = "fn main() {\n    missing_one()\n    missing_two()\n}\n";
+
+        let diagnostics = check_source_diagnostics(source, &options);
+
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].message, "unknown function `missing_one`");
+        assert_eq!(diagnostics[1].message, "unknown function `missing_two`");
+        let first = diagnostics[0].span.as_ref().unwrap();
+        let second = diagnostics[1].span.as_ref().unwrap();
+        assert_eq!((first.start.line, first.start.column), (2, 5));
+        assert_eq!((first.end.line, first.end.column), (2, 16));
+        assert_eq!((second.start.line, second.start.column), (3, 5));
+        assert_eq!((second.end.line, second.end.column), (3, 16));
+    }
+
+    #[test]
+    fn multi_diagnostics_resolve_qualified_imported_values() {
+        let options = CompileOptions {
+            source: PathBuf::from("qualified.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        };
+        let sdk = SdkResolver {
+            target: Some("agonlight-mos-ez80".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        let source =
+            "import agon.vdp\nfn main() { let color: u8 = vdp.COLOR_GREEN; test.pass() }\n";
+
+        let diagnostics = check_source_diagnostics_with_sdk(source, &options, &sdk);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
     }
 
     #[test]
@@ -1222,7 +1604,7 @@ mod tests {
             };
 
             assert_eq!(error.message, expected, "{label}");
-            assert!(error.location.is_some(), "{label}: {error:?}");
+            assert!(error.location().is_some(), "{label}: {error:?}");
         }
     }
 

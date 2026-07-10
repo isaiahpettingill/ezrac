@@ -7,10 +7,10 @@ use std::{
 use ezra::{
     ast::{Declaration, Expr, Function, Stmt, Type},
     compile::{
-        CompileOptions, SdkResolver, builtin_sdk_modules, check_source_with_sdk,
+        CompileOptions, SdkResolver, builtin_sdk_modules, check_source_diagnostics_with_sdk,
         parse_and_resolve_imports_with_sdk,
     },
-    diagnostic::{Diagnostic, SourceLocation},
+    diagnostic::{Diagnostic, SourcePosition, SourceSpan},
     parser::parse_program,
     project::load_nearest_project_config,
     target::DEFAULT_TARGET_TRIPLE,
@@ -232,11 +232,11 @@ impl Server {
     fn did_change(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
         let params: DidChangeParams = serde_json::from_value(params)
             .map_err(|error| format!("invalid didChange params: {error}"))?;
-        if let Some(document) = self.documents.get_mut(&params.text_document.uri) {
-            if let Some(change) = params.content_changes.into_iter().last() {
-                document.text = change.text;
-                document.version = params.text_document.version;
-            }
+        if let Some(document) = self.documents.get_mut(&params.text_document.uri)
+            && let Some(change) = params.content_changes.into_iter().last()
+        {
+            document.text = change.text;
+            document.version = params.text_document.version;
         }
         self.publish_diagnostics(&params.text_document.uri, output)
     }
@@ -256,13 +256,10 @@ impl Server {
         let Some(document) = self.documents.get(uri) else {
             return Ok(());
         };
-        let mut diagnostics = semantic_diagnostics(document);
-        if let Err(error) = check_document(document) {
-            let diagnostic = diagnostic_to_lsp(document, &error);
-            if !diagnostic_is_covered_by_semantic(&diagnostic, &diagnostics) {
-                diagnostics.insert(0, diagnostic);
-            }
-        }
+        let diagnostics = check_document_diagnostics(document)
+            .iter()
+            .map(|diagnostic| diagnostic_to_lsp(document, diagnostic))
+            .collect::<Vec<_>>();
         write_notification(
             output,
             TextDocumentPublishDiagnostics::METHOD,
@@ -275,9 +272,12 @@ impl Server {
     }
 }
 
-fn check_document(document: &OpenDocument) -> Result<(), Diagnostic> {
-    let sdk = sdk_for_path(&document.path)?;
-    check_source_with_sdk(
+fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
+    let sdk = match sdk_for_path(&document.path) {
+        Ok(sdk) => sdk,
+        Err(error) => return vec![error],
+    };
+    check_source_diagnostics_with_sdk(
         &document.text,
         &CompileOptions {
             source: document.path.clone(),
@@ -286,7 +286,6 @@ fn check_document(document: &OpenDocument) -> Result<(), Diagnostic> {
         },
         &sdk,
     )
-    .map(|_| ())
 }
 
 fn sdk_for_path(path: &Path) -> Result<SdkResolver, Diagnostic> {
@@ -725,8 +724,7 @@ fn collect_sdk_modules(root: &Path, directory: &Path, modules: &mut BTreeSet<Str
         let module = relative
             .with_extension("")
             .to_string_lossy()
-            .replace('\\', ".")
-            .replace('/', ".");
+            .replace(['\\', '/'], ".");
         if !module.is_empty() {
             modules.insert(module);
         }
@@ -960,186 +958,6 @@ fn module_members(index: &SymbolIndex, module: &str) -> Vec<String> {
         .collect()
 }
 
-fn semantic_diagnostics(document: &OpenDocument) -> Vec<LspDiagnostic> {
-    let Ok(program) = parse_program(&document.path, &document.text) else {
-        return Vec::new();
-    };
-    let index = symbol_index(document);
-    let mut diagnostics = Vec::new();
-    for declaration in &program.declarations {
-        collect_declaration_reference_diagnostics(declaration, &index, &mut diagnostics);
-    }
-    for diagnostic in &mut diagnostics {
-        if let Some(name) = diagnostic
-            .message
-            .strip_prefix("unknown symbol `")
-            .and_then(|message| message.strip_suffix('`'))
-        {
-            diagnostic.range = range_for_symbol(&document.text, name).unwrap_or(diagnostic.range);
-        }
-    }
-    diagnostics
-}
-
-fn collect_declaration_reference_diagnostics(
-    declaration: &Declaration,
-    index: &SymbolIndex,
-    diagnostics: &mut Vec<LspDiagnostic>,
-) {
-    match declaration {
-        Declaration::Const(decl) => {
-            collect_expr_reference_diagnostics(&decl.value, index, diagnostics)
-        }
-        Declaration::Port(decl) => {
-            collect_expr_reference_diagnostics(&decl.value, index, diagnostics)
-        }
-        Declaration::Mmio(decl) => {
-            collect_expr_reference_diagnostics(&decl.value, index, diagnostics)
-        }
-        Declaration::Global(decl) => {
-            collect_expr_reference_diagnostics(&decl.value, index, diagnostics)
-        }
-        Declaration::Function(function) => {
-            collect_stmt_reference_diagnostics(&function.body, index, diagnostics)
-        }
-        Declaration::Cfg { declaration, .. } => {
-            collect_declaration_reference_diagnostics(declaration, index, diagnostics)
-        }
-        _ => {}
-    }
-}
-
-fn collect_stmt_reference_diagnostics(
-    stmts: &[Stmt],
-    index: &SymbolIndex,
-    diagnostics: &mut Vec<LspDiagnostic>,
-) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Let { value, .. } | Stmt::Out { value, .. } | Stmt::Return(Some(value)) => {
-                collect_expr_reference_diagnostics(value, index, diagnostics)
-            }
-            Stmt::Assign { target, value, .. } => {
-                collect_place_reference_diagnostics(target, index, diagnostics);
-                collect_expr_reference_diagnostics(value, index, diagnostics);
-            }
-            Stmt::If {
-                condition,
-                then_body,
-                else_body,
-            } => {
-                collect_expr_reference_diagnostics(condition, index, diagnostics);
-                collect_stmt_reference_diagnostics(then_body, index, diagnostics);
-                collect_stmt_reference_diagnostics(else_body, index, diagnostics);
-            }
-            Stmt::While { condition, body } => {
-                collect_expr_reference_diagnostics(condition, index, diagnostics);
-                collect_stmt_reference_diagnostics(body, index, diagnostics);
-            }
-            Stmt::Loop { body } => collect_stmt_reference_diagnostics(body, index, diagnostics),
-            Stmt::Expr(expr) => collect_expr_reference_diagnostics(expr, index, diagnostics),
-            Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => {}
-        }
-    }
-}
-
-fn collect_place_reference_diagnostics(
-    place: &ezra::ast::Place,
-    index: &SymbolIndex,
-    diagnostics: &mut Vec<LspDiagnostic>,
-) {
-    match place {
-        ezra::ast::Place::Ident(name) => push_unknown_symbol(name, index, diagnostics),
-        ezra::ast::Place::Index { name, index: expr } => {
-            push_unknown_symbol(name, index, diagnostics);
-            collect_expr_reference_diagnostics(expr, index, diagnostics);
-        }
-        ezra::ast::Place::Field { base, .. } => push_unknown_symbol(base, index, diagnostics),
-        ezra::ast::Place::Access(path) => {
-            push_unknown_symbol(&access_path_text(path), index, diagnostics)
-        }
-        ezra::ast::Place::Deref(expr) => {
-            collect_expr_reference_diagnostics(expr, index, diagnostics)
-        }
-    }
-}
-
-fn collect_expr_reference_diagnostics(
-    expr: &Expr,
-    index: &SymbolIndex,
-    diagnostics: &mut Vec<LspDiagnostic>,
-) {
-    match expr {
-        Expr::Ident(name) | Expr::In(name) | Expr::AddressOf(name) => {
-            push_unknown_symbol(name, index, diagnostics)
-        }
-        Expr::Index { name, index: expr } | Expr::AddressOfIndex { name, index: expr } => {
-            push_unknown_symbol(name, index, diagnostics);
-            collect_expr_reference_diagnostics(expr, index, diagnostics);
-        }
-        Expr::Field { base, .. } | Expr::AddressOfField { base, .. } => {
-            push_unknown_symbol(base, index, diagnostics)
-        }
-        Expr::Access(path) | Expr::AddressOfAccess(path) => {
-            push_unknown_symbol(&access_path_text(path), index, diagnostics)
-        }
-        Expr::StructInit { ty, fields } => {
-            push_unknown_symbol(ty, index, diagnostics);
-            for (_, value) in fields {
-                collect_expr_reference_diagnostics(value, index, diagnostics);
-            }
-        }
-        Expr::Call { path, args } => {
-            push_unknown_symbol(&path.join("."), index, diagnostics);
-            for arg in args {
-                collect_expr_reference_diagnostics(arg, index, diagnostics);
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
-            collect_expr_reference_diagnostics(expr, index, diagnostics)
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_expr_reference_diagnostics(left, index, diagnostics);
-            collect_expr_reference_diagnostics(right, index, diagnostics);
-        }
-        Expr::Array(values) => {
-            for value in values {
-                collect_expr_reference_diagnostics(value, index, diagnostics);
-            }
-        }
-        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::String(_) => {}
-    }
-}
-
-fn push_unknown_symbol(name: &str, index: &SymbolIndex, diagnostics: &mut Vec<LspDiagnostic>) {
-    if name.is_empty()
-        || index.symbols.contains_key(name)
-        || index.modules.contains(name)
-        || PRIMITIVE_TYPES.contains(&name)
-        || KEYWORDS.contains(&name)
-    {
-        return;
-    }
-    diagnostics.push(LspDiagnostic {
-        range: default_range(),
-        severity: 1,
-        source: "ezrac",
-        message: format!("unknown symbol `{name}`"),
-    });
-}
-
-fn diagnostic_is_covered_by_semantic(
-    diagnostic: &LspDiagnostic,
-    diagnostics: &[LspDiagnostic],
-) -> bool {
-    let Some(symbol) = diagnostic_symbol(&diagnostic.message) else {
-        return false;
-    };
-    diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic_symbol(&diagnostic.message).as_deref() == Some(symbol))
-}
-
 fn diagnostic_symbol(message: &str) -> Option<&str> {
     message
         .split('`')
@@ -1302,13 +1120,11 @@ const PRIMITIVE_TYPES: &[&str] = &["u8", "i8", "u16", "i16", "u24", "i24", "ptr"
 fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnostic {
     LspDiagnostic {
         range: error
-            .location
+            .span
             .as_ref()
-            .map(|location| source_location_to_range(&document.text, location))
-            .map_or_else(
-                || diagnostic_fallback_range(document, &error.message),
-                |range| range,
-            ),
+            .filter(|span| span.file == document.path)
+            .map(|span| source_span_to_range(&document.text, span))
+            .unwrap_or_else(|| diagnostic_fallback_range(document, &error.message)),
         severity: 1,
         source: "ezrac",
         message: error.message.clone(),
@@ -1316,10 +1132,10 @@ fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnost
 }
 
 fn diagnostic_fallback_range(document: &OpenDocument, message: &str) -> Range {
-    if let Some(symbol) = diagnostic_symbol(message) {
-        if let Some(range) = range_for_symbol(&document.text, symbol) {
-            return range;
-        }
+    if let Some(symbol) = diagnostic_symbol(message)
+        && let Some(range) = range_for_symbol(&document.text, symbol)
+    {
+        return range;
     }
 
     let preferred_line = if message.contains("main function") {
@@ -1366,35 +1182,24 @@ fn range_for_line(source: &str, line_index: usize) -> Range {
     }
 }
 
-fn source_location_to_range(source: &str, location: &SourceLocation) -> Range {
+fn source_span_to_range(source: &str, span: &SourceSpan) -> Range {
+    let start = source_position_to_lsp(source, &span.start);
+    let end = source_position_to_lsp(source, &span.end);
+    Range { start, end }
+}
+
+fn source_position_to_lsp(source: &str, location: &SourcePosition) -> Position {
     let line_index = location.line.saturating_sub(1);
     let source_line = source.lines().nth(line_index).unwrap_or_default();
     let scalar_column = location.column.saturating_sub(1);
-    let byte_start = source_line
+    let byte = source_line
         .char_indices()
         .nth(scalar_column)
         .map(|(index, _)| index)
         .unwrap_or(source_line.len());
-    let byte_end = source_line[byte_start..]
-        .char_indices()
-        .nth(1)
-        .map(|(index, _)| byte_start + index)
-        .unwrap_or(source_line.len());
-    let character = utf16_len(&source_line[..byte_start]);
-    let end_character = if byte_end > byte_start {
-        utf16_len(&source_line[..byte_end])
-    } else {
-        character
-    };
-    Range {
-        start: Position {
-            line: line_index as u32,
-            character,
-        },
-        end: Position {
-            line: line_index as u32,
-            character: end_character,
-        },
+    Position {
+        line: line_index as u32,
+        character: utf16_len(&source_line[..byte]),
     }
 }
 
@@ -1568,8 +1373,34 @@ mod tests {
             version: None,
         };
 
-        let error = check_document(&document).unwrap_err();
+        let error = check_document_diagnostics(&document)
+            .into_iter()
+            .next()
+            .unwrap();
         assert!(error.message.contains("type mismatch"), "{error}");
+    }
+
+    #[test]
+    fn compiler_diagnostics_publish_multiple_exact_ranges() {
+        let document = OpenDocument {
+            path: PathBuf::from("multi-error.ezra"),
+            text: "fn main() {\n    missing_one()\n    missing_two()\n}\n".to_owned(),
+            version: None,
+        };
+
+        let diagnostics = check_document_diagnostics(&document);
+        let diagnostics = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic_to_lsp(&document, diagnostic))
+            .collect::<Vec<_>>();
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].range.start.line, 1);
+        assert_eq!(diagnostics[0].range.start.character, 4);
+        assert_eq!(diagnostics[0].range.end.character, 15);
+        assert_eq!(diagnostics[1].range.start.line, 2);
+        assert_eq!(diagnostics[1].range.start.character, 4);
+        assert_eq!(diagnostics[1].range.end.character, 15);
     }
 
     #[test]
@@ -1761,12 +1592,12 @@ mod tests {
         assert_eq!(counter["textEdit"]["range"]["start"]["character"], 9);
         assert_eq!(counter["textEdit"]["range"]["end"]["character"], 11);
 
-        let range = source_location_to_range(
+        let range = source_span_to_range(
             "😀x",
-            &SourceLocation {
+            &SourceSpan {
                 file: PathBuf::from("utf16.ezra"),
-                line: 1,
-                column: 2,
+                start: SourcePosition { line: 1, column: 2 },
+                end: SourcePosition { line: 1, column: 3 },
             },
         );
         assert_eq!(range.start.character, 2);

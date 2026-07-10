@@ -661,23 +661,11 @@ fn eval_atom(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, 
 }
 
 fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
-    if let Some(len) = asm_meta::generated_instruction_len(cpu, text)? {
-        Ok(len)
-    } else if !cpu.supports_z80_syntax() {
-        Err(Diagnostic::new(format!(
+    asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
+        Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
-        )))
-    } else if matches!(text, "sra a" | "srl a" | "rl a" | "rr a") {
-        Ok(2)
-    } else if text.starts_with("ld h,") || text.starts_with("ld a,") {
-        Ok(2)
-    } else if text.starts_with("xor ") {
-        Ok(2)
-    } else {
-        Err(Diagnostic::new(format!(
-            "test assembler does not support instruction `{text}`"
-        )))
-    }
+        ))
+    })
 }
 
 fn emit_instruction(
@@ -710,12 +698,6 @@ fn emit_instruction(
     } else if let Some(load) = asm_meta::imm24_load_instruction(cpu, text) {
         bytes.extend_from_slice(load.prefix);
         push24(bytes, parse_addr(load.value, labels, pc)?);
-    } else if let Some(value) = text.strip_prefix("ld h,") {
-        bytes.push(0x26);
-        bytes.push(parse_u8(value.trim())?);
-    } else if let Some(value) = text.strip_prefix("ld a,") {
-        bytes.push(0x3E);
-        bytes.push(parse_u8(value.trim())?);
     } else {
         return Err(Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -771,14 +753,6 @@ fn looks_like_label_ref(text: &str) -> bool {
     };
     (first == '_' || first == '.' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
-}
-
-fn parse_u8(text: &str) -> Result<u8, Diagnostic> {
-    let value = eval_expr(text, &HashMap::new(), 0)?;
-    if value > 0xFF {
-        return Err(Diagnostic::new(format!("value {text} is outside u8 range")));
-    }
-    Ok(value as u8)
 }
 
 fn parse_number(text: &str) -> Result<u32, Diagnostic> {

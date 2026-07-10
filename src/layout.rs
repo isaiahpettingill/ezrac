@@ -448,8 +448,8 @@ impl Layout {
                 symbol("EZRA_RAM_BASE", Address24::new(0x07_0000)),
                 symbol("EZRA_RODATA_BASE", Address24::new(0x06_0000)),
                 symbol("EZRA_ASSET_BASE", Address24::new(0x0C_0000)),
-                symbol("AGON_VDP_PORT", Address24::new(0x0000_B0)),
-                symbol("AGON_EMULATOR_EXIT_PORT", Address24::new(0x0000_00)),
+                symbol("AGON_VDP_PORT", Address24::new(0x0000_00B0)),
+                symbol("AGON_EMULATOR_EXIT_PORT", Address24::new(0x0000_0000)),
             ],
         }
     }
@@ -1196,9 +1196,7 @@ fn eval_layout_binary_op(left: i128, op: &str, right: i128) -> Result<i128, Diag
             }
         }
         "%" => {
-            if right == 0 {
-                Ok(0)
-            } else if left == i128::MIN && right == -1 {
+            if right == 0 || (left == i128::MIN && right == -1) {
                 Ok(0)
             } else {
                 Ok(left % right)
@@ -1374,6 +1372,15 @@ fn symbol(name: &str, value: Address24) -> Symbol {
         name: name.to_owned(),
         value,
     }
+}
+
+#[cfg(test)]
+fn layout_symbol_value(layout: &Layout, name: &str) -> Option<u32> {
+    layout
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == name)
+        .map(|symbol| symbol.value.get())
 }
 
 #[cfg(test)]
@@ -1690,13 +1697,4 @@ mod tests {
 
         assert!(error.message.contains("outside the 24-bit address space"));
     }
-}
-
-#[cfg(test)]
-fn layout_symbol_value(layout: &Layout, name: &str) -> Option<u32> {
-    layout
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == name)
-        .map(|symbol| symbol.value.get())
 }

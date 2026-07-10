@@ -861,7 +861,7 @@ fn build_ezra_source(
     settings: &BuildSettings,
     options: &BuildCommandOptions,
 ) -> Result<BuildOutputs, String> {
-    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
+    let program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
@@ -941,22 +941,17 @@ fn write_build_artifacts(
 
     let assembled = ezra::vm::assemble_subset_with_options_at(
         AssemblerCpu::from(settings.target.triple.cpu),
-        &assembly,
+        assembly,
         settings.layout.entry.get(),
         &assembly_source_options(source_path, &settings.layout),
     )
     .map_err(|error| error.to_string())?;
-    let map = build_output_map(
-        &settings,
-        &program,
-        assembled.bytes.len(),
-        &assembled.symbols,
-    )
-    .map_err(|error| {
-        error
-            .with_location_if_missing(source_location.clone())
-            .to_string()
-    })?;
+    let map = build_output_map(settings, program, assembled.bytes.len(), &assembled.symbols)
+        .map_err(|error| {
+            error
+                .with_location_if_missing(source_location.clone())
+                .to_string()
+        })?;
     if let Some(parent) = output_base.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
@@ -965,7 +960,7 @@ fn write_build_artifacts(
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let executable = build_executable_bytes(&settings, &assembled.bytes, Some(&executable_path))?;
+    let executable = build_executable_bytes(settings, &assembled.bytes, Some(&executable_path))?;
     fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
@@ -3739,7 +3734,7 @@ mod tests {
             "fn main() { let value: u8 = 256; test.pass() }\n",
         )
         .unwrap();
-        let prefix = format!("{}:1:1:", source_path.display());
+        let prefix = format!("{}:1:29:", source_path.display());
 
         let build_error = build_source(source_path.to_str().unwrap()).unwrap_err();
         assert!(
