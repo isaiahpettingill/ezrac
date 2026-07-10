@@ -1,6 +1,6 @@
 # Editor Support
 
-Syntax definitions for EZRA live under `editors/` and cover `.ezra` and `.ezralayout` files. Editors with LSP support can run `ezrac lsp` for diagnostics and completions when `ezrac` is built or installed with `--features lsp`.
+Syntax definitions for EZRA live under `editors/` and cover `.ezra` and `.ezralayout` files. Editors with LSP support can run `ezrac lsp` for diagnostics and completions when `ezrac` is built or installed with `--features lsp`. The server watches EZRA sources, `Ezra.toml`, and configured layout files so import, project, and layout changes republish workspace diagnostics.
 
 ```sh
 cargo install --path /path/to/ezrac --features lsp

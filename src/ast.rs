@@ -137,6 +137,14 @@ pub struct Function {
 pub struct StmtSpan {
     pub span: SourceSpan,
     pub children: Vec<StmtSpan>,
+    /// Parser-derived source ranges for expressions and identifiers in this statement.
+    pub references: Vec<SourceReference>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceReference {
+    pub text: String,
+    pub span: SourceSpan,
 }
 
 #[derive(Clone, Debug, PartialEq)]

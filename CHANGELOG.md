@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.18
+
+- Added target-independent handwritten-assembly preprocessing with vendorable includes, defines, CPU/target conditionals, parameterized macros, and hygienic macro-local labels.
+- Applied preprocessing consistently to `assemble --base` and assembly builds.
+- Added an extensible test-runner backend interface, including eZ80 crate execution for eZ80, Z80-family, i8080, and i8085 targets.
+- Expanded parser-derived semantic diagnostic targeting and generated eZ80 assembler coverage.
+
 ## 0.1.17
 
 - Added ez180N console frame-tick synchronization through `console.frame_tick()` and `console.wait_tick()`.

@@ -37,7 +37,7 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 | 36. Example game | Implemented | Repository examples include complete Agon programs and build fixtures. | Hardware smoke testing is platform-specific. |
 | 37. Runtime helpers | Implemented | Arithmetic, memcpy, memset, signed operations, debug, and test helpers execute in VM tests. | Future backends need helper ABIs. |
 | 38. Assembly output | Partial | Generated/standalone assembly, CPU modes, global section linking, includes, maps, and formats are tested. | Exhaustive UM0077 enumeration remains #4. |
-| 39. Test runner | Partial | Deterministic Z80-family execution supports budgets, memory, ports, traps, stacks, and CI status. | Multi-file architecture-neutral runner remains #59. |
+| 39. Test runner | Partial | The architecture-selectable runner supports eZ80, Z80, Z80N, Z180, i8080, and i8085 through the `ez80` backend, with budgets, memory, ports, traps, stacks, CP/M BDOS basics, and CI status. | Add emulator backends for non-`ez80` CPU families as targets are implemented. |
 | 40. Compiler pipeline | Partial | AST → HIR → TBIR → assembly → assembler → layout is explicit and dumpable with safe optimization tests. | New backends and advanced passes remain #14–#16 and #49–#66. |
 | 41. Diagnostics | Partial | Structured spans, UTF-16 LSP ranges, cross-file multi-reference errors, import/include provenance, and CLI locations are tested. | AST-native semantic spans and full multi-error type checking remain. |
 | 42. Grammar sketch | Implemented | `src/ezra.pest` is the executable grammar with parser tests. | Prose must follow grammar changes. |
@@ -46,9 +46,9 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 ## Highest-priority uncovered work
 
 1. Finish AST-native semantic spans and collect independent type errors in one check pass.
-2. Complete #54: definitions, symbols, semantic tokens, and dependency/config invalidation.
+2. Keep LSP import, project-configuration, and layout invalidation covered as workspace behavior expands.
 3. Finish exhaustive eZ80 generated-form enumeration in #4.
-4. Build the architecture-neutral project test runner in #59.
+4. Add non-`ez80` emulator backends as their CPU targets are implemented.
 5. Move inlining, tail calls, and advanced loop/memory optimization into TBIR passes (#14–#16).
 
 Untested behavior remains incomplete. Validate changes with `cargo test --all-features` and `cargo clippy --all-targets --all-features -- -D warnings` before changing a row to **Implemented**.

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -559,11 +559,19 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         executable_name: None,
     };
     let image = if let Some(base_addr) = options.base_addr {
+        let assembly = preprocess_assembly(
+            &source_path,
+            &source,
+            &settings.target.triple.value,
+            settings.assembler_cpu,
+        )?;
+        let mut source_options = assembly_source_options(&source_path, &settings.layout);
+        source_options.line_origins = assembly.line_origins;
         let assembled = ezra::vm::assemble_subset_with_options_at(
             settings.assembler_cpu,
-            &source,
+            &assembly.text,
             base_addr,
-            &assembly_source_options(&source_path, &settings.layout),
+            &source_options,
         )
         .map_err(|error| error.to_string())?;
         AssemblyBuildImage {
@@ -1070,6 +1078,12 @@ struct ExpandedAssembly {
     line_origins: Vec<SourceLocation>,
 }
 
+#[derive(Clone, Debug)]
+struct AssemblyMacro {
+    parameters: Vec<String>,
+    body: Vec<(String, SourceLocation)>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PlacedAssemblySection {
     name: String,
@@ -1082,7 +1096,12 @@ fn build_assembly_image(
     assembly: &str,
     settings: &BuildSettings,
 ) -> Result<AssemblyBuildImage, String> {
-    let assembly = expand_assembly_includes(source_path, assembly)?;
+    let assembly = preprocess_assembly(
+        source_path,
+        assembly,
+        &settings.target.triple.value,
+        settings.assembler_cpu,
+    )?;
     let sections = split_assembly_sections(&assembly.text);
     let section_bases =
         placed_assembly_section_bases(source_path, settings, &sections, &assembly.line_origins)?;
@@ -1237,6 +1256,262 @@ fn expand_assembly_includes(
     let root = normalize_include_path(source_path);
     expand_assembly_file(&root, assembly, &mut vec![root.clone()], &mut expanded)?;
     Ok(expanded)
+}
+
+/// Expand EZRA assembly directives after recursive includes and before any
+/// CPU-specific parsing. Macro sets are ordinary vendored include files.
+fn preprocess_assembly(
+    source_path: &Path,
+    assembly: &str,
+    target: &str,
+    cpu: AssemblerCpu,
+) -> Result<ExpandedAssembly, String> {
+    let included = expand_assembly_includes(source_path, assembly)?;
+    let lines = included
+        .text
+        .lines()
+        .zip(included.line_origins)
+        .map(|(line, origin)| (line.to_owned(), origin))
+        .collect::<Vec<_>>();
+    expand_assembly_macros(
+        lines,
+        target,
+        cpu,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        0,
+    )
+}
+
+fn expand_assembly_macros(
+    lines: Vec<(String, SourceLocation)>,
+    target: &str,
+    cpu: AssemblerCpu,
+    defines: &mut HashMap<String, String>,
+    macros: &mut HashMap<String, AssemblyMacro>,
+    depth: usize,
+) -> Result<ExpandedAssembly, String> {
+    if depth > 32 {
+        return Err("assembly macro expansion exceeded 32 nested invocations".to_owned());
+    }
+    let mut output = ExpandedAssembly {
+        text: String::new(),
+        line_origins: Vec::new(),
+    };
+    let mut conditions = Vec::<bool>::new();
+    let mut active = true;
+    let mut index = 0;
+    while index < lines.len() {
+        let (line, origin) = &lines[index];
+        let trimmed = line.split(';').next().unwrap_or_default().trim();
+        if let Some(condition) = trimmed.strip_prefix("%if ") {
+            let value = evaluate_assembly_condition(condition.trim(), target, cpu, defines)?;
+            conditions.push(active);
+            active &= value;
+            index += 1;
+            continue;
+        }
+        if trimmed == "%else" {
+            let Some(parent_active) = conditions.last().copied() else {
+                return Err(format!(
+                    "{}:{}: `%else` without `%if`",
+                    origin.file.display(),
+                    origin.line
+                ));
+            };
+            active = parent_active && !active;
+            index += 1;
+            continue;
+        }
+        if trimmed == "%endif" {
+            active = conditions.pop().ok_or_else(|| {
+                format!(
+                    "{}:{}: `%endif` without `%if`",
+                    origin.file.display(),
+                    origin.line
+                )
+            })?;
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("%macro ") {
+            let (name, parameters) = parse_assembly_macro_signature(rest, origin)?;
+            let mut body = Vec::new();
+            index += 1;
+            while index < lines.len()
+                && lines[index].0.split(';').next().unwrap_or_default().trim() != "%endmacro"
+            {
+                body.push(lines[index].clone());
+                index += 1;
+            }
+            if index == lines.len() {
+                return Err(format!(
+                    "{}:{}: unterminated macro `{name}`",
+                    origin.file.display(),
+                    origin.line
+                ));
+            }
+            if active {
+                macros.insert(name, AssemblyMacro { parameters, body });
+            }
+            index += 1;
+            continue;
+        }
+        if !active {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("%define ") {
+            let (name, value) = rest.split_once(char::is_whitespace).ok_or_else(|| {
+                format!(
+                    "{}:{}: expected `%define NAME value`",
+                    origin.file.display(),
+                    origin.line
+                )
+            })?;
+            defines.insert(name.to_owned(), value.trim().to_owned());
+            index += 1;
+            continue;
+        }
+        if let Some(name) = trimmed
+            .strip_prefix('%')
+            .and_then(|rest| rest.split_whitespace().next())
+            && let Some(definition) = macros.get(name).cloned()
+        {
+            let args = trimmed[name.len() + 1..].trim();
+            let args = if args.is_empty() {
+                Vec::new()
+            } else {
+                args.split(',').map(|arg| arg.trim().to_owned()).collect()
+            };
+            if args.len() != definition.parameters.len() {
+                return Err(format!(
+                    "{}:{}: macro `{name}` expects {} arguments, got {}",
+                    origin.file.display(),
+                    origin.line,
+                    definition.parameters.len(),
+                    args.len()
+                ));
+            }
+            let expansion_id = output.line_origins.len();
+            let expanded = definition
+                .body
+                .into_iter()
+                .map(|(body, _)| {
+                    let mut body = substitute_assembly_defines(&body, defines);
+                    for (parameter, value) in definition.parameters.iter().zip(&args) {
+                        body = body.replace(&format!("${parameter}"), value);
+                    }
+                    (
+                        body.replace("%%", &format!("__ezra_macro_{expansion_id}_")),
+                        origin.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expanded =
+                expand_assembly_macros(expanded, target, cpu, defines, macros, depth + 1)?;
+            output.text.push_str(&expanded.text);
+            output.line_origins.extend(expanded.line_origins);
+            index += 1;
+            continue;
+        }
+        output
+            .text
+            .push_str(&substitute_assembly_defines(line, defines));
+        output.text.push('\n');
+        output.line_origins.push(origin.clone());
+        index += 1;
+    }
+    if !conditions.is_empty() {
+        return Err("unterminated `%if` in assembly source".to_owned());
+    }
+    Ok(output)
+}
+
+fn parse_assembly_macro_signature(
+    text: &str,
+    origin: &SourceLocation,
+) -> Result<(String, Vec<String>), String> {
+    let text = text.trim();
+    let (name, parameters) = if let Some((name, parameters)) = text.split_once('(') {
+        let parameters = parameters.strip_suffix(')').ok_or_else(|| {
+            format!(
+                "{}:{}: macro parameter list is missing `)`",
+                origin.file.display(),
+                origin.line
+            )
+        })?;
+        (name.trim().to_owned(), parameters.trim().to_owned())
+    } else {
+        let mut parts = text.split_whitespace();
+        let name = parts.next().ok_or_else(|| {
+            format!(
+                "{}:{}: missing macro name",
+                origin.file.display(),
+                origin.line
+            )
+        })?;
+        let parameters = parts.collect::<Vec<_>>().join(" ");
+        (
+            name.to_owned(),
+            parameters
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .to_owned(),
+        )
+    };
+    if name.is_empty() {
+        return Err(format!(
+            "{}:{}: missing macro name",
+            origin.file.display(),
+            origin.line
+        ));
+    }
+    Ok((
+        name,
+        if parameters.is_empty() {
+            Vec::new()
+        } else {
+            parameters
+                .split(',')
+                .map(|parameter| parameter.trim().to_owned())
+                .collect()
+        },
+    ))
+}
+
+fn evaluate_assembly_condition(
+    condition: &str,
+    target: &str,
+    cpu: AssemblerCpu,
+    defines: &HashMap<String, String>,
+) -> Result<bool, String> {
+    if let Some(value) = condition
+        .strip_prefix("cpu(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Ok(cpu.as_str() == value.trim_matches('"'));
+    }
+    if let Some(value) = condition
+        .strip_prefix("target(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Ok(target == value.trim_matches('"'));
+    }
+    if let Some(name) = condition
+        .strip_prefix("defined(")
+        .and_then(|name| name.strip_suffix(')'))
+    {
+        return Ok(defines.contains_key(name.trim()));
+    }
+    Err(format!("unsupported assembly condition `{condition}`"))
+}
+
+fn substitute_assembly_defines(line: &str, defines: &HashMap<String, String>) -> String {
+    defines.iter().fold(line.to_owned(), |line, (name, value)| {
+        line.replace(&format!("${{{name}}}"), value)
+    })
 }
 
 fn expand_assembly_file(
@@ -3357,6 +3632,74 @@ mod tests {
         let error = expand_assembly_includes(&source_path, &source).unwrap_err();
         assert!(error.contains("outer.inc:1"), "{error}");
         assert!(error.contains("missing.inc"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assembly_preprocessor_expands_vendored_macros_and_target_conditionals() {
+        let root = temp_root("assembly_macros");
+        std::fs::create_dir_all(root.join("macros")).unwrap();
+        let source_path = root.join("main.asm");
+        std::fs::write(
+            root.join("macros/test.inc"),
+            r#"
+                %define EXIT_PORT 0Eh
+                %macro finish(code)
+                    mvi a, $code
+                    out ${EXIT_PORT}
+                %endmacro
+            "#,
+        )
+        .unwrap();
+        let source = r#"
+            include "macros/test.inc"
+            %if cpu("i8080")
+                %finish 1
+            %else
+                db 0
+            %endif
+            %macro twice()
+            %%loop:
+                nop
+                jp %%loop
+            %endmacro
+            %twice
+        "#;
+        std::fs::write(&source_path, source).unwrap();
+
+        let expanded =
+            preprocess_assembly(&source_path, source, "bare-i8080", AssemblerCpu::I8080).unwrap();
+        assert!(expanded.text.contains("mvi a, 1"), "{}", expanded.text);
+        assert!(expanded.text.contains("out 0Eh"), "{}", expanded.text);
+        assert!(!expanded.text.contains("db 0"), "{}", expanded.text);
+        assert!(expanded.text.contains("__ezra_macro_"), "{}", expanded.text);
+        assert_eq!(
+            expanded.line_origins[0].file,
+            normalize_include_path(&source_path)
+        );
+
+        let base_source = root.join("base.asm");
+        let base_output = root.join("base.com");
+        std::fs::write(
+            &base_source,
+            "%macro exit()\nmvi a, 0\nout 0Eh\n%endmacro\n%exit\n",
+        )
+        .unwrap();
+        assemble_file(&AssembleOptions {
+            path: base_source.to_string_lossy().into_owned(),
+            output: Some(base_output.to_string_lossy().into_owned()),
+            base_addr: Some(0x0100),
+            assembler_cpu: None,
+            layout_path: None,
+            map_path: None,
+            target: Some("cpm-2.2-i8080".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(base_output).unwrap(),
+            [0x3E, 0x00, 0xD3, 0x0E]
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5724,6 +6067,43 @@ mod tests {
         assert!(asm.contains("    call 0005h"), "{asm}");
         assert!(com.windows(2).any(|bytes| bytes == [0x20, 0x30]));
         assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_command_runs_cpm_8080_and_8085_source_targets() {
+        let root = temp_root("test_cpm_intel_targets");
+        std::fs::create_dir_all(&root).unwrap();
+        for (target, extra_asm) in [
+            ("cpm-2.2-i8080", ""),
+            ("cpm-2.2-i8085", "asm volatile { \"rim\" \"sim\" }"),
+        ] {
+            let source_path = root.join(format!("{target}.ezra"));
+            std::fs::write(
+                &source_path,
+                format!(
+                    r#"
+                        import cpm.bdos
+
+                        fn main() {{
+                            {extra_asm}
+                            bdos.exit()
+                        }}
+                    "#
+                ),
+            )
+            .unwrap();
+
+            test_source_with_command_options(&CommandOptions {
+                path: source_path.to_string_lossy().into_owned(),
+                debug_comments: false,
+                default_sdk_symbols: false,
+                layout_path: None,
+                target: Some(target.to_owned()),
+            })
+            .unwrap();
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }

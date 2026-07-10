@@ -10,7 +10,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl,
         Function, Place, Program, Stmt, Type, UnaryOp,
     },
-    diagnostic::{Diagnostic, diagnostic_span, source_token_spans},
+    diagnostic::Diagnostic,
     hir::HirProgram,
     target::{
         Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE,
@@ -117,10 +117,16 @@ pub fn collect_ez80_semantic_diagnostics(
         );
         emitter.disable_dead_code_elimination();
         if let Err(error) = emitter.emit_function(function) {
-            let span = function.body_spans.first().map(|span| span.span.clone());
-            let error = span
-                .map(|span| error.clone().with_span_if_missing(span))
-                .unwrap_or(error);
+            let error = locate_program_diagnostic(program, error);
+            let error = if error.span.is_none() {
+                function
+                    .body_spans
+                    .first()
+                    .map(|span| error.clone().with_span_if_missing(span.span.clone()))
+                    .unwrap_or(error)
+            } else {
+                error
+            };
             if !diagnostics.iter().any(|diagnostic| {
                 diagnostic.message == error.message && diagnostic.span == error.span
             }) {
@@ -142,26 +148,47 @@ fn locate_program_diagnostic(program: &Program, error: Diagnostic) -> Diagnostic
         .step_by(2)
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();
-    let matching_units = program
-        .source_units
+    let value = error
+        .message
+        .strip_prefix("value ")
+        .and_then(|message| message.split_whitespace().next());
+    program
+        .declarations
         .iter()
-        .filter(|unit| {
-            quoted
-                .iter()
-                .any(|token| !source_token_spans(&unit.path, &unit.text, token).is_empty())
+        .filter_map(|declaration| match declaration {
+            Declaration::Function(function) => Some(function),
+            _ => None,
         })
-        .collect::<Vec<_>>();
-    let unit = (matching_units.len() == 1)
-        .then(|| matching_units[0])
-        .or_else(|| {
-            program
-                .source_units
-                .iter()
-                .find(|unit| unit.path == program.source_path)
-        });
-    unit.and_then(|unit| diagnostic_span(&unit.path, &unit.text, &error.message))
-        .map(|span| error.clone().with_span_if_missing(span))
+        .flat_map(|function| statement_references(&function.body_spans))
+        .filter(|reference| {
+            quoted.iter().any(|token| reference.text == *token)
+                || value.is_some_and(|value| reference.text == value)
+        })
+        .min_by_key(|reference| {
+            (
+                reference
+                    .span
+                    .end
+                    .line
+                    .saturating_sub(reference.span.start.line),
+                reference
+                    .span
+                    .end
+                    .column
+                    .saturating_sub(reference.span.start.column),
+            )
+        })
+        .map(|reference| error.clone().with_span_if_missing(reference.span.clone()))
         .unwrap_or(error)
+}
+
+fn statement_references(spans: &[crate::ast::StmtSpan]) -> Vec<&crate::ast::SourceReference> {
+    let mut references = Vec::new();
+    for span in spans {
+        references.extend(span.references.iter());
+        references.extend(statement_references(&span.children));
+    }
+    references
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -8399,7 +8426,6 @@ fn collect_stmt_call_diagnostics(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for (index, stmt) in stmts.iter().enumerate() {
-        let span = spans.get(index).map(|span| span.span.clone());
         let result = match stmt {
             Stmt::Let { value, .. } => validate_expr_calls(value, functions),
             Stmt::Assign { target, value, .. } => validate_place_calls(target, functions)
@@ -8447,12 +8473,43 @@ fn collect_stmt_call_diagnostics(
             Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => Ok(()),
         };
         if let Err(error) = result {
-            diagnostics.push(
-                span.map(|span| error.clone().with_span_if_missing(span))
-                    .unwrap_or(error),
-            );
+            let error = spans
+                .get(index)
+                .map(|span| locate_statement_diagnostic(span, error.clone()))
+                .unwrap_or(error);
+            diagnostics.push(error);
         }
     }
+}
+
+fn locate_statement_diagnostic(statement: &crate::ast::StmtSpan, error: Diagnostic) -> Diagnostic {
+    let quoted = error
+        .message
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    statement
+        .references
+        .iter()
+        .filter(|reference| quoted.iter().any(|token| reference.text == *token))
+        .min_by_key(|reference| {
+            (
+                reference
+                    .span
+                    .end
+                    .line
+                    .saturating_sub(reference.span.start.line),
+                reference
+                    .span
+                    .end
+                    .column
+                    .saturating_sub(reference.span.start.column),
+            )
+        })
+        .map(|reference| error.clone().with_span_if_missing(reference.span.clone()))
+        .unwrap_or_else(|| error.with_span_if_missing(statement.span.clone()))
 }
 
 fn validate_place_calls(

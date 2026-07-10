@@ -11,7 +11,7 @@ use crate::{
         AccessPath, AccessSegment, CfgPredicate, Declaration, EmbedSource, Expr, Function, Place,
         Program, Stmt, Type,
     },
-    diagnostic::{Diagnostic, SourceLocation, diagnostic_span, source_token_spans},
+    diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
     parser::parse_program,
     target::{DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple},
 };
@@ -73,12 +73,8 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
         Ok(program) => program,
         Err(error) => return vec![locate_source_diagnostic(error, source, &options.source)],
     };
-    let mut diagnostics = collect_reference_diagnostics(
-        &source_program,
-        &resolved,
-        source,
-        options.default_sdk_symbols,
-    );
+    let mut diagnostics =
+        collect_reference_diagnostics(&source_program, &resolved, options.default_sdk_symbols);
     for unit in &resolved.source_units {
         if normalize_path(&unit.path) == normalize_path(&source_program.source_path) {
             continue;
@@ -87,7 +83,6 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
             diagnostics.extend(collect_reference_diagnostics(
                 &program,
                 &resolved,
-                &unit.text,
                 options.default_sdk_symbols,
             ));
         }
@@ -198,30 +193,79 @@ fn locate_source_diagnostic(error: Diagnostic, source: &str, path: &Path) -> Dia
         .unwrap_or_else(|| error.with_location_if_missing(source_start_location(path)))
 }
 
-struct ReferenceDiagnostics<'a> {
-    file: &'a Path,
-    source: &'a str,
-    occurrences: HashMap<String, usize>,
+struct ReferenceDiagnostics {
+    references: Vec<crate::ast::SourceReference>,
+    used_spans: Vec<crate::diagnostic::SourceSpan>,
     diagnostics: Vec<Diagnostic>,
 }
 
-impl ReferenceDiagnostics<'_> {
-    fn push(&mut self, name: &str, message: String) {
-        let occurrence = self.occurrences.entry(name.to_owned()).or_default();
-        let spans = source_token_spans(self.file, self.source, name);
-        let span = spans.get(*occurrence).or_else(|| spans.last()).cloned();
-        *occurrence += 1;
-        let diagnostic = span
-            .map(|span| Diagnostic::at_span(span, message.clone()))
-            .unwrap_or_else(|| Diagnostic::new(message));
-        self.diagnostics.push(diagnostic);
+impl ReferenceDiagnostics {
+    fn set_references(&mut self, references: &[crate::ast::SourceReference]) {
+        self.references = references.to_vec();
+        self.used_spans.clear();
     }
+
+    fn push(&mut self, name: &str, message: String) {
+        let matching = self
+            .references
+            .iter()
+            .filter(|reference| normalize_reference(&reference.text) == normalize_reference(name))
+            .collect::<Vec<_>>();
+        let span = matching
+            .iter()
+            .copied()
+            .filter(|reference| !self.used_spans.contains(&reference.span))
+            .min_by_key(|reference| {
+                (
+                    reference
+                        .span
+                        .end
+                        .line
+                        .saturating_sub(reference.span.start.line),
+                    reference
+                        .span
+                        .end
+                        .column
+                        .saturating_sub(reference.span.start.column),
+                )
+            })
+            .map(|reference| reference.span.clone())
+            .or_else(|| {
+                matching
+                    .iter()
+                    .copied()
+                    .min_by_key(|reference| {
+                        (
+                            reference
+                                .span
+                                .end
+                                .line
+                                .saturating_sub(reference.span.start.line),
+                            reference
+                                .span
+                                .end
+                                .column
+                                .saturating_sub(reference.span.start.column),
+                        )
+                    })
+                    .map(|reference| reference.span.clone())
+            });
+        if let Some(span) = span {
+            self.used_spans.push(span.clone());
+            self.diagnostics.push(Diagnostic::at_span(span, message));
+        } else {
+            self.diagnostics.push(Diagnostic::new(message));
+        }
+    }
+}
+
+fn normalize_reference(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 fn collect_reference_diagnostics(
     source_program: &Program,
     resolved: &Program,
-    source: &str,
     default_sdk_symbols: bool,
 ) -> Vec<Diagnostic> {
     let globals = resolved
@@ -231,9 +275,8 @@ fn collect_reference_diagnostics(
         .map(str::to_owned)
         .collect::<HashSet<_>>();
     let mut output = ReferenceDiagnostics {
-        file: &source_program.source_path,
-        source,
-        occurrences: HashMap::new(),
+        references: Vec::new(),
+        used_spans: Vec::new(),
         diagnostics: Vec::new(),
     };
     for declaration in &source_program.declarations {
@@ -246,7 +289,7 @@ fn collect_declaration_references(
     declaration: &Declaration,
     globals: &HashSet<String>,
     default_sdk_symbols: bool,
-    output: &mut ReferenceDiagnostics<'_>,
+    output: &mut ReferenceDiagnostics,
 ) {
     match declaration {
         Declaration::Const(decl) => {
@@ -265,7 +308,13 @@ fn collect_declaration_references(
             let mut names = globals.clone();
             names.extend(function.params.iter().map(|param| param.name.clone()));
             collect_local_names(&function.body, &mut names);
-            collect_stmt_references(&function.body, &names, default_sdk_symbols, output);
+            collect_stmt_references(
+                &function.body,
+                &function.body_spans,
+                &names,
+                default_sdk_symbols,
+                output,
+            );
         }
         Declaration::Cfg { declaration, .. } => {
             collect_declaration_references(declaration, globals, default_sdk_symbols, output)
@@ -303,11 +352,16 @@ fn collect_local_names(stmts: &[Stmt], names: &mut HashSet<String>) {
 
 fn collect_stmt_references(
     stmts: &[Stmt],
+    spans: &[crate::ast::StmtSpan],
     names: &HashSet<String>,
     default_sdk_symbols: bool,
-    output: &mut ReferenceDiagnostics<'_>,
+    output: &mut ReferenceDiagnostics,
 ) {
-    for stmt in stmts {
+    for (index, stmt) in stmts.iter().enumerate() {
+        let span = spans.get(index);
+        output.set_references(span.map_or(&[], |span| span.references.as_slice()));
+        let child_spans: &[crate::ast::StmtSpan] =
+            span.map_or(&[], |span| span.children.as_slice());
         match stmt {
             Stmt::Let { value, .. } | Stmt::Return(Some(value)) => {
                 collect_expr_references(value, names, default_sdk_symbols, output)
@@ -322,15 +376,28 @@ fn collect_stmt_references(
                 else_body,
             } => {
                 collect_expr_references(condition, names, default_sdk_symbols, output);
-                collect_stmt_references(then_body, names, default_sdk_symbols, output);
-                collect_stmt_references(else_body, names, default_sdk_symbols, output);
+                let then_count = then_body.len();
+                collect_stmt_references(
+                    then_body,
+                    &child_spans[..child_spans.len().min(then_count)],
+                    names,
+                    default_sdk_symbols,
+                    output,
+                );
+                collect_stmt_references(
+                    else_body,
+                    child_spans.get(then_count..).unwrap_or_default(),
+                    names,
+                    default_sdk_symbols,
+                    output,
+                );
             }
             Stmt::While { condition, body } => {
                 collect_expr_references(condition, names, default_sdk_symbols, output);
-                collect_stmt_references(body, names, default_sdk_symbols, output);
+                collect_stmt_references(body, child_spans, names, default_sdk_symbols, output);
             }
             Stmt::Loop { body } => {
-                collect_stmt_references(body, names, default_sdk_symbols, output)
+                collect_stmt_references(body, child_spans, names, default_sdk_symbols, output)
             }
             Stmt::Out { port, value } => {
                 push_unknown_reference(port, false, names, default_sdk_symbols, output);
@@ -346,7 +413,7 @@ fn collect_place_references(
     place: &Place,
     names: &HashSet<String>,
     default_sdk_symbols: bool,
-    output: &mut ReferenceDiagnostics<'_>,
+    output: &mut ReferenceDiagnostics,
 ) {
     match place {
         Place::Ident(name) => {
@@ -375,7 +442,7 @@ fn collect_expr_references(
     expr: &Expr,
     names: &HashSet<String>,
     default_sdk_symbols: bool,
-    output: &mut ReferenceDiagnostics<'_>,
+    output: &mut ReferenceDiagnostics,
 ) {
     match expr {
         Expr::Ident(name) | Expr::In(name) | Expr::AddressOf(name) => {
@@ -428,7 +495,7 @@ fn push_unknown_access_path(
     path: &AccessPath,
     names: &HashSet<String>,
     default_sdk_symbols: bool,
-    output: &mut ReferenceDiagnostics<'_>,
+    output: &mut ReferenceDiagnostics,
 ) {
     if names.contains(&path.root) {
         return;
@@ -449,7 +516,7 @@ fn push_unknown_field(
     field: &str,
     names: &HashSet<String>,
     default_sdk_symbols: bool,
-    output: &mut ReferenceDiagnostics<'_>,
+    output: &mut ReferenceDiagnostics,
 ) {
     if names.contains(base) {
         return;
@@ -468,7 +535,7 @@ fn push_unknown_reference(
     function: bool,
     names: &HashSet<String>,
     default_sdk_symbols: bool,
-    output: &mut ReferenceDiagnostics<'_>,
+    output: &mut ReferenceDiagnostics,
 ) {
     if names.contains(name)
         || default_sdk_symbols
@@ -1613,6 +1680,53 @@ mod tests {
         assert_eq!((first.end.line, first.end.column), (2, 16));
         assert_eq!((second.start.line, second.start.column), (3, 5));
         assert_eq!((second.end.line, second.end.column), (3, 16));
+    }
+
+    #[test]
+    fn check_keeps_repeated_reference_diagnostics_on_their_own_ast_spans() {
+        let options = CompileOptions {
+            source: PathBuf::from("repeated-error.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        };
+        let source = "fn main() {\n    missing()\n    missing()\n}\n";
+
+        let diagnostics = check_source_diagnostics(source, &options);
+
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.message == "unknown function `missing`")
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.span.as_ref().unwrap().start.line)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+    }
+
+    #[test]
+    fn check_keeps_same_statement_references_on_their_own_ast_spans() {
+        let options = CompileOptions {
+            source: PathBuf::from("same-statement-error.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        };
+        let source = "fn main() { let value: u8 = missing + missing }\n";
+
+        let diagnostics = check_source_diagnostics(source, &options);
+        let spans = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message == "unknown value `missing`")
+            .map(|diagnostic| diagnostic.span.as_ref().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(spans.len(), 2, "{diagnostics:#?}");
+        assert_eq!(spans[0].start.column, 29);
+        assert_eq!(spans[1].start.column, 39);
     }
 
     #[test]

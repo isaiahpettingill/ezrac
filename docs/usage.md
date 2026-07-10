@@ -81,6 +81,12 @@ Run generated code in the compiler's target VM test path:
 ezrac test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>
 ```
 
+The built-in test runner uses the `ez80` emulator backend for eZ80 ADL, Z80,
+Z80N, Z180, i8080, and i8085 target profiles. eZ80 uses a 24-bit ADL address
+space; the other built-in CPU modes use 16-bit address and stack bounds. The
+runner backend interface is extensible, so new CPU families can supply an
+emulator without changing the compiler test command.
+
 Assemble handwritten assembly:
 
 ```sh
@@ -116,6 +122,55 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 `--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Supported modes are `i8080`, `i8085`, `z80`, `z80n`, `z180`, and `ez80`.
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
+
+## Assembly Macros
+
+Handwritten assembly is preprocessed before CPU-specific parsing for both
+`ezrac assemble`, including `--base`, and `ezrac build --input-kind assembly`.
+This layer is target-independent: macro sets can be vendored with an assembly
+project and used by eZ80, Z80-family, and Intel-family assembly inputs.
+
+Use ordinary relative `include` directives to vendor a macro set:
+
+```asm
+include "macros/console.inc"
+%print_char 65
+```
+
+Defines substitute `${NAME}` in ordinary assembly and macro bodies:
+
+```asm
+%define DEBUG_PORT 0Ch
+out (${DEBUG_PORT}), a
+```
+
+Conditionals select source based on the configured target or assembler CPU:
+
+```asm
+%if cpu("ez80")
+    out0 (0Ch), a
+%else
+    out (0Ch), a
+%endif
+```
+
+Macros have named parameters referenced as `$name`. Invoke a macro with a `%`
+prefix so it cannot conflict with an instruction mnemonic. Labels beginning
+with `%%` are hygienic per invocation.
+
+```asm
+%macro delay(count)
+%%loop:
+    djnz %%loop
+%endmacro
+
+%delay 16
+```
+
+Supported condition forms are `cpu("name")`, `target("triple")`, and
+`defined(NAME)`. Macros expand recursively up to 32 levels. The macro layer
+does not compile or link `.ezra` SDK functions; reusable assembly APIs should
+be published as vendorable macro sets with explicit target ABI requirements.
 
 ## ZX Spectrum Output
 

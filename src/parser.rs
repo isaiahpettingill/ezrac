@@ -546,6 +546,7 @@ fn build_stmt(
     pair: Pair<'_, Rule>,
 ) -> Result<(Stmt, crate::ast::StmtSpan), Diagnostic> {
     let span = pair_span(file, &pair);
+    let references = collect_pair_references(file, &pair);
     let (statement, children) = match pair.as_rule() {
         Rule::let_stmt => {
             let mut inner = pair.into_inner();
@@ -661,7 +662,36 @@ fn build_stmt(
         ),
         _ => unreachable!("unexpected stmt rule {:?}", pair.as_rule()),
     };
-    Ok((statement, crate::ast::StmtSpan { span, children }))
+    Ok((
+        statement,
+        crate::ast::StmtSpan {
+            span,
+            children,
+            references,
+        },
+    ))
+}
+
+fn collect_pair_references(file: &Path, pair: &Pair<'_, Rule>) -> Vec<crate::ast::SourceReference> {
+    let mut references = Vec::new();
+    collect_pair_references_inner(file, pair.clone(), &mut references);
+    references
+}
+
+fn collect_pair_references_inner(
+    file: &Path,
+    pair: Pair<'_, Rule>,
+    references: &mut Vec<crate::ast::SourceReference>,
+) {
+    // Keep every parser node: semantic code can select the smallest exact source
+    // construct without re-tokenizing diagnostic text later.
+    references.push(crate::ast::SourceReference {
+        text: pair.as_str().to_owned(),
+        span: pair_span(file, &pair),
+    });
+    for inner in pair.into_inner() {
+        collect_pair_references_inner(file, inner, references);
+    }
 }
 
 fn build_place(pair: Pair<'_, Rule>) -> Result<Place, Diagnostic> {

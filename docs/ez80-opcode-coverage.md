@@ -30,9 +30,10 @@ Priority 2: close common eZ80/Z80 gaps.
 
 Priority 3: make coverage auditable.
 
-- `instruction_coverage(cpu)` now exposes machine-readable rows containing accepted syntax, emitted bytes, CPU mode, exact/generated provenance, VM sizing support, and inline-assembly effects.
-- The generated coverage test checks every exposed row against the encoder, VM sizing path, and clobber/effect analyzer for all six supported CPU modes.
-- Expand the concrete generated-form corpus until it exhaustively cross-checks all accepted UM0077 operand combinations, not only the currently documented representative forms.
+- `instruction_coverage(cpu)` exposes machine-readable rows containing accepted syntax, emitted bytes, CPU mode, exact/generated provenance, VM sizing support, and inline-assembly effects.
+- The generated corpus covers register, indirect, immediate, 24-bit immediate/direct, indexed, IX/IY byte-alias, ALU, CB-bit, branch, I/O, LEA, mode-suffix, Z180, and Z80N operand matrices in addition to exact metadata forms.
+- Every exposed Z80, Z80N, Z180, and eZ80 row is assembled through the standalone assembler and cross-checked against its inline-assembly effect analysis.
+- Continue expanding the corpus for any accepted UM0077 forms not yet represented by an operand matrix.
 - Golden tests for standalone `ezra assemble` inputs used by examples and target SDKs.
 
 Longer-term direction:

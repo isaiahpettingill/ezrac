@@ -57,6 +57,56 @@ pub struct TestRunOptions {
     pub stack_top: u32,
 }
 
+/// A fully assembled test image that an emulator backend can load and execute.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestImage {
+    pub cpu_family: CpuFamily,
+    pub base_addr: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// Extensible execution backend for target test images.
+///
+/// The built-in backend uses the `ez80` crate for eZ80, Z80, Z80N, Z180,
+/// i8080, and i8085. Other CPU families can supply their own backend without
+/// changing the compiler test command.
+pub trait EmulatorBackend: Send + Sync {
+    fn supports(&self, cpu_family: CpuFamily) -> bool;
+    fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic>;
+}
+
+pub struct TestRunner {
+    backends: Vec<Box<dyn EmulatorBackend>>,
+}
+
+impl Default for TestRunner {
+    fn default() -> Self {
+        Self::new(vec![Box::new(Ez80Emulator)])
+    }
+}
+
+impl TestRunner {
+    pub fn new(backends: Vec<Box<dyn EmulatorBackend>>) -> Self {
+        Self { backends }
+    }
+
+    pub fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+        let backend = self
+            .backends
+            .iter()
+            .find(|backend| backend.supports(image.cpu_family))
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "no test emulator is registered for CPU `{}`",
+                    image.cpu_family.as_str()
+                ))
+            })?;
+        backend.run(image, options)
+    }
+}
+
+pub struct Ez80Emulator;
+
 const TEST_STACK_BYTES: u32 = 0x010000;
 
 pub fn run_assembly_test(assembly: &str, instruction_budget: u64) -> Result<TestRun, Diagnostic> {
@@ -92,49 +142,131 @@ pub fn run_assembly_test_with_cpu_options_at(
     options: &TestRunOptions,
     base_addr: u32,
 ) -> Result<TestRun, Diagnostic> {
-    if options.stack_top > Address24::MAX {
-        return Err(Diagnostic::new(format!(
-            "test stack top 0x{:X} is outside the 24-bit address space",
-            options.stack_top
-        )));
+    let code = assemble_subset_at(cpu_family, assembly, base_addr)?;
+    TestRunner::default().run(
+        &TestImage {
+            cpu_family,
+            base_addr,
+            bytes: code,
+        },
+        options,
+    )
+}
+
+impl EmulatorBackend for Ez80Emulator {
+    fn supports(&self, cpu_family: CpuFamily) -> bool {
+        matches!(
+            cpu_family,
+            CpuFamily::Ez80
+                | CpuFamily::Z80
+                | CpuFamily::Z80N
+                | CpuFamily::Z180
+                | CpuFamily::I8080
+                | CpuFamily::I8085
+        )
     }
-    for (address, _) in &options.initial_memory {
-        if *address > Address24::MAX {
+
+    fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+        let address_limit = address_limit_for_family(image.cpu_family);
+        if image.base_addr > address_limit {
             return Err(Diagnostic::new(format!(
-                "test memory address 0x{address:X} is outside the 24-bit address space"
+                "test image base address 0x{:X} is outside the {}-bit address space",
+                image.base_addr,
+                address_width_for_family(image.cpu_family)
             )));
         }
-    }
+        if options.stack_top > address_limit {
+            return Err(Diagnostic::new(format!(
+                "test stack top 0x{:X} is outside the {}-bit address space",
+                options.stack_top,
+                address_width_for_family(image.cpu_family)
+            )));
+        }
+        for (address, _) in &options.initial_memory {
+            if *address > address_limit {
+                return Err(Diagnostic::new(format!(
+                    "test memory address 0x{address:X} is outside the {}-bit address space",
+                    address_width_for_family(image.cpu_family)
+                )));
+            }
+        }
 
-    let code = assemble_subset_at(cpu_family, assembly, base_addr)?;
-    let code_start = base_addr;
-    let code_end = checked_code_end(code_start, code.len())?;
-    let mut machine = TestMachine::new();
-    for (port, value) in &options.initial_ports {
-        machine.ports[*port as usize] = *value;
-    }
-    for (address, value) in &options.initial_memory {
-        machine.poke(*address, *value);
-    }
-    for (address, byte) in code.into_iter().enumerate() {
-        machine.poke(base_addr + address as u32, byte);
-    }
+        let code_start = image.base_addr;
+        let code_end =
+            checked_code_end_for_family(code_start, image.bytes.len(), image.cpu_family)?;
+        let mut machine = TestMachine::new(address_limit);
+        for (port, value) in &options.initial_ports {
+            machine.ports[*port as usize] = *value;
+        }
+        for (address, value) in &options.initial_memory {
+            machine.poke(*address, *value);
+        }
+        for (address, byte) in image.bytes.iter().copied().enumerate() {
+            machine.poke(image.base_addr + address as u32, byte);
+        }
 
-    let mut cpu = Cpu::new_for_mode(cpu_mode_for_family(cpu_family));
-    cpu.state.reg.adl = cpu_family == CpuFamily::Ez80;
-    cpu.state.set_pc(base_addr);
-    if cpu_family == CpuFamily::Z80 {
-        cpu.state.reg.set16(Reg16::SP, options.stack_top as u16);
-    } else {
-        cpu.state.reg.set24(Reg16::SP, options.stack_top);
-    }
-    if std::env::var_os("EZRA_TRACE_VM").is_some() {
-        cpu.set_trace(true);
-    }
+        let mut cpu = Cpu::new_for_mode(cpu_mode_for_family(image.cpu_family));
+        cpu.state.reg.adl = image.cpu_family == CpuFamily::Ez80;
+        cpu.state.set_pc(image.base_addr);
+        if image.cpu_family != CpuFamily::Ez80 {
+            cpu.state.reg.set16(Reg16::SP, options.stack_top as u16);
+        } else {
+            cpu.state.reg.set24(Reg16::SP, options.stack_top);
+        }
+        if std::env::var_os("EZRA_TRACE_VM").is_some() {
+            cpu.set_trace(true);
+        }
 
-    for instruction in 0..options.instruction_budget {
-        let pc = cpu.state.pc();
-        if cpu_family == CpuFamily::Z80 && handle_cpm_bdos_call(&mut cpu, &mut machine)? {
+        for instruction in 0..options.instruction_budget {
+            let pc = cpu.state.pc();
+            if is_cpm_cpu(image.cpu_family) && handle_cpm_bdos_call(&mut cpu, &mut machine)? {
+                if machine.halted {
+                    return Ok(TestRun {
+                        halted: true,
+                        result_code: machine.result_code,
+                        instructions: instruction + 1,
+                        debug_output: machine.debug_output,
+                        ports: machine.ports,
+                        failure: None,
+                    });
+                }
+                continue;
+            }
+            if pc < code_start || pc >= code_end {
+                return Ok(TestRun {
+                    halted: false,
+                    result_code: machine.result_code,
+                    instructions: instruction,
+                    debug_output: machine.debug_output,
+                    ports: machine.ports,
+                    failure: Some(TestRunFailure::ExecutionOutsideMappedMemory { pc }),
+                });
+            }
+            if catch_unwind(AssertUnwindSafe(|| cpu.execute_instruction(&mut machine))).is_err() {
+                return Ok(TestRun {
+                    halted: false,
+                    result_code: machine.result_code,
+                    instructions: instruction,
+                    debug_output: machine.debug_output,
+                    ports: machine.ports,
+                    failure: Some(TestRunFailure::IllegalInstruction { pc }),
+                });
+            }
+            let sp = if image.cpu_family == CpuFamily::Ez80 {
+                cpu.state.reg.get24(Reg16::SP)
+            } else {
+                cpu.state.reg.get16(Reg16::SP) as u32
+            };
+            if !stack_pointer_in_bounds(sp, options.stack_top) {
+                return Ok(TestRun {
+                    halted: false,
+                    result_code: machine.result_code,
+                    instructions: instruction + 1,
+                    debug_output: machine.debug_output,
+                    ports: machine.ports,
+                    failure: Some(TestRunFailure::StackOverflow { sp }),
+                });
+            }
             if machine.halted {
                 return Ok(TestRun {
                     halted: true,
@@ -145,59 +277,55 @@ pub fn run_assembly_test_with_cpu_options_at(
                     failure: None,
                 });
             }
-            continue;
         }
-        if pc < code_start || pc >= code_end {
-            return Ok(TestRun {
-                halted: false,
-                result_code: machine.result_code,
-                instructions: instruction,
-                debug_output: machine.debug_output,
-                ports: machine.ports,
-                failure: Some(TestRunFailure::ExecutionOutsideMappedMemory { pc }),
-            });
-        }
-        if catch_unwind(AssertUnwindSafe(|| cpu.execute_instruction(&mut machine))).is_err() {
-            return Ok(TestRun {
-                halted: false,
-                result_code: machine.result_code,
-                instructions: instruction,
-                debug_output: machine.debug_output,
-                ports: machine.ports,
-                failure: Some(TestRunFailure::IllegalInstruction { pc }),
-            });
-        }
-        let sp = cpu.state.reg.get24(Reg16::SP);
-        if !stack_pointer_in_bounds(sp, options.stack_top) {
-            return Ok(TestRun {
-                halted: false,
-                result_code: machine.result_code,
-                instructions: instruction + 1,
-                debug_output: machine.debug_output,
-                ports: machine.ports,
-                failure: Some(TestRunFailure::StackOverflow { sp }),
-            });
-        }
-        if machine.halted {
-            return Ok(TestRun {
-                halted: true,
-                result_code: machine.result_code,
-                instructions: instruction + 1,
-                debug_output: machine.debug_output,
-                ports: machine.ports,
-                failure: None,
-            });
-        }
-    }
 
-    Ok(TestRun {
-        halted: false,
-        result_code: machine.result_code,
-        instructions: options.instruction_budget,
-        debug_output: machine.debug_output,
-        ports: machine.ports,
-        failure: Some(TestRunFailure::Timeout),
-    })
+        Ok(TestRun {
+            halted: false,
+            result_code: machine.result_code,
+            instructions: options.instruction_budget,
+            debug_output: machine.debug_output,
+            ports: machine.ports,
+            failure: Some(TestRunFailure::Timeout),
+        })
+    }
+}
+
+fn address_width_for_family(cpu_family: CpuFamily) -> u8 {
+    if cpu_family == CpuFamily::Ez80 {
+        24
+    } else {
+        16
+    }
+}
+
+fn address_limit_for_family(cpu_family: CpuFamily) -> u32 {
+    if cpu_family == CpuFamily::Ez80 {
+        Address24::MAX
+    } else {
+        u16::MAX as u32
+    }
+}
+
+fn checked_code_end_for_family(
+    code_start: u32,
+    code_len: usize,
+    cpu_family: CpuFamily,
+) -> Result<u32, Diagnostic> {
+    let end = checked_code_end(code_start, code_len)?;
+    if end > address_limit_for_family(cpu_family) {
+        return Err(Diagnostic::new(format!(
+            "test program exceeds the {}-bit address space",
+            address_width_for_family(cpu_family)
+        )));
+    }
+    Ok(end)
+}
+
+fn is_cpm_cpu(cpu_family: CpuFamily) -> bool {
+    matches!(
+        cpu_family,
+        CpuFamily::Z80 | CpuFamily::I8080 | CpuFamily::I8085
+    )
 }
 
 fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
@@ -871,6 +999,7 @@ fn push24(bytes: &mut Vec<u8>, value: u32) {
 
 struct TestMachine {
     memory: HashMap<u32, u8>,
+    address_mask: u32,
     ports: [u8; 256],
     cycles: Cell<i64>,
     halted: bool,
@@ -879,9 +1008,10 @@ struct TestMachine {
 }
 
 impl TestMachine {
-    fn new() -> Self {
+    fn new(address_limit: u32) -> Self {
         Self {
             memory: HashMap::new(),
+            address_mask: address_limit,
             ports: [0; 256],
             cycles: Cell::new(0),
             halted: false,
@@ -894,13 +1024,13 @@ impl TestMachine {
 impl Machine for TestMachine {
     fn peek(&self, address: u32) -> u8 {
         self.memory
-            .get(&(address & 0xFF_FFFF))
+            .get(&(address & self.address_mask))
             .copied()
             .unwrap_or(0)
     }
 
     fn poke(&mut self, address: u32, value: u8) {
-        self.memory.insert(address & 0xFF_FFFF, value);
+        self.memory.insert(address & self.address_mask, value);
     }
 
     fn use_cycles(&self, cycles: i32) {
@@ -1013,6 +1143,101 @@ mod tests {
         assert!(run.halted, "{run:?}");
         assert_eq!(run.debug_output, b"EZRA CP/M");
         assert_eq!(run.failure, None);
+    }
+
+    #[test]
+    fn runs_i8080_and_i8085_programs_with_16_bit_state() {
+        for (cpu, assembly) in [
+            (CpuFamily::I8080, "mvi a, 0\nout 0Dh\nmvi a, 1\nout 0Eh\n"),
+            (
+                CpuFamily::I8085,
+                "rim\nmvi a, 0\nout 0Dh\nmvi a, 1\nout 0Eh\n",
+            ),
+        ] {
+            let run = run_assembly_test_with_cpu_options_at(
+                cpu,
+                assembly,
+                &TestRunOptions {
+                    instruction_budget: 100,
+                    initial_ports: Vec::new(),
+                    initial_memory: Vec::new(),
+                    stack_top: 0xFF00,
+                },
+                0x0100,
+            )
+            .unwrap();
+
+            assert!(run.halted, "{cpu:?}: {run:?}");
+            assert_eq!(run.result_code, 0, "{cpu:?}: {run:?}");
+            assert_eq!(run.failure, None, "{cpu:?}: {run:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_i8080_images_outside_the_16_bit_address_space() {
+        let error = run_assembly_test_with_cpu_options_at(
+            CpuFamily::I8080,
+            "hlt\n",
+            &TestRunOptions {
+                instruction_budget: 1,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0xFF00,
+            },
+            0x01_0000,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "test image base address 0x10000 is outside the 16-bit address space"
+        );
+    }
+
+    #[test]
+    fn test_runner_accepts_backends_for_other_architectures() {
+        struct StubEmulator;
+
+        impl EmulatorBackend for StubEmulator {
+            fn supports(&self, cpu_family: CpuFamily) -> bool {
+                cpu_family == CpuFamily::M68k
+            }
+
+            fn run(
+                &self,
+                image: &TestImage,
+                _options: &TestRunOptions,
+            ) -> Result<TestRun, Diagnostic> {
+                assert_eq!(image.bytes, [0x4E, 0x75]);
+                Ok(TestRun {
+                    halted: true,
+                    result_code: 0,
+                    instructions: 1,
+                    debug_output: Vec::new(),
+                    ports: [0; 256],
+                    failure: None,
+                })
+            }
+        }
+
+        let runner = TestRunner::new(vec![Box::new(StubEmulator)]);
+        let run = runner
+            .run(
+                &TestImage {
+                    cpu_family: CpuFamily::M68k,
+                    base_addr: 0,
+                    bytes: vec![0x4E, 0x75],
+                },
+                &TestRunOptions {
+                    instruction_budget: 1,
+                    initial_ports: Vec::new(),
+                    initial_memory: Vec::new(),
+                    stack_top: 0,
+                },
+            )
+            .unwrap();
+
+        assert!(run.halted);
     }
 
     #[test]

@@ -12,6 +12,7 @@ use ezra::{
         resolve_import_source,
     },
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
+    layout::parse_layout,
     parser::parse_program,
     project::load_nearest_project_config,
     target::DEFAULT_TARGET_TRIPLE,
@@ -98,6 +99,18 @@ struct TextDocumentContentChangeEvent {
 struct DidCloseParams {
     #[serde(rename = "textDocument")]
     text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
+struct DidChangeWatchedFilesParams {
+    changes: Vec<WatchedFileChange>,
+}
+
+#[derive(Deserialize)]
+struct WatchedFileChange {
+    uri: String,
+    #[serde(rename = "type")]
+    kind: u8,
 }
 
 #[derive(Deserialize)]
@@ -268,7 +281,7 @@ impl Server {
                 }
             }
             "workspace/didChangeWatchedFiles" => {
-                self.publish_workspace_diagnostics(output)?;
+                self.did_change_watched_files(message.params, output)?;
             }
             _ => {
                 if let Some(id) = message.id {
@@ -312,6 +325,25 @@ impl Server {
             .map_err(|error| format!("invalid didClose params: {error}"))?;
         self.documents.remove(&params.text_document.uri);
         self.publish_workspace_diagnostics(output)
+    }
+
+    fn did_change_watched_files(
+        &mut self,
+        params: Value,
+        output: &mut impl Write,
+    ) -> Result<(), String> {
+        let params: DidChangeWatchedFilesParams = serde_json::from_value(params)
+            .map_err(|error| format!("invalid watched-file params: {error}"))?;
+        let has_relevant_change = params.changes.into_iter().any(|change| {
+            // LSP file-event kinds are create (1), change (2), and delete (3).
+            // Ignore malformed events and files outside EZRA project inputs.
+            matches!(change.kind, 1..=3)
+                && uri_to_path(&change.uri).is_ok_and(|path| is_project_input(&path))
+        });
+        if has_relevant_change {
+            self.publish_workspace_diagnostics(output)?;
+        }
+        Ok(())
     }
 
     fn publish_workspace_diagnostics(&mut self, output: &mut impl Write) -> Result<(), String> {
@@ -377,6 +409,7 @@ impl Server {
                     (diagnostic_path, diagnostic)
                 }),
             );
+            diagnostics.extend(project_layout_diagnostics(&path));
         }
 
         let mut publications = self
@@ -502,6 +535,49 @@ fn sdk_for_path(path: &Path) -> Result<SdkResolver, Diagnostic> {
             .map(|project| project.sdk_paths.clone())
             .unwrap_or_default(),
     })
+}
+
+fn is_project_input(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "Ezra.toml")
+        || matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("ezra" | "ezralayout")
+        )
+}
+
+fn project_layout_diagnostics(root: &Path) -> Vec<(PathBuf, Diagnostic)> {
+    let Ok(Some(project)) = load_nearest_project_config(root) else {
+        return Vec::new();
+    };
+    let mut layout_paths = project.layout_file.into_iter().collect::<Vec<_>>();
+    if let Some(cartridge) = project.cartridge {
+        layout_paths.push(cartridge.layout_file);
+    }
+    layout_paths.sort();
+    layout_paths.dedup();
+
+    let mut diagnostics = Vec::new();
+    for path in layout_paths {
+        match std::fs::read_to_string(&path) {
+            Ok(source) => match parse_layout(&source) {
+                Ok(layout) => {
+                    if let Err(errors) = layout.validate() {
+                        diagnostics.extend(
+                            errors
+                                .into_iter()
+                                .map(|diagnostic| (path.clone(), diagnostic)),
+                        );
+                    }
+                }
+                Err(diagnostic) => diagnostics.push((path.clone(), diagnostic)),
+            },
+            Err(error) => diagnostics.push((
+                path.clone(),
+                Diagnostic::new(format!("failed to read `{}`: {error}", path.display())),
+            )),
+        }
+    }
+    diagnostics
 }
 
 fn initialize_result() -> Value {
@@ -2516,6 +2592,129 @@ mod tests {
             )
             .unwrap();
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn watched_project_files_republish_layout_diagnostics_and_ignore_unrelated_files() {
+        let root =
+            std::env::temp_dir().join(format!("ezrac-lsp-watched-files-{}", std::process::id()));
+        fs::create_dir_all(root.join("src")).unwrap();
+        let main_path = root.join("src/main.ezra");
+        let layout_path = root.join("layout.ezralayout");
+        fs::write(
+            root.join("Ezra.toml"),
+            "[layout]\nfile = \"layout.ezralayout\"\n",
+        )
+        .unwrap();
+        fs::write(&main_path, "fn main() {}\n").unwrap();
+        fs::write(&layout_path, "this is not an EZRA layout\n").unwrap();
+        let main_uri = path_to_uri(&main_path);
+        let layout_uri = path_to_uri(&layout_path);
+        let mut server = Server::default();
+        server.documents.insert(
+            main_uri,
+            OpenDocument {
+                path: main_path,
+                text: "fn main() {}\n".to_owned(),
+                version: Some(1),
+            },
+        );
+
+        let mut output = Vec::new();
+        server
+            .handle_message(
+                Message {
+                    id: None,
+                    method: "workspace/didChangeWatchedFiles".to_owned(),
+                    params: json!({ "changes": [{ "uri": layout_uri, "type": 2 }] }),
+                },
+                &mut output,
+            )
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("publishDiagnostics"));
+        assert!(output.contains("layout.ezralayout"), "{output}");
+
+        fs::write(root.join("Ezra.toml"), "[layout\n").unwrap();
+        let mut output = Vec::new();
+        server
+            .handle_message(
+                Message {
+                    id: None,
+                    method: "workspace/didChangeWatchedFiles".to_owned(),
+                    params: json!({
+                        "changes": [{ "uri": path_to_uri(&root.join("Ezra.toml")), "type": 2 }]
+                    }),
+                },
+                &mut output,
+            )
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("publishDiagnostics"));
+        assert!(output.contains("failed to parse"), "{output}");
+
+        let mut output = Vec::new();
+        server
+            .handle_message(
+                Message {
+                    id: None,
+                    method: "workspace/didChangeWatchedFiles".to_owned(),
+                    params: json!({
+                        "changes": [{ "uri": "file:///tmp/unrelated.txt", "type": 2 }]
+                    }),
+                },
+                &mut output,
+            )
+            .unwrap();
+        assert!(output.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn watched_import_changes_republish_dependent_project_diagnostics() {
+        let root =
+            std::env::temp_dir().join(format!("ezrac-lsp-watched-import-{}", std::process::id()));
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(
+            root.join("Ezra.toml"),
+            "[build]\ntarget = \"custom-unknown-ez80\"\n",
+        )
+        .unwrap();
+        let main_path = root.join("src/main.ezra");
+        let import_path = root.join("src/lib/math.ezra");
+        let main_source = "import lib.math\nfn main() { math.increment() }\n";
+        fs::write(&main_path, main_source).unwrap();
+        fs::write(&import_path, "pub fn increment() {}\n").unwrap();
+        let mut server = Server::default();
+        server.documents.insert(
+            path_to_uri(&main_path),
+            OpenDocument {
+                path: main_path,
+                text: main_source.to_owned(),
+                version: Some(1),
+            },
+        );
+
+        fs::write(&import_path, "pub fn increment(\n").unwrap();
+        let import_uri = path_to_uri(&import_path);
+        let mut output = Vec::new();
+        server
+            .handle_message(
+                Message {
+                    id: None,
+                    method: "workspace/didChangeWatchedFiles".to_owned(),
+                    params: json!({ "changes": [{ "uri": import_uri, "type": 2 }] }),
+                },
+                &mut output,
+            )
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("publishDiagnostics"));
+        assert!(output.contains("lib/math.ezra"), "{output}");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

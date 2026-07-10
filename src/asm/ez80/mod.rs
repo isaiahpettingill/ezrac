@@ -41,7 +41,7 @@ pub struct InstructionCoverage {
     pub vm_sizing_supported: bool,
 }
 
-const GENERATED_COVERAGE_FORMS: &[&str] = &[
+const GENERATED_COVERAGE_SEEDS: &[&str] = &[
     "nop",
     "mov a, b",
     "mvi a, 7Fh",
@@ -81,6 +81,162 @@ const GENERATED_COVERAGE_FORMS: &[&str] = &[
     "out0.lil (0Ch), a",
 ];
 
+fn generated_coverage_forms() -> Vec<String> {
+    let mut forms = GENERATED_COVERAGE_SEEDS
+        .iter()
+        .map(|form| (*form).to_owned())
+        .collect::<Vec<_>>();
+    let reg8 = ["b", "c", "d", "e", "h", "l", "a"];
+    let reg8_or_hl = ["b", "c", "d", "e", "h", "l", "(hl)", "a"];
+    let reg16 = ["bc", "de", "hl", "sp"];
+
+    for dst in reg8_or_hl {
+        for src in reg8_or_hl {
+            forms.push(format!("ld {dst}, {src}"));
+        }
+        forms.push(format!("ld {dst}, 7Fh"));
+        forms.push(format!("inc {dst}"));
+        forms.push(format!("dec {dst}"));
+    }
+    for register in reg16 {
+        forms.push(format!("inc {register}"));
+        forms.push(format!("dec {register}"));
+        forms.push(format!("add hl, {register}"));
+        forms.push(format!("ld {register}, 1234h"));
+        forms.push(format!("ld {register}, (1234h)"));
+        forms.push(format!("ld (1234h), {register}"));
+    }
+    for op in ["add a", "adc a", "sub", "sbc a", "and", "xor", "or", "cp"] {
+        for operand in reg8_or_hl {
+            forms.push(alu_coverage_form(op, operand));
+        }
+        forms.push(alu_coverage_form(op, "55h"));
+    }
+    for op in ["rlc", "rrc", "rl", "rr", "sla", "sra", "sll", "srl"] {
+        for operand in reg8_or_hl {
+            forms.push(format!("{op} {operand}"));
+        }
+    }
+    for op in ["bit", "res", "set"] {
+        for bit in 0..8 {
+            for operand in reg8_or_hl {
+                forms.push(format!("{op} {bit}, {operand}"));
+            }
+        }
+    }
+    for index in ["ix", "iy"] {
+        for register in reg8 {
+            forms.push(format!("ld {register}, ({index}+2)"));
+            forms.push(format!("ld ({index}-2), {register}"));
+        }
+        forms.push(format!("ld ({index}+2), 7Fh"));
+        forms.push(format!("inc ({index}+2)"));
+        forms.push(format!("dec ({index}-2)"));
+        for op in ["add a", "adc a", "sub", "sbc a", "and", "xor", "or", "cp"] {
+            forms.push(alu_coverage_form(op, &format!("({index}+2)")));
+        }
+        for op in ["rlc", "rrc", "rl", "rr", "sla", "sra", "sll", "srl"] {
+            forms.push(format!("{op} ({index}+2)"));
+        }
+        for op in ["bit", "res", "set"] {
+            for bit in 0..8 {
+                forms.push(format!("{op} {bit}, ({index}+2)"));
+            }
+        }
+    }
+    for register in ["b", "c", "d", "e", "h", "l", "a", "(hl)"] {
+        forms.push(format!("tst {register}"));
+    }
+    for register in ["bc", "de", "hl"] {
+        forms.push(format!("mlt {register}"));
+    }
+    for register in ["hl", "de", "bc"] {
+        forms.push(format!("add {register}, 1234h"));
+    }
+    for alias in ["ixh", "ixl", "iyh", "iyl"] {
+        let index_register = &alias[..2];
+        forms.push(format!("ld {alias}, 7Fh"));
+        forms.push(format!("inc {alias}"));
+        forms.push(format!("dec {alias}"));
+        for register in ["b", "c", "d", "e", "a", alias] {
+            forms.push(format!("ld {alias}, {register}"));
+            forms.push(format!("ld {register}, {alias}"));
+        }
+        for op in ["add a", "adc a", "sub", "sbc a", "and", "xor", "or", "cp"] {
+            forms.push(alu_coverage_form(op, alias));
+        }
+        forms.push(format!("lea hl, {index_register}+2"));
+        forms.push(format!("lea hl, {index_register}-128"));
+        forms.push(format!("lea hl, {index_register}+127"));
+    }
+    for register in ["bc", "de", "hl", "sp", "ix", "iy"] {
+        forms.push(format!("ld {register}, 040000h"));
+    }
+    for register in ["a", "bc", "de", "hl", "sp", "ix", "iy"] {
+        forms.push(format!("ld {register}, (040000h)"));
+        forms.push(format!("ld (040000h), {register}"));
+    }
+    for register in ["b", "c", "d", "e", "h", "l", "a"] {
+        forms.push(format!("in {register}, (c)"));
+        forms.push(format!("out (c), {register}"));
+        forms.push(format!("in0 {register}, (12h)"));
+        forms.push(format!("out0 (12h), {register}"));
+    }
+    for mnemonic in ["jp", "call"] {
+        forms.push(format!("{mnemonic} 040000h"));
+        for condition in ["nz", "z", "nc", "c", "po", "pe", "p", "m"] {
+            forms.push(format!("{mnemonic} {condition}, 040000h"));
+        }
+    }
+    for address in (0..=0x38).step_by(8) {
+        forms.push(format!("rst {address:02X}h"));
+    }
+    let suffixed_bases = [
+        "nop",
+        "ld ixh, 12h",
+        "bit 3, (iy-1)",
+        "out0 (0Ch), a",
+        "lea hl, ix-1",
+        "ld ix, 040000h",
+        "ld iy, (040000h)",
+        "ld (040000h), iy",
+        "jp 040000h",
+    ];
+    for suffix in ["sis", "lis", "sil", "lil"] {
+        for base in suffixed_bases {
+            let (mnemonic, operands) = base.split_once(' ').unwrap_or((base, ""));
+            forms.push(if operands.is_empty() {
+                format!("{mnemonic}.{suffix}")
+            } else {
+                format!("{mnemonic}.{suffix} {operands}")
+            });
+        }
+    }
+    forms.extend(
+        [
+            "tst 55h",
+            "tstio 55h",
+            "test 55h",
+            "push 1234h",
+            "nextreg 12h, 34h",
+            "nextreg 12h, a",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    forms.sort();
+    forms.dedup();
+    forms
+}
+
+fn alu_coverage_form(op: &str, operand: &str) -> String {
+    if op.contains(' ') {
+        format!("{op}, {operand}")
+    } else {
+        format!("{op} {operand}")
+    }
+}
+
 /// Analyze one source instruction through the same module that owns opcode encoding.
 pub fn analyze_instruction(
     cpu: AssemblerCpu,
@@ -102,17 +258,74 @@ pub fn instruction_coverage(cpu: AssemblerCpu) -> Result<Vec<InstructionCoverage
             true,
         )?);
     }
-    for syntax in GENERATED_COVERAGE_FORMS {
-        let Ok(Some(bytes)) = encode_generated_instruction(cpu, syntax) else {
+    for syntax in generated_coverage_forms() {
+        let Ok(Some(bytes)) = coverage_bytes(cpu, &syntax) else {
             continue;
         };
-        if coverage.iter().any(|row| row.syntax == *syntax) {
+        if coverage.iter().any(|row| row.syntax == syntax) {
             continue;
         }
-        coverage.push(coverage_row(cpu, syntax, bytes, false)?);
+        coverage.push(coverage_row(cpu, &syntax, bytes, false)?);
     }
     coverage.sort_by(|left, right| left.syntax.cmp(&right.syntax));
     Ok(coverage)
+}
+
+fn coverage_bytes(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if let Some((prefix, base)) = ez80_mode_suffixed_instruction(cpu, text)
+        && let Some(mut bytes) = coverage_bytes(cpu, &base)?
+    {
+        bytes.insert(0, prefix);
+        return Ok(Some(bytes));
+    }
+    if let Some(bytes) = encode_generated_instruction(cpu, text)? {
+        return Ok(Some(bytes));
+    }
+    if let Some(load) = imm24_load_instruction(cpu, text) {
+        let value = parse_number(load.value)?;
+        if value > 0xFF_FFFF {
+            return Err(Diagnostic::new(format!(
+                "value {} is outside u24 range",
+                load.value
+            )));
+        }
+        let mut bytes = load.prefix.to_vec();
+        push24(&mut bytes, value);
+        return Ok(Some(bytes));
+    }
+    if let Some(direct) = direct24_instruction(cpu, text) {
+        let value = parse_number(direct.addr)?;
+        if value > 0xFF_FFFF {
+            return Err(Diagnostic::new(format!(
+                "value {} is outside u24 range",
+                direct.addr
+            )));
+        }
+        let mut bytes = direct.prefix.to_vec();
+        push24(&mut bytes, value);
+        return Ok(Some(bytes));
+    }
+    if let Some(branch) = branch_instruction(cpu, text)
+        && matches!(branch.width, BranchWidth::Absolute24)
+    {
+        let value = parse_number(branch.target)?;
+        if value > 0xFF_FFFF {
+            return Err(Diagnostic::new(format!(
+                "value {} is outside u24 range",
+                branch.target
+            )));
+        }
+        let mut bytes = vec![branch.opcode];
+        push24(&mut bytes, value);
+        return Ok(Some(bytes));
+    }
+    Ok(None)
+}
+
+fn push24(bytes: &mut Vec<u8>, value: u32) {
+    bytes.push(value as u8);
+    bytes.push((value >> 8) as u8);
+    bytes.push((value >> 16) as u8);
 }
 
 fn coverage_row(
@@ -2038,6 +2251,7 @@ fn parse_number(text: &str) -> Result<u32, Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::assemble_subset_with_symbols_at;
     use ez80::Machine;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -2507,12 +2721,42 @@ mod tests {
             for row in coverage {
                 assert!(row.vm_sizing_supported, "{cpu:?}: {}", row.syntax);
                 assert_eq!(
-                    encode_generated_instruction(cpu, &row.syntax).unwrap(),
+                    coverage_bytes(cpu, &row.syntax).unwrap(),
                     Some(row.bytes.clone()),
                     "{cpu:?}: {}",
                     row.syntax
                 );
                 assert_eq!(row.effects, instruction_effects(&row.syntax));
+            }
+        }
+    }
+
+    #[test]
+    fn every_documented_z80_family_form_assembles_through_the_standalone_path() {
+        for cpu in [
+            AssemblerCpu::Z80,
+            AssemblerCpu::Z80N,
+            AssemblerCpu::Z180,
+            AssemblerCpu::Ez80,
+        ] {
+            for row in instruction_coverage(cpu).unwrap() {
+                let source = format!("{}\n.done:\nnop\n", row.syntax);
+                let assembled = assemble_subset_with_symbols_at(cpu, &source, 0x0100)
+                    .unwrap_or_else(|error| panic!("{cpu:?}: {}: {error}", row.syntax));
+                assert_eq!(
+                    &assembled.bytes[..row.bytes.len()],
+                    row.bytes.as_slice(),
+                    "{cpu:?}: {}",
+                    row.syntax
+                );
+                let analysis = analyze_instruction(cpu, &row.syntax).unwrap();
+                assert_eq!(
+                    analysis.encoded_len,
+                    Some(row.bytes.len()),
+                    "{cpu:?}: {}",
+                    row.syntax
+                );
+                assert_eq!(analysis.effects, row.effects, "{cpu:?}: {}", row.syntax);
             }
         }
     }
