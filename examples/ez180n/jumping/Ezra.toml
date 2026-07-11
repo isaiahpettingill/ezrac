@@ -1,0 +1,11 @@
+[project]
+name = "ezra-game"
+
+[build]
+input = "src/main.ezra"
+target = "ez180n-ez80"
+output = "gaem"
+executable = "ezra-game"
+
+[sdk]
+paths = ["sdk"]

@@ -1,0 +1,12 @@
+target/
+*.bin
+*.com
+*.gaem
+*.hex
+*.tap
+*.gb
+*.8xp
+*.8ek
+*.8xk
+*.map
+*.asm

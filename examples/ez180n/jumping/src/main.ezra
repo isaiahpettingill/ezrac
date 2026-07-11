@@ -1,0 +1,111 @@
+import ez180n.console
+
+fn write_line(x: u8, y: u8, text: ptr<u8>){
+    let cursor: ptr<u8> = text
+    let x1 : u8 = x
+    while *cursor != '\0' {
+        let char: u8 = *cursor
+        console.put_char(x1, y, char)
+        cursor += 1
+        x1 += 1
+    }
+}
+
+const FLOOR_Y: u8 = 30
+const STARTING_X: u8 = 10
+global PLAYER_X: u8 = STARTING_X
+global OLD_PLAYER_X: u8 = STARTING_X
+global PLAYER_Y: u8 = FLOOR_Y
+global OLD_PLAYER_Y: u8 = FLOOR_Y
+global PLAYER_VY: u8 = 0
+
+fn set_player_x(x: u8){
+    OLD_PLAYER_X = PLAYER_X
+    PLAYER_X = x
+}
+
+fn inc_player_x(dx: u8){
+    set_player_x(PLAYER_X + dx)
+}
+
+fn dec_player_x(dx: u8){
+    set_player_x(PLAYER_X - dx)
+}
+
+fn set_player_y(y: u8){
+    OLD_PLAYER_Y = PLAYER_Y
+    PLAYER_Y = y
+}
+
+fn dec_player_y(dy: u8){
+    set_player_y(PLAYER_Y - dy)
+}
+
+fn clamp_player_position(){
+    if PLAYER_X >= console.WIDTH {
+        set_player_x(console.WIDTH - 1)
+    }
+    else if PLAYER_X <= 0 {
+        set_player_x(0)
+    }
+
+    if PLAYER_Y >= console.HEIGHT {
+        set_player_y(console.HEIGHT - 1)
+    }
+
+    else if PLAYER_Y <= 0 {
+        set_player_y(0)
+    }
+}
+
+fn do_player_controls(){
+    if console.button_down(0, console.BUTTON_RIGHT) {
+        inc_player_x(1)
+    }
+    if console.button_down(0, console.BUTTON_LEFT) {
+        dec_player_x(1)
+    }
+    if console.button_down(0, console.BUTTON_A) && PLAYER_Y >= FLOOR_Y {
+        PLAYER_VY = 2
+    }
+}
+
+fn gravity(){
+    if PLAYER_VY != 0  {
+        dec_player_y(PLAYER_VY)
+        PLAYER_VY -= 1
+    }
+    else if PLAYER_Y < FLOOR_Y {
+        set_player_y(PLAYER_Y + 1)
+    }
+    else {
+        set_player_y(FLOOR_Y)
+    }
+}
+
+fn draw_player() {
+    console.put_char(PLAYER_X, PLAYER_Y, '@')
+}
+
+fn update_player() {
+    do_player_controls()
+    gravity()
+    clamp_player_position()
+}
+
+fn draw_hud() {
+    write_line(1, 1, "Jumping ampsersat example")
+}
+
+fn main() {
+    loop {
+        if (console.frame_tick() & 1) == 0 {
+            update_player()
+        }
+        console.fill(console.CHAR_SPACE)
+        draw_player()
+        draw_hud()
+        console.present()
+        console.wait_tick()
+    }
+}
