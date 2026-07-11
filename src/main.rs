@@ -3598,17 +3598,29 @@ mod tests {
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gameboy");
         for name in ["serial-hello", "background", "sprite"] {
             let source = examples.join(name).join("src/main.ezra");
-            let outputs = build_source_with_build_options(&BuildCommandOptions {
-                path: Some(source.to_string_lossy().into_owned()),
-                debug_comments: false,
-                default_sdk_symbols: true,
-                input_kind: Some(InputKind::Ezra),
-                assembler_cpu: None,
-                layout_path: None,
-                target: Some("gameboy-dmg-lr35902".to_owned()),
-            })
-            .unwrap_or_else(|error| panic!("failed to build Game Boy example `{name}`: {error}"));
-            assert_eq!(std::fs::read(outputs.executable).unwrap().len(), 0x8000);
+            for (target, cgb_flag) in [
+                ("gameboy-dmg-lr35902", 0x00),
+                ("gameboy-color-lr35902", 0xC0),
+            ] {
+                let outputs = build_source_with_build_options(&BuildCommandOptions {
+                    path: Some(source.to_string_lossy().into_owned()),
+                    debug_comments: false,
+                    default_sdk_symbols: true,
+                    input_kind: Some(InputKind::Ezra),
+                    assembler_cpu: None,
+                    layout_path: None,
+                    target: Some(target.to_owned()),
+                })
+                .unwrap_or_else(|error| {
+                    panic!("failed to build Game Boy example `{name}` for `{target}`: {error}")
+                });
+                let rom = std::fs::read(outputs.executable).unwrap();
+                assert_eq!(rom.len(), 0x8000);
+                assert_eq!(
+                    rom[0x0143], cgb_flag,
+                    "wrong compatibility byte for {target}"
+                );
+            }
         }
     }
 
