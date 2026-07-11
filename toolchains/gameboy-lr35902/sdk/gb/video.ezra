@@ -20,8 +20,9 @@ pub fn clear_background() {
     asm volatile {
         "ld hl, 9800h"
         "ld bc, 0400h"
-        "xor a"
+        "ld d, 0"
         ".gb_video_clear_bg:"
+        "ld a, d"
         "ld (hl+), a"
         "dec bc"
         "ld a, b"
@@ -42,7 +43,48 @@ pub fn copy_bytes() {
     }
 }
 
+// Initializes CGB BG and OBJ palette zero. These registers are harmless on DMG.
+pub fn initialize_palettes() {
+    asm volatile {
+        "ld a, 80h"
+        "ldh (68h), a"
+        "ld a, 0FFh"
+        "ldh (69h), a"
+        "ld a, 7Fh"
+        "ldh (69h), a"
+        "ld a, 0B5h"
+        "ldh (69h), a"
+        "ld a, 56h"
+        "ldh (69h), a"
+        "ld a, 4Ah"
+        "ldh (69h), a"
+        "ld a, 29h"
+        "ldh (69h), a"
+        "xor a"
+        "ldh (69h), a"
+        "ldh (69h), a"
+        "ld a, 80h"
+        "ldh (6Ah), a"
+        "ld a, 0FFh"
+        "ldh (6Bh), a"
+        "ld a, 7Fh"
+        "ldh (6Bh), a"
+        "ld a, 0B5h"
+        "ldh (6Bh), a"
+        "ld a, 56h"
+        "ldh (6Bh), a"
+        "ld a, 4Ah"
+        "ldh (6Bh), a"
+        "ld a, 29h"
+        "ldh (6Bh), a"
+        "xor a"
+        "ldh (6Bh), a"
+        "ldh (6Bh), a"
+    }
+}
+
 pub fn enable_background() {
+    initialize_palettes()
     asm volatile {
         "ld a, 0E4h"
         "ldh (47h), a"
@@ -52,6 +94,7 @@ pub fn enable_background() {
 }
 
 pub fn enable_background_and_sprites() {
+    initialize_palettes()
     asm volatile {
         "ld a, 0E4h"
         "ldh (47h), a"
