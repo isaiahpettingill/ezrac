@@ -8,13 +8,7 @@ embed checker_tile: bytes = bytes [
 
 fn main() {
     video.begin_update()
-    // copy_bytes accepts source in HL, destination in DE, and length in B.
-    asm volatile {
-        "ld hl, _checker_tile"
-        "ld de, 8000h"
-        "ld b, 16"
-    }
-    video.copy_bytes()
+    video.copy_bytes(&checker_tile, 0x8000, 16)
     video.clear_background()
     video.enable_background()
 }

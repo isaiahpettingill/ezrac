@@ -10,13 +10,7 @@ embed smile_sprite: bytes = bytes [
 fn main() {
     video.begin_update()
     sprites.clear_background_tile()
-    // copy_bytes accepts source in HL, destination in DE, and length in B.
-    asm volatile {
-        "ld hl, _smile_sprite"
-        "ld de, 8010h"
-        "ld b, 16"
-    }
-    video.copy_bytes()
+    sprites.upload_tile1(&smile_sprite)
     video.clear_background()
     sprites.show_centered_tile1()
     video.enable_background_and_sprites()

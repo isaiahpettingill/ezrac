@@ -14,6 +14,7 @@ pub struct ProjectConfig {
     pub executable: Option<String>,
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
+    pub assets: AssetConfig,
     pub sdk_paths: Vec<PathBuf>,
 }
 
@@ -21,6 +22,35 @@ pub struct ProjectConfig {
 pub struct CartridgeConfig {
     pub layout_file: PathBuf,
     pub manifest_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AssetConfig {
+    pub default: AssetPlacement,
+    pub targets: Vec<(String, AssetPlacement)>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AssetPlacement {
+    pub section: Option<String>,
+    pub align: Option<u32>,
+}
+
+impl AssetConfig {
+    pub fn placement_for(&self, target: &str) -> AssetPlacement {
+        let mut placement = self.default.clone();
+        for (pattern, target_placement) in &self.targets {
+            if target_pattern_matches(pattern, target) {
+                if target_placement.section.is_some() {
+                    placement.section.clone_from(&target_placement.section);
+                }
+                if target_placement.align.is_some() {
+                    placement.align = target_placement.align;
+                }
+            }
+        }
+        placement
+    }
 }
 
 pub fn load_nearest_project_config(
@@ -97,6 +127,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(|file| root.join(file));
 
     let cartridge = parse_cartridge_config(&value, &root)?;
+    let assets = parse_asset_config(&value)?;
 
     let sdk_paths = match value.get("sdk").and_then(|sdk| sdk.get("paths")) {
         Some(toml::Value::Array(paths)) => paths
@@ -125,8 +156,61 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         executable,
         layout_file,
         cartridge,
+        assets,
         sdk_paths,
     })
+}
+
+fn parse_asset_config(value: &toml::Value) -> Result<AssetConfig, Diagnostic> {
+    let Some(assets) = value.get("assets") else {
+        return Ok(AssetConfig::default());
+    };
+    let default = parse_asset_placement(assets, "assets")?;
+    let mut targets = Vec::new();
+    if let Some(target_table) = assets.get("targets") {
+        let table = target_table
+            .as_table()
+            .ok_or_else(|| Diagnostic::new("project field `assets.targets` must be a table"))?;
+        for (pattern, placement) in table {
+            targets.push((
+                pattern.clone(),
+                parse_asset_placement(placement, "assets.targets")?,
+            ));
+        }
+    }
+    Ok(AssetConfig { default, targets })
+}
+
+fn parse_asset_placement(
+    value: &toml::Value,
+    field: &'static str,
+) -> Result<AssetPlacement, Diagnostic> {
+    let section = value
+        .get("section")
+        .map(required_string(field))
+        .transpose()?;
+    let align = value
+        .get("align")
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| value.is_power_of_two())
+                .ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "project field `{field}.align` must be a positive power of two"
+                    ))
+                })
+        })
+        .transpose()?;
+    Ok(AssetPlacement { section, align })
+}
+
+fn target_pattern_matches(pattern: &str, target: &str) -> bool {
+    match pattern.split_once('*') {
+        Some((prefix, suffix)) => target.starts_with(prefix) && target.ends_with(suffix),
+        None => pattern == target,
+    }
 }
 
 fn parse_cartridge_config(
@@ -187,6 +271,17 @@ file = "layouts/demo.ezralayout"
 layout = "cartridges/agon.toml"
 manifest = "cartridges/manifest.toml"
 
+[assets]
+section = ".assets"
+align = 16
+
+[assets.targets."gameboy-*"]
+section = ".rodata"
+align = 32
+
+[assets.targets."zxspectrum-*"]
+align = 256
+
 [sdk]
 paths = ["sdk", "../shared"]
 "#,
@@ -212,6 +307,20 @@ paths = ["sdk", "../shared"]
                 layout_file: PathBuf::from("/project/cartridges/agon.toml"),
                 manifest_file: Some(PathBuf::from("/project/cartridges/manifest.toml")),
             })
+        );
+        assert_eq!(
+            config.assets.placement_for("gameboy-dmg-lr35902"),
+            AssetPlacement {
+                section: Some(".rodata".to_owned()),
+                align: Some(32),
+            }
+        );
+        assert_eq!(
+            config.assets.placement_for("zxspectrum-z80"),
+            AssetPlacement {
+                section: Some(".assets".to_owned()),
+                align: Some(256),
+            }
         );
         assert_eq!(
             config.sdk_paths,

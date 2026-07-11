@@ -14,7 +14,7 @@ use ezra::{
     hir::HirProgram,
     layout::{Layout, parse_layout},
     parser::parse_program,
-    project::{load_nearest_project_config, load_project_config},
+    project::{AssetConfig, load_nearest_project_config, load_project_config},
     target::{
         Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE,
         EZRA_RODATA_BASE, EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format,
@@ -551,6 +551,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         assembler_cpu,
         layout,
         layout_path,
+        asset_config: AssetConfig::default(),
         default_sdk_symbols: true,
         output_root: source_path
             .parent()
@@ -611,6 +612,7 @@ struct BuildSettings {
     assembler_cpu: AssemblerCpu,
     layout: Layout,
     layout_path: Option<PathBuf>,
+    asset_config: AssetConfig,
     default_sdk_symbols: bool,
     output_root: PathBuf,
     executable_name: Option<String>,
@@ -694,6 +696,10 @@ fn resolve_build_settings(
     let executable_name = project
         .as_ref()
         .and_then(|project| project.executable.clone());
+    let asset_config = project
+        .as_ref()
+        .map(|project| project.assets.clone())
+        .unwrap_or_default();
 
     Ok(BuildSettings {
         sdk,
@@ -703,6 +709,7 @@ fn resolve_build_settings(
         assembler_cpu,
         layout,
         layout_path,
+        asset_config,
         default_sdk_symbols,
         output_root,
         executable_name,
@@ -728,6 +735,25 @@ fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String>
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
+}
+
+fn apply_asset_configuration(program: &mut Program, settings: &BuildSettings) {
+    let placement = settings
+        .asset_config
+        .placement_for(&settings.target.triple.value);
+    for declaration in &mut program.declarations {
+        let ezra::ast::Declaration::Embed(embed) = declaration else {
+            continue;
+        };
+        if embed.section.is_none() {
+            embed.section.clone_from(&placement.section);
+        }
+        if embed.align.is_none()
+            && let Some(align) = placement.align
+        {
+            embed.align = Some(ezra::ast::Expr::Int(i64::from(align)));
+        }
+    }
 }
 
 fn emit_source_assembly(
@@ -884,11 +910,12 @@ fn build_ezra_source(
     settings: &BuildSettings,
     options: &BuildCommandOptions,
 ) -> Result<BuildOutputs, String> {
-    let program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
+    apply_asset_configuration(&mut program, settings);
     ensure_ez80_codegen_supported(settings)?;
     let assembly = emit_source_assembly(
         &program,
@@ -2160,11 +2187,12 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let metadata = parse_test_metadata(&source)?;
     let settings = resolve_build_settings(options, &source_path)?;
-    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
+    apply_asset_configuration(&mut program, &settings);
     if let Err(errors) = settings.layout.validate() {
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
@@ -2350,11 +2378,12 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     let source_path = PathBuf::from(&options.path);
     let source_location = command_source_start_location(&source_path);
     let settings = resolve_build_settings(options, &source_path)?;
-    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
+    apply_asset_configuration(&mut program, &settings);
     if let Err(errors) = settings.layout.validate() {
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
@@ -2394,11 +2423,12 @@ fn check_source_with_layout(
         .filter(|decl| matches!(decl, ezra::ast::Declaration::Import(_)))
         .count();
     let settings = resolve_build_settings(options, source_path)?;
-    let program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
     })?;
+    apply_asset_configuration(&mut program, &settings);
     if let Err(errors) = settings.layout.validate() {
         let message = format_layout_errors(settings.layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
@@ -3604,7 +3634,7 @@ mod tests {
     #[test]
     fn game_boy_source_examples_build_as_roms() {
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gameboy");
-        for name in ["serial-hello", "background", "sprite"] {
+        for name in ["serial-hello", "background", "sprite", "input-audio"] {
             let source = examples.join(name).join("src/main.ezra");
             for (target, cgb_flag) in [
                 ("gameboy-dmg-lr35902", 0x00),

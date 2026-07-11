@@ -3,9 +3,5 @@ import gb.serial
 embed message: bytes = cstr("Hello from EZRA on Game Boy!\n")
 
 fn main() {
-    // The current Game Boy SDK register ABI accepts the string address in HL.
-    asm volatile {
-        "ld hl, _message"
-    }
-    serial.send_cstr()
+    serial.send_cstr(&message)
 }

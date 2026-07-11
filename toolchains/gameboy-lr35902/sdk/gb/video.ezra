@@ -32,7 +32,7 @@ pub fn clear_background() {
 }
 
 // HL = source, DE = VRAM destination, B = byte count.
-pub fn copy_bytes() {
+pub fn copy_bytes(source: ptr<u8>, destination: u16, count: u8) {
     asm volatile {
         ".gb_video_copy:"
         "ld a, (hl+)"

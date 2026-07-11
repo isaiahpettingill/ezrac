@@ -96,45 +96,49 @@ hexadecimal notation. Signed SP-relative operands use `+n` or `-n` and must fit
 
 Game Boy targets can compile `.ezra` source directly. The initial LR35902 ABI
 sets `SP` to `FFFEh`, calls `_main` from the cartridge entry code, and enters a
-HALT loop when `main` returns. Functions currently support parameterless calls,
-`return`, and LR35902 `asm` blocks. Unsupported high-level statements and
-function signatures are rejected with target-specific diagnostics rather than
-being lowered as incompatible Z80 code.
+HALT loop when `main` returns. SDK calls support up to three compile-time
+arguments using the LR35902 register ABI, including embedded-data addresses.
+Unsupported high-level statements and dynamic expressions are rejected with
+target-specific diagnostics rather than being lowered as incompatible Z80 code.
 
-`embed` declarations place raw files or literal bytes in cartridge ROM and
-expose `_name` and `_name_end` assembly labels. This makes preconverted 2bpp
-tiles, tile maps, sprite sheets, palettes, music, and other binary assets easy
-to package without `incbin`:
+`embed` declarations place raw files or literal bytes in cartridge ROM. Project
+`[assets]` rules can override section and alignment per target, so the same
+source declarations also work with ZX Spectrum, Agon, and custom layouts. This
+makes preconverted 2bpp tiles, tile maps, sprite sheets, palettes, wave tables,
+music, and other binary assets easy to package without `incbin`:
 
 ```ezra
 embed tiles: bytes = file("assets/tiles.2bpp")
 embed map: bytes = file("assets/level.map")
 
+import gb.video
+import gb.sprites
+
 fn main() {
-    asm volatile {
-        "ld hl, _tiles"
-        // Upload through an SDK routine or an LR35902 copy loop.
-    }
+    video.begin_update()
+    video.copy_bytes(&tiles, 0x8000, 16)
+    sprites.upload_tile1(&tiles)
 }
 ```
 
 Complete projects live under `examples/gameboy`: `serial-hello`, `background`,
-and `sprite`. Source projects can import these built-in modules on both DMG and
-CGB targets:
+`sprite`, and `input-audio`. Source projects can import these built-in modules
+on both DMG and CGB targets:
 
 - `gb.video`: safe LCD shutdown, VRAM byte copying, background-map clearing,
   and standard BG/OBJ LCD setup.
 - `gb.sprites`: blank background tile setup, OAM sprite display, and hide-all.
 - `gb.serial`: zero-terminated serial output for emulator consoles and link
   diagnostics.
+- `gb.input`: normalized active-high reads for Right, Left, Up, Down, A, B,
+  Select, and Start, plus wait helpers.
+- `gb.audio`: APU setup, pulse beep playback, embedded 32-sample wave loading,
+  and wave-channel playback.
 
-The initial SDK uses a documented register ABI where data-dependent operations
-need it: `video.copy_bytes()` accepts source in `HL`, destination in `DE`, and
-byte count in `B`; `serial.send_cstr()` accepts the string address in `HL`.
-Thus applications generally need only a short asset-address setup block while
-all hardware loops and synchronization stay in reusable SDK functions. Typed
-SDK parameters will replace these final register loads as high-level LR35902
-argument lowering expands.
+Embedded assets can now be passed directly to SDK calls such as
+`sprites.upload_tile1(&player)` and `audio.load_wave(&wave)`; applications do
+not need inline assembly for ordinary sprite textures, tile uploads, serial
+strings, or wave-table audio.
 
 The backend currently emits 32 KiB ROM-only cartridges; mapper banking,
 high-level expression lowering, and interrupt functions remain future

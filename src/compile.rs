@@ -910,6 +910,14 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/serial.ezra"),
                 "gb.serial",
             )),
+            "gb.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/input.ezra"),
+                "gb.input",
+            )),
+            "gb.audio" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/audio.ezra"),
+                "gb.audio",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {
@@ -1042,6 +1050,8 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "gb.video",
         "gb.sprites",
         "gb.serial",
+        "gb.input",
+        "gb.audio",
         "agon.buffers",
         "agon.console",
         "agon.mos",

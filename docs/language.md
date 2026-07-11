@@ -218,7 +218,33 @@ Embeds may select an output section and alignment.
 embed banked: bytes = bytes [0xA1, 0xA2] section .bank1 align 256
 ```
 
-Use custom layouts to define additional sections.
+Use custom layouts to define additional sections. A project can also provide
+portable default placement and target-specific overrides without changing the
+source declaration:
+
+```toml
+[assets]
+section = ".assets"
+align = 16
+
+[assets.targets."gameboy-*"]
+section = ".rodata"
+align = 16
+
+[assets.targets."zxspectrum-*"]
+section = ".assets"
+align = 256
+
+[assets.targets."agonlight-*"]
+section = ".assets"
+align = 64
+```
+
+Target patterns accept one `*` wildcard. Explicit `section` or `align` clauses
+on an `embed` declaration take precedence over project defaults. Layouts and
+packagers then decide what those sections mean: cartridge ROM for Game Boy,
+tape/image sections for ZX Spectrum, or dedicated asset memory for Agon and
+other mapped targets. The source-facing symbols remain stable across targets.
 
 ## Structs
 

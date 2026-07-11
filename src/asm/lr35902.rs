@@ -33,9 +33,9 @@ pub fn emit_lr35902_assembly_with_options(
 
     for declaration in &program.declarations {
         if let Declaration::Function(function) = declaration {
-            if !function.params.is_empty() || function.return_type.is_some() {
+            if function.params.len() > 3 || function.return_type.is_some() {
                 return Err(Diagnostic::new(format!(
-                    "Game Boy backend currently supports only parameterless void functions; `{}` has an unsupported signature",
+                    "Game Boy SDK functions currently support at most three register arguments and no return value; `{}` has an unsupported signature",
                     function.name
                 )));
             }
@@ -59,7 +59,8 @@ pub fn emit_lr35902_assembly_with_options(
                             out.push('\n');
                         }
                     }
-                    Stmt::Expr(Expr::Call { path, args }) if args.is_empty() => {
+                    Stmt::Expr(Expr::Call { path, args }) => {
+                        emit_call_arguments(&mut out, args)?;
                         let name = path
                             .last()
                             .ok_or_else(|| Diagnostic::new("empty call path"))?;
@@ -71,7 +72,7 @@ pub fn emit_lr35902_assembly_with_options(
                     }
                     _ => {
                         return Err(Diagnostic::new(format!(
-                            "Game Boy backend currently supports LR35902 asm blocks, zero-argument function calls, and `return`; unsupported statement in `{}`",
+                            "Game Boy backend currently supports LR35902 asm blocks, register-ABI function calls, and `return`; unsupported statement in `{}`",
                             function.name
                         )));
                     }
@@ -103,6 +104,51 @@ pub fn emit_lr35902_assembly_with_options(
     }
 
     Ok(out)
+}
+
+fn emit_call_arguments(out: &mut String, args: &[Expr]) -> Result<(), Diagnostic> {
+    if args.len() > 3 {
+        return Err(Diagnostic::new(
+            "Game Boy SDK calls currently accept at most three arguments",
+        ));
+    }
+    for (index, arg) in args.iter().enumerate() {
+        let value = match arg {
+            Expr::Int(value) | Expr::TypedInt(value, _) => {
+                if !(0..=0xFFFF).contains(value) {
+                    return Err(Diagnostic::new(format!(
+                        "Game Boy SDK argument {value} is outside 0..65535"
+                    )));
+                }
+                format!("{:04X}h", *value as u16)
+            }
+            Expr::AddressOf(name) | Expr::Ident(name) => format!("_{name}"),
+            _ => {
+                return Err(Diagnostic::new(
+                    "Game Boy SDK arguments must be integer constants or embedded-data addresses",
+                ));
+            }
+        };
+        match index {
+            0 => out.push_str(&format!("ld hl, {value}\n")),
+            1 => out.push_str(&format!("ld de, {value}\n")),
+            2 => {
+                let (Expr::Int(raw) | Expr::TypedInt(raw, _)) = arg else {
+                    return Err(Diagnostic::new(
+                        "the third Game Boy SDK argument must be an 8-bit constant",
+                    ));
+                };
+                if !(0..=0xFF).contains(raw) {
+                    return Err(Diagnostic::new(format!(
+                        "Game Boy SDK byte argument {raw} is outside 0..255"
+                    )));
+                }
+                out.push_str(&format!("ld b, {:02X}h\n", *raw as u8));
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 fn embed_bytes(program: &Program, source: &EmbedSource) -> Result<Vec<u8>, Diagnostic> {

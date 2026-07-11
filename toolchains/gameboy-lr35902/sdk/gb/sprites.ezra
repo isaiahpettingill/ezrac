@@ -13,6 +13,20 @@ pub fn clear_background_tile() {
     }
 }
 
+// Uploads one embedded 8x8 2bpp texture to tile slot one.
+pub fn upload_tile1(texture: ptr<u8>) {
+    asm volatile {
+        "ld de, 8010h"
+        "ld b, 16"
+        ".gb_sprites_upload:"
+        "ld a, (hl+)"
+        "ld (de), a"
+        "inc de"
+        "dec b"
+        "jr nz, .gb_sprites_upload"
+    }
+}
+
 // Configures OAM entry zero at screen position (80, 68), using tile one.
 pub fn show_centered_tile1() {
     asm volatile {

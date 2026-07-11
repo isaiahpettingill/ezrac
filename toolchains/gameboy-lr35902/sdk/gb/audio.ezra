@@ -1,0 +1,63 @@
+// Game Boy APU helpers and embedded wave-table playback.
+
+pub fn enable() {
+    asm volatile {
+        "ld a, 80h"
+        "ldh (26h), a"
+        "ld a, 77h"
+        "ldh (24h), a"
+        "ld a, 0FFh"
+        "ldh (25h), a"
+    }
+}
+
+pub fn disable() {
+    asm volatile {
+        "xor a"
+        "ldh (26h), a"
+    }
+}
+
+pub fn play_beep() {
+    asm volatile {
+        "ld a, 80h"
+        "ldh (11h), a"
+        "ld a, 0F3h"
+        "ldh (12h), a"
+        "ld a, 00h"
+        "ldh (13h), a"
+        "ld a, 87h"
+        "ldh (14h), a"
+    }
+}
+
+// Loads 16 packed bytes (32 four-bit samples) from the embedded asset in HL.
+pub fn load_wave(samples: ptr<u8>) {
+    asm volatile {
+        "xor a"
+        "ldh (1Ah), a"
+        "ld de, 0FF30h"
+        "ld b, 16"
+        ".gb_audio_wave_copy:"
+        "ld a, (hl+)"
+        "ld (de), a"
+        "inc de"
+        "dec b"
+        "jr nz, .gb_audio_wave_copy"
+    }
+}
+
+pub fn play_wave() {
+    asm volatile {
+        "ld a, 80h"
+        "ldh (1Ah), a"
+        "xor a"
+        "ldh (1Bh), a"
+        "ld a, 20h"
+        "ldh (1Ch), a"
+        "xor a"
+        "ldh (1Dh), a"
+        "ld a, 87h"
+        "ldh (1Eh), a"
+    }
+}

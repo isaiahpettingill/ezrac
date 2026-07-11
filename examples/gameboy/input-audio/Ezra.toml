@@ -1,0 +1,15 @@
+[project]
+name = "gameboy-input-audio"
+
+[build]
+input = "src/main.ezra"
+target = "gameboy-dmg-lr35902"
+output = "gb"
+
+[assets]
+section = ".assets"
+align = 16
+
+[assets.targets."gameboy-*"]
+section = ".rodata"
+align = 16

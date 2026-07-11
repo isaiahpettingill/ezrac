@@ -1,0 +1,65 @@
+// Normalized active-high Game Boy controls.
+// read() leaves the state byte in A:
+// bit 0 Right, 1 Left, 2 Up, 3 Down, 4 A, 5 B, 6 Select, 7 Start.
+
+pub const RIGHT: u8 = 0x01
+pub const LEFT: u8 = 0x02
+pub const UP: u8 = 0x04
+pub const DOWN: u8 = 0x08
+pub const A: u8 = 0x10
+pub const B: u8 = 0x20
+pub const SELECT: u8 = 0x40
+pub const START: u8 = 0x80
+
+pub fn read() {
+    asm volatile {
+        "ld a, 20h"
+        "ldh (00h), a"
+        "ldh a, (00h)"
+        "ldh a, (00h)"
+        "cpl"
+        "and 0Fh"
+        "ld b, a"
+        "ld a, 10h"
+        "ldh (00h), a"
+        "ldh a, (00h)"
+        "ldh a, (00h)"
+        "cpl"
+        "and 0Fh"
+        "swap a"
+        "or b"
+        "ld b, a"
+        "ld a, 30h"
+        "ldh (00h), a"
+        "ld a, b"
+    }
+}
+
+// Waits until any active-high button bit in mask is held.
+pub fn wait(mask: u8) {
+    asm volatile {
+        "ld c, l"
+        ".gb_input_wait_mask:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_mask"
+    }
+}
+
+pub fn wait_for_a() {
+    asm volatile {
+        ".gb_input_wait_a:"
+        "call _read"
+        "and 10h"
+        "jr z, .gb_input_wait_a"
+    }
+}
+
+pub fn wait_for_start() {
+    asm volatile {
+        ".gb_input_wait_start:"
+        "call _read"
+        "and 80h"
+        "jr z, .gb_input_wait_start"
+    }
+}
