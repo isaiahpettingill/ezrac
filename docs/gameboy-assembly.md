@@ -9,9 +9,10 @@ gameboy-color-lr35902
 ```
 
 Both targets use the dedicated `lr35902` assembler and emit a valid 32 KiB
-ROM-only `.gb` cartridge. The packager writes the entry stub, Nintendo logo,
-title, compatibility byte, ROM/RAM type fields, header checksum, and global
-checksum. DMG ROMs use compatibility byte `0x00`; CGB ROMs use `0xC0`.
+ROM-only cartridge. DMG builds use the `.gb` extension and compatibility byte
+`0x00`; Game Boy Color builds use `.gbc` and compatibility byte `0xC0`. The
+packager writes the entry stub, Nintendo logo, title, ROM/RAM type fields,
+header checksum, and global checksum.
 
 ## Project
 

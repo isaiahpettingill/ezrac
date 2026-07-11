@@ -589,7 +589,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         .output
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| source_path.with_extension(output_format.extension()));
+        .unwrap_or_else(|| source_path.with_extension(executable_extension(&settings)));
     let executable = build_executable_bytes(&settings, &image.bytes, Some(&output_path))?;
     fs::write(&output_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
@@ -919,6 +919,14 @@ fn build_assembly_source(
     write_assembly_build_artifacts(source_path, source_location, settings, &assembly)
 }
 
+fn executable_extension(settings: &BuildSettings) -> &'static str {
+    if settings.target.triple.value.starts_with("gameboy-color-") {
+        "gbc"
+    } else {
+        settings.output_format.extension()
+    }
+}
+
 fn write_assembly_build_artifacts(
     source_path: &Path,
     _source_location: SourceLocation,
@@ -928,7 +936,7 @@ fn write_assembly_build_artifacts(
     let output_base = build_output_base_path(settings, source_path)?;
     let asm_path = output_base.with_extension("asm");
     let map_path = output_base.with_extension("map");
-    let executable_path = output_base.with_extension(settings.output_format.extension());
+    let executable_path = output_base.with_extension(executable_extension(settings));
     let image = build_assembly_image(source_path, assembly, settings)?;
 
     if let Some(parent) = output_base.parent() {
@@ -969,7 +977,7 @@ fn write_build_artifacts(
     let output_base = build_output_base_path(settings, source_path)?;
     let asm_path = output_base.with_extension("asm");
     let map_path = output_base.with_extension("map");
-    let executable_path = output_base.with_extension(settings.output_format.extension());
+    let executable_path = output_base.with_extension(executable_extension(settings));
 
     let assembled = ezra::vm::assemble_subset_with_options_at(
         AssemblerCpu::from(settings.target.triple.cpu),
@@ -3614,6 +3622,18 @@ mod tests {
                 .unwrap_or_else(|error| {
                     panic!("failed to build Game Boy example `{name}` for `{target}`: {error}")
                 });
+                let expected_extension = if target.starts_with("gameboy-color-") {
+                    "gbc"
+                } else {
+                    "gb"
+                };
+                assert_eq!(
+                    outputs
+                        .executable
+                        .extension()
+                        .and_then(|value| value.to_str()),
+                    Some(expected_extension)
+                );
                 let rom = std::fs::read(outputs.executable).unwrap();
                 assert_eq!(rom.len(), 0x8000);
                 assert_eq!(

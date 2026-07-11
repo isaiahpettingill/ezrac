@@ -39,7 +39,7 @@ The current production-quality source path is eZ80-oriented. Z80-family and 8080
 | `ti83premiumce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
 | `zxspectrum-z80` | Z80 | 16 | `.bin` | `zx.*` | Experimental Z80 target |
 | `gameboy-dmg-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | EZRA source and assembly DMG target |
-| `gameboy-color-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | EZRA source and assembly CGB target |
+| `gameboy-color-lr35902` | LR35902 | 16 | `.gbc` | vendored `asm/gb` macros | EZRA source and assembly CGB target |
 | `ti83-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
 | `ti83plus-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
 | `ti84-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
@@ -275,8 +275,9 @@ gameboy-color-lr35902
 
 These are assembly-only targets with a dedicated LR35902 assembler. They do
 not inherit Z80-only instructions or EZRA source code generation. Both produce
-32 KiB ROM-only `.gb` cartridges with the Nintendo logo, entry stub, title,
-DMG/CGB compatibility flag, and valid header/global checksums. Code begins at
+32 KiB ROM-only cartridges with the Nintendo logo, entry stub, title,
+DMG/CGB compatibility flag, and valid header/global checksums. DMG output uses
+`.gb`; Game Boy Color output uses `.gbc`. Code begins at
 `0x0150`; the ROM header occupies `0x0100..0x014F`.
 
 The assembler covers all 244 executable base instructions and all 256
