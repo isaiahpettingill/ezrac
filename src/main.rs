@@ -3457,12 +3457,14 @@ mod tests {
 
     #[test]
     fn game_boy_targets_write_valid_dmg_and_cgb_roms() {
+        use ez80::{Cpu, Machine, PlainMachine};
+
         let root = temp_root("game_boy_roms");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("main.asm");
         std::fs::write(
             &source_path,
-            "di\nld sp, 0FFFEh\nld a, 81h\nldh (02h), a\nhalt\n",
+            "di\nld sp, 0FFFEh\nld a, 42h\nldh (80h), a\nhalt\n",
         )
         .unwrap();
         for (target, cgb_flag) in [
@@ -3485,6 +3487,29 @@ mod tests {
             assert_eq!(&rom[0x0100..0x0104], &[0xC3, 0x50, 0x01, 0x00]);
             assert_eq!(rom[0x0143], cgb_flag);
             assert_eq!(&rom[0x0150..0x0155], &[0xF3, 0x31, 0xFE, 0xFF, 0x3E]);
+
+            let mut machine = PlainMachine::new();
+            for (address, byte) in rom.iter().copied().enumerate() {
+                machine.poke(address as u32, byte);
+            }
+            let mut cpu = Cpu::new_gameboy();
+            cpu.state.set_pc(0x0100);
+            for _ in 0..16 {
+                if cpu.is_halted() {
+                    break;
+                }
+                cpu.fast_execute_instruction(&mut machine);
+            }
+            assert!(
+                cpu.is_halted(),
+                "{target} ROM did not halt in Game Boy CPU mode"
+            );
+            assert_eq!(
+                machine.peek(0xFF80),
+                0x42,
+                "{target} ROM did not execute LR35902 LDH semantics"
+            );
+
             let header = rom[0x0134..=0x014C]
                 .iter()
                 .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
