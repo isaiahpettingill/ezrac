@@ -4,10 +4,12 @@ version = "0.1.0"
 schema_version = 1
 authors = ["Ezra contributors"]
 description = "Ezra language support."
-repository = "https://github.com/ezra/ezrac"
+repository = "https://github.com/isaiahpettingill/ezrac"
 
 [grammars.ezra]
-path = "../tree-sitter-ezra"
+repository = "https://github.com/isaiahpettingill/ezrac"
+rev = "4b29e895fe88e198fed3c5fd8c3be31e34e3e9d2"
+path = "editors/tree-sitter-ezra"
 
 [language_servers.ezra-lsp]
 name = "EZRA Language Server"

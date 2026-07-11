@@ -10,10 +10,15 @@ impl zed::Extension for EzraExtension {
     fn language_server_command(
         &mut self,
         _language_server_id: &LanguageServerId,
-        _worktree: &Worktree,
+        worktree: &Worktree,
     ) -> Result<zed::Command> {
+        let command = worktree.which("ezrac").ok_or_else(|| {
+            "Could not find `ezrac` in PATH. Install it with `cargo install --path /path/to/ezrac --features lsp`."
+                .to_owned()
+        })?;
+
         Ok(zed::Command {
-            command: "ezrac".into(),
+            command,
             args: vec!["lsp".into()],
             env: vec![],
         })

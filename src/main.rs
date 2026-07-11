@@ -2740,6 +2740,22 @@ fn install_zed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
             "languages/ezra/highlights.scm",
             include_str!("editor_assets/zed/languages/ezra/highlights.scm"),
         ),
+        (
+            "languages/ezra/brackets.scm",
+            include_str!("editor_assets/zed/languages/ezra/brackets.scm"),
+        ),
+        (
+            "languages/ezra/indents.scm",
+            include_str!("editor_assets/zed/languages/ezra/indents.scm"),
+        ),
+        (
+            "languages/ezra/outline.scm",
+            include_str!("editor_assets/zed/languages/ezra/outline.scm"),
+        ),
+        (
+            "languages/ezra/textobjects.scm",
+            include_str!("editor_assets/zed/languages/ezra/textobjects.scm"),
+        ),
     ];
     write_syntax_files(root, &files, dry_run)
 }

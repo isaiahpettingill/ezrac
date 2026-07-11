@@ -2,8 +2,11 @@ name = "Ezra"
 grammar = "ezra"
 path_suffixes = ["ezra", "ezralayout"]
 line_comments = ["//"]
+word_characters = ["."]
 brackets = [
   { start = "{", end = "}", close = true, newline = true },
   { start = "[", end = "]", close = true, newline = false },
   { start = "(", end = ")", close = true, newline = false },
+  { start = "\"", end = "\"", close = true, newline = false, not_in = ["comment", "string"] },
+  { start = "'", end = "'", close = true, newline = false, not_in = ["comment", "string"] },
 ]

@@ -24,6 +24,10 @@ module.exports = grammar({
 
   word: $ => $.identifier,
 
+  conflicts: $ => [
+    [$._expression, $.struct_literal],
+  ],
+
   rules: {
     source_file: $ => repeat($._declaration),
 
@@ -87,7 +91,7 @@ module.exports = grammar({
     loop_statement: $ => seq('loop', $.block),
     break_statement: $ => seq('break', optional(';')),
     continue_statement: $ => seq('continue', optional(';')),
-    return_statement: $ => seq('return', optional($._expression), optional(';')),
+    return_statement: $ => prec.right(seq('return', optional($._expression), optional(';'))),
     out_statement: $ => seq('out', $.path, ',', $._expression, optional(';')),
     assignment_statement: $ => seq($.place, $.assignment_operator, $._expression, optional(';')),
     expression_statement: $ => seq($._expression, optional(';')),
