@@ -8,7 +8,7 @@ repository = "https://github.com/isaiahpettingill/ezrac"
 
 [grammars.ezra]
 repository = "https://github.com/isaiahpettingill/ezrac"
-rev = "4b29e895fe88e198fed3c5fd8c3be31e34e3e9d2"
+rev = "cfbeb43f9d09cd44e37b7d7ea32338a109406393"
 path = "editors/tree-sitter-ezra"
 
 [language_servers.ezra-lsp]
