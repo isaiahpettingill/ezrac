@@ -6,8 +6,16 @@ embed checker_tile: bytes = bytes [
 
 fn main() {
     asm volatile {
+        "ldh a, (40h)"
+        "bit 7, a"
+        "jr z, .lcd_off"
+        ".wait_vblank:"
+        "ldh a, (44h)"
+        "cp 144"
+        "jr c, .wait_vblank"
         "xor a"
         "ldh (40h), a"
+        ".lcd_off:"
         "ld hl, _checker_tile"
         "ld de, 8000h"
         "ld b, 16"
