@@ -1,0 +1,62 @@
+// Game Boy PPU helpers. Functions preserve no registers unless documented.
+
+// Safely disables the LCD whether execution started through a boot ROM or directly.
+pub fn begin_update() {
+    asm volatile {
+        "ldh a, (40h)"
+        "bit 7, a"
+        "ret z"
+        ".gb_video_wait_vblank:"
+        "ldh a, (44h)"
+        "cp 144"
+        "jr c, .gb_video_wait_vblank"
+        "xor a"
+        "ldh (40h), a"
+    }
+}
+
+// Clears the 32x32 background map to tile zero.
+pub fn clear_background() {
+    asm volatile {
+        "ld hl, 9800h"
+        "ld bc, 0400h"
+        "xor a"
+        ".gb_video_clear_bg:"
+        "ld (hl+), a"
+        "dec bc"
+        "ld a, b"
+        "or c"
+        "jr nz, .gb_video_clear_bg"
+    }
+}
+
+// HL = source, DE = VRAM destination, B = byte count.
+pub fn copy_bytes() {
+    asm volatile {
+        ".gb_video_copy:"
+        "ld a, (hl+)"
+        "ld (de), a"
+        "inc de"
+        "dec b"
+        "jr nz, .gb_video_copy"
+    }
+}
+
+pub fn enable_background() {
+    asm volatile {
+        "ld a, 0E4h"
+        "ldh (47h), a"
+        "ld a, 91h"
+        "ldh (40h), a"
+    }
+}
+
+pub fn enable_background_and_sprites() {
+    asm volatile {
+        "ld a, 0E4h"
+        "ldh (47h), a"
+        "ldh (48h), a"
+        "ld a, 93h"
+        "ldh (40h), a"
+    }
+}

@@ -119,8 +119,25 @@ fn main() {
 ```
 
 Complete projects live under `examples/gameboy`: `serial-hello`, `background`,
-and `sprite`. The backend currently emits 32 KiB ROM-only cartridges; mapper
-banking, high-level expression lowering, and interrupt functions remain future
+and `sprite`. Source projects can import these built-in modules on both DMG and
+CGB targets:
+
+- `gb.video`: safe LCD shutdown, VRAM byte copying, background-map clearing,
+  and standard BG/OBJ LCD setup.
+- `gb.sprites`: blank background tile setup, OAM sprite display, and hide-all.
+- `gb.serial`: zero-terminated serial output for emulator consoles and link
+  diagnostics.
+
+The initial SDK uses a documented register ABI where data-dependent operations
+need it: `video.copy_bytes()` accepts source in `HL`, destination in `DE`, and
+byte count in `B`; `serial.send_cstr()` accepts the string address in `HL`.
+Thus applications generally need only a short asset-address setup block while
+all hardware loops and synchronization stay in reusable SDK functions. Typed
+SDK parameters will replace these final register loads as high-level LR35902
+argument lowering expands.
+
+The backend currently emits 32 KiB ROM-only cartridges; mapper banking,
+high-level expression lowering, and interrupt functions remain future
 extensions.
 
 ## Macro SDK

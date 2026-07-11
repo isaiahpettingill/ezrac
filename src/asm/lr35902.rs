@@ -40,6 +40,11 @@ pub fn emit_lr35902_assembly_with_options(
                 )));
             }
             out.push_str(&format!("_{}:\n", function.name));
+            let local_label_prefix = function
+                .name
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>();
             let mut returned = false;
             for statement in &function.body {
                 match statement {
@@ -50,7 +55,7 @@ pub fn emit_lr35902_assembly_with_options(
                         ..
                     } if inputs.is_empty() && outputs.is_empty() => {
                         for line in lines {
-                            out.push_str(line);
+                            out.push_str(&line.replace('.', &format!(".{local_label_prefix}_")));
                             out.push('\n');
                         }
                     }

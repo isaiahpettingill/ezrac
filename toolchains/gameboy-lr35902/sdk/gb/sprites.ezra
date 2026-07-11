@@ -1,0 +1,42 @@
+// Hardware sprite helpers.
+
+// Clears tile zero so it can be used as a blank background tile.
+pub fn clear_background_tile() {
+    asm volatile {
+        "ld hl, 8000h"
+        "ld b, 16"
+        "xor a"
+        ".gb_sprites_clear_tile:"
+        "ld (hl+), a"
+        "dec b"
+        "jr nz, .gb_sprites_clear_tile"
+    }
+}
+
+// Configures OAM entry zero at screen position (80, 68), using tile one.
+pub fn show_centered_tile1() {
+    asm volatile {
+        "ld a, 84"
+        "ld (0FE00h), a"
+        "ld a, 88"
+        "ld (0FE01h), a"
+        "ld a, 1"
+        "ld (0FE02h), a"
+        "xor a"
+        "ld (0FE03h), a"
+    }
+}
+
+pub fn hide_all() {
+    asm volatile {
+        "ld hl, 0FE00h"
+        "ld b, 40"
+        "xor a"
+        ".gb_sprites_hide:"
+        "ld (hl), a"
+        "ld de, 4"
+        "add hl, de"
+        "dec b"
+        "jr nz, .gb_sprites_hide"
+    }
+}

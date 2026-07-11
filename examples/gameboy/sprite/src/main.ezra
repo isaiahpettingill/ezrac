@@ -1,3 +1,6 @@
+import gb.video
+import gb.sprites
+
 // A simple 8x8 smile sprite in native Game Boy 2bpp format.
 embed smile_sprite: bytes = bytes [
     0x3C, 0x3C, 0x42, 0x42, 0xA5, 0xA5, 0x81, 0x81,
@@ -5,53 +8,16 @@ embed smile_sprite: bytes = bytes [
 ]
 
 fn main() {
+    video.begin_update()
+    sprites.clear_background_tile()
+    // copy_bytes accepts source in HL, destination in DE, and length in B.
     asm volatile {
-        "ldh a, (40h)"
-        "bit 7, a"
-        "jr z, .lcd_off"
-        ".wait_vblank:"
-        "ldh a, (44h)"
-        "cp 144"
-        "jr c, .wait_vblank"
-        "xor a"
-        "ldh (40h), a"
-        ".lcd_off:"
-        "ld hl, 8000h"
-        "ld b, 16"
-        "xor a"
-        ".clear_bg_tile:"
-        "ld (hl+), a"
-        "dec b"
-        "jr nz, .clear_bg_tile"
         "ld hl, _smile_sprite"
         "ld de, 8010h"
         "ld b, 16"
-        ".copy_sprite:"
-        "ld a, (hl+)"
-        "ld (de), a"
-        "inc de"
-        "dec b"
-        "jr nz, .copy_sprite"
-        "ld hl, 9800h"
-        "ld bc, 0400h"
-        "xor a"
-        ".clear_bg_map:"
-        "ld (hl+), a"
-        "dec bc"
-        "ld a, b"
-        "or c"
-        "jr nz, .clear_bg_map"
-        "ld a, 84"
-        "ld (0FE00h), a"
-        "ld a, 88"
-        "ld (0FE01h), a"
-        "ld a, 1"
-        "ld (0FE02h), a"
-        "xor a"
-        "ld (0FE03h), a"
-        "ld a, 0E4h"
-        "ldh (48h), a"
-        "ld a, 93h"
-        "ldh (40h), a"
     }
+    video.copy_bytes()
+    video.clear_background()
+    sprites.show_centered_tile1()
+    video.enable_background_and_sprites()
 }

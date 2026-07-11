@@ -1,0 +1,19 @@
+// Serial helpers useful for emulator consoles and link-cable diagnostics.
+
+// Sends the zero-terminated string at HL using the internal serial clock.
+pub fn send_cstr() {
+    asm volatile {
+        ".gb_serial_next:"
+        "ld a, (hl+)"
+        "and a"
+        "ret z"
+        "ldh (01h), a"
+        "ld a, 81h"
+        "ldh (02h), a"
+        ".gb_serial_wait:"
+        "ldh a, (02h)"
+        "and 80h"
+        "jr nz, .gb_serial_wait"
+        "jr .gb_serial_next"
+    }
+}

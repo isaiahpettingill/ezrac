@@ -896,7 +896,23 @@ fn builtin_sdk_path(import: &str) -> PathBuf {
 }
 
 fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
-    if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {
+    if target.is_some_and(|target| target.starts_with("gameboy-")) {
+        match import {
+            "gb.video" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/video.ezra"),
+                "gb.video",
+            )),
+            "gb.sprites" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/sprites.ezra"),
+                "gb.sprites",
+            )),
+            "gb.serial" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/serial.ezra"),
+                "gb.serial",
+            )),
+            _ => None,
+        }
+    } else if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {
         match import {
             "agon.buffers" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/buffers.ezra"),
@@ -1023,6 +1039,9 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
 /// LSP cannot advertise a module that import resolution would reject.
 pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
     const MODULES: &[&str] = &[
+        "gb.video",
+        "gb.sprites",
+        "gb.serial",
         "agon.buffers",
         "agon.console",
         "agon.mos",

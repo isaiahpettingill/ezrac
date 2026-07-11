@@ -1,3 +1,5 @@
+import gb.video
+
 // One 8x8 two-bit tile, embedded directly in the ROM by EZRA.
 embed checker_tile: bytes = bytes [
     0xAA, 0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA,
@@ -5,38 +7,14 @@ embed checker_tile: bytes = bytes [
 ]
 
 fn main() {
+    video.begin_update()
+    // copy_bytes accepts source in HL, destination in DE, and length in B.
     asm volatile {
-        "ldh a, (40h)"
-        "bit 7, a"
-        "jr z, .lcd_off"
-        ".wait_vblank:"
-        "ldh a, (44h)"
-        "cp 144"
-        "jr c, .wait_vblank"
-        "xor a"
-        "ldh (40h), a"
-        ".lcd_off:"
         "ld hl, _checker_tile"
         "ld de, 8000h"
         "ld b, 16"
-        ".copy_tile:"
-        "ld a, (hl+)"
-        "ld (de), a"
-        "inc de"
-        "dec b"
-        "jr nz, .copy_tile"
-        "ld hl, 9800h"
-        "ld bc, 0400h"
-        "xor a"
-        ".fill_map:"
-        "ld (hl+), a"
-        "dec bc"
-        "ld a, b"
-        "or c"
-        "jr nz, .fill_map"
-        "ld a, 0E4h"
-        "ldh (47h), a"
-        "ld a, 91h"
-        "ldh (40h), a"
     }
+    video.copy_bytes()
+    video.clear_background()
+    video.enable_background()
 }
