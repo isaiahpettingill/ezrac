@@ -6,7 +6,7 @@ use std::{
 };
 
 use ezra::{
-    asm::{AssemblyOptions, emit_ez80_assembly_with_options},
+    asm::{AssemblyOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options},
     ast::Program,
     cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
     compile::{SdkResolver, load_program_with_sdk},
@@ -718,15 +718,27 @@ fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String>
             | CpuFamily::Z180
             | CpuFamily::I8080
             | CpuFamily::I8085
+            | CpuFamily::Lr35902
     ) {
         return Ok(());
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL, Z80-family, and 8080-family targets; use `assemble` for hand-written assembly or a supported source target",
+        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL, Z80-family, 8080-family, and LR35902 targets; use `assemble` for hand-written assembly or a supported source target",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
+}
+
+fn emit_source_assembly(
+    program: &Program,
+    options: AssemblyOptions,
+) -> Result<String, ezra::diagnostic::Diagnostic> {
+    if options.cpu == CpuFamily::Lr35902 {
+        emit_lr35902_assembly_with_options(program, options)
+    } else {
+        emit_ez80_assembly_with_options(program, options)
+    }
 }
 
 fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
@@ -878,7 +890,7 @@ fn build_ezra_source(
             .to_string()
     })?;
     ensure_ez80_codegen_supported(settings)?;
-    let assembly = emit_ez80_assembly_with_options(
+    let assembly = emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
             &settings.layout,
@@ -1047,6 +1059,7 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
     settings.output_format == OutputFormat::CpmCom
         || bare_target_cpu(&settings.target.triple.value).is_some()
         || settings.target.triple.value.starts_with("zxspectrum-z80")
+        || settings.target.triple.value.starts_with("gameboy-")
         || is_ti_ce_target(&settings.target.triple.value)
         || is_ti_z80_target(&settings.target.triple.value)
 }
@@ -2150,7 +2163,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
     }
     validate_layout_for_target(&settings)?;
     ensure_ez80_codegen_supported(&settings)?;
-    let assembly = emit_ez80_assembly_with_options(
+    let assembly = emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
             &settings.layout,
@@ -2340,7 +2353,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     }
     validate_layout_for_target(&settings)?;
     ensure_ez80_codegen_supported(&settings)?;
-    emit_ez80_assembly_with_options(
+    emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
             &settings.layout,
@@ -2384,7 +2397,7 @@ fn check_source_with_layout(
     }
     validate_layout_for_target(&settings)?;
     ensure_ez80_codegen_supported(&settings)?;
-    emit_ez80_assembly_with_options(
+    emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
             &settings.layout,
@@ -2983,7 +2996,7 @@ fn print_targets() {
             address_width_bits: 16,
             output: "gb",
             sdk: "vendored asm/gb",
-            status: "assembly-only DMG target",
+            status: "EZRA source and assembly DMG target",
         },
         TargetRow {
             triple: "gameboy-color-lr35902",
@@ -2991,7 +3004,7 @@ fn print_targets() {
             address_width_bits: 16,
             output: "gb",
             sdk: "vendored asm/gb",
-            status: "assembly-only CGB target",
+            status: "EZRA source and assembly CGB target",
         },
         TargetRow {
             triple: "ti83-z80",
@@ -3525,6 +3538,81 @@ mod tests {
     }
 
     #[test]
+    fn game_boy_targets_compile_ezra_source_with_embedded_assets() {
+        use ez80::{Cpu, Machine, PlainMachine};
+
+        let root = temp_root("game_boy_ezra_source");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(
+            &source_path,
+            r#"
+                embed tile: bytes = bytes [0x42, 0x18, 0x24, 0x42]
+
+                fn main() {
+                    asm volatile {
+                        "ld hl, _tile"
+                        "ld a, (hl)"
+                        "ldh (80h), a"
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        for target in ["gameboy-dmg-lr35902", "gameboy-color-lr35902"] {
+            let outputs = build_source_with_build_options(&BuildCommandOptions {
+                path: Some(source_path.to_string_lossy().into_owned()),
+                debug_comments: false,
+                default_sdk_symbols: true,
+                input_kind: Some(InputKind::Ezra),
+                assembler_cpu: None,
+                layout_path: None,
+                target: Some(target.to_owned()),
+            })
+            .unwrap();
+            let rom = std::fs::read(outputs.executable).unwrap();
+            assert_eq!(rom.len(), 0x8000);
+
+            let mut machine = PlainMachine::new();
+            for (address, byte) in rom.iter().copied().enumerate() {
+                machine.poke(address as u32, byte);
+            }
+            let mut cpu = Cpu::new_gameboy();
+            cpu.state.set_pc(0x0100);
+            for _ in 0..32 {
+                if cpu.is_halted() {
+                    break;
+                }
+                cpu.fast_execute_instruction(&mut machine);
+            }
+            assert!(cpu.is_halted(), "{target} source ROM did not halt");
+            assert_eq!(machine.peek(0xFF80), 0x42);
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn game_boy_source_examples_build_as_roms() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gameboy");
+        for name in ["serial-hello", "background", "sprite"] {
+            let source = examples.join(name).join("src/main.ezra");
+            let outputs = build_source_with_build_options(&BuildCommandOptions {
+                path: Some(source.to_string_lossy().into_owned()),
+                debug_comments: false,
+                default_sdk_symbols: true,
+                input_kind: Some(InputKind::Ezra),
+                assembler_cpu: None,
+                layout_path: None,
+                target: Some("gameboy-dmg-lr35902".to_owned()),
+            })
+            .unwrap_or_else(|error| panic!("failed to build Game Boy example `{name}`: {error}"));
+            assert_eq!(std::fs::read(outputs.executable).unwrap().len(), 0x8000);
+        }
+    }
+
+    #[test]
     fn game_boy_vendored_sdk_macros_preprocess_and_assemble() {
         let sdk =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/gameboy-lr35902/sdk/asm/gb");
@@ -3532,7 +3620,19 @@ mod tests {
         let source = r#"
             include "color.inc"
             %GB_AUDIO_ENABLE
-            %GB_TIMER_START 0, 0, 5
+            ld hl, GB_OAM
+            %GB_SPRITE_SET 32, 40, 1, OAMF_XFLIP
+            %GB_SPRITE_HIDE
+            ld hl, GB_TILE_DATA_0
+            ld de, GB_TILE_DATA_0
+            ld b, 1
+            %GB_TILE_UPLOAD
+            ld hl, GB_BG_MAP_0
+            xor a
+            %GB_TILEMAP_FILL
+            %GB_WAVE_LOAD
+            %GB_WAVE_PLAY 0, 20h, 0, 80h
+            %GB_TIMER_START 0, 0, TAC_ENABLE + TAC_4096_HZ
             %GB_JOYPAD_READ_DPAD
             %GB_SERIAL_START 65
             %GBC_VRAM_BANK 1

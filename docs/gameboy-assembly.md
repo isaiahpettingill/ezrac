@@ -1,7 +1,7 @@
 # Game Boy Assembly
 
-EZRA provides separate assembly-only targets for the original monochrome Game
-Boy and Game Boy Color:
+EZRA provides separate targets for the original monochrome Game Boy and Game
+Boy Color:
 
 ```text
 gameboy-dmg-lr35902
@@ -91,9 +91,36 @@ Numeric operands use decimal, `0x`-prefixed hexadecimal, or `h`-suffixed
 hexadecimal notation. Signed SP-relative operands use `+n` or `-n` and must fit
 `-128..127`.
 
-EZRA source-to-LR35902 lowering is not implemented yet, so EZRA inline-assembly
-blocks are not available for these targets; the standalone assembler itself
-accepts the complete documented opcode set.
+## EZRA Source Projects
+
+Game Boy targets can compile `.ezra` source directly. The initial LR35902 ABI
+sets `SP` to `FFFEh`, calls `_main` from the cartridge entry code, and enters a
+HALT loop when `main` returns. Functions currently support parameterless calls,
+`return`, and LR35902 `asm` blocks. Unsupported high-level statements and
+function signatures are rejected with target-specific diagnostics rather than
+being lowered as incompatible Z80 code.
+
+`embed` declarations place raw files or literal bytes in cartridge ROM and
+expose `_name` and `_name_end` assembly labels. This makes preconverted 2bpp
+tiles, tile maps, sprite sheets, palettes, music, and other binary assets easy
+to package without `incbin`:
+
+```ezra
+embed tiles: bytes = file("assets/tiles.2bpp")
+embed map: bytes = file("assets/level.map")
+
+fn main() {
+    asm volatile {
+        "ld hl, _tiles"
+        // Upload through an SDK routine or an LR35902 copy loop.
+    }
+}
+```
+
+Complete projects live under `examples/gameboy`: `serial-hello`, `background`,
+and `sprite`. The backend currently emits 32 KiB ROM-only cartridges; mapper
+banking, high-level expression lowering, and interrupt functions remain future
+extensions.
 
 ## Macro SDK
 

@@ -1,0 +1,7 @@
+[project]
+name = "gameboy-serial-hello"
+
+[build]
+input = "src/main.ezra"
+target = "gameboy-dmg-lr35902"
+output = "gb"

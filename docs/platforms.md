@@ -38,8 +38,8 @@ The current production-quality source path is eZ80-oriented. Z80-family and 8080
 | `ti84plusce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
 | `ti83premiumce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
 | `zxspectrum-z80` | Z80 | 16 | `.bin` | `zx.*` | Experimental Z80 target |
-| `gameboy-dmg-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | Assembly-only DMG target |
-| `gameboy-color-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | Assembly-only CGB target |
+| `gameboy-dmg-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | EZRA source and assembly DMG target |
+| `gameboy-color-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | EZRA source and assembly CGB target |
 | `ti83-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
 | `ti83plus-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
 | `ti84-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |

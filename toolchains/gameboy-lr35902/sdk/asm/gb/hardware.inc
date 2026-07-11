@@ -53,7 +53,34 @@ rBGPD equ 0FF69h
 rOBPI equ 0FF6Ah
 rOBPD equ 0FF6Bh
 rSVBK equ 0FF70h
+rWAVE equ 0FF30h
 rIE equ 0FFFFh
+
+GB_TILE_DATA_0 equ 08000h
+GB_TILE_DATA_1 equ 08800h
+GB_BG_MAP_0 equ 09800h
+GB_BG_MAP_1 equ 09C00h
+GB_OAM equ 0FE00h
+GB_OAM_COUNT equ 40
+GB_OAM_ENTRY_SIZE equ 4
+GB_OAM_Y equ 0
+GB_OAM_X equ 1
+GB_OAM_TILE equ 2
+GB_OAM_FLAGS equ 3
+OAMF_PRIORITY equ 80h
+OAMF_YFLIP equ 40h
+OAMF_XFLIP equ 20h
+OAMF_DMG_PALETTE1 equ 10h
+OAMF_CGB_BANK1 equ 08h
+
+GB_PAD_RIGHT equ 01h
+GB_PAD_LEFT equ 02h
+GB_PAD_UP equ 04h
+GB_PAD_DOWN equ 08h
+GB_PAD_A equ 10h
+GB_PAD_B equ 20h
+GB_PAD_SELECT equ 40h
+GB_PAD_START equ 80h
 
 IEF_VBLANK equ 01h
 IEF_STAT equ 02h
@@ -68,6 +95,10 @@ LCDC_ENABLE equ 80h
 SC_INTERNAL equ 01h
 SC_CGB_FAST equ 02h
 SC_START equ 80h
+TAC_4096_HZ equ 00h
+TAC_262144_HZ equ 01h
+TAC_65536_HZ equ 02h
+TAC_16384_HZ equ 03h
 TAC_ENABLE equ 04h
 
 GB_VBLANK_VECTOR equ 0040h
@@ -116,6 +147,51 @@ GB_JOYPAD_VECTOR equ 0060h
 
 %macro GB_LCD_ENABLE(flags)
     %GB_WRITE_IO rLCDC, $flags
+%endmacro
+
+; HL = ROM source, DE = VRAM destination, B = tile count. Clobbers AF, B, DE, HL.
+%macro GB_TILE_UPLOAD()
+%%tile:
+    ld c, 16
+%%byte:
+    ld a, (hl+)
+    ld (de), a
+    inc de
+    dec c
+    jr nz, %%byte
+    dec b
+    jr nz, %%tile
+%endmacro
+
+; HL = map address, A = tile index. Fills one 32x32 hardware tile map.
+%macro GB_TILEMAP_FILL()
+    ld d, a
+    ld bc, 0400h
+%%loop:
+    ld a, d
+    ld (hl+), a
+    dec bc
+    ld a, b
+    or c
+    jr nz, %%loop
+%endmacro
+
+; HL = OAM entry, values are immediate screen coordinates/tile/flags.
+%macro GB_SPRITE_SET(y, x, tile, flags)
+    ld a, $y
+    ld (hl+), a
+    ld a, $x
+    ld (hl+), a
+    ld a, $tile
+    ld (hl+), a
+    ld a, $flags
+    ld (hl), a
+%endmacro
+
+; HL = OAM entry.
+%macro GB_SPRITE_HIDE()
+    xor a
+    ld (hl), a
 %endmacro
 
 %macro GB_OAM_DMA(source_high)
@@ -210,6 +286,28 @@ GB_JOYPAD_VECTOR equ 0060h
     %GB_WRITE_IO rNR22, $envelope
     %GB_WRITE_IO rNR23, $low
     %GB_WRITE_IO rNR24, $high
+%endmacro
+
+; HL points to 16 bytes of packed wave samples. Clobbers AF, B, DE, HL.
+%macro GB_WAVE_LOAD()
+    xor a
+    ldh (rNR30), a
+    ld de, rWAVE
+    ld b, 16
+%%loop:
+    ld a, (hl+)
+    ld (de), a
+    inc de
+    dec b
+    jr nz, %%loop
+%endmacro
+
+%macro GB_WAVE_PLAY(length, level, low, high)
+    %GB_WRITE_IO rNR30, 80h
+    %GB_WRITE_IO rNR31, $length
+    %GB_WRITE_IO rNR32, $level
+    %GB_WRITE_IO rNR33, $low
+    %GB_WRITE_IO rNR34, $high
 %endmacro
 
 %macro GB_NOISE(length, envelope, polynomial, control)

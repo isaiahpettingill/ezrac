@@ -1,0 +1,19 @@
+embed message: bytes = cstr("Hello from EZRA on Game Boy!\n")
+
+fn main() {
+    asm volatile {
+        "ld hl, _message"
+        ".serial_loop:"
+        "ld a, (hl+)"
+        "and a"
+        "ret z"
+        "ldh (01h), a"
+        "ld a, 81h"
+        "ldh (02h), a"
+        ".serial_wait:"
+        "ldh a, (02h)"
+        "and 80h"
+        "jr nz, .serial_wait"
+        "jr .serial_loop"
+    }
+}
