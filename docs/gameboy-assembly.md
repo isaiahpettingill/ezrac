@@ -69,10 +69,31 @@ swap (hl)
 stop
 ```
 
-Z80-only instructions and registers such as `out`, `exx`, `ix`, `iy`, and ED
-instructions are rejected. EZRA source-to-LR35902 lowering is not implemented,
-so EZRA inline-assembly blocks are not available for these targets; the
-standalone assembler itself accepts the complete documented opcode set.
+Z80-only instructions and registers such as `in`, `out`, `exx`, `djnz`, `ix`,
+`iy`, `i`, `r`, alternate registers, indexed operands, and ED-family block
+instructions are rejected. LR35902 conditional branches support only `nz`,
+`z`, `nc`, and `c`. Relative branches must fit `-128..127`; absolute addresses
+are 16-bit and encoded little-endian. `stop` emits the required two-byte
+`10h 00h` form.
+
+The assembler accepts these Game Boy aliases:
+
+| Canonical form | Accepted aliases |
+| --- | --- |
+| `jp hl` | `jp (hl)` |
+| `ld (hl+), a` / `ld a, (hl+)` | `(hli)`, plus `ldi (hl), a` / `ldi a, (hl)` |
+| `ld (hl-), a` / `ld a, (hl-)` | `(hld)`, plus `ldd (hl), a` / `ldd a, (hl)` |
+| `ldh (n), a` / `ldh a, (n)` | `n` may be an 8-bit offset or an address in `FF00h..FFFFh` |
+| `ldh (c), a` / `ldh a, (c)` | `ld (c), a` / `ld a, (c)` |
+
+Memory operands use parentheses; RGBDS square-bracket syntax is not accepted.
+Numeric operands use decimal, `0x`-prefixed hexadecimal, or `h`-suffixed
+hexadecimal notation. Signed SP-relative operands use `+n` or `-n` and must fit
+`-128..127`.
+
+EZRA source-to-LR35902 lowering is not implemented yet, so EZRA inline-assembly
+blocks are not available for these targets; the standalone assembler itself
+accepts the complete documented opcode set.
 
 ## Macro SDK
 

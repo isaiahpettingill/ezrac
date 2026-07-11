@@ -1510,6 +1510,90 @@ mod tests {
     }
 
     #[test]
+    fn lr35902_assembler_has_exact_golden_encodings() {
+        let cases: &[(&str, &[u8])] = &[
+            ("ld bc, 1234h", &[0x01, 0x34, 0x12]),
+            ("ld (1234h), sp", &[0x08, 0x34, 0x12]),
+            ("stop", &[0x10, 0x00]),
+            ("ld (hl+), a", &[0x22]),
+            ("ldi a, (hl)", &[0x2A]),
+            ("ld (hld), a", &[0x32]),
+            ("ldd a, (hl)", &[0x3A]),
+            ("ldh (80h), a", &[0xE0, 0x80]),
+            ("ldh a, (0FF80h)", &[0xF0, 0x80]),
+            ("ld (c), a", &[0xE2]),
+            ("ld a, (c)", &[0xF2]),
+            ("add sp, -128", &[0xE8, 0x80]),
+            ("ld hl, sp+127", &[0xF8, 0x7F]),
+            ("jp (hl)", &[0xE9]),
+            ("swap (hl)", &[0xCB, 0x36]),
+            ("bit 7, (hl)", &[0xCB, 0x7E]),
+            ("res 3, a", &[0xCB, 0x9F]),
+            ("set 0, b", &[0xCB, 0xC0]),
+            ("rst 38h", &[0xFF]),
+        ];
+
+        for (syntax, expected) in cases {
+            assert_eq!(
+                assemble_subset_at(CpuFamily::Lr35902, syntax, 0x0150).unwrap(),
+                *expected,
+                "{syntax}"
+            );
+        }
+    }
+
+    #[test]
+    fn lr35902_assembler_encodes_branch_and_address_boundaries() {
+        let source =
+            "start:\n jr nz, forward\n jr start\nforward:\n jp z, start\n call c, 0FFFFh\n";
+        assert_eq!(
+            assemble_subset_at(CpuFamily::Lr35902, source, 0x0150).unwrap(),
+            [0x20, 0x02, 0x18, 0xFC, 0xCA, 0x50, 0x01, 0xDC, 0xFF, 0xFF]
+        );
+        assert_eq!(relative_offset(0x0150, 0x00D2).unwrap(), 0x80);
+        assert_eq!(relative_offset(0x0150, 0x01D1).unwrap(), 0x7F);
+        assert!(relative_offset(0x0150, 0x00D1).is_err());
+        assert!(relative_offset(0x0150, 0x01D2).is_err());
+
+        let error = assemble_subset_at(CpuFamily::Lr35902, "jp 10000h", 0x0150).unwrap_err();
+        assert!(error.message.contains("outside u16 range"), "{error}");
+    }
+
+    #[test]
+    fn lr35902_assembler_rejects_z80_only_syntax_with_clear_diagnostics() {
+        for syntax in [
+            "out (1), a",
+            "in a, (1)",
+            "exx",
+            "djnz 0",
+            "ld ix, 1234h",
+            "ld iy, 1234h",
+            "jp po, 1234h",
+        ] {
+            let error = assemble_subset_at(CpuFamily::Lr35902, syntax, 0x0150).unwrap_err();
+            assert!(
+                error.message.contains("LR35902") || error.message.contains("branch condition"),
+                "unexpected diagnostic for `{syntax}`: {error}"
+            );
+        }
+
+        for (syntax, expected) in [
+            ("bit 8, a", "outside 0..7"),
+            ("push sp", "stack register"),
+            ("ld (hl), (hl)", "use `halt`"),
+            ("rst 40h", "restart vector"),
+            ("add sp, 128", "outside -128..127"),
+            ("ldh (100h), a", "outside FF00h..FFFFh"),
+        ] {
+            let error = assemble_subset_at(CpuFamily::Lr35902, syntax, 0x0150).unwrap_err();
+            assert!(
+                error.message.contains(expected),
+                "unexpected diagnostic: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn lr35902_assembler_covers_every_documented_opcode() {
         let mut base = HashSet::new();
         let mut cb = HashSet::new();
