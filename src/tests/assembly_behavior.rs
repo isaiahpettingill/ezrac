@@ -546,3 +546,55 @@ fn cpm_z80_harness_runs_complex_assembly_fixture_and_com_format() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn assemble_file_writes_m6800_raw_binary() {
+    let root = temp_root("assemble_m6800_file");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.asm");
+    let output_path = root.join("main.bin");
+    std::fs::write(
+        &source_path,
+        r#"
+            VALUE equ 20h
+            start:
+                ldaa #42h
+                staa <VALUE
+                ldx #$1234
+            loop:
+                dex
+                bne loop
+                jmp >C000h
+        "#,
+    )
+    .unwrap();
+
+    assemble_file(&AssembleOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        output: Some(output_path.to_string_lossy().into_owned()),
+        base_addr: Some(0x8000),
+        assembler_cpu: Some(AssemblerCpu::M6800),
+        layout_path: None,
+        map_path: None,
+        target: Some("bare-m6800".to_owned()),
+    })
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        [
+            0x86, 0x42, 0x97, 0x20, 0xCE, 0x12, 0x34, 0x09, 0x26, 0xFD, 0x7E, 0xC0, 0x00
+        ]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn m6800_rejects_non_m6800_instruction() {
+    let error =
+        ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::M6800, "ld a, 7Fh\n", 0x1000)
+            .unwrap_err();
+
+    assert!(error.message.contains("M6800 instruction"), "{error}");
+}
