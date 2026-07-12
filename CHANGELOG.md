@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.20
+
+- Added direct EZRA source builds for DMG `.gb` and Game Boy Color `.gbc` ROMs, with LR35902 emulator-backed tests and complete assembler verification.
+- Added built-in `gb.video`, `gb.sprites`, `gb.input`, `gb.audio`, and `gb.serial` source SDK modules for PPU setup, tiles, hardware sprites, controls, sound, wave tables, and serial output.
+- Added assembly-free Game Boy background, sprite, serial, and input/audio examples validated visually with mGBA.
+- Added portable project-level asset placement rules with target-pattern overrides for section and alignment, while preserving explicit source-level embed settings.
+- Added compile-time SDK argument lowering for embedded asset addresses and constants, enabling calls such as `sprites.upload_tile1(&player)` and `audio.load_wave(&wave)`.
+- Upgraded the `ez80` emulator dependency to 0.5.0 for native Game Boy LR35902 CPU mode.
+
 ## 0.1.19
 
 - Added separate `gameboy-dmg-lr35902` and `gameboy-color-lr35902` assembly-only targets with valid ROM-only `.gb` packaging and checksums.
