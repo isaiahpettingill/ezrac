@@ -7,7 +7,7 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
-use crate::asm::ez80 as asm_meta;
+use crate::asm::{chip8 as chip8_asm, ez80 as asm_meta};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -299,10 +299,10 @@ fn address_width_for_family(cpu_family: CpuFamily) -> u8 {
 }
 
 fn address_limit_for_family(cpu_family: CpuFamily) -> u32 {
-    if cpu_family == CpuFamily::Ez80 {
-        Address24::MAX
-    } else {
-        u16::MAX as u32
+    match cpu_family {
+        CpuFamily::Ez80 => Address24::MAX,
+        CpuFamily::Chip8 | CpuFamily::SuperChip => 0x0FFF,
+        _ => u16::MAX as u32,
     }
 }
 
@@ -338,6 +338,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::I8085 => CpuMode::I8085,
         CpuFamily::M68k => CpuMode::Z80,
         CpuFamily::Lr35902 => CpuMode::Z80,
+        CpuFamily::Chip8 | CpuFamily::SuperChip | CpuFamily::XoChip => CpuMode::Z80,
     }
 }
 
@@ -895,6 +896,9 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         return Ok(encode_lr35902(text, &HashMap::new(), 0, false)?.len());
     }
+    if let Some(dialect) = chip8_dialect(cpu) {
+        return chip8_asm::instruction_len(dialect, text);
+    }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -911,6 +915,8 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         bytes.extend(encode_lr35902(text, labels, pc, true)?);
+    } else if let Some(dialect) = chip8_dialect(cpu) {
+        bytes.extend(chip8_asm::encode_instruction(dialect, text, labels, pc)?);
     } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
@@ -940,6 +946,15 @@ fn emit_instruction(
         )));
     }
     Ok(())
+}
+
+fn chip8_dialect(cpu: AssemblerCpu) -> Option<chip8_asm::Chip8Dialect> {
+    match cpu {
+        AssemblerCpu::Chip8 => Some(chip8_asm::Chip8Dialect::Chip8),
+        AssemblerCpu::SuperChip => Some(chip8_asm::Chip8Dialect::SuperChip),
+        AssemblerCpu::XoChip => Some(chip8_asm::Chip8Dialect::XoChip),
+        _ => None,
+    }
 }
 
 fn encode_lr35902(

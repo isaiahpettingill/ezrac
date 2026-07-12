@@ -546,3 +546,46 @@ fn cpm_z80_harness_runs_complex_assembly_fixture_and_com_format() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn chip8_family_assembly_targets_encode_dialect_opcodes() {
+    let root = temp_root("assemble_chip8_family");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let cases = [
+        (
+            "chip8-vm-chip8",
+            "start:\n    cls\n    ld v0, 12h\n    add v0, 1\n    jp start\n",
+            vec![0x00, 0xE0, 0x60, 0x12, 0x70, 0x01, 0x12, 0x00],
+        ),
+        (
+            "schip-vm-schip",
+            "start:\n    high\n    scroll-down 4\n    drw v0, v1, 0\n    exit\n",
+            vec![0x00, 0xFF, 0x00, 0xC4, 0xD0, 0x10, 0x00, 0xFD],
+        ),
+        (
+            "xochip-vm-xochip",
+            "start:\n    long i, sprite\n    plane v1\n    audio\nsprite:\n    db 0AAh\n",
+            vec![0xF0, 0x00, 0x02, 0x08, 0xF1, 0x01, 0xF0, 0x02, 0xAA],
+        ),
+    ];
+
+    for (target, source, expected) in cases {
+        let source_path = root.join(format!("{target}.asm"));
+        let output_path = root.join(format!("{target}.ch8"));
+        std::fs::write(&source_path, source).unwrap();
+        assemble_file(&AssembleOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            output: Some(output_path.to_string_lossy().into_owned()),
+            base_addr: None,
+            assembler_cpu: None,
+            layout_path: None,
+            map_path: None,
+            target: Some(target.to_owned()),
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(output_path).unwrap(), expected, "{target}");
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -1095,6 +1095,10 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
         || bare_target_cpu(&settings.target.triple.value).is_some()
         || settings.target.triple.value.starts_with("zxspectrum-z80")
         || settings.target.triple.value.starts_with("gameboy-")
+        || matches!(
+            settings.target.triple.cpu,
+            CpuFamily::Chip8 | CpuFamily::SuperChip | CpuFamily::XoChip
+        )
         || is_ti_ce_target(&settings.target.triple.value)
         || is_ti_z80_target(&settings.target.triple.value)
 }
@@ -2489,7 +2493,13 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 }
 
 fn default_layout_for_target(target: &str) -> Layout {
-    if let Some(cpu) = bare_target_cpu(target) {
+    if target.starts_with("chip8-") || target == "vm-chip8" {
+        Layout::chip8("chip8")
+    } else if target.starts_with("schip-") || target.starts_with("superchip-") {
+        Layout::chip8("schip")
+    } else if target.starts_with("xochip-") {
+        Layout::chip8("xochip")
+    } else if let Some(cpu) = bare_target_cpu(target) {
         match cpu {
             AssemblerCpu::Ez80 => Layout::bare_ez80(),
             _ => Layout::bare_16(cpu.as_str()),
@@ -3043,6 +3053,30 @@ fn print_targets() {
             output: "gb",
             sdk: "vendored asm/gb",
             status: "EZRA source and assembly CGB target",
+        },
+        TargetRow {
+            triple: "chip8-vm-chip8",
+            cpu: "chip8",
+            address_width_bits: 12,
+            output: "bin",
+            sdk: "none",
+            status: "assembly-only CHIP-8 target",
+        },
+        TargetRow {
+            triple: "schip-vm-schip",
+            cpu: "schip",
+            address_width_bits: 12,
+            output: "bin",
+            sdk: "none",
+            status: "assembly-only SUPER-CHIP target",
+        },
+        TargetRow {
+            triple: "xochip-vm-xochip",
+            cpu: "xochip",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "assembly-only XO-CHIP target",
         },
         TargetRow {
             triple: "ti83-z80",
