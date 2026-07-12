@@ -6,3 +6,5 @@ pub use ez80::{
     emit_ez80_assembly_with_debug_comments, emit_ez80_assembly_with_options,
 };
 pub use lr35902::emit_lr35902_assembly_with_options;
+
+pub mod m68k;

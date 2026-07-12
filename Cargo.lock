@@ -20,6 +20,7 @@ version = "0.1.20"
 dependencies = [
  "ez80",
  "lsp",
+ "m68000",
  "pest",
  "pest_derive",
  "serde",
@@ -59,6 +60,12 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "m68000"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae608876c3e5b088c53d7b310dda17bae1b5aa33cb61a5824e7bc730a3f9c7fe"
 
 [[package]]
 name = "memchr"
