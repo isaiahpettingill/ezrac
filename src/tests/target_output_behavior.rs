@@ -1,0 +1,650 @@
+use super::*;
+
+#[test]
+fn game_boy_targets_write_valid_dmg_and_cgb_roms() {
+    use ez80::{Cpu, Machine, PlainMachine};
+
+    let root = temp_root("game_boy_roms");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.asm");
+    std::fs::write(
+        &source_path,
+        "di\nld sp, 0FFFEh\nld a, 42h\nldh (80h), a\nhalt\n",
+    )
+    .unwrap();
+    for (target, cgb_flag) in [
+        ("gameboy-dmg-lr35902", 0x00),
+        ("gameboy-color-lr35902", 0xC0),
+    ] {
+        let output = root.join(format!("{target}.gb"));
+        assemble_file(&AssembleOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            output: Some(output.to_string_lossy().into_owned()),
+            base_addr: None,
+            assembler_cpu: None,
+            layout_path: None,
+            map_path: None,
+            target: Some(target.to_owned()),
+        })
+        .unwrap();
+        let rom = std::fs::read(output).unwrap();
+        assert_eq!(rom.len(), 0x8000);
+        assert_eq!(&rom[0x0100..0x0104], &[0xC3, 0x50, 0x01, 0x00]);
+        assert_eq!(rom[0x0143], cgb_flag);
+        assert_eq!(&rom[0x0150..0x0155], &[0xF3, 0x31, 0xFE, 0xFF, 0x3E]);
+
+        let mut machine = PlainMachine::new();
+        for (address, byte) in rom.iter().copied().enumerate() {
+            machine.poke(address as u32, byte);
+        }
+        let mut cpu = Cpu::new_gameboy();
+        cpu.state.set_pc(0x0100);
+        for _ in 0..16 {
+            if cpu.is_halted() {
+                break;
+            }
+            cpu.fast_execute_instruction(&mut machine);
+        }
+        assert!(
+            cpu.is_halted(),
+            "{target} ROM did not halt in Game Boy CPU mode"
+        );
+        assert_eq!(
+            machine.peek(0xFF80),
+            0x42,
+            "{target} ROM did not execute LR35902 LDH semantics"
+        );
+
+        let header = rom[0x0134..=0x014C]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+        assert_eq!(rom[0x014D], header);
+        let global = rom
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !matches!(*index, 0x014E | 0x014F))
+            .fold(0u16, |sum, (_, byte)| sum.wrapping_add(u16::from(*byte)));
+        assert_eq!(&rom[0x014E..0x0150], &global.to_be_bytes());
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn game_boy_targets_compile_ezra_source_with_embedded_assets() {
+    use ez80::{Cpu, Machine, PlainMachine};
+
+    let root = temp_root("game_boy_ezra_source");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+                embed tile: bytes = bytes [0x42, 0x18, 0x24, 0x42]
+
+                fn main() {
+                    asm volatile {
+                        "ld hl, _tile"
+                        "ld a, (hl)"
+                        "ldh (80h), a"
+                    }
+                }
+            "#,
+    )
+    .unwrap();
+
+    for target in ["gameboy-dmg-lr35902", "gameboy-color-lr35902"] {
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some(target.to_owned()),
+        })
+        .unwrap();
+        let rom = std::fs::read(outputs.executable).unwrap();
+        assert_eq!(rom.len(), 0x8000);
+
+        let mut machine = PlainMachine::new();
+        for (address, byte) in rom.iter().copied().enumerate() {
+            machine.poke(address as u32, byte);
+        }
+        let mut cpu = Cpu::new_gameboy();
+        cpu.state.set_pc(0x0100);
+        for _ in 0..32 {
+            if cpu.is_halted() {
+                break;
+            }
+            cpu.fast_execute_instruction(&mut machine);
+        }
+        assert!(cpu.is_halted(), "{target} source ROM did not halt");
+        assert_eq!(machine.peek(0xFF80), 0x42);
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn game_boy_source_examples_build_as_roms() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gameboy");
+    for name in ["serial-hello", "background", "sprite", "input-audio"] {
+        let source = examples.join(name).join("src/main.ezra");
+        for (target, cgb_flag) in [
+            ("gameboy-dmg-lr35902", 0x00),
+            ("gameboy-color-lr35902", 0xC0),
+        ] {
+            let outputs = build_source_with_build_options(&BuildCommandOptions {
+                path: Some(source.to_string_lossy().into_owned()),
+                debug_comments: false,
+                default_sdk_symbols: true,
+                input_kind: Some(InputKind::Ezra),
+                assembler_cpu: None,
+                layout_path: None,
+                target: Some(target.to_owned()),
+            })
+            .unwrap_or_else(|error| {
+                panic!("failed to build Game Boy example `{name}` for `{target}`: {error}")
+            });
+            let expected_extension = if target.starts_with("gameboy-color-") {
+                "gbc"
+            } else {
+                "gb"
+            };
+            assert_eq!(
+                outputs
+                    .executable
+                    .extension()
+                    .and_then(|value| value.to_str()),
+                Some(expected_extension)
+            );
+            let rom = std::fs::read(outputs.executable).unwrap();
+            assert_eq!(rom.len(), 0x8000);
+            assert_eq!(
+                rom[0x0143], cgb_flag,
+                "wrong compatibility byte for {target}"
+            );
+        }
+    }
+}
+
+#[test]
+fn bare_source_build_can_emit_com_and_intel_hex() {
+    for (name, output, extension, prefix) in [
+        ("bare_z80_source_com", "com", "com", ""),
+        ("bare_z80_source_hex", "hex", "hex", ":020000040000FA"),
+    ] {
+        let root = temp_root(name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Ezra.toml"),
+            format!(
+                r#"
+                    [project]
+                    name = "bare-demo"
+
+                    [build]
+                    input = "main.ezra"
+                    target = "bare-z80"
+                    output = "{output}"
+                    executable = "demo"
+                    "#
+            ),
+        )
+        .unwrap();
+        let source_path = root.join("main.ezra");
+        std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+        let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+        let bytes = std::fs::read(&outputs.executable).unwrap();
+
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some(extension)
+        );
+        if !prefix.is_empty() {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.starts_with(prefix), "{text}");
+            assert!(text.ends_with(":00000001FF\n"), "{text}");
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
+    let root = temp_root("zxspectrum_sdk_build");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+                import zx.rom
+                import zx.screen
+
+                fn main() {
+                    screen.border(2)
+                    rom.print_char(65)
+                }
+            "#,
+    )
+    .unwrap();
+
+    let outputs = build_source_with_command_options(&CommandOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        debug_comments: false,
+        default_sdk_symbols: false,
+        layout_path: None,
+        target: Some("zxspectrum-z80".to_owned()),
+    })
+    .unwrap();
+
+    let asm = std::fs::read_to_string(outputs.asm).unwrap();
+    let map = std::fs::read_to_string(outputs.map).unwrap();
+    let tape = std::fs::read(&outputs.executable).unwrap();
+    assert!(asm.contains("; target: Z80"), "{asm}");
+    assert!(asm.contains("out (0FEh), a"), "{asm}");
+    assert!(asm.contains("rst 10h"), "{asm}");
+    assert!(map.contains(".text        0x008000"), "{map}");
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("tap")
+    );
+    assert_eq!(u16::from_le_bytes([tape[0], tape[1]]), 19);
+    assert_eq!(tape[2], 0x00);
+    assert_eq!(tape[3], 3);
+    assert!(u16::from_le_bytes([tape[14], tape[15]]) > 0);
+    assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x8000);
+    let data_block = 21;
+    assert_eq!(tape[data_block + 2], 0xFF);
+    assert_eq!(&tape[data_block + 3..data_block + 6], &[0xF3, 0x31, 0x00]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn spectrum_tap_preserves_a_custom_load_address() {
+    let mut settings = resolve_build_settings(
+        &CommandOptions {
+            path: "game.ezra".to_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("zxspectrum-z80".to_owned()),
+        },
+        Path::new("game.ezra"),
+    )
+    .unwrap();
+    settings.layout.load = Address24::new(0x8001);
+    let tape = zx_spectrum_tap_bytes(&settings, None, &[0x00]).unwrap();
+    assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x8001);
+}
+
+#[test]
+fn ti_ce_target_can_override_output_to_raw_bin() {
+    let root = temp_root("ti_ce_bin_override");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+                [build]
+                target = "ti84plusce-ez80"
+                output = "bin"
+            "#,
+    )
+    .unwrap();
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+    let bin = std::fs::read(&outputs.executable).unwrap();
+
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("bin")
+    );
+    assert_eq!(&bin[0..4], &[0xF3, 0x31, 0xFF, 0xFF]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn ti_ce_target_can_emit_8ek_app_output() {
+    let root = temp_root("ti_ce_8ek_output");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+                [build]
+                target = "ti84plusce-ez80"
+                output = "8ek"
+            "#,
+    )
+    .unwrap();
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+    let app = std::fs::read(&outputs.executable).unwrap();
+
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("8ek")
+    );
+    assert_ti_app(&app, b'E', b"GAME\0\0\0\0", 0xD1_A881, &[0xF3, 0x31]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn ti_z80_target_can_override_output_to_raw_bin() {
+    let root = temp_root("ti_z80_bin_override");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+                [build]
+                target = "ti84plus-z80"
+                output = "bin"
+            "#,
+    )
+    .unwrap();
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+    let bin = std::fs::read(&outputs.executable).unwrap();
+
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("bin")
+    );
+    assert_eq!(&bin[0..3], &[0xF3, 0x31, 0x00]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn ti_z80_target_can_emit_8xk_app_output() {
+    let root = temp_root("ti_z80_8xk_output");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+                [build]
+                target = "ti84plus-z80"
+                output = "8xk"
+            "#,
+    )
+    .unwrap();
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+    let app = std::fs::read(&outputs.executable).unwrap();
+
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("8xk")
+    );
+    assert_ti_app(&app, b'X', b"GAME\0\0\0\0", 0x00009D95, &[0xF3, 0x31]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn agon_mos_target_uses_expanded_builtin_sdk_modules() {
+    let root = temp_root("agon_expanded_sdk");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let source_path = root.join("src/main.ezra");
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+                [build]
+                target = "agonlight-mos-ez80"
+                executable = "expanded-sdk"
+            "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &source_path,
+        r#"
+                import agon.console
+                import agon.gpio
+                import agon.keyboard
+                import agon.mouse
+                import agon.vdp
+
+                fn main() {
+                    console.color(vdp.COLOR_GREEN)
+                    console.background(vdp.COLOR_BLACK)
+                    console.print_line("SDK")
+                    vdp.line(0, 0, 16, 16)
+                    mouse.enable()
+                    let key: u8 = keyboard.ascii()
+                    gpio.set_port_b_direction(gpio.ALL_OUTPUTS)
+                    gpio.write_port_b(key)
+                }
+            "#,
+    )
+    .unwrap();
+
+    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+    let asm = std::fs::read_to_string(&outputs.asm).unwrap();
+    let bin = std::fs::read(&outputs.executable).unwrap();
+
+    assert!(asm.contains("rst.lis 08h"), "{asm}");
+    assert!(asm.contains("rst.lis 10h"), "{asm}");
+    assert!(asm.contains("out0 (9Ah), a"), "{asm}");
+    assert_eq!(&bin[64..69], b"MOS\0\x01");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cpm_z80_source_build_writes_com_binary() {
+    let root = temp_root("cpm_source_build");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+
+    let outputs = build_source_with_command_options(&CommandOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        layout_path: None,
+        target: Some("cpm-2.2-z80".to_owned()),
+    })
+    .unwrap();
+
+    let asm = std::fs::read_to_string(outputs.asm).unwrap();
+    let com = std::fs::read(&outputs.executable).unwrap();
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("com")
+    );
+    assert!(asm.contains("; target: Z80"), "{asm}");
+    assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cpm_z80_source_example_uses_console_sdk_and_writes_com_binary() {
+    let root = temp_root("cpm_source_example");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80/hello-source.ezra"),
+    )
+    .unwrap();
+    let source_path = root.join("hello-source.ezra");
+    std::fs::write(&source_path, source).unwrap();
+
+    let outputs = build_source_with_command_options(&CommandOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        layout_path: None,
+        target: Some("cpm-2.2-z80".to_owned()),
+    })
+    .unwrap();
+
+    let asm = std::fs::read_to_string(outputs.asm).unwrap();
+    let com = std::fs::read(&outputs.executable).unwrap();
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("com")
+    );
+    assert!(asm.contains("; target: Z80"), "{asm}");
+    assert!(asm.contains("    call 0005h"), "{asm}");
+    assert!(!asm.contains("ld de, hl"), "{asm}");
+    assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cpm_z80_fcb_source_example_builds() {
+    let root = temp_root("cpm_fcb_source_example");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80/file-control.ezra"),
+    )
+    .unwrap();
+    let source_path = root.join("file-control.ezra");
+    std::fs::write(&source_path, source).unwrap();
+
+    let outputs = build_source_with_command_options(&CommandOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        layout_path: None,
+        target: Some("cpm-2.2-z80".to_owned()),
+    })
+    .unwrap();
+
+    let asm = std::fs::read_to_string(outputs.asm).unwrap();
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("com")
+    );
+    assert!(asm.contains("; target: Z80"), "{asm}");
+    assert!(asm.contains("    call 0005h"), "{asm}");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cpm_8080_source_build_uses_sdk_and_writes_com_binary() {
+    let root = temp_root("cpm_8080_source_build");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+                import cpm.bdos
+
+                fn main() {
+                    bdos.console_output(65)
+                    bdos.exit()
+                }
+            "#,
+    )
+    .unwrap();
+
+    let outputs = build_source_with_command_options(&CommandOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        debug_comments: false,
+        default_sdk_symbols: false,
+        layout_path: None,
+        target: Some("cpm-2.2-i8080".to_owned()),
+    })
+    .unwrap();
+
+    let asm = std::fs::read_to_string(outputs.asm).unwrap();
+    let com = std::fs::read(&outputs.executable).unwrap();
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("com")
+    );
+    assert!(asm.contains("; target: i8080"), "{asm}");
+    assert!(asm.contains("    call 0005h"), "{asm}");
+    assert!(asm.contains("    mov c,"), "{asm}");
+    assert!(!asm.contains("    ld "), "{asm}");
+    assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cpm_8085_source_build_uses_sdk_and_writes_com_binary() {
+    let root = temp_root("cpm_8085_source_build");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+                import cpm.bdos
+
+                fn main() {
+                    asm volatile {
+                        "rim"
+                        "sim"
+                    }
+                    bdos.console_output(65)
+                    bdos.exit()
+                }
+            "#,
+    )
+    .unwrap();
+
+    let outputs = build_source_with_command_options(&CommandOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        debug_comments: false,
+        default_sdk_symbols: false,
+        layout_path: None,
+        target: Some("cpm-2.2-i8085".to_owned()),
+    })
+    .unwrap();
+
+    let asm = std::fs::read_to_string(outputs.asm).unwrap();
+    let com = std::fs::read(&outputs.executable).unwrap();
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("com")
+    );
+    assert!(asm.contains("; target: i8085"), "{asm}");
+    assert!(asm.contains("    rim"), "{asm}");
+    assert!(asm.contains("    sim"), "{asm}");
+    assert!(asm.contains("    call 0005h"), "{asm}");
+    assert!(com.windows(2).any(|bytes| bytes == [0x20, 0x30]));
+    assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn commands_accept_intel_hex_output_format() {
+    let root = temp_root("intel_hex_output");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("game.ezra");
+    std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+                [build]
+                target = "agonlight-console8-ez80"
+                output = "hex"
+            "#,
+    )
+    .unwrap();
+
+    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("hex")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
