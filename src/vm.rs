@@ -337,7 +337,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::I8080 => CpuMode::I8080,
         CpuFamily::I8085 => CpuMode::I8085,
         CpuFamily::M68k => CpuMode::Z80,
-        CpuFamily::Lr35902 => CpuMode::Z80,
+        CpuFamily::Lr35902 | CpuFamily::Mos6502 => CpuMode::Z80,
     }
 }
 
@@ -895,6 +895,9 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         return Ok(encode_lr35902(text, &HashMap::new(), 0, false)?.len());
     }
+    if cpu == AssemblerCpu::Mos6502 {
+        return crate::asm::mos6502::instruction_len(text);
+    }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -911,6 +914,10 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         bytes.extend(encode_lr35902(text, labels, pc, true)?);
+    } else if cpu == AssemblerCpu::Mos6502 {
+        bytes.extend(crate::asm::mos6502::encode_instruction(
+            text, labels, pc, true,
+        )?);
     } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
@@ -1354,7 +1361,7 @@ fn push16(bytes: &mut Vec<u8>, value: u32) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
+pub(crate) fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
     let next_pc = (pc + 2) & 0xFF_FFFF;
     let offset = target as i64 - next_pc as i64;
     if !(-128..=127).contains(&offset) {
@@ -1392,7 +1399,7 @@ fn looks_like_label_ref(text: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
 }
 
-fn parse_number(text: &str) -> Result<u32, Diagnostic> {
+pub(crate) fn parse_number(text: &str) -> Result<u32, Diagnostic> {
     let text = text.trim().trim_end_matches(',');
     if let Some(hex) = text.strip_suffix('h') {
         u32::from_str_radix(hex, 16)
