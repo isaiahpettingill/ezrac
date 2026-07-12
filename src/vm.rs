@@ -7,7 +7,7 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
-use crate::asm::ez80 as asm_meta;
+use crate::asm::{avr, ez80 as asm_meta};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -338,6 +338,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::I8085 => CpuMode::I8085,
         CpuFamily::M68k => CpuMode::Z80,
         CpuFamily::Lr35902 => CpuMode::Z80,
+        CpuFamily::Avr => CpuMode::Z80,
     }
 }
 
@@ -895,6 +896,9 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         return Ok(encode_lr35902(text, &HashMap::new(), 0, false)?.len());
     }
+    if cpu == AssemblerCpu::Avr {
+        return avr::instruction_len(text);
+    }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -911,6 +915,8 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         bytes.extend(encode_lr35902(text, labels, pc, true)?);
+    } else if cpu == AssemblerCpu::Avr {
+        bytes.extend(avr::encode_instruction(text, labels, pc)?);
     } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;

@@ -27,6 +27,7 @@ pub enum CpuFamily {
     I8080,
     I8085,
     Lr35902,
+    Avr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +39,7 @@ pub enum AssemblerCpu {
     Z180,
     Ez80,
     Lr35902,
+    Avr,
 }
 
 impl AssemblerCpu {
@@ -50,8 +52,9 @@ impl AssemblerCpu {
             "z180" => Ok(Self::Z180),
             "ez80" => Ok(Self::Ez80),
             "lr35902" | "gameboy" | "gb" => Ok(Self::Lr35902),
+            "avr" | "atmega32u4" => Ok(Self::Avr),
             _ => Err(format!(
-                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, or lr35902"
+                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, or avr"
             )),
         }
     }
@@ -65,6 +68,7 @@ impl AssemblerCpu {
             Self::Z180 => "z180",
             Self::Ez80 => "ez80",
             Self::Lr35902 => "lr35902",
+            Self::Avr => "avr",
         }
     }
 
@@ -76,6 +80,7 @@ impl AssemblerCpu {
             Self::Ez80 => Some(CpuFamily::Ez80),
             Self::I8080 | Self::I8085 => None,
             Self::Lr35902 => None,
+            Self::Avr => None,
         }
     }
 
@@ -99,6 +104,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::I8085 => Self::I8085,
             CpuFamily::M68k => Self::Ez80,
             CpuFamily::Lr35902 => Self::Lr35902,
+            CpuFamily::Avr => Self::Avr,
         }
     }
 }
@@ -114,6 +120,7 @@ impl CpuFamily {
             Self::I8080 => "i8080",
             Self::I8085 => "i8085",
             Self::Lr35902 => "lr35902",
+            Self::Avr => "avr",
         }
     }
 }
@@ -149,6 +156,7 @@ pub enum OutputFormat {
     Ti8xk,
     ZxSpectrumTap,
     GameBoyGb,
+    ArduinoHex,
 }
 
 impl OutputFormat {
@@ -163,6 +171,7 @@ impl OutputFormat {
             Self::Ti8xk => "8xk",
             Self::ZxSpectrumTap => "tap",
             Self::GameBoyGb => "gb",
+            Self::ArduinoHex => "hex",
         }
     }
 }
@@ -205,6 +214,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::ZxSpectrumTap
     } else if triple.value.starts_with("gameboy-") {
         OutputFormat::GameBoyGb
+    } else if triple.value.starts_with("arduboy-") {
+        OutputFormat::ArduinoHex
     } else {
         OutputFormat::RawBin
     }
@@ -234,6 +245,10 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
             address_width_bits: 16,
         }),
         CpuFamily::Lr35902 => Some(TargetMemoryModel {
+            pointer_width_bits: 16,
+            address_width_bits: 16,
+        }),
+        CpuFamily::Avr => Some(TargetMemoryModel {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
@@ -278,6 +293,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "i8080" | "8080" => Some(CpuFamily::I8080),
             "i8085" | "8085" => Some(CpuFamily::I8085),
             "lr35902" => Some(CpuFamily::Lr35902),
+            "avr" | "atmega32u4" => Some(CpuFamily::Avr),
             _ => None,
         })
         .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;

@@ -546,3 +546,31 @@ fn cpm_z80_harness_runs_complex_assembly_fixture_and_com_format() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn arduboy_avr_assembly_smoke_test_writes_hex() {
+    let root = temp_root("arduboy_avr_assembly");
+    std::fs::create_dir_all(&root).unwrap();
+    let asm = root.join("blink.asm");
+    std::fs::write(
+        &asm,
+        "start:\n    ldi r16, 0FFh\n    out 04h, r16\n    sbi 05h, 5\n    rjmp start\n",
+    )
+    .unwrap();
+    let output = root.join("blink.hex");
+
+    assemble_file(&AssembleOptions {
+        path: asm.display().to_string(),
+        output: Some(output.display().to_string()),
+        map_path: None,
+        base_addr: Some(0),
+        target: Some("arduboy-avr".to_owned()),
+        assembler_cpu: None,
+        layout_path: None,
+    })
+    .unwrap();
+
+    let hex = std::fs::read_to_string(output).unwrap();
+    assert!(hex.starts_with(":"));
+    assert!(hex.contains(":00000001FF"));
+}

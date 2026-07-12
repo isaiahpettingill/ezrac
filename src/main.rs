@@ -731,7 +731,7 @@ fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String>
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL, Z80-family, 8080-family, and LR35902 targets; use `assemble` for hand-written assembly or a supported source target",
+        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL, Z80-family, 8080-family, and LR35902 targets; use `assemble` for hand-written AVR assembly or another supported source target",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
@@ -1791,7 +1791,10 @@ fn build_executable_bytes(
     code: &[u8],
     output_path: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
-    if settings.output_format == OutputFormat::IntelHex {
+    if matches!(
+        settings.output_format,
+        OutputFormat::IntelHex | OutputFormat::ArduinoHex
+    ) {
         return Ok(intel_hex_bytes(settings.layout.load.get(), code));
     }
     if settings.output_format == OutputFormat::Ti8xp {
@@ -2498,6 +2501,8 @@ fn default_layout_for_target(target: &str) -> Layout {
         Layout::zx_spectrum_z80()
     } else if target.starts_with("gameboy-") {
         Layout::game_boy_lr35902()
+    } else if target.starts_with("arduboy-") {
+        Layout::bare_16("arduboy_avr")
     } else if is_ti_ce_target(target) {
         Layout::ti_ce_ez80(target)
     } else if is_ti_z80_target(target) {
