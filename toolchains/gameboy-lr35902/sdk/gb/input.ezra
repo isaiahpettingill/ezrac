@@ -47,19 +47,33 @@ pub fn wait(mask: u8) {
 }
 
 pub fn wait_for_a() {
-    asm volatile {
-        ".gb_input_wait_a:"
-        "call _read"
-        "and 10h"
-        "jr z, .gb_input_wait_a"
-    }
+    wait(0x10)
 }
 
 pub fn wait_for_start() {
-    asm volatile {
-        ".gb_input_wait_start:"
-        "call _read"
-        "and 80h"
-        "jr z, .gb_input_wait_start"
-    }
+    wait(0x80)
+}
+
+pub fn wait_for_b() {
+    wait(0x20)
+}
+
+pub fn wait_for_select() {
+    wait(0x40)
+}
+
+pub fn wait_for_right() {
+    wait(0x01)
+}
+
+pub fn wait_for_left() {
+    wait(0x02)
+}
+
+pub fn wait_for_up() {
+    wait(0x04)
+}
+
+pub fn wait_for_down() {
+    wait(0x08)
 }
