@@ -264,3 +264,40 @@ pub fn free_drive(mask: u16) {
 pub fn write_random_with_zero_fill(fcb: u16) -> u8 {
     return call_de_a(WRITE_RANDOM_WITH_ZERO_FILL, fcb)
 }
+
+pub fn system_reset() {
+    exit()
+}
+
+pub fn get_console_status() -> u8 {
+    return console_status()
+}
+
+pub fn return_version_number() -> u16 {
+    return version()
+}
+
+pub fn return_login_vector() -> u16 {
+    return login_vector()
+}
+
+pub fn return_current_disk() -> u8 {
+    return current_disk()
+}
+
+pub fn set_dma(address: u16) {
+    set_dma_address(address)
+}
+
+pub fn get_allocation_vector() -> u16 {
+    return allocation_vector()
+}
+
+pub fn get_read_only_vector() -> u16 {
+    return read_only_vector()
+}
+
+pub fn get_set_user_code(value: u8) -> u8 {
+    return call_de_a(GET_SET_USER_CODE, cast<u16>(value))
+}
+

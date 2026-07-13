@@ -562,6 +562,116 @@ fn cpm_z80_target_uses_builtin_bdos_sdk() {
 }
 
 #[test]
+fn cpm_bdos_sdk_exposes_all_cpm_2_2_system_calls() {
+    let source = r#"
+            import cpm.bdos
+
+            fn main() {
+                bdos.system_reset()
+                bdos.console_input()
+                bdos.console_output(65)
+                bdos.reader_input()
+                bdos.punch_output(65)
+                bdos.list_output(65)
+                bdos.direct_console_io(0xFF)
+                bdos.get_io_byte()
+                bdos.set_io_byte(0)
+                bdos.print_string(0x0080)
+                bdos.read_console_buffer(0x0080)
+                bdos.get_console_status()
+                bdos.return_version_number()
+                bdos.reset_disk_system()
+                bdos.select_disk(0)
+                bdos.open_file(0x005C)
+                bdos.close_file(0x005C)
+                bdos.search_for_first(0x005C)
+                bdos.search_for_next()
+                bdos.delete_file(0x005C)
+                bdos.read_sequential(0x005C)
+                bdos.write_sequential(0x005C)
+                bdos.make_file(0x005C)
+                bdos.rename_file(0x005C)
+                bdos.return_login_vector()
+                bdos.return_current_disk()
+                bdos.set_dma_address(0x0080)
+                bdos.get_allocation_vector()
+                bdos.write_protect_disk()
+                bdos.get_read_only_vector()
+                bdos.set_file_attributes(0x005C)
+                bdos.disk_parameter_block()
+                bdos.get_set_user_code(0xFF)
+                bdos.read_random(0x005C)
+                bdos.write_random(0x005C)
+                bdos.compute_file_size(0x005C)
+                bdos.set_random_record(0x005C)
+                bdos.reset_drive(1)
+                bdos.access_drive(1)
+                bdos.free_drive(1)
+                bdos.write_random_with_zero_fill(0x005C)
+            }
+        "#;
+    let sdk = SdkResolver {
+        target: Some("cpm-2.2-z80".to_owned()),
+        sdk_roots: Vec::new(),
+    };
+    let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
+
+    let expected_constants = [
+        "bdos.SYSTEM_RESET",
+        "bdos.CONSOLE_INPUT",
+        "bdos.CONSOLE_OUTPUT",
+        "bdos.READER_INPUT",
+        "bdos.PUNCH_OUTPUT",
+        "bdos.LIST_OUTPUT",
+        "bdos.DIRECT_CONSOLE_IO",
+        "bdos.GET_IO_BYTE",
+        "bdos.SET_IO_BYTE",
+        "bdos.PRINT_STRING",
+        "bdos.READ_CONSOLE_BUFFER",
+        "bdos.GET_CONSOLE_STATUS",
+        "bdos.RETURN_VERSION_NUMBER",
+        "bdos.RESET_DISK_SYSTEM",
+        "bdos.SELECT_DISK",
+        "bdos.OPEN_FILE",
+        "bdos.CLOSE_FILE",
+        "bdos.SEARCH_FOR_FIRST",
+        "bdos.SEARCH_FOR_NEXT",
+        "bdos.DELETE_FILE",
+        "bdos.READ_SEQUENTIAL",
+        "bdos.WRITE_SEQUENTIAL",
+        "bdos.MAKE_FILE",
+        "bdos.RENAME_FILE",
+        "bdos.RETURN_LOGIN_VECTOR",
+        "bdos.RETURN_CURRENT_DISK",
+        "bdos.SET_DMA_ADDRESS",
+        "bdos.GET_ALLOCATION_VECTOR",
+        "bdos.WRITE_PROTECT_DISK",
+        "bdos.GET_READ_ONLY_VECTOR",
+        "bdos.SET_FILE_ATTRIBUTES",
+        "bdos.GET_DISK_PARAMETER_BLOCK",
+        "bdos.GET_SET_USER_CODE",
+        "bdos.READ_RANDOM",
+        "bdos.WRITE_RANDOM",
+        "bdos.COMPUTE_FILE_SIZE",
+        "bdos.SET_RANDOM_RECORD",
+        "bdos.RESET_DRIVE",
+        "bdos.ACCESS_DRIVE",
+        "bdos.FREE_DRIVE",
+        "bdos.WRITE_RANDOM_WITH_ZERO_FILL",
+    ];
+
+    for expected in expected_constants {
+        assert!(
+            program
+                .declarations
+                .iter()
+                .any(|decl| matches!(decl, Declaration::Const(decl) if decl.name == expected)),
+            "missing CP/M BDOS constant {expected}"
+        );
+    }
+}
+
+#[test]
 fn cpm_z80_target_uses_builtin_console_sdk() {
     let source = r#"
             import cpm.console
