@@ -1265,6 +1265,49 @@ fn rejects_assembly_labels_outside_address_space() {
 }
 
 #[test]
+fn m68k_assembler_has_distinct_cpu_mode_and_golden_encodings() {
+    let cases: &[(&str, &[u8])] = &[
+        ("nop", &[0x4E, 0x71]),
+        ("rts", &[0x4E, 0x75]),
+        ("moveq #7, d0", &[0x70, 0x07]),
+        ("move.w #1234h, d0", &[0x30, 0x3C, 0x12, 0x34]),
+        ("move.w #$1234, d0", &[0x30, 0x3C, 0x12, 0x34]),
+        ("move.l d0, (a0)", &[0x20, 0x80]),
+        ("lea 1234h, a0", &[0x41, 0xF8, 0x12, 0x34]),
+        ("addq.w #1, d0", &[0x52, 0x40]),
+        ("trap #15", &[0x4E, 0x4F]),
+        ("illegal", &[0x4A, 0xFC]),
+    ];
+
+    for (syntax, expected) in cases {
+        assert_eq!(
+            assemble_subset_with_symbols_at(AssemblerCpu::M68k, syntax, 0x1000)
+                .unwrap()
+                .bytes,
+            *expected,
+            "{syntax}"
+        );
+    }
+}
+
+#[test]
+fn m68k_assembler_resolves_labels_and_rejects_z80_aliasing() {
+    let assembled = assemble_subset_with_symbols_at(
+        AssemblerCpu::M68k,
+        "start:\n bra done\n nop\ndone:\n rts\n",
+        0x1000,
+    )
+    .unwrap();
+    assert_eq!(assembled.bytes, [0x60, 0x02, 0x4E, 0x71, 0x4E, 0x75]);
+
+    let error = assemble_subset_with_symbols_at(AssemblerCpu::M68k, "ld a, 1", 0x1000).unwrap_err();
+    assert!(
+        error.message.contains("68000") || error.message.contains("m68k"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
 fn mos6502_assembler_encodes_common_addressing_modes() {
     let bytes = assemble_subset_with_symbols_at(
         AssemblerCpu::Mos6502,

@@ -7,7 +7,7 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
-use crate::asm::ez80 as asm_meta;
+use crate::asm::{ez80 as asm_meta, m68k as asm_m68k};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -895,7 +895,9 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         return Ok(encode_lr35902(text, &HashMap::new(), 0, false)?.len());
     }
-    if cpu == AssemblerCpu::Mos6502 {
+    if cpu == AssemblerCpu::M68k {
+        return asm_m68k::instruction_len(text);
+    } else if cpu == AssemblerCpu::Mos6502 {
         return crate::asm::mos6502::instruction_len(text);
     }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
@@ -914,6 +916,8 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         bytes.extend(encode_lr35902(text, labels, pc, true)?);
+    } else if cpu == AssemblerCpu::M68k {
+        bytes.extend(asm_m68k::encode(text, labels, pc, true)?);
     } else if cpu == AssemblerCpu::Mos6502 {
         bytes.extend(crate::asm::mos6502::encode_instruction(
             text, labels, pc, true,

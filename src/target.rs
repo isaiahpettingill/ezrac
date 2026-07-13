@@ -39,6 +39,7 @@ pub enum AssemblerCpu {
     Z180,
     Ez80,
     Lr35902,
+    M68k,
     Mos6502,
 }
 
@@ -52,9 +53,10 @@ impl AssemblerCpu {
             "z180" => Ok(Self::Z180),
             "ez80" => Ok(Self::Ez80),
             "lr35902" | "gameboy" | "gb" => Ok(Self::Lr35902),
+            "m68k" | "68000" | "m68000" => Ok(Self::M68k),
             "6502" | "mos6502" | "m6502" => Ok(Self::Mos6502),
             _ => Err(format!(
-                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, or 6502"
+                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, or m68k"
             )),
         }
     }
@@ -68,6 +70,7 @@ impl AssemblerCpu {
             Self::Z180 => "z180",
             Self::Ez80 => "ez80",
             Self::Lr35902 => "lr35902",
+            Self::M68k => "m68k",
             Self::Mos6502 => "6502",
         }
     }
@@ -79,7 +82,7 @@ impl AssemblerCpu {
             Self::Z180 => Some(CpuFamily::Z80),
             Self::Ez80 => Some(CpuFamily::Ez80),
             Self::I8080 | Self::I8085 => None,
-            Self::Lr35902 | Self::Mos6502 => None,
+            Self::Lr35902 | Self::M68k | Self::Mos6502 => None,
         }
     }
 
@@ -101,7 +104,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::Z180 => Self::Z180,
             CpuFamily::I8080 => Self::I8080,
             CpuFamily::I8085 => Self::I8085,
-            CpuFamily::M68k => Self::Ez80,
+            CpuFamily::M68k => Self::M68k,
             CpuFamily::Lr35902 => Self::Lr35902,
             CpuFamily::Mos6502 => Self::Mos6502,
         }
