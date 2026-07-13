@@ -149,6 +149,14 @@ fn resolves_game_boy_assembly_targets() {
 }
 
 #[test]
+fn resolves_arduboy_avr_target_profile() {
+    let profile = super::resolve_target_profile(Some("arduboy-avr")).unwrap();
+    assert_eq!(profile.triple.cpu, super::CpuFamily::Avr);
+    assert_eq!(profile.output_format, super::OutputFormat::ArduinoHex);
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+}
+
+#[test]
 fn resolves_chip8_family_assembly_targets() {
     for (target, cpu, bits, assembler) in [
         ("chip8-vm-chip8", CpuFamily::Chip8, 12, AssemblerCpu::Chip8),

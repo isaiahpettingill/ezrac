@@ -28,6 +28,7 @@ pub enum CpuFamily {
     I8080,
     I8085,
     Lr35902,
+    Avr,
     Chip8,
     SuperChip,
     XoChip,
@@ -43,6 +44,7 @@ pub enum AssemblerCpu {
     Z180,
     Ez80,
     Lr35902,
+    Avr,
     Chip8,
     SuperChip,
     XoChip,
@@ -61,6 +63,7 @@ impl AssemblerCpu {
             "z180" => Ok(Self::Z180),
             "ez80" => Ok(Self::Ez80),
             "lr35902" | "gameboy" | "gb" => Ok(Self::Lr35902),
+            "avr" | "atmega32u4" => Ok(Self::Avr),
             "chip8" | "chip-8" => Ok(Self::Chip8),
             "schip" | "superchip" | "super-chip" => Ok(Self::SuperChip),
             "xochip" | "xo-chip" => Ok(Self::XoChip),
@@ -68,7 +71,7 @@ impl AssemblerCpu {
             "m68k" | "68000" | "m68000" => Ok(Self::M68k),
             "6502" | "mos6502" | "m6502" => Ok(Self::Mos6502),
             _ => Err(format!(
-                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, m6800, m68k, chip8, schip, or xochip"
+                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, m6800, m68k, chip8, schip, xochip, or avr"
             )),
         }
     }
@@ -82,6 +85,7 @@ impl AssemblerCpu {
             Self::Z180 => "z180",
             Self::Ez80 => "ez80",
             Self::Lr35902 => "lr35902",
+            Self::Avr => "avr",
             Self::Chip8 => "chip8",
             Self::SuperChip => "schip",
             Self::XoChip => "xochip",
@@ -105,6 +109,7 @@ impl AssemblerCpu {
             | Self::Chip8
             | Self::SuperChip
             | Self::XoChip => None,
+            Self::Avr => None,
         }
     }
 
@@ -128,6 +133,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::I8085 => Self::I8085,
             CpuFamily::M68k => Self::M68k,
             CpuFamily::Lr35902 => Self::Lr35902,
+            CpuFamily::Avr => Self::Avr,
             CpuFamily::Chip8 => Self::Chip8,
             CpuFamily::SuperChip => Self::SuperChip,
             CpuFamily::XoChip => Self::XoChip,
@@ -148,6 +154,7 @@ impl CpuFamily {
             Self::I8080 => "i8080",
             Self::I8085 => "i8085",
             Self::Lr35902 => "lr35902",
+            Self::Avr => "avr",
             Self::Chip8 => "chip8",
             Self::SuperChip => "schip",
             Self::XoChip => "xochip",
@@ -188,6 +195,7 @@ pub enum OutputFormat {
     Ti8xk,
     ZxSpectrumTap,
     GameBoyGb,
+    ArduinoHex,
 }
 
 impl OutputFormat {
@@ -202,6 +210,7 @@ impl OutputFormat {
             Self::Ti8xk => "8xk",
             Self::ZxSpectrumTap => "tap",
             Self::GameBoyGb => "gb",
+            Self::ArduinoHex => "hex",
         }
     }
 }
@@ -244,6 +253,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::ZxSpectrumTap
     } else if triple.value.starts_with("gameboy-") {
         OutputFormat::GameBoyGb
+    } else if triple.value.starts_with("arduboy-") {
+        OutputFormat::ArduinoHex
     } else {
         OutputFormat::RawBin
     }
@@ -281,6 +292,10 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
             address_width_bits: 12,
         }),
         CpuFamily::XoChip => Some(TargetMemoryModel {
+            pointer_width_bits: 16,
+            address_width_bits: 16,
+        }),
+        CpuFamily::Avr => Some(TargetMemoryModel {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
@@ -325,6 +340,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "i8080" | "8080" => Some(CpuFamily::I8080),
             "i8085" | "8085" => Some(CpuFamily::I8085),
             "lr35902" => Some(CpuFamily::Lr35902),
+            "avr" | "atmega32u4" => Some(CpuFamily::Avr),
             "chip8" | "chip" => Some(CpuFamily::Chip8),
             "schip" | "superchip" => Some(CpuFamily::SuperChip),
             "xochip" => Some(CpuFamily::XoChip),

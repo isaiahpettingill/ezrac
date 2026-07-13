@@ -7,7 +7,7 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
-use crate::asm::{chip8 as chip8_asm, ez80 as asm_meta, m68k as asm_m68k, m6800};
+use crate::asm::{avr, chip8 as chip8_asm, ez80 as asm_meta, m68k as asm_m68k, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -343,6 +343,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         | CpuFamily::Chip8
         | CpuFamily::SuperChip
         | CpuFamily::XoChip => CpuMode::Z80,
+        CpuFamily::Avr => CpuMode::Z80,
     }
 }
 
@@ -900,7 +901,9 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         return Ok(encode_lr35902(text, &HashMap::new(), 0, false)?.len());
     }
-    if let Some(dialect) = chip8_dialect(cpu) {
+    if cpu == AssemblerCpu::Avr {
+        return avr::instruction_len(text);
+    } else if let Some(dialect) = chip8_dialect(cpu) {
         return chip8_asm::instruction_len(dialect, text);
     } else if cpu == AssemblerCpu::M6800 {
         return m6800::instruction_len(text)?.ok_or_else(|| {
@@ -929,6 +932,8 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         bytes.extend(encode_lr35902(text, labels, pc, true)?);
+    } else if cpu == AssemblerCpu::Avr {
+        bytes.extend(avr::encode_instruction(text, labels, pc)?);
     } else if let Some(dialect) = chip8_dialect(cpu) {
         bytes.extend(chip8_asm::encode_instruction(dialect, text, labels, pc)?);
     } else if cpu == AssemblerCpu::M6800 {

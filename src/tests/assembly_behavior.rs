@@ -548,6 +548,50 @@ fn cpm_z80_harness_runs_complex_assembly_fixture_and_com_format() {
 }
 
 #[test]
+fn arduboy_avr_assembly_smoke_test_writes_hex() {
+    let root = temp_root("arduboy_avr_assembly");
+    std::fs::create_dir_all(&root).unwrap();
+    let asm = root.join("blink.asm");
+    std::fs::write(
+        &asm,
+        "start:\n    ldi r16, 0FFh\n    out 04h, r16\n    sbi 05h, 5\n    rjmp start\n",
+    )
+    .unwrap();
+    let output = root.join("blink.hex");
+
+    assemble_file(&AssembleOptions {
+        path: asm.display().to_string(),
+        output: Some(output.display().to_string()),
+        map_path: None,
+        base_addr: Some(0),
+        target: Some("arduboy-avr".to_owned()),
+        assembler_cpu: None,
+        layout_path: None,
+    })
+    .unwrap();
+
+    let hex = std::fs::read_to_string(output).unwrap();
+    assert!(hex.starts_with(":"));
+    assert!(hex.contains(":00000001FF"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn avr_aliases_encode_their_underlying_instructions() {
+    let cases = [
+        ("clr r16", vec![0x00, 0x27]),
+        ("lsl r16", vec![0x00, 0x0F]),
+        ("tst r16", vec![0x00, 0x23]),
+    ];
+
+    for (instruction, expected) in cases {
+        let bytes =
+            ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::Avr, instruction, 0).unwrap();
+        assert_eq!(bytes.bytes, expected, "{instruction}");
+    }
+}
+
+#[test]
 fn chip8_family_assembly_targets_encode_dialect_opcodes() {
     let root = temp_root("assemble_chip8_family");
     std::fs::create_dir_all(&root).unwrap();
