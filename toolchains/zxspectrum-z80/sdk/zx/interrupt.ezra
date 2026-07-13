@@ -1,0 +1,18 @@
+pub const FRAME_HZ: u8 = 50
+
+pub fn enable() {
+    asm volatile(clobber flags) { "ei" }
+}
+
+pub fn disable() {
+    asm volatile(clobber flags) { "di" }
+}
+
+pub fn halt_until_interrupt() {
+    asm volatile { "halt" }
+}
+
+pub fn wait_vblank() {
+    enable()
+    halt_until_interrupt()
+}

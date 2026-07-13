@@ -625,10 +625,21 @@ fn zxspectrum_target_uses_builtin_zx_sdk() {
     let source = r#"
             import zx.rom
             import zx.screen
+            import zx.io
+            import zx.keyboard
+            import zx.sound
+            import zx.memory
+            import zx.interrupt
 
             fn main() {
                 rom.print_char(65)
                 screen.border(1)
+                screen.set_attr(0, 0, screen.attr(screen.WHITE, screen.BLUE, screen.BRIGHT))
+                io.write_ula(0)
+                let keys: u8 = keyboard.any_key()
+                sound.beeper(keys)
+                memory.select_128k_bank(0, 0, 0)
+                interrupt.disable()
             }
         "#;
     let sdk = SdkResolver {
@@ -643,6 +654,20 @@ fn zxspectrum_target_uses_builtin_zx_sdk() {
     assert!(program.declarations.iter().any(|decl| {
         matches!(decl, Declaration::Function(function) if function.name == "screen.border")
     }));
+    for name in [
+        "io.write_ula",
+        "keyboard.any_key",
+        "sound.ay_write",
+        "memory.select_128k_bank",
+        "interrupt.wait_vblank",
+    ] {
+        assert!(
+            program.declarations.iter().any(|decl| {
+                matches!(decl, Declaration::Function(function) if function.name == name)
+            }),
+            "missing {name}"
+        );
+    }
 }
 
 #[test]

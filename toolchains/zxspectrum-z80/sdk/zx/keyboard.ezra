@@ -1,0 +1,34 @@
+pub const ROW_SHIFT_ZXCV: u16 = 0xFEFE
+pub const ROW_ASDFG: u16 = 0xFDFE
+pub const ROW_QWERT: u16 = 0xFBFE
+pub const ROW_12345: u16 = 0xF7FE
+pub const ROW_09876: u16 = 0xEFFE
+pub const ROW_POIUY: u16 = 0xDFFE
+pub const ROW_ENTER_LKJH: u16 = 0xBFFE
+pub const ROW_SPACE_SYM_MNB: u16 = 0x7FFE
+
+pub const KEY0: u8 = 0x01
+pub const KEY1: u8 = 0x02
+pub const KEY2: u8 = 0x04
+pub const KEY3: u8 = 0x08
+pub const KEY4: u8 = 0x10
+
+pub fn read_row(port: u16) -> u8 {
+    let result: u8 = 0
+    asm volatile(in port: u16 as reg16, out result: u8 as reg8, clobber a, clobber b, clobber c, clobber flags, clobber ports) {
+        "ld b, h"
+        "ld c, l"
+        "in a, (c)"
+        "cpl"
+        "and 1Fh"
+    }
+    return result
+}
+
+pub fn any_key() -> u8 {
+    return read_row(ROW_SHIFT_ZXCV) | read_row(ROW_ASDFG) | read_row(ROW_QWERT) | read_row(ROW_12345) | read_row(ROW_09876) | read_row(ROW_POIUY) | read_row(ROW_ENTER_LKJH) | read_row(ROW_SPACE_SYM_MNB)
+}
+
+pub fn wait_any() {
+    while any_key() == 0 {}
+}

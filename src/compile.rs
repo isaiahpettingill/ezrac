@@ -998,6 +998,26 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/screen.ezra"),
                 "zx.screen",
             )),
+            "zx.io" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/io.ezra"),
+                "zx.io",
+            )),
+            "zx.keyboard" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/keyboard.ezra"),
+                "zx.keyboard",
+            )),
+            "zx.sound" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/sound.ezra"),
+                "zx.sound",
+            )),
+            "zx.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/memory.ezra"),
+                "zx.memory",
+            )),
+            "zx.interrupt" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/interrupt.ezra"),
+                "zx.interrupt",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("ezra-test-")) {
@@ -1067,6 +1087,11 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "ti.lcd",
         "zx.rom",
         "zx.screen",
+        "zx.io",
+        "zx.keyboard",
+        "zx.sound",
+        "zx.memory",
+        "zx.interrupt",
         "harness.io",
         "harness.layout",
         "harness.memory",
