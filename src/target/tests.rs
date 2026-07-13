@@ -147,3 +147,28 @@ fn resolves_game_boy_assembly_targets() {
         );
     }
 }
+
+#[test]
+fn resolves_chip8_family_assembly_targets() {
+    for (target, cpu, bits, assembler) in [
+        ("chip8-vm-chip8", CpuFamily::Chip8, 12, AssemblerCpu::Chip8),
+        (
+            "schip-vm-schip",
+            CpuFamily::SuperChip,
+            12,
+            AssemblerCpu::SuperChip,
+        ),
+        (
+            "xochip-vm-xochip",
+            CpuFamily::XoChip,
+            16,
+            AssemblerCpu::XoChip,
+        ),
+    ] {
+        let profile = resolve_target_profile(Some(target)).unwrap();
+        assert_eq!(profile.triple.cpu, cpu);
+        assert_eq!(profile.memory.address_width_bits, bits);
+        assert_eq!(profile.output_format, OutputFormat::RawBin);
+        assert_eq!(AssemblerCpu::from(profile.triple.cpu), assembler);
+    }
+}

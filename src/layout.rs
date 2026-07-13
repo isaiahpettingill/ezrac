@@ -82,6 +82,49 @@ pub struct Layout {
 }
 
 impl Layout {
+    pub fn chip8(dialect: &str) -> Self {
+        let (end, stack) = if dialect == "xochip" {
+            (0xFFFF, 0xFFFF)
+        } else {
+            (0x0FFF, 0x0FFF)
+        };
+        Self {
+            name: format!("{dialect}_layout"),
+            load: Address24::new(0x0200),
+            entry: Address24::new(0x0200),
+            stack: Address24::new(stack),
+            regions: vec![
+                region(
+                    "interpreter",
+                    0x0000,
+                    0x01FF,
+                    &[RegionFlags::READ, RegionFlags::RESERVED],
+                ),
+                region(
+                    "program",
+                    0x0200,
+                    end,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+            ],
+            sections: vec![
+                section(".header", "program", 2),
+                section(".text", "program", 2),
+                section(".rodata", "program", 2),
+                section(".data", "program", 2),
+                section(".bss", "program", 2),
+                section(".assets", "program", 2),
+                section(".scratch", "program", 2),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0200)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0200)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0200)),
+                symbol("EZRA_STACK_TOP", Address24::new(stack)),
+            ],
+        }
+    }
+
     pub fn bare_16(cpu: &str) -> Self {
         Self {
             name: format!("bare_{cpu}"),
