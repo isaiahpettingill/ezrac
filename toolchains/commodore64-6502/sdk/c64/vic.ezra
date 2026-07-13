@@ -37,14 +37,16 @@ pub const LIGHT_GRAY: u8 = 15
 
 pub fn border(color: u8) { *(cast<ptr<u8>>(cast<u24>(BORDER))) = color & 15 }
 pub fn background(color: u8) { *(cast<ptr<u8>>(cast<u24>(BACKGROUND))) = color & 15 }
-pub fn set_raster(line: u8) { *(cast<ptr<u8>>(cast<u24>(RASTER))) = line }
-pub fn raster() -> u8 { return *(cast<ptr<u8>>(cast<u24>(RASTER))) }
-pub fn wait_raster(line: u8) { let waiting: u8 = 0; while raster() != line { waiting = waiting } }
+pub fn set_raster(line: u16) { let control: u8 = *(cast<ptr<u8>>(cast<u24>(CONTROL1))) & 0x7F; *(cast<ptr<u8>>(cast<u24>(RASTER))) = cast<u8>(line); if line > 255 { *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = control | 0x80 } else { *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = control } }
+pub fn raster() -> u16 { return cast<u16>(*(cast<ptr<u8>>(cast<u24>(RASTER)))) | ((cast<u16>(*(cast<ptr<u8>>(cast<u24>(CONTROL1)))) & 0x80) << 1) }
+pub fn wait_raster(line: u16) { let waiting: u8 = 0; while raster() != line { waiting = waiting } }
 pub fn screen_address(x: u8, y: u8) -> u16 { return SCREEN_RAM + cast<u16>(y) * cast<u16>(SCREEN_COLUMNS) + cast<u16>(x) }
 pub fn color_address(x: u8, y: u8) -> u16 { return COLOR_RAM + cast<u16>(y) * cast<u16>(SCREEN_COLUMNS) + cast<u16>(x) }
 pub fn put_char(x: u8, y: u8, character: u8) { *(cast<ptr<u8>>(cast<u24>(screen_address(x, y)))) = character }
 pub fn put_color(x: u8, y: u8, color: u8) { *(cast<ptr<u8>>(cast<u24>(color_address(x, y)))) = color & 15 }
 pub fn clear(character: u8, color: u8) { let index: u16 = 0; while index < 1000 { *(cast<ptr<u8>>(cast<u24>(SCREEN_RAM + index))) = character; *(cast<ptr<u8>>(cast<u24>(COLOR_RAM + index))) = color & 15; index = index + 1 } }
+pub fn set_memory_pointers(screen_offset: u8, character_offset: u8) { *(cast<ptr<u8>>(cast<u24>(MEMORY_POINTERS))) = (screen_offset & 15) << 4 | ((character_offset & 7) << 1) }
+pub fn sprite_pointer(sprite: u8, pointer: u8) { if sprite < 8 { *(cast<ptr<u8>>(cast<u24>(SCREEN_RAM + 0x03F8 + cast<u16>(sprite)))) = pointer } }
 pub fn sprite_position(sprite: u8, x: u16, y: u8) { let offset: u16 = cast<u16>(sprite) << 1; *(cast<ptr<u8>>(cast<u24>(SPRITE_X + offset))) = cast<u8>(x); *(cast<ptr<u8>>(cast<u24>(SPRITE_Y + offset))) = y; let mask: u8 = 1 << sprite; let high: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))); if x > 255 { *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))) = high | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))) = high & ~mask } }
 pub fn sprite_enable(sprite: u8, enabled: u8) { let mask: u8 = 1 << sprite; let value: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))); if enabled != 0 { *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))) = value | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))) = value & ~mask } }
 pub fn sprite_color(sprite: u8, color: u8) { *(cast<ptr<u8>>(cast<u24>(SPRITE_COLOR0 + cast<u16>(sprite)))) = color & 15 }

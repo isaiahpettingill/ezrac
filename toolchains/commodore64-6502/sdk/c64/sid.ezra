@@ -21,5 +21,8 @@ pub fn pulse_width(voice: u8, value: u16) { let base: u16 = voice_base(voice); *
 pub fn control(voice: u8, value: u8) { *(cast<ptr<u8>>(cast<u24>(voice_base(voice) + 4))) = value }
 pub fn attack_decay(voice: u8, attack: u8, decay: u8) { *(cast<ptr<u8>>(cast<u24>(voice_base(voice) + 5))) = (attack << 4) | (decay & 15) }
 pub fn sustain_release(voice: u8, sustain: u8, release: u8) { *(cast<ptr<u8>>(cast<u24>(voice_base(voice) + 6))) = (sustain << 4) | (release & 15) }
-pub fn volume(value: u8) { *(cast<ptr<u8>>(cast<u24>(MODE_VOLUME))) = value & 15 }
+pub fn mode_volume(value: u8) { *(cast<ptr<u8>>(cast<u24>(MODE_VOLUME))) = value }
+pub fn volume(value: u8) { mode_volume((*(cast<ptr<u8>>(cast<u24>(MODE_VOLUME))) & 0xF0) | (value & 15)) }
+pub fn filter_cutoff(value: u16) { *(cast<ptr<u8>>(cast<u24>(FILTER_CUTOFF_LO))) = cast<u8>(value & 7); *(cast<ptr<u8>>(cast<u24>(FILTER_CUTOFF_HI))) = cast<u8>(value >> 3) }
+pub fn filter_route(value: u8) { *(cast<ptr<u8>>(cast<u24>(FILTER_ROUTE))) = value }
 pub fn mute() { volume(0) }

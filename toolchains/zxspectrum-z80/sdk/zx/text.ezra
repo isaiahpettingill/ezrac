@@ -1,0 +1,18 @@
+// ZX ROM RST $10 text codes. Printable ASCII is $20..$7F except $60 is £.
+pub const CHAR_SPACE: u8 = 0x20
+pub const CHAR_A: u8 = 'A'
+pub const CHAR_Z: u8 = 'Z'
+pub const CHAR_0: u8 = '0'
+pub const CHAR_9: u8 = '9'
+pub const NEWLINE: u8 = 13
+pub const BACKSPACE: u8 = 8
+pub const TAB: u8 = 9
+pub const INK: u8 = 16
+pub const PAPER: u8 = 17
+pub const FLASH: u8 = 18
+pub const BRIGHT: u8 = 19
+pub const INVERSE: u8 = 20
+pub const OVER: u8 = 21
+pub const AT: u8 = 22
+pub fn print_ascii(text: ptr<u8>) { let index: u16 = 0; while *(text + index) != 0 { asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) { "ld a, {ch}" "rst 10h" } index = index + 1 } }
+pub fn newline() { asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) { "ld a, 13" "rst 10h" } }

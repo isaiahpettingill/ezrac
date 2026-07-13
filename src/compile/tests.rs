@@ -839,11 +839,13 @@ fn commodore64_target_uses_builtin_c64_sdk_and_6502_codegen() {
         import c64.sid
         import c64.cia
         import c64.memory
+        import c64.text
 
         fn main() {
             memory.map_roms_and_io()
             vic.border(vic.BLUE)
-            vic.put_char(0, 0, 1)
+            vic.put_char(0, 0, text.CHAR_A)
+            text.put_ascii(1, 0, "HELLO")
             sid.frequency(0, 0x1120)
             cia.timer_a(cia.CIA1, 1000, cia.TIMER_START)
         }
