@@ -1,0 +1,25 @@
+// SID 6581/8580 three-voice synthesizer registers.
+pub const SID_BASE: u16 = 0xD400
+pub const VOICE1: u16 = 0xD400
+pub const VOICE2: u16 = 0xD407
+pub const VOICE3: u16 = 0xD40E
+pub const FILTER_CUTOFF_LO: u16 = 0xD415
+pub const FILTER_CUTOFF_HI: u16 = 0xD416
+pub const FILTER_ROUTE: u16 = 0xD417
+pub const MODE_VOLUME: u16 = 0xD418
+pub const GATE: u8 = 1
+pub const SYNC: u8 = 2
+pub const RING: u8 = 4
+pub const TEST: u8 = 8
+pub const TRIANGLE: u8 = 16
+pub const SAWTOOTH: u8 = 32
+pub const PULSE: u8 = 64
+pub const NOISE: u8 = 128
+pub fn voice_base(voice: u8) -> u16 { return SID_BASE + cast<u16>(voice) * 7 }
+pub fn frequency(voice: u8, value: u16) { let base: u16 = voice_base(voice); *(cast<ptr<u8>>(cast<u24>(base))) = cast<u8>(value); *(cast<ptr<u8>>(cast<u24>(base + 1))) = cast<u8>(value >> 8) }
+pub fn pulse_width(voice: u8, value: u16) { let base: u16 = voice_base(voice); *(cast<ptr<u8>>(cast<u24>(base + 2))) = cast<u8>(value); *(cast<ptr<u8>>(cast<u24>(base + 3))) = cast<u8>(value >> 8) & 15 }
+pub fn control(voice: u8, value: u8) { *(cast<ptr<u8>>(cast<u24>(voice_base(voice) + 4))) = value }
+pub fn attack_decay(voice: u8, attack: u8, decay: u8) { *(cast<ptr<u8>>(cast<u24>(voice_base(voice) + 5))) = (attack << 4) | (decay & 15) }
+pub fn sustain_release(voice: u8, sustain: u8, release: u8) { *(cast<ptr<u8>>(cast<u24>(voice_base(voice) + 6))) = (sustain << 4) | (release & 15) }
+pub fn volume(value: u8) { *(cast<ptr<u8>>(cast<u24>(MODE_VOLUME))) = value & 15 }
+pub fn mute() { volume(0) }

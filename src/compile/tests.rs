@@ -831,6 +831,55 @@ fn zxspectrum_target_uses_builtin_zx_sdk() {
     }
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn commodore64_target_uses_builtin_c64_sdk_and_6502_codegen() {
+    let source = r#"
+        import c64.vic
+        import c64.sid
+        import c64.cia
+        import c64.memory
+
+        fn main() {
+            memory.map_roms_and_io()
+            vic.border(vic.BLUE)
+            vic.put_char(0, 0, 1)
+            sid.frequency(0, 0x1120)
+            cia.timer_a(cia.CIA1, 1000, cia.TIMER_START)
+        }
+    "#;
+    let sdk = SdkResolver {
+        target: Some("commodore64-6502".to_owned()),
+        sdk_roots: Vec::new(),
+    };
+    let program = parse_and_resolve_imports_with_sdk(Path::new("c64.ezra"), source, &sdk).unwrap();
+
+    for name in [
+        "vic.border",
+        "vic.sprite_position",
+        "sid.frequency",
+        "cia.timer_a",
+        "memory.map_roms_and_io",
+    ] {
+        assert!(
+            program.declarations.iter().any(|decl| {
+                matches!(decl, Declaration::Function(function) if function.name == name)
+            }),
+            "missing {name}"
+        );
+    }
+    check_source_with_sdk(
+        source,
+        &CompileOptions {
+            source: PathBuf::from("c64.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        },
+        &sdk,
+    )
+    .unwrap();
+}
+
 #[test]
 fn ti_ce_targets_use_builtin_tice_sdk() {
     let source = r#"

@@ -11,6 +11,7 @@ const GAMEBOY_CORE_ENV: &str = "PLAY96_GAMEBOY_CORE";
 const ZX_SPECTRUM_CORE_ENV: &str = "PLAY96_ZX_SPECTRUM_CORE";
 const CPM_CORE_ENV: &str = "PLAY96_CPM_CORE";
 const EZ180N_CORE_ENV: &str = "PLAY96_EZ180N_CORE";
+const C64_CORE_ENV: &str = "PLAY96_C64_CORE";
 
 fn lock_real_core_tests() -> MutexGuard<'static, ()> {
     REAL_CORE_TEST_LOCK
@@ -567,6 +568,35 @@ fn gameboy_examples_run_on_real_core() {
         assert_deterministic_video_save_state(&mut game, "gameboy-serial-hello");
         capture(&game, "gameboy-serial-hello");
     }
+}
+
+#[test]
+#[ignore = "requires PLAY96_C64_CORE pointing at a VICE-compatible Commodore 64 libretro core"]
+fn c64_example_runs_on_real_core() {
+    let _guard = lock_real_core_tests();
+    let core = core_from_env(C64_CORE_ENV);
+    let program = build_example(
+        "examples/commodore64/hello/src/main.ezra",
+        "examples/commodore64/hello/target/commodore64-6502/src/c64-hello.prg",
+    );
+    let image = fs::read(&program).unwrap();
+    assert!(image.len() > 2, "C64 PRG has no program payload");
+    assert_eq!(
+        &image[..2],
+        &0x080Du16.to_le_bytes(),
+        "C64 PRG has the wrong load address"
+    );
+
+    let mut c64 = open_session(&core, &program, "Commodore 64 hello example");
+    c64.run_frames(300).unwrap();
+    assert_eq!(
+        (c64.framebuffer_width(), c64.framebuffer_height()),
+        (320, 200),
+        "Commodore 64 example used unexpected video geometry"
+    );
+    assert_non_uniform_frame(&c64, "Commodore 64 hello example");
+    round_trip_save_state(&mut c64, "commodore64-hello");
+    capture(&c64, "commodore64-hello");
 }
 
 #[test]
