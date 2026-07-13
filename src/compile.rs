@@ -918,6 +918,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/audio.ezra"),
                 "gb.audio",
             )),
+            "gb.color" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/color.ezra"),
+                "gb.color",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {

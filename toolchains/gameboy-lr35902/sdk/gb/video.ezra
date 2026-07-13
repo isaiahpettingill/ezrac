@@ -103,3 +103,21 @@ pub fn enable_background_and_sprites() {
         "ldh (40h), a"
     }
 }
+
+// Adds amount to the background X scroll register (SCX).
+pub fn scroll_x_forward(amount: u8) {
+    asm volatile {
+        "ldh a, (43h)"
+        "add a, l"
+        "ldh (43h), a"
+    }
+}
+
+// Subtracts amount from the background X scroll register (SCX).
+pub fn scroll_x_backward(amount: u8) {
+    asm volatile {
+        "ldh a, (43h)"
+        "sub l"
+        "ldh (43h), a"
+    }
+}
