@@ -14,6 +14,7 @@ pub fn write_ula(value: u8) {
 pub fn read_ula() -> u8 {
     let result: u8 = 0
     asm volatile(out result: u8 as reg8, clobber a, clobber flags, clobber ports) {
+        "ld a, 0FFh"
         "in a, (0FEh)"
     }
     return result
