@@ -1,0 +1,25 @@
+pub const ULA_PORT: u8 = 0xFE
+pub const BORDER_MASK: u8 = 0x07
+pub const MIC_BIT: u8 = 0x08
+pub const SPEAKER_BIT: u8 = 0x10
+pub const EAR_BIT: u8 = 0x40
+
+pub fn write_ula(value: u8) {
+    asm volatile(in value: u8 as reg8, clobber a, clobber flags, clobber ports) {
+        "ld a, {value}"
+        "out (0FEh), a"
+    }
+}
+
+pub fn read_ula() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as reg8, clobber a, clobber flags, clobber ports) {
+        "ld a, 0FFh"
+        "in a, (0FEh)"
+    }
+    return result
+}
+
+pub fn set_border_and_speaker(color: u8, speaker_on: u8) {
+    write_ula((color & BORDER_MASK) | ((speaker_on & 1) << 4))
+}

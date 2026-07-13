@@ -226,11 +226,13 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
     std::fs::write(
         &source_path,
         r#"
+                import zx.io
                 import zx.rom
                 import zx.screen
 
                 fn main() {
-                    screen.border(2)
+                    let ula: u8 = io.read_ula()
+                    screen.border(ula)
                     rom.print_char(65)
                 }
             "#,
@@ -251,6 +253,13 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
     let tape = std::fs::read(&outputs.executable).unwrap();
     assert!(asm.contains("; target: Z80"), "{asm}");
     assert!(asm.contains("out (0FEh), a"), "{asm}");
+    assert!(
+        asm.contains(
+            "ld a, 0FFh
+    in a, (0FEh)"
+        ),
+        "{asm}"
+    );
     assert!(asm.contains("rst 10h"), "{asm}");
     assert!(map.contains(".text        0x008000"), "{map}");
     assert_eq!(

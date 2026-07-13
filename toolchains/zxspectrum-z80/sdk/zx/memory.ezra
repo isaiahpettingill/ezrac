@@ -1,0 +1,23 @@
+pub const ROM_BASE: u16 = 0x0000
+pub const ROM_SIZE: u16 = 0x4000
+pub const RAM_BASE_16K: u16 = 0x4000
+pub const RAM_BASE_48K: u16 = 0x4000
+pub const BANKED_WINDOW: u16 = 0xC000
+pub const BANK_SIZE: u16 = 0x4000
+pub const BANK_PORT: u16 = 0x7FFD
+pub const BANK_RAM_MASK: u8 = 0x07
+pub const BANK_SCREEN_SHADOW: u8 = 0x08
+pub const BANK_ROM_128: u8 = 0x10
+pub const BANK_LOCK: u8 = 0x20
+
+pub fn out_7ffd(value: u8) {
+    asm volatile(in value: u8 as reg8, clobber a, clobber bc, clobber flags, clobber ports) {
+        "ld a, {value}"
+        "ld bc, 07FFDh"
+        "out (c), a"
+    }
+}
+
+pub fn select_128k_bank(bank: u8, shadow_screen: u8, rom: u8) {
+    out_7ffd((bank & BANK_RAM_MASK) | ((shadow_screen & 1) << 3) | ((rom & 1) << 4))
+}

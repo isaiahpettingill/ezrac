@@ -1,0 +1,55 @@
+pub const AY_ADDRESS_PORT: u16 = 0xFFFD
+pub const AY_DATA_PORT: u16 = 0xBFFD
+pub const AY_TONE_A_FINE: u8 = 0
+pub const AY_TONE_A_COARSE: u8 = 1
+pub const AY_TONE_B_FINE: u8 = 2
+pub const AY_TONE_B_COARSE: u8 = 3
+pub const AY_TONE_C_FINE: u8 = 4
+pub const AY_TONE_C_COARSE: u8 = 5
+pub const AY_NOISE_PERIOD: u8 = 6
+pub const AY_MIXER: u8 = 7
+pub const AY_VOLUME_A: u8 = 8
+pub const AY_VOLUME_B: u8 = 9
+pub const AY_VOLUME_C: u8 = 10
+pub const AY_ENV_FINE: u8 = 11
+pub const AY_ENV_COARSE: u8 = 12
+pub const AY_ENV_SHAPE: u8 = 13
+
+pub fn beeper(on: u8) {
+    asm volatile(in on: u8 as reg8, clobber a, clobber flags, clobber ports) {
+        "ld a, {on}"
+        "and 01h"
+        "rlca"
+        "rlca"
+        "rlca"
+        "rlca"
+        "out (0FEh), a"
+    }
+}
+
+pub fn ay_select(register: u8) {
+    asm volatile(in register: u8 as reg8, clobber a, clobber bc, clobber flags, clobber ports) {
+        "ld a, {register}"
+        "ld bc, 0FFFDh"
+        "out (c), a"
+    }
+}
+
+pub fn ay_write(register: u8, value: u8) {
+    ay_select(register)
+    asm volatile(in value: u8 as reg8, clobber a, clobber bc, clobber flags, clobber ports) {
+        "ld a, {value}"
+        "ld bc, 0BFFDh"
+        "out (c), a"
+    }
+}
+
+pub fn ay_set_tone(channel: u8, period: u16) {
+    let reg: u8 = channel << 1
+    ay_write(reg, cast<u8>(period))
+    ay_write(reg + 1, cast<u8>((period >> 8) & 0x0F))
+}
+
+pub fn ay_set_volume(channel: u8, volume: u8) {
+    ay_write(AY_VOLUME_A + channel, volume & 0x1F)
+}
