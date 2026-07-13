@@ -764,6 +764,7 @@ fn emit_source_assembly(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, ezra::diagnostic::Diagnostic> {
+    ezra::tbir::diagnostics::validate_program(program, options.cpu)?;
     if options.cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(program, options)
     } else if options.cpu == CpuFamily::Mos6502 {

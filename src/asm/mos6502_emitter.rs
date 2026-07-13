@@ -131,11 +131,43 @@ impl Emitter {
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
         let return_label = self.next_label(&format!("{}_return", function.name));
+        let naked = function.attrs.iter().any(|attr| attr == "naked");
+        let interrupt = function.attrs.iter().any(|attr| attr == "interrupt");
+        if interrupt && (!function.params.is_empty() || function.return_type.is_some()) {
+            return Err(Diagnostic::new(format!(
+                "interrupt function `{}` cannot have parameters or a return value",
+                function.name
+            )));
+        }
+        if naked
+            && function.body.iter().any(|stmt| {
+                !matches!(
+                    stmt,
+                    Stmt::Asm {
+                        inputs,
+                        outputs,
+                        ..
+                    } if inputs.is_empty() && outputs.is_empty()
+                )
+            })
+        {
+            return Err(Diagnostic::new(format!(
+                "naked function `{}` may contain only asm blocks without operands",
+                function.name
+            )));
+        }
         self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
         self.return_types.push(function.return_type.clone());
 
+        if interrupt && !naked {
+            self.line("    pha");
+            self.line("    txa");
+            self.line("    pha");
+            self.line("    tya");
+            self.line("    pha");
+        }
         let signature = self
             .model
             .functions
@@ -153,7 +185,18 @@ impl Emitter {
         }
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
-        self.line("    rts");
+        if interrupt {
+            if !naked {
+                self.line("    pla");
+                self.line("    tay");
+                self.line("    pla");
+                self.line("    tax");
+                self.line("    pla");
+            }
+            self.line("    rti");
+        } else if !naked {
+            self.line("    rts");
+        }
 
         self.return_types.pop();
         self.return_labels.pop();
@@ -177,7 +220,18 @@ impl Emitter {
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
-                let width = self.model.type_width(&ty)?;
+                let Ok(width) = self.model.type_width(&ty) else {
+                    if *op != AssignOp::Set {
+                        return Err(Diagnostic::new(
+                            "compound assignment requires a scalar value",
+                        ));
+                    }
+                    let size = self.model.type_size(&ty)?;
+                    let temporary = self.model.allocate(size)?;
+                    self.emit_initializer(temporary, &ty, value)?;
+                    self.emit_store_aggregate_place(target, temporary, size)?;
+                    return Ok(());
+                };
                 if *op == AssignOp::Set {
                     self.emit_expr(value, &ty)?;
                 } else {
@@ -294,6 +348,10 @@ impl Emitter {
         value: &Expr,
     ) -> Result<(), Diagnostic> {
         match (self.model.resolved_type(ty)?, value) {
+            (Type::Array { .. }, Expr::Ident(name)) => {
+                let source = self.binding(name)?;
+                self.copy(source.storage, storage, storage.size);
+            }
             (Type::Array { element, len }, Expr::Array(values)) => {
                 let element_size = self.model.type_size(&element)?;
                 let len = u32::try_from(self.model.const_value(&len)?)
@@ -329,6 +387,15 @@ impl Emitter {
                         value,
                     )?;
                 }
+            }
+            (Type::Named(name), Expr::Ident(source)) if self.model.structs.contains_key(&name) => {
+                let source = self.binding(source)?;
+                self.copy(source.storage, storage, storage.size);
+            }
+            (resolved @ (Type::Array { .. } | Type::Named(_)), Expr::Deref(pointer)) => {
+                self.emit_expr(pointer, &Type::Ptr(Box::new(resolved)))?;
+                self.copy_result_to_zp();
+                self.copy_indirect_to_storage(storage, storage.size);
             }
             (resolved, _) => {
                 let width = self.model.type_width(&resolved)?;
@@ -414,6 +481,11 @@ impl Emitter {
                 self.emit_unary(*op, width);
             }
             Expr::Binary { left, op, right } => {
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    self.emit_short_circuit(left, *op, right)?;
+                    self.extend_result(1, width, false);
+                    return Ok(());
+                }
                 let operand_ty = if is_comparison(*op) || matches!(op, BinaryOp::And | BinaryOp::Or)
                 {
                     self.expr_type(left)
@@ -429,6 +501,11 @@ impl Emitter {
                 self.emit_expr(right, &operand_ty)?;
                 self.copy(self.r0, self.r1, u32::from(operand_width));
                 self.copy(left_storage, self.r0, u32::from(operand_width));
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                    && let Type::Ptr(inner) = self.model.resolved_type(&operand_ty)?
+                {
+                    self.scale_storage(self.r1, operand_width, self.model.type_size(&inner)?);
+                }
                 self.emit_binary_op(*op, operand_width, type_is_signed(&operand_ty))?;
                 if is_comparison(*op) || matches!(op, BinaryOp::And | BinaryOp::Or) {
                     self.extend_result(1, width, false);
@@ -455,19 +532,27 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         let name = path.join(".");
         match name.as_str() {
-            "mem.peek8" => {
+            "mem.peek8" | "ezra.mem.peek8" => {
                 self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
                 self.copy_result_to_zp();
                 self.load_indirect(1);
                 return Ok(());
             }
-            "mem.poke8" => {
+            "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
                 self.copy_result_to_zp();
                 self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
                 self.lda(self.r0.address);
                 self.line(&format!("    ldy #$00"));
                 self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
+                return Ok(());
+            }
+            "mem.memcpy" | "ezra.mem.memcpy" => {
+                self.emit_memcpy(args)?;
+                return Ok(());
+            }
+            "mem.memset" | "ezra.mem.memset" => {
+                self.emit_memset(args)?;
                 return Ok(());
             }
             _ => {}
@@ -498,7 +583,44 @@ impl Emitter {
                 self.model.type_size(ty)?,
             );
         }
+        let mut saved = self
+            .scopes
+            .last()
+            .map(|scope| {
+                scope
+                    .values()
+                    .map(|binding| binding.storage)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        saved.sort_by_key(|storage| storage.address);
+        saved.dedup();
+        for storage in &saved {
+            for offset in 0..storage.size {
+                self.lda(storage.address + offset);
+                self.line("    pha");
+            }
+        }
         self.line(&format!("    jsr {}", function_label(&name)));
+        let return_storage = signature
+            .return_type
+            .as_ref()
+            .map(|ty| self.model.type_size(ty))
+            .transpose()?
+            .map(|size| self.model.allocate(size))
+            .transpose()?;
+        if let Some(return_storage) = return_storage {
+            self.copy(self.r0, return_storage, return_storage.size);
+        }
+        for storage in saved.iter().rev() {
+            for offset in (0..storage.size).rev() {
+                self.line("    pla");
+                self.sta(storage.address + offset);
+            }
+        }
+        if let Some(return_storage) = return_storage {
+            self.copy(return_storage, self.r0, return_storage.size);
+        }
         if signature.return_type.is_none() {
             self.zero(self.r0);
         } else {
@@ -507,6 +629,68 @@ impl Emitter {
                 .type_width(signature.return_type.as_ref().unwrap())?;
             self.extend_result(return_width, self.model.type_width(expected)?, false);
         }
+        Ok(())
+    }
+
+    fn emit_memcpy(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        if args.len() != 3 {
+            return Err(Diagnostic::new("mem.memcpy requires three arguments"));
+        }
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        let destination = self.model.allocate(2)?;
+        self.copy(self.r0, destination, 2);
+        self.emit_expr(&args[1], &pointer)?;
+        let source = self.model.allocate(2)?;
+        self.copy(self.r0, source, 2);
+        self.emit_expr(&args[2], &Type::Named("u16".to_owned()))?;
+        let length = self.model.allocate(2)?;
+        self.copy(self.r0, length, 2);
+        let loop_label = self.next_label("memcpy_loop");
+        let done = self.next_label("memcpy_done");
+        self.set_zp_from_storage(POINTER_ZP, source);
+        self.set_zp_from_storage(POINTER_ZP + 2, destination);
+        self.line(&format!("{loop_label}:"));
+        self.jump_storage_zero(length, 2, &done);
+        self.line("    ldy #$00");
+        self.line(&format!("    lda (${:02X}),y", POINTER_ZP));
+        self.line(&format!("    sta (${:02X}),y", POINTER_ZP + 2));
+        self.increment_zp(POINTER_ZP);
+        self.increment_zp(POINTER_ZP + 2);
+        self.decrement(length, 2);
+        self.line(&format!("    jmp {loop_label}"));
+        self.line(&format!("{done}:"));
+        self.zero(self.r0);
+        Ok(())
+    }
+
+    fn emit_memset(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        if args.len() != 3 {
+            return Err(Diagnostic::new("mem.memset requires three arguments"));
+        }
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        let destination = self.model.allocate(2)?;
+        self.copy(self.r0, destination, 2);
+        self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
+        let value = self.model.allocate(1)?;
+        self.copy(self.r0, value, 1);
+        self.emit_expr(&args[2], &Type::Named("u16".to_owned()))?;
+        let length = self.model.allocate(2)?;
+        self.copy(self.r0, length, 2);
+        let loop_label = self.next_label("memset_loop");
+        let done = self.next_label("memset_done");
+        self.set_zp_from_storage(POINTER_ZP, destination);
+        self.line(&format!("{loop_label}:"));
+        self.jump_storage_zero(length, 2, &done);
+        self.lda(value.address);
+        self.line("    ldy #$00");
+        self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
+        self.increment_zp(POINTER_ZP);
+        self.decrement(length, 2);
+        self.line(&format!("    jmp {loop_label}"));
+        self.line(&format!("{done}:"));
+        self.zero(self.r0);
         Ok(())
     }
 
@@ -527,9 +711,9 @@ impl Emitter {
                     self.sta(self.r0.address + offset);
                 }
             }
-            BinaryOp::Mul => self.multiply(width),
-            BinaryOp::Div | BinaryOp::Mod => self.divide(width, op == BinaryOp::Mod),
-            BinaryOp::Shl | BinaryOp::Shr => self.shift(width, op == BinaryOp::Shr),
+            BinaryOp::Mul => self.multiply(width, signed),
+            BinaryOp::Div | BinaryOp::Mod => self.divide(width, op == BinaryOp::Mod, signed),
+            BinaryOp::Shl | BinaryOp::Shr => self.shift(width, op == BinaryOp::Shr, signed),
             BinaryOp::And | BinaryOp::Or => self.logical(op),
             op if is_comparison(op) => self.compare(op, width, signed),
             _ => return Err(Diagnostic::new("unsupported 6502 binary operation")),
@@ -593,29 +777,56 @@ impl Emitter {
         }
     }
 
-    fn multiply(&mut self, width: u8) {
+    fn multiply(&mut self, width: u8, signed: bool) {
         let loop_label = self.next_label("mul_loop");
         let done = self.next_label("mul_done");
-        self.zero(self.r2);
+        let multiplicand = self
+            .model
+            .allocate(u32::from(width))
+            .expect("multiply scratch");
+        let multiplier = self
+            .model
+            .allocate(u32::from(width))
+            .expect("multiply scratch");
+        let negative = self.model.allocate(1).expect("multiply sign");
+        self.zero(negative);
+        if signed {
+            self.normalize_signed_operand(self.r0, width, negative, false);
+            self.normalize_signed_operand(self.r1, width, negative, true);
+        }
+        self.copy(self.r0, multiplicand, u32::from(width));
+        self.copy(self.r1, multiplier, u32::from(width));
+        self.zero(self.r0);
         self.line(&format!("{loop_label}:"));
-        self.jump_storage_zero(self.r1, width, &done);
-        self.copy(self.r2, self.r1, u32::from(width));
-        self.copy(self.r0, self.r2, u32::from(width));
+        self.jump_storage_zero(multiplier, width, &done);
+        self.copy(multiplicand, self.r1, u32::from(width));
         self.add(width);
-        self.copy(self.r0, self.r2, u32::from(width));
-        self.copy(self.r1, self.r0, u32::from(width));
-        self.decrement(self.r0, width);
-        self.copy(self.r0, self.r1, u32::from(width));
-        self.copy(self.r2, self.r0, u32::from(width));
+        self.decrement(multiplier, width);
         self.line(&format!("    jmp {loop_label}"));
         self.line(&format!("{done}:"));
-        self.copy(self.r2, self.r0, u32::from(width));
+        if signed {
+            self.negate_if_flag(self.r0, width, negative);
+        }
     }
 
-    fn divide(&mut self, width: u8, remainder: bool) {
+    fn divide(&mut self, width: u8, remainder: bool, signed: bool) {
         let loop_label = self.next_label("div_loop");
         let done = self.next_label("div_done");
         let zero = self.next_label("div_zero");
+        let quotient_negative = self.model.allocate(1).expect("division sign");
+        let remainder_negative = self.model.allocate(1).expect("division sign");
+        self.zero(quotient_negative);
+        self.zero(remainder_negative);
+        if signed {
+            self.lda(self.r0.address + u32::from(width - 1));
+            let dividend_positive = self.next_label("dividend_positive");
+            self.branch_long("bpl", &dividend_positive);
+            self.toggle(quotient_negative);
+            self.toggle(remainder_negative);
+            self.negate_storage(self.r0, width);
+            self.line(&format!("{dividend_positive}:"));
+            self.normalize_signed_operand(self.r1, width, quotient_negative, true);
+        }
         self.zero(self.r2);
         self.jump_storage_zero(self.r1, width, &zero);
         self.line(&format!("{loop_label}:"));
@@ -630,15 +841,31 @@ impl Emitter {
         if !remainder {
             self.copy(self.r2, self.r0, u32::from(width));
         }
+        if signed {
+            self.negate_if_flag(
+                self.r0,
+                width,
+                if remainder {
+                    remainder_negative
+                } else {
+                    quotient_negative
+                },
+            );
+        }
     }
 
-    fn shift(&mut self, width: u8, right: bool) {
+    fn shift(&mut self, width: u8, right: bool, signed: bool) {
         let loop_label = self.next_label("shift_loop");
         let done = self.next_label("shift_done");
         self.line(&format!("{loop_label}:"));
         self.jump_if_zero(self.r1.address, &done);
         if right {
-            self.line("    clc");
+            if signed {
+                self.lda(self.r0.address + u32::from(width - 1));
+                self.line("    asl a");
+            } else {
+                self.line("    clc");
+            }
             for offset in (0..u32::from(width)).rev() {
                 self.line(&format!("    ror ${:04X}", self.r0.address + offset));
             }
@@ -678,10 +905,42 @@ impl Emitter {
         self.line(&format!("{done}:"));
     }
 
-    fn compare(&mut self, op: BinaryOp, width: u8, _signed: bool) {
+    fn emit_short_circuit(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let decisive = self.next_label("logical_decisive");
+        let done = self.next_label("logical_done");
+        let bool_type = Type::Named("bool".to_owned());
+        self.emit_expr(left, &bool_type)?;
+        match op {
+            BinaryOp::And => self.jump_if_zero(self.r0.address, &decisive),
+            BinaryOp::Or => self.jump_if_nonzero(self.r0.address, &decisive),
+            _ => unreachable!(),
+        }
+        self.emit_expr(right, &bool_type)?;
+        self.line(&format!("    jmp {done}"));
+        self.line(&format!("{decisive}:"));
+        self.load_constant(i64::from(op == BinaryOp::Or), 1);
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn compare(&mut self, op: BinaryOp, width: u8, signed: bool) {
         let true_label = self.next_label("compare_true");
         let false_label = self.next_label("compare_false");
         let done = self.next_label("compare_done");
+        if signed && !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            let top = u32::from(width - 1);
+            self.lda(self.r0.address + top);
+            self.line("    eor #$80");
+            self.sta(self.r0.address + top);
+            self.lda(self.r1.address + top);
+            self.line("    eor #$80");
+            self.sta(self.r1.address + top);
+        }
         match op {
             BinaryOp::Eq | BinaryOp::Ne => {
                 for offset in 0..u32::from(width) {
@@ -765,6 +1024,39 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn emit_store_aggregate_place(
+        &mut self,
+        place: &Place,
+        source: Storage,
+        size: u32,
+    ) -> Result<(), Diagnostic> {
+        match self.place_address(place)? {
+            Address::Direct(address) => self.copy(source, Storage { address, size }, size),
+            Address::Indirect => {
+                for offset in 0..size {
+                    self.lda(source.address + offset);
+                    self.line("    ldy #$00");
+                    self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
+                    if offset + 1 < size {
+                        self.increment_zp(POINTER_ZP);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_indirect_to_storage(&mut self, storage: Storage, size: u32) {
+        for offset in 0..size {
+            self.line("    ldy #$00");
+            self.line(&format!("    lda (${:02X}),y", POINTER_ZP));
+            self.sta(storage.address + offset);
+            if offset + 1 < size {
+                self.increment_zp(POINTER_ZP);
+            }
+        }
     }
 
     fn place_address(&mut self, place: &Place) -> Result<Address, Diagnostic> {
@@ -1078,6 +1370,94 @@ impl Emitter {
         }
     }
 
+    fn scale_storage(&mut self, storage: Storage, width: u8, scale: u32) {
+        if scale <= 1 {
+            return;
+        }
+        let source = self
+            .model
+            .allocate(u32::from(width))
+            .expect("pointer scale source");
+        let result = self
+            .model
+            .allocate(u32::from(width))
+            .expect("pointer scale result");
+        self.copy(storage, source, u32::from(width));
+        self.zero(result);
+        for _ in 0..scale {
+            self.copy(result, self.r0, u32::from(width));
+            self.copy(source, self.r1, u32::from(width));
+            self.add(width);
+            self.copy(self.r0, result, u32::from(width));
+        }
+        self.copy(result, storage, u32::from(width));
+    }
+
+    fn normalize_signed_operand(
+        &mut self,
+        storage: Storage,
+        width: u8,
+        negative: Storage,
+        toggle_sign: bool,
+    ) {
+        let positive = self.next_label("signed_positive");
+        self.lda(storage.address + u32::from(width - 1));
+        self.branch_long("bpl", &positive);
+        if toggle_sign {
+            self.toggle(negative);
+        } else {
+            self.lda_imm(1);
+            self.sta(negative.address);
+        }
+        self.negate_storage(storage, width);
+        self.line(&format!("{positive}:"));
+    }
+
+    fn negate_if_flag(&mut self, storage: Storage, width: u8, flag: Storage) {
+        let done = self.next_label("sign_done");
+        self.jump_if_zero(flag.address, &done);
+        self.negate_storage(storage, width);
+        self.line(&format!("{done}:"));
+    }
+
+    fn negate_storage(&mut self, storage: Storage, width: u8) {
+        for offset in 0..u32::from(width) {
+            self.lda(storage.address + offset);
+            self.line("    eor #$FF");
+            self.sta(storage.address + offset);
+        }
+        self.line("    clc");
+        for offset in 0..u32::from(width) {
+            self.lda(storage.address + offset);
+            self.line(&format!(
+                "    adc #${:02X}",
+                if offset == 0 { 1 } else { 0 }
+            ));
+            self.sta(storage.address + offset);
+        }
+    }
+
+    fn toggle(&mut self, storage: Storage) {
+        self.lda(storage.address);
+        self.line("    eor #$01");
+        self.sta(storage.address);
+    }
+
+    fn set_zp_from_storage(&mut self, zero_page: u32, storage: Storage) {
+        self.lda(storage.address);
+        self.sta(zero_page);
+        self.lda(storage.address + 1);
+        self.sta(zero_page + 1);
+    }
+
+    fn increment_zp(&mut self, zero_page: u32) {
+        let done = self.next_label("pointer_incremented");
+        self.line(&format!("    inc ${zero_page:02X}"));
+        self.branch_long("bne", &done);
+        self.line(&format!("    inc ${:02X}", zero_page + 1));
+        self.line(&format!("{done}:"));
+    }
+
     fn set_pointer(&mut self, address: u32) {
         self.lda_imm(address as u8);
         self.sta(POINTER_ZP);
@@ -1131,15 +1511,15 @@ impl Emitter {
     }
 
     fn decrement(&mut self, storage: Storage, width: u8) {
-        let done = self.next_label("decrement_done");
+        self.line("    sec");
         for offset in 0..u32::from(width) {
             self.lda(storage.address + offset);
-            self.branch_long("bne", &done);
-            self.lda_imm(0xFF);
+            self.line(&format!(
+                "    sbc #${:02X}",
+                if offset == 0 { 1 } else { 0 }
+            ));
             self.sta(storage.address + offset);
         }
-        self.line(&format!("{done}:"));
-        self.line(&format!("    dec ${:04X}", storage.address));
     }
 
     fn jump_storage_zero(&mut self, storage: Storage, width: u8, label: &str) {
@@ -1367,11 +1747,22 @@ mod tests {
                     return value % 3
                 }
 
+                fn factorial(n: u8) -> u8 {
+                    if n <= 1 { return 1 }
+                    return n * factorial(n - 1)
+                }
+
+                interrupt fn irq() { asm volatile { "nop" } }
+                naked fn raw() { asm volatile { "nop" "rts" } }
+
                 fn main() {
                     let local: [u8; 3] = [1, 2, 3]
+                    let local_copy: [u8; 3] = local
                     let point: Point = Point { x: local[1], y: calculate(4, 8) }
+                    let point_copy: Point = point
                     let pointer: ptr<u8> = &point.x
                     *pointer = point.x + 1
+                    *(pointer + 1) = factorial(4)
                     total = cast<u24>(point.y)
                     total <<= 1
                     total ^= 0x0000FF
@@ -1381,6 +1772,8 @@ mod tests {
                     let i: u8 = 0
                     while i < COUNT { i += 1 }
                     loop { break }
+                    mem.memset(&local[0], 0, 3)
+                    mem.memcpy(&local[0], &local_copy[0], 3)
                     asm volatile(clobber a, clobber flags) { "nop" }
                 }
             "#,

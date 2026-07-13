@@ -233,6 +233,29 @@ impl SemanticModel {
                 self.aliases.insert(alias.name.clone(), alias.ty.clone());
             }
         }
+        let mut pending = program
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Const(declaration) => Some(declaration),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        while !pending.is_empty() {
+            let before = pending.len();
+            pending.retain(|declaration| {
+                let Ok(value) = self.const_value(&declaration.value) else {
+                    return true;
+                };
+                self.constants.insert(declaration.name.clone(), value);
+                self.constant_types
+                    .insert(declaration.name.clone(), declaration.ty.clone());
+                false
+            });
+            if pending.len() == before {
+                break;
+            }
+        }
         for declaration in &program.declarations {
             if let Declaration::Struct(declaration) = declaration {
                 let mut offset = 0;
@@ -271,6 +294,9 @@ impl SemanticModel {
         }
         for declaration in &program.declarations {
             if let Declaration::Const(declaration) = declaration {
+                if self.constants.contains_key(&declaration.name) {
+                    continue;
+                }
                 let value = self.const_value(&declaration.value)?;
                 self.constants.insert(declaration.name.clone(), value);
                 self.constant_types
