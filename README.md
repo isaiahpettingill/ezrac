@@ -102,6 +102,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
 - `docs/real-core-tests.md` explains how to run the opt-in `play96` example suites against real libretro cores.
+- `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `REMAINING_WORK.md` tracks known gaps and follow-up work.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.

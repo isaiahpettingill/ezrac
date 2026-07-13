@@ -40,6 +40,8 @@ else {
 }
 
 $coreDirectory = Join-Path $repoRoot "target/play96-cores/$cachePlatform"
+$resultsDirectory = Join-Path $repoRoot "target/play96-results"
+$results = @()
 New-Item -ItemType Directory -Force -Path $coreDirectory | Out-Null
 
 function Get-LibretroCore {
@@ -135,41 +137,99 @@ function Get-Ez180NCore {
     return (Resolve-Path -LiteralPath $libraryPath).Path
 }
 
+function Write-TestResults {
+    New-Item -ItemType Directory -Force -Path $resultsDirectory | Out-Null
+    $generatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    $report = [ordered]@{
+        schemaVersion = 1
+        generatedAt = $generatedAt
+        host = $cachePlatform
+        requestedSuite = $Suite
+        play96Version = "0.3.2"
+        results = @($results)
+    }
+    $jsonPath = Join-Path $resultsDirectory "real-core-results.json"
+    $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+
+    $markdown = New-Object System.Collections.Generic.List[string]
+    $markdown.Add("# Real-core test results")
+    $markdown.Add("")
+    $markdown.Add("Generated at: $generatedAt")
+    $markdown.Add("")
+    $markdown.Add("Host: ``$cachePlatform``  ")
+    $markdown.Add("Selection: ``$Suite``  ")
+    $markdown.Add("Frontend: ``play96 0.3.2``")
+    $markdown.Add("")
+    $markdown.Add("| Suite | Test | Core | SHA-256 | Source | Status | Seconds |")
+    $markdown.Add("| --- | --- | --- | --- | --- | --- | ---: |")
+    foreach ($result in $results) {
+        $markdown.Add("| $($result.suite) | ``$($result.test)`` | ``$($result.core)`` | ``$($result.sha256)`` | $($result.source) | $($result.status) | $($result.durationSeconds) |")
+    }
+    $markdownPath = Join-Path $resultsDirectory "real-core-results.md"
+    $markdown | Set-Content -LiteralPath $markdownPath -Encoding UTF8
+    Write-Host "Wrote real-core result reports: $markdownPath and $jsonPath"
+}
+
 function Invoke-CoreTest {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Name
+        [string]$SuiteName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Core,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Source
     )
 
     Write-Host "Running $Name"
+    $started = [DateTimeOffset]::UtcNow
     Push-Location $repoRoot
     try {
         & cargo test --test libretro_examples $Name -- --ignored --exact --nocapture
-        if ($LASTEXITCODE -ne 0) {
-            throw "Real-core integration test failed: $Name"
-        }
+        $exitCode = $LASTEXITCODE
     }
     finally {
         Pop-Location
+    }
+    $duration = [Math]::Round(([DateTimeOffset]::UtcNow - $started).TotalSeconds, 2)
+    $status = if ($exitCode -eq 0) { "passed" } else { "failed" }
+    $script:results += [pscustomobject][ordered]@{
+        suite = $SuiteName
+        test = $Name
+        core = [System.IO.Path]::GetFileName($Core)
+        sha256 = Get-Sha256Hex -Path $Core
+        source = $Source
+        status = $status
+        durationSeconds = $duration
+    }
+    if ($exitCode -ne 0) {
+        Write-TestResults
+        throw "Real-core integration test failed: $Name"
     }
 }
 
 if ($Suite -eq "All" -or $Suite -eq "GameBoy") {
     $env:PLAY96_GAMEBOY_CORE = Get-LibretroCore -Name "mgba_libretro"
-    Invoke-CoreTest -Name "gameboy_examples_run_on_real_core"
+    Invoke-CoreTest -SuiteName "Game Boy" -Name "gameboy_examples_run_on_real_core" -Core $env:PLAY96_GAMEBOY_CORE -Source "RetroArch buildbot latest/mGBA"
 }
 
 if ($Suite -eq "All" -or $Suite -eq "ZxSpectrum") {
     $env:PLAY96_ZX_SPECTRUM_CORE = Get-LibretroCore -Name "fuse_libretro"
-    Invoke-CoreTest -Name "zx_spectrum_example_runs_on_real_core"
+    Invoke-CoreTest -SuiteName "ZX Spectrum" -Name "zx_spectrum_example_runs_on_real_core" -Core $env:PLAY96_ZX_SPECTRUM_CORE -Source "RetroArch buildbot latest/Fuse"
 }
 
 if ($Suite -eq "All" -or $Suite -eq "Cpm") {
     $env:PLAY96_CPM_CORE = Get-LibretroCore -Name "ep128emu_core_libretro"
-    Invoke-CoreTest -Name "cpm_examples_run_on_real_core"
+    Invoke-CoreTest -SuiteName "CP/M" -Name "cpm_examples_run_on_real_core" -Core $env:PLAY96_CPM_CORE -Source "RetroArch buildbot latest/ep128emu"
 }
 
 if ($Suite -eq "All" -or $Suite -eq "Ez180N") {
     $env:PLAY96_EZ180N_CORE = Get-Ez180NCore
-    Invoke-CoreTest -Name "ez180n_examples_run_on_real_core"
+    Invoke-CoreTest -SuiteName "ez180N" -Name "ez180n_examples_run_on_real_core" -Core $env:PLAY96_EZ180N_CORE -Source "Codeberg nightly release"
 }
+
+Write-TestResults

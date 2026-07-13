@@ -50,7 +50,9 @@ The CP/M suite creates a 720 KiB FAT12 disk for each generated `.com`, adds a `R
 
 Agon MOS and TI examples are not included yet because the repository does not currently emit content that a configured `play96`-compatible libretro core can boot directly for those systems.
 
-Each successful test writes its final framebuffer to `target/play96-captures`. These PNGs are useful for reviewing a core's rendering when an assertion changes.
+Each successful test writes its final framebuffer to `target/play96-captures`. These PNGs are useful for reviewing a core's rendering when an assertion changes. The runner also writes shareable Markdown and JSON reports to `target/play96-results` with suite status, runtime, core source, and SHA-256 identity.
+
+The latest reviewed four-suite run is published in [`docs/real-core-test-results.md`](real-core-test-results.md). Partial `-Suite` reports contain only the selected platform and should not replace that complete snapshot.
 
 ## Direct test commands
 

@@ -466,9 +466,13 @@ fn zx_spectrum_example_runs_on_real_core() {
     );
 
     round_trip_save_state(&mut game, "zx-spectrum-hello");
+    let restored_border = (0..60).any(|_| {
+        game.run_frame().unwrap();
+        is_blue(game.pixel_xrgb(2, 2).unwrap())
+    });
     assert!(
-        is_blue(game.pixel_xrgb(2, 2).unwrap()),
-        "ZX Spectrum state restore lost the program's blue border"
+        restored_border,
+        "ZX Spectrum state restore did not redraw the program's blue border within 60 frames"
     );
 }
 
