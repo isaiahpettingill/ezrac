@@ -267,7 +267,7 @@ Supported fields:
 ```text
 [build].input           default source path when running `ezrac build` without a file
 [build].target          target triple
-[build].output          output format: bin, com, hex, 8xp, 8ek, or 8xk
+[build].output          output format: bin, com, hex, tap, gb, prg, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
 [build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, or 6502
 [build].executable      artifact basename and TI variable/app name source
@@ -305,6 +305,9 @@ Supported output format names:
 bin                 raw binary bytes
 com                 CP/M .COM image
 hex, ihex, intel-hex Intel HEX text
+tap, zxtap          ZX Spectrum tape image
+gb, gameboy         Game Boy ROM image
+prg, c64            Commodore 64 program image
 8xp, ti8xp          TI protected program file
 8ek, ti8ek          TI CE app-style file
 8xk, ti8xk          classic TI app-style file
@@ -314,6 +317,9 @@ Target defaults:
 
 ```text
 CP/M targets                 com
+ZX Spectrum targets          tap
+Game Boy targets             gb
+Commodore 64 target          prg
 TI calculator targets        8xp
 all other targets            bin
 ```

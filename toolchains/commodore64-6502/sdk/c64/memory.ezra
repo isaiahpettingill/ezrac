@@ -1,0 +1,15 @@
+// CPU port $0001 controls BASIC, KERNAL, character ROM, and I/O visibility.
+pub const CPU_PORT: u16 = 0x0001
+pub const LORAM: u8 = 1
+pub const HIRAM: u8 = 2
+pub const CHAREN: u8 = 4
+pub const RAM_ALL: u8 = 0
+pub const ROMS_AND_IO: u8 = LORAM | HIRAM | CHAREN
+pub const CHAR_ROM: u8 = LORAM | HIRAM
+pub const KERNAL_ONLY: u8 = HIRAM | CHAREN
+pub fn bank(value: u8) { *(cast<ptr<u8>>(cast<u24>(CPU_PORT))) = value }
+pub fn current_bank() -> u8 { return *(cast<ptr<u8>>(cast<u24>(CPU_PORT))) }
+pub fn show_io() { bank(current_bank() | CHAREN) }
+pub fn hide_io_show_char_rom() { bank(current_bank() & ~CHAREN) }
+pub fn map_all_ram() { bank(RAM_ALL) }
+pub fn map_roms_and_io() { bank(ROMS_AND_IO) }

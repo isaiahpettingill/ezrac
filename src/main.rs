@@ -1114,6 +1114,7 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
         || bare_target_cpu(&settings.target.triple.value).is_some()
         || settings.target.triple.value.starts_with("zxspectrum-z80")
         || settings.target.triple.value.starts_with("gameboy-")
+        || settings.target.triple.value.starts_with("commodore64-6502")
         || matches!(
             settings.target.triple.cpu,
             CpuFamily::Chip8 | CpuFamily::SuperChip | CpuFamily::XoChip
@@ -1829,6 +1830,9 @@ fn build_executable_bytes(
     if settings.output_format == OutputFormat::GameBoyGb {
         return game_boy_rom_bytes(settings, output_path, code);
     }
+    if settings.output_format == OutputFormat::Commodore64Prg {
+        return commodore64_prg_bytes(settings, code);
+    }
     if matches!(
         settings.output_format,
         OutputFormat::Ti8ek | OutputFormat::Ti8xk
@@ -1844,6 +1848,21 @@ fn build_executable_bytes(
         return build_agon_mos_executable(settings.layout.entry.get(), code);
     }
     Ok(code.to_vec())
+}
+
+fn commodore64_prg_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
+    if !settings.target.triple.value.starts_with("commodore64-6502") {
+        return Err(format!(
+            "target `{}` does not support Commodore 64 .prg output",
+            settings.target.triple.value
+        ));
+    }
+    let load = u16::try_from(settings.layout.load.get())
+        .map_err(|_| "Commodore 64 load address exceeds 16 bits".to_owned())?;
+    let mut output = Vec::with_capacity(code.len() + 2);
+    output.extend_from_slice(&load.to_le_bytes());
+    output.extend_from_slice(code);
+    Ok(output)
 }
 
 fn game_boy_rom_bytes(
@@ -2577,7 +2596,7 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
     write_scaffold_file(
         &root.join(".gitignore"),
         options.force,
-        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.tap\n*.gb\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
+        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.tap\n*.gb\n*.prg\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
     )?;
     write_scaffold_file(
         &root.join("Ezra.toml"),

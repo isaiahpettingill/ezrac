@@ -247,6 +247,7 @@ pub enum OutputFormat {
     ZxSpectrumTap,
     GameBoyGb,
     ArduinoHex,
+    Commodore64Prg,
 }
 
 impl OutputFormat {
@@ -262,6 +263,7 @@ impl OutputFormat {
             Self::ZxSpectrumTap => "tap",
             Self::GameBoyGb => "gb",
             Self::ArduinoHex => "hex",
+            Self::Commodore64Prg => "prg",
         }
     }
 }
@@ -306,6 +308,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::GameBoyGb
     } else if triple.value.starts_with("arduboy-") {
         OutputFormat::ArduinoHex
+    } else if triple.value.starts_with("commodore64-6502") {
+        OutputFormat::Commodore64Prg
     } else {
         OutputFormat::RawBin
     }
@@ -370,8 +374,9 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "8xk" | "ti8xk" => Ok(OutputFormat::Ti8xk),
         "tap" | "zxtap" | "spectrum-tap" => Ok(OutputFormat::ZxSpectrumTap),
         "gb" | "gameboy" | "gameboy-gb" => Ok(OutputFormat::GameBoyGb),
+        "prg" | "c64" | "commodore64-prg" => Ok(OutputFormat::Commodore64Prg),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }

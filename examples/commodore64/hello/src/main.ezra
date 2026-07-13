@@ -1,0 +1,23 @@
+import c64.vic
+import c64.sid
+import c64.cia
+import c64.memory
+
+fn main() {
+    memory.map_roms_and_io()
+    vic.border(vic.BLUE)
+    vic.background(vic.LIGHT_BLUE)
+    vic.clear(32, vic.WHITE)
+    vic.put_char(16, 12, 8)
+    vic.put_char(17, 12, 5)
+    vic.put_char(18, 12, 12)
+    vic.put_char(19, 12, 12)
+    vic.put_char(20, 12, 15)
+    sid.volume(15)
+    sid.frequency(0, 0x1120)
+    sid.attack_decay(0, 2, 4)
+    sid.sustain_release(0, 10, 4)
+    sid.control(0, sid.TRIANGLE | sid.GATE)
+    let waiting: u8 = 0
+    while cia.joystick(2) == 0 { waiting = waiting }
+}

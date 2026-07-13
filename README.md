@@ -44,7 +44,7 @@ cargo run -- layout
 cargo run -- header
 ```
 
-`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, CP/M `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, and TI calculator formats; see `docs/usage.md`.
+`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, CP/M `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
 
 `init` creates a non-destructive starter project with `.gitignore`, `Ezra.toml`, `README.md`, `src/main.ezra`, `sdk/`, and `assets/`. `install-syntax` installs syntax files for selected editors; supported editor names are `vim`, `neovim`, `nano`, `micro`, `helix`, `vscode`, `zed`, and `notepad++`.
 

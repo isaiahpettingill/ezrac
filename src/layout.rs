@@ -101,6 +101,8 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::zx_spectrum_z80()
     } else if target.starts_with("gameboy-") {
         Layout::game_boy_lr35902()
+    } else if target.starts_with("commodore64-6502") {
+        Layout::commodore64_6502()
     } else if target.starts_with("arduboy-") {
         Layout::bare_16("arduboy_avr")
     } else if is_ti_ce_target(target) {
@@ -244,6 +246,71 @@ impl Layout {
                 symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
                 symbol("EZRA_RODATA_BASE", Address24::new(0x8000)),
                 symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
+            ],
+        }
+    }
+
+    pub fn commodore64_6502() -> Self {
+        Self {
+            name: "commodore64_6502".to_owned(),
+            load: Address24::new(0x080D),
+            entry: Address24::new(0x080D),
+            stack: Address24::new(0x01FF),
+            regions: vec![
+                region(
+                    "zero_page",
+                    0x0002,
+                    0x00FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "stack",
+                    0x0100,
+                    0x01FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region("basic", 0x0801, 0x080C, &[RegionFlags::RESERVED]),
+                region(
+                    "code",
+                    0x080D,
+                    0x3FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x4000, 0x7FFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xC000,
+                    0xCFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "io",
+                    0xD000,
+                    0xDFFF,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region("assets", 0x8000, 0xBFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0x0200,
+                    0x07FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+            ],
+            sections: bare_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x080D)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x080D)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x080D)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x01FF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xC000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x4000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x8000)),
             ],
         }
     }

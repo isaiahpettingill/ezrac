@@ -98,6 +98,17 @@ fn resolves_generic_bare_6502_target() {
     assert!(!profile.supports_port_io());
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn commodore64_target_defaults_to_prg_output() {
+    let profile = resolve_target_profile(Some("commodore64-6502")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Mos6502);
+    assert_eq!(profile.output_format, OutputFormat::Commodore64Prg);
+    assert_eq!(profile.output_format.extension(), "prg");
+    assert_eq!(profile.memory.address_width_bits, 16);
+}
+
 #[test]
 fn ti_calculator_targets_default_to_8xp_output() {
     for target in [
@@ -144,9 +155,12 @@ fn parses_output_formats() {
     assert_eq!(parse_output_format("8xk"), Ok(OutputFormat::Ti8xk));
     assert_eq!(parse_output_format("tap"), Ok(OutputFormat::ZxSpectrumTap));
     assert_eq!(parse_output_format("gb"), Ok(OutputFormat::GameBoyGb));
+    assert_eq!(parse_output_format("prg"), Ok(OutputFormat::Commodore64Prg));
     let error = parse_output_format("bad").unwrap_err();
     assert!(
-        error.contains("expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `8xp`, `8ek`, or `8xk`"),
+        error.contains(
+            "expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `8xp`, `8ek`, or `8xk`"
+        ),
         "{error}"
     );
 }

@@ -284,6 +284,20 @@ Coding guidance:
 
 Use ROM and screen wrappers where possible. Treat display memory as volatile and keep stack/system memory clear unless your loader and custom layout say otherwise.
 
+## Commodore 64
+
+Target:
+
+```text
+commodore64-6502
+```
+
+This MOS 6510 (6502-compatible) target has direct EZRA-to-6502 code generation and writes a `.prg` executable. The first two bytes are the little-endian `$080D` load address; code starts at `$080D`. The package does not include a BASIC stub, so launch it with `SYS 2061`, a monitor, or a compatible emulator/loader.
+
+Bundled modules are `c64.vic` (VIC-II graphics, screen/color RAM, raster, IRQ, sprites), `c64.sid` (three SID voices and filters), `c64.cia` (keyboard, joysticks, timers, IRQ), and `c64.memory` (6510 `$0001` ROM/I/O banking). Call `memory.map_roms_and_io()` before hardware MMIO after changing bank state. See `docs/targets/commodore64.md` for register API details and Play96 real-core validation.
+
+Default layout reserves zero page and stack, loads code at `$080D`, uses `$4000..$7FFF` for read-only data, `$8000..$BFFF` for assets, `$C000..$CFFF` for RAM, and reserves `$D000..$DFFF` for volatile I/O.
+
 ## Nintendo Game Boy
 
 Targets:
@@ -430,7 +444,7 @@ target = "ti84plusce-ez80"
 output = "8xp"
 ```
 
-Valid output formats are `bin`, `com`, `hex`, `tap`, `gb`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output is target-checked, as are TI app formats: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
+Valid output formats are `bin`, `com`, `hex`, `tap`, `gb`, `prg`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output and Commodore 64 `.prg` output are target-checked, as are TI app formats: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
 
 ## Adding A New Platform
 

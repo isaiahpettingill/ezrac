@@ -175,11 +175,7 @@ fn diagnostic_assembly_options(
     default_sdk_symbols: bool,
 ) -> AssemblyOptions {
     let target = target.unwrap_or(DEFAULT_TARGET_TRIPLE);
-    let layout = if cpu == CpuFamily::Mos6502 {
-        crate::layout::Layout::bare_6502()
-    } else {
-        default_layout_for_target(target)
-    };
+    let layout = default_layout_for_target(target);
     let symbol = |name: &str| {
         layout
             .symbols
@@ -1119,6 +1115,26 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             "ti.lcd" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/ti-z80/sdk/ti/lcd.ezra"),
                 "ti.lcd",
+            )),
+            _ => None,
+        }
+    } else if target.is_some_and(|target| target.starts_with("commodore64-6502")) {
+        match import {
+            "c64.vic" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/commodore64-6502/sdk/c64/vic.ezra"),
+                "c64.vic",
+            )),
+            "c64.sid" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/commodore64-6502/sdk/c64/sid.ezra"),
+                "c64.sid",
+            )),
+            "c64.cia" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/commodore64-6502/sdk/c64/cia.ezra"),
+                "c64.cia",
+            )),
+            "c64.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/commodore64-6502/sdk/c64/memory.ezra"),
+                "c64.memory",
             )),
             _ => None,
         }

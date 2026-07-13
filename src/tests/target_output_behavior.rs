@@ -187,6 +187,37 @@ fn game_boy_source_examples_build_as_roms() {
     }
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn commodore64_source_example_builds_as_prg() {
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/commodore64/hello/src/main.ezra");
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
+        path: Some(source.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        input_kind: Some(InputKind::Ezra),
+        assembler_cpu: None,
+        layout_path: None,
+        target: Some("commodore64-6502".to_owned()),
+    })
+    .unwrap();
+    assert_eq!(
+        outputs
+            .executable
+            .extension()
+            .and_then(|value| value.to_str()),
+        Some("prg")
+    );
+    let program = std::fs::read(outputs.executable).unwrap();
+    assert!(program.len() > 2);
+    assert_eq!(&program[..2], &0x080Du16.to_le_bytes());
+    assert_eq!(
+        program[2], 0xD8,
+        "C64 program should begin with CLD startup code"
+    );
+}
+
 #[test]
 fn bare_source_build_can_emit_com_and_intel_hex() {
     for (name, output, extension, prefix) in [

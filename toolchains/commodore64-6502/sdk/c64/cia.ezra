@@ -1,0 +1,31 @@
+// CIA 6526 keyboard, joystick, timer, and interrupt registers.
+pub const CIA1: u16 = 0xDC00
+pub const CIA2: u16 = 0xDD00
+pub const PORT_A: u16 = 0x00
+pub const PORT_B: u16 = 0x01
+pub const DATA_DIRECTION_A: u16 = 0x02
+pub const DATA_DIRECTION_B: u16 = 0x03
+pub const TIMER_A_LO: u16 = 0x04
+pub const TIMER_A_HI: u16 = 0x05
+pub const TIMER_B_LO: u16 = 0x06
+pub const TIMER_B_HI: u16 = 0x07
+pub const INTERRUPT_CONTROL: u16 = 0x0D
+pub const CONTROL_A: u16 = 0x0E
+pub const CONTROL_B: u16 = 0x0F
+pub const JOY_UP: u8 = 1
+pub const JOY_DOWN: u8 = 2
+pub const JOY_LEFT: u8 = 4
+pub const JOY_RIGHT: u8 = 8
+pub const JOY_FIRE: u8 = 16
+pub const TIMER_START: u8 = 1
+pub const TIMER_ONE_SHOT: u8 = 8
+pub const IRQ_TIMER_A: u8 = 1
+pub const IRQ_TIMER_B: u8 = 2
+pub fn read(base: u16, register: u16) -> u8 { return *(cast<ptr<u8>>(cast<u24>(base + register))) }
+pub fn write(base: u16, register: u16, value: u8) { *(cast<ptr<u8>>(cast<u24>(base + register))) = value }
+pub fn joystick(port: u8) -> u8 { if port == 1 { return ~read(CIA1, PORT_A) & 31 } return ~read(CIA1, PORT_B) & 31 }
+pub fn keyboard_row(row: u8) -> u8 { write(CIA1, DATA_DIRECTION_A, 255); write(CIA1, PORT_A, ~row); return ~read(CIA1, PORT_B) }
+pub fn timer_a(base: u16, value: u16, control: u8) { write(base, TIMER_A_LO, cast<u8>(value)); write(base, TIMER_A_HI, cast<u8>(value >> 8)); write(base, CONTROL_A, control) }
+pub fn timer_b(base: u16, value: u16, control: u8) { write(base, TIMER_B_LO, cast<u8>(value)); write(base, TIMER_B_HI, cast<u8>(value >> 8)); write(base, CONTROL_B, control) }
+pub fn enable_irq(base: u16, sources: u8) { write(base, INTERRUPT_CONTROL, sources | 128) }
+pub fn acknowledge_irq(base: u16) -> u8 { return read(base, INTERRUPT_CONTROL) }
