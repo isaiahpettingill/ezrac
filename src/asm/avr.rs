@@ -98,7 +98,9 @@ fn encode(
             let word = match op {
                 "inc" => 0x9403 | (r << 4),
                 "dec" => 0x940A | (r << 4),
-                "clr" | "lsl" | "tst" => 0x2400 | (r << 4) | (r & 0x0F) | ((r & 0x10) << 5),
+                "clr" => 0x2400 | (r << 4) | (r & 0x0F) | ((r & 0x10) << 5),
+                "lsl" => 0x0C00 | (r << 4) | (r & 0x0F) | ((r & 0x10) << 5),
+                "tst" => 0x2000 | (r << 4) | (r & 0x0F) | ((r & 0x10) << 5),
                 _ => unreachable!(),
             };
             Ok(word_bytes(word))

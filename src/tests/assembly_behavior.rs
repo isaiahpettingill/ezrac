@@ -573,4 +573,147 @@ fn arduboy_avr_assembly_smoke_test_writes_hex() {
     let hex = std::fs::read_to_string(output).unwrap();
     assert!(hex.starts_with(":"));
     assert!(hex.contains(":00000001FF"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn avr_aliases_encode_their_underlying_instructions() {
+    let cases = [
+        ("clr r16", vec![0x00, 0x27]),
+        ("lsl r16", vec![0x00, 0x0F]),
+        ("tst r16", vec![0x00, 0x23]),
+    ];
+
+    for (instruction, expected) in cases {
+        let bytes =
+            ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::Avr, instruction, 0).unwrap();
+        assert_eq!(bytes.bytes, expected, "{instruction}");
+    }
+}
+
+#[test]
+fn chip8_family_assembly_targets_encode_dialect_opcodes() {
+    let root = temp_root("assemble_chip8_family");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let cases = [
+        (
+            "chip8-vm-chip8",
+            "start:\n    cls\n    ld v0, 12h\n    add v0, 1\n    jp start\n",
+            vec![0x00, 0xE0, 0x60, 0x12, 0x70, 0x01, 0x12, 0x00],
+        ),
+        (
+            "schip-vm-schip",
+            "start:\n    high\n    scroll-down 4\n    drw v0, v1, 0\n    exit\n",
+            vec![0x00, 0xFF, 0x00, 0xC4, 0xD0, 0x10, 0x00, 0xFD],
+        ),
+        (
+            "xochip-vm-xochip",
+            "start:\n    long i, sprite\n    plane v1\n    audio\nsprite:\n    db 0AAh\n",
+            vec![0xF0, 0x00, 0x02, 0x08, 0xF1, 0x01, 0xF0, 0x02, 0xAA],
+        ),
+    ];
+
+    for (target, source, expected) in cases {
+        let source_path = root.join(format!("{target}.asm"));
+        let output_path = root.join(format!("{target}.ch8"));
+        std::fs::write(&source_path, source).unwrap();
+        assemble_file(&AssembleOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            output: Some(output_path.to_string_lossy().into_owned()),
+            base_addr: None,
+            assembler_cpu: None,
+            layout_path: None,
+            map_path: None,
+            target: Some(target.to_owned()),
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(output_path).unwrap(), expected, "{target}");
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn chip8_rejects_xochip_long_i_instruction() {
+    let error =
+        ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::Chip8, "long i, 0x1234\n", 0x0200)
+            .unwrap_err();
+
+    assert!(error.message.contains("chip8 assembler"), "{error}");
+}
+
+#[test]
+fn assemble_file_writes_m6800_raw_binary() {
+    let root = temp_root("assemble_m6800_file");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.asm");
+    let output_path = root.join("main.bin");
+    std::fs::write(
+        &source_path,
+        r#"
+            VALUE equ 20h
+            start:
+                ldaa #42h
+                staa <VALUE
+                ldx #$1234
+            loop:
+                dex
+                bne loop
+                jmp >C000h
+        "#,
+    )
+    .unwrap();
+
+    assemble_file(&AssembleOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        output: Some(output_path.to_string_lossy().into_owned()),
+        base_addr: Some(0x8000),
+        assembler_cpu: Some(AssemblerCpu::M6800),
+        layout_path: None,
+        map_path: None,
+        target: Some("bare-m6800".to_owned()),
+    })
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        [
+            0x86, 0x42, 0x97, 0x20, 0xCE, 0x12, 0x34, 0x09, 0x26, 0xFD, 0x7E, 0xC0, 0x00
+        ]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn m6800_rejects_non_m6800_instruction() {
+    let error =
+        ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::M6800, "ld a, 7Fh\n", 0x1000)
+            .unwrap_err();
+
+    assert!(error.message.contains("M6800 instruction"), "{error}");
+}
+
+#[test]
+fn m6800_target_rejects_ezra_source_codegen() {
+    let root = temp_root("m6800_source_codegen");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    let error = build_source_with_build_options(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: false,
+        input_kind: Some(InputKind::Ezra),
+        assembler_cpu: None,
+        layout_path: None,
+        target: Some("bare-m6800".to_owned()),
+    })
+    .unwrap_err();
+
+    assert!(error.contains("CPU `m6800`"), "{error}");
+
+    let _ = std::fs::remove_dir_all(root);
 }
