@@ -203,6 +203,40 @@ fn tbir_accepts_16_bit_mmio_for_6502() {
     assert_eq!(tbir.target.pointer_width_bits, 16);
 }
 
+#[test]
+fn semantic_model_uses_target_pointer_width() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "global cursor: ptr<u8> = 0\nfn main() {}",
+    )
+    .unwrap();
+    let model = model::SemanticModel::from_program(&program, 16, 0xA000, 0x8000, 0xC000).unwrap();
+
+    assert_eq!(model.pointer_bytes(), 2);
+    assert_eq!(model.globals["cursor"].size, 2);
+}
+
+#[test]
+fn semantic_model_layouts_aggregates_and_function_slots() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+            const COUNT: u8 = 3
+            struct Pixel { x: u8 y: u16 }
+            global pixels: [Pixel; COUNT] = [Pixel { x: 0, y: 0 }]
+            fn draw(pixel: ptr<Pixel>, color: u8) {}
+            fn main() {}
+        "#,
+    )
+    .unwrap();
+    let model = model::SemanticModel::from_program(&program, 16, 0xA000, 0x8000, 0xC000).unwrap();
+
+    assert_eq!(model.structs["Pixel"].size, 3);
+    assert_eq!(model.globals["pixels"].size, 9);
+    assert_eq!(model.functions["draw"].argument_slots.len(), 2);
+    assert_eq!(model.functions["draw"].argument_slots[0].size, 2);
+}
+
 fn object_kind(tbir: &TbirProgram, name: &str) -> Option<TbirObjectKind> {
     tbir.declarations.iter().find_map(|decl| match decl {
         TbirDeclaration::Object {

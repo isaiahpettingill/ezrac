@@ -8,6 +8,7 @@ use crate::{
 pub mod diagnostics;
 pub mod dump;
 pub mod ez80;
+pub mod model;
 pub mod optimize;
 
 #[derive(Clone, Debug, PartialEq)]
