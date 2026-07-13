@@ -72,6 +72,101 @@ fn build_example_with_args(source: &str, artifact: &str, arguments: &[&str]) -> 
     artifact
 }
 
+fn assert_valid_game_boy_rom(path: &Path, color: bool) {
+    const ROM_SIZE: usize = 0x8000;
+    const ENTRY_POINT: [u8; 4] = [0xC3, 0x50, 0x01, 0x00];
+    const NINTENDO_LOGO: [u8; 48] = [
+        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00,
+        0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD,
+        0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB,
+        0xB9, 0x33, 0x3E,
+    ];
+
+    let rom = fs::read(path).unwrap_or_else(|error| {
+        panic!("failed to read Game Boy ROM `{}`: {error}", path.display())
+    });
+    assert_eq!(
+        rom.len(),
+        ROM_SIZE,
+        "`{}` is not a 32 KiB ROM-only image",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x0100..0x0104],
+        ENTRY_POINT,
+        "`{}` has an invalid entry point",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x0104..0x0134],
+        NINTENDO_LOGO,
+        "`{}` has an invalid Nintendo logo",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x0143],
+        if color { 0xC0 } else { 0x00 },
+        "`{}` has the wrong CGB flag",
+        path.display()
+    );
+    assert_eq!(
+        &rom[0x0144..0x0146],
+        b"00",
+        "`{}` has an invalid licensee code",
+        path.display()
+    );
+    assert_eq!(
+        &rom[0x0146..0x014A],
+        &[0x00, 0x00, 0x00, 0x00],
+        "`{}` is not a ROM-only cartridge",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x014A],
+        0x01,
+        "`{}` has the wrong destination code",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x014B],
+        0x33,
+        "`{}` has the wrong licensee selector",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x014C],
+        0x00,
+        "`{}` has the wrong ROM version",
+        path.display()
+    );
+    assert!(
+        rom[0x0150..].iter().any(|byte| *byte != 0xFF),
+        "`{}` has no compiled code",
+        path.display()
+    );
+
+    let header_checksum = rom[0x0134..=0x014C].iter().fold(0u8, |checksum, byte| {
+        checksum.wrapping_sub(*byte).wrapping_sub(1)
+    });
+    assert_eq!(
+        rom[0x014D],
+        header_checksum,
+        "`{}` has an invalid header checksum",
+        path.display()
+    );
+    let global_checksum = rom
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matches!(*index, 0x014E | 0x014F))
+        .fold(0u16, |sum, (_, byte)| sum.wrapping_add(u16::from(*byte)));
+    assert_eq!(
+        u16::from_be_bytes([rom[0x014E], rom[0x014F]]),
+        global_checksum,
+        "`{}` has an invalid global checksum",
+        path.display()
+    );
+}
+
 fn set_fat12_entry(fat: &mut [u8], cluster: u16, value: u16) {
     let offset = usize::from(cluster) + usize::from(cluster / 2);
     if cluster & 1 == 0 {
@@ -307,6 +402,26 @@ fn assert_deterministic_save_state(session: &mut Session, label: &str) {
     let _ = fs::remove_file(path);
 }
 
+fn assert_deterministic_video_save_state(session: &mut Session, label: &str) {
+    let directory = repository_root().join("target/play96-states");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!("{label}.state"));
+    session.save_state(&path).unwrap_or_else(|error| {
+        panic!("{label} core does not provide a usable save state: {error}")
+    });
+    session.run_frames(5).unwrap();
+    let expected_frame = session.frame_hash();
+
+    session.load_state(&path).unwrap();
+    session.run_frames(5).unwrap();
+    assert_eq!(
+        session.frame_hash(),
+        expected_frame,
+        "{label} video diverged after restoring a save state"
+    );
+    let _ = fs::remove_file(path);
+}
+
 fn round_trip_save_state(session: &mut Session, label: &str) {
     let directory = repository_root().join("target/play96-states");
     fs::create_dir_all(&directory).unwrap();
@@ -356,6 +471,16 @@ fn gameboy_examples_run_on_real_core() {
         "examples/gameboy/sprite/target/gameboy-dmg-lr35902/src/main.gb",
     );
 
+    for (rom, color) in [
+        (&background, false),
+        (&color_input, true),
+        (&input_audio, false),
+        (&serial_hello, false),
+        (&sprite, false),
+    ] {
+        assert_valid_game_boy_rom(rom, color);
+    }
+
     {
         let mut game = open_session(&core, &background, "Game Boy background example");
         game.run_frames(300).unwrap();
@@ -378,6 +503,7 @@ fn gameboy_examples_run_on_real_core() {
             game.framebuffer().iter().any(|pixel| *pixel != corner),
             "Game Boy sprite was not visible against its background"
         );
+        assert_deterministic_save_state(&mut game, "gameboy-sprite");
         capture(&game, "gameboy-sprite");
     }
 
@@ -419,6 +545,7 @@ fn gameboy_examples_run_on_real_core() {
             cool_pixel,
             "B input did not restore the warm Game Boy Color palette"
         );
+        assert_deterministic_video_save_state(&mut game, "gameboy-color-input");
         capture(&game, "gameboy-color-input");
     }
 
@@ -429,6 +556,7 @@ fn gameboy_examples_run_on_real_core() {
         let audible = heard_audio_during(&mut game, 30);
         game.clear_buttons();
         assert!(audible, "A input did not produce Game Boy audio samples");
+        assert_deterministic_video_save_state(&mut game, "gameboy-input-audio");
         capture(&game, "gameboy-input-audio");
     }
 
@@ -436,6 +564,7 @@ fn gameboy_examples_run_on_real_core() {
         let mut game = open_session(&core, &serial_hello, "Game Boy serial example");
         game.run_frames(300).unwrap();
         assert_framebuffer(&game, "Game Boy serial example");
+        assert_deterministic_video_save_state(&mut game, "gameboy-serial-hello");
         capture(&game, "gameboy-serial-hello");
     }
 }

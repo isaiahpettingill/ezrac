@@ -1,5 +1,7 @@
 /target
+# Zed extension build output and downloaded/generated grammar artifacts.
 /editors/zed/target
+/editors/zed/grammars/
 /examples/**/target
 /examples/**/*.map
 /examples/**/*.bin

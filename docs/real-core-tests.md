@@ -41,7 +41,7 @@ The downloader currently supports x86-64 Windows, Linux, and macOS. Other hosts 
 
 | Test | Examples | Core | Assertions |
 | --- | --- | --- | --- |
-| `gameboy_examples_run_on_real_core` | All five projects under `examples/gameboy` | mGBA | DMG/CGB video, sprite/background rendering, joypad-driven palette and scrolling changes, audio, and deterministic save states |
+| `gameboy_examples_run_on_real_core` | All five projects under `examples/gameboy` | mGBA | ROM-only header, CGB flag, Nintendo logo, and both checksums for every artifact; DMG/CGB video; sprite/background rendering; joypad-driven palette and scrolling changes; audio; and deterministic save states for every example |
 | `zx_spectrum_example_runs_on_real_core` | `examples/zxspectrum-z80/hello` | Fuse | `.tap` loading, keyboard-driven `RANDOMIZE USR` fallback, visible output, the program's blue border, and save-state round trips |
 | `cpm_examples_run_on_real_core` | All source and assembly programs under `examples/cpm-z80` | ep128emu | CP/M builds, IS-DOS boot and program launch, visible output, fixture file access, and deterministic save states |
 | `ez180n_examples_run_on_real_core` | All three projects under `examples/ez180n` | ez180N | Character video, joypad movement/jumping, and sound output |
