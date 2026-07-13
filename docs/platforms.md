@@ -326,13 +326,13 @@ cpm.fcb
 Checked-in runnable examples live under `examples/cpm-z80`. Build an assembly example with:
 
 ```sh
-cargo run -- assemble --target cpm-2.2-z80 examples/cpm-z80/hello-char.asm
+cargo run -- build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
 Build the source example with:
 
 ```sh
-cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/hello-source.ezra
+cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/console-output.ezra
 ```
 
 Coding guidance:

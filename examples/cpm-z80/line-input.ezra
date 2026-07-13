@@ -1,0 +1,14 @@
+import cpm.console
+
+global input_buffer: [u8; 34] = [32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+fn main() {
+    console.write('T')
+    console.write('y')
+    console.write('p')
+    console.write('e')
+    console.write(':')
+    console.write(' ')
+    console.read_line(&input_buffer[0])
+    console.exit()
+}

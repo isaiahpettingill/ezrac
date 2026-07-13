@@ -1,7 +1,6 @@
 /target
 /editors/zed/target
 /examples/**/target
-/examples/**/*.asm
 /examples/**/*.map
 /examples/**/*.bin
 /examples/**/*.gaem

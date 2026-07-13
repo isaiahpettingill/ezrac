@@ -930,6 +930,10 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Mos6502 {
         return crate::asm::mos6502::instruction_len(text);
     }
+    if let Some((opcode, _)) = z80_imm16_load(cpu, text) {
+        let prefix_len = usize::from(opcode == 0xDD || opcode == 0xFD);
+        return Ok(prefix_len + 3);
+    }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
             "test assembler does not support instruction `{text}`"
@@ -976,7 +980,15 @@ fn emit_instruction(
         )?);
         return Ok(());
     }
-    if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
+    if let Some((opcode, value)) = z80_imm16_load(cpu, text) {
+        if opcode == 0xDD || opcode == 0xFD {
+            bytes.push(opcode);
+            bytes.push(0x21);
+        } else {
+            bytes.push(opcode);
+        }
+        push16(bytes, parse_addr(value, labels, pc)?)?;
+    } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
     } else if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
@@ -1005,6 +1017,35 @@ fn emit_instruction(
         )));
     }
     Ok(())
+}
+
+fn z80_imm16_load(cpu: AssemblerCpu, text: &str) -> Option<(u8, &str)> {
+    if !matches!(
+        cpu,
+        AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180
+    ) {
+        return None;
+    }
+    let (destination, value) = text.strip_prefix("ld ")?.split_once(',')?;
+    let opcode = match destination.trim() {
+        "bc" => 0x01,
+        "de" => 0x11,
+        "hl" => 0x21,
+        "sp" => 0x31,
+        "ix" => 0xDD,
+        "iy" => 0xFD,
+        _ => return None,
+    };
+    let value = value.trim();
+    if value.starts_with('(')
+        || matches!(
+            value,
+            "a" | "b" | "c" | "d" | "e" | "h" | "l" | "bc" | "de" | "hl" | "sp" | "ix" | "iy"
+        )
+    {
+        return None;
+    }
+    Some((opcode, value))
 }
 
 fn chip8_dialect(cpu: AssemblerCpu) -> Option<chip8_asm::Chip8Dialect> {

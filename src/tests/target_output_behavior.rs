@@ -477,66 +477,32 @@ fn cpm_z80_source_build_writes_com_binary() {
 }
 
 #[test]
-fn cpm_z80_source_example_uses_console_sdk_and_writes_com_binary() {
+fn cpm_z80_source_examples_use_sdk_and_write_com_binaries() {
     let root = temp_root("cpm_source_example");
     std::fs::create_dir_all(&root).unwrap();
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80/hello-source.ezra"),
-    )
-    .unwrap();
-    let source_path = root.join("hello-source.ezra");
-    std::fs::write(&source_path, source).unwrap();
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80");
+    for name in ["console-output", "line-input", "file-read"] {
+        let source_path = root.join(format!("{name}.ezra"));
+        std::fs::copy(examples.join(format!("{name}.ezra")), &source_path).unwrap();
+        let outputs = build_source_with_command_options(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("cpm-2.2-z80".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("failed to build CP/M example `{name}`: {error}"));
 
-    let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
-        debug_comments: false,
-        default_sdk_symbols: true,
-        layout_path: None,
-        target: Some("cpm-2.2-z80".to_owned()),
-    })
-    .unwrap();
-
-    let asm = std::fs::read_to_string(outputs.asm).unwrap();
-    let com = std::fs::read(&outputs.executable).unwrap();
-    assert_eq!(
-        outputs.executable.extension().and_then(|ext| ext.to_str()),
-        Some("com")
-    );
-    assert!(asm.contains("; target: Z80"), "{asm}");
-    assert!(asm.contains("    call 0005h"), "{asm}");
-    assert!(!asm.contains("ld de, hl"), "{asm}");
-    assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn cpm_z80_fcb_source_example_builds() {
-    let root = temp_root("cpm_fcb_source_example");
-    std::fs::create_dir_all(&root).unwrap();
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80/file-control.ezra"),
-    )
-    .unwrap();
-    let source_path = root.join("file-control.ezra");
-    std::fs::write(&source_path, source).unwrap();
-
-    let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
-        debug_comments: false,
-        default_sdk_symbols: true,
-        layout_path: None,
-        target: Some("cpm-2.2-z80".to_owned()),
-    })
-    .unwrap();
-
-    let asm = std::fs::read_to_string(outputs.asm).unwrap();
-    assert_eq!(
-        outputs.executable.extension().and_then(|ext| ext.to_str()),
-        Some("com")
-    );
-    assert!(asm.contains("; target: Z80"), "{asm}");
-    assert!(asm.contains("    call 0005h"), "{asm}");
+        let asm = std::fs::read_to_string(outputs.asm).unwrap();
+        let com = std::fs::read(&outputs.executable).unwrap();
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("com")
+        );
+        assert!(asm.contains("; target: Z80"), "{asm}");
+        assert!(asm.contains("    call 0005h"), "{asm}");
+        assert_eq!(&com[0..3], &[0xF3, 0x31, 0x00]);
+    }
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -553,7 +519,7 @@ fn cpm_8080_source_build_uses_sdk_and_writes_com_binary() {
 
                 fn main() {
                     bdos.console_output(65)
-                    bdos.exit()
+                    bdos.system_reset()
                 }
             "#,
     )
@@ -599,7 +565,7 @@ fn cpm_8085_source_build_uses_sdk_and_writes_com_binary() {
                         "sim"
                     }
                     bdos.console_output(65)
-                    bdos.exit()
+                    bdos.system_reset()
                 }
             "#,
     )

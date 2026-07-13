@@ -97,10 +97,6 @@ pub fn call_hl(function: u8) -> u16 {
     return result
 }
 
-pub fn exit() {
-    call(SYSTEM_RESET)
-}
-
 pub fn console_input() -> u8 {
     return call_a(CONSOLE_INPUT)
 }
@@ -141,6 +137,10 @@ pub fn read_console_buffer(address: u16) {
     call_de(READ_CONSOLE_BUFFER, address)
 }
 
+pub fn read_console_buffer_at(buffer: ptr<u8>) {
+    read_console_buffer(cast<u16>(buffer))
+}
+
 pub fn console_status() -> u8 {
     return call_a(GET_CONSOLE_STATUS)
 }
@@ -161,8 +161,16 @@ pub fn open_file(fcb: u16) -> u8 {
     return call_de_a(OPEN_FILE, fcb)
 }
 
+pub fn open_file_at(fcb: ptr<u8>) -> u8 {
+    return open_file(cast<u16>(fcb))
+}
+
 pub fn close_file(fcb: u16) -> u8 {
     return call_de_a(CLOSE_FILE, fcb)
+}
+
+pub fn close_file_at(fcb: ptr<u8>) -> u8 {
+    return close_file(cast<u16>(fcb))
 }
 
 pub fn search_for_first(fcb: u16) -> u8 {
@@ -179,6 +187,10 @@ pub fn delete_file(fcb: u16) -> u8 {
 
 pub fn read_sequential(fcb: u16) -> u8 {
     return call_de_a(READ_SEQUENTIAL, fcb)
+}
+
+pub fn read_sequential_at(fcb: ptr<u8>) -> u8 {
+    return read_sequential(cast<u16>(fcb))
 }
 
 pub fn write_sequential(fcb: u16) -> u8 {
@@ -241,16 +253,16 @@ pub fn write_random(fcb: u16) -> u8 {
     return call_de_a(WRITE_RANDOM, fcb)
 }
 
-pub fn compute_file_size(fcb: u16) -> u8 {
-    return call_de_a(COMPUTE_FILE_SIZE, fcb)
+pub fn compute_file_size(fcb: u16) {
+    call_de(COMPUTE_FILE_SIZE, fcb)
 }
 
-pub fn set_random_record(fcb: u16) -> u8 {
-    return call_de_a(SET_RANDOM_RECORD, fcb)
+pub fn populate_random_record(fcb: u16) {
+    call_de(SET_RANDOM_RECORD, fcb)
 }
 
-pub fn reset_drive(mask: u16) {
-    call_de(RESET_DRIVE, mask)
+pub fn reset_drive(mask: u16) -> u8 {
+    return call_de_a(RESET_DRIVE, mask)
 }
 
 pub fn access_drive(mask: u16) {
@@ -266,7 +278,7 @@ pub fn write_random_with_zero_fill(fcb: u16) -> u8 {
 }
 
 pub fn system_reset() {
-    exit()
+    call(SYSTEM_RESET)
 }
 
 pub fn get_console_status() -> u8 {

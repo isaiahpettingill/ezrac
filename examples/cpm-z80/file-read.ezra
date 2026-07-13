@@ -1,8 +1,10 @@
+import cpm.bdos
 import cpm.console
 import cpm.dma
 import cpm.fcb
 
 global file_control_block: [u8; 36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+global dma_record: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 fn prepare_readme_fcb() {
     fcb.init(&file_control_block[0], fcb.DRIVE_DEFAULT)
@@ -19,10 +21,12 @@ fn prepare_readme_fcb() {
 
 fn main() {
     prepare_readme_fcb()
-    dma.reset_default()
-    console.write('F')
-    console.write('C')
-    console.write('B')
-    console.newline()
+    dma.set_buffer(&dma_record[0])
+    if bdos.open_file_at(&file_control_block[0]) == fcb.RESULT_OK {
+        if bdos.read_sequential_at(&file_control_block[0]) == fcb.RESULT_OK {
+            console.write(dma_record[0])
+        }
+        bdos.close_file_at(&file_control_block[0])
+    }
     console.exit()
 }

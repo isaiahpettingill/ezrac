@@ -355,7 +355,7 @@ fn test_command_runs_cpm_8080_and_8085_source_targets() {
 
                         fn main() {{
                             {extra_asm}
-                            bdos.exit()
+                            bdos.system_reset()
                         }}
                     "#
             ),
