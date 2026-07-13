@@ -350,7 +350,12 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
-        CpuFamily::M68k => None,
+        // The 68000 has 32-bit registers but the initial generic target uses
+        // its 24-bit external address bus and EZRA's existing u24 pointers.
+        CpuFamily::M68k => Some(TargetMemoryModel {
+            pointer_width_bits: 24,
+            address_width_bits: 24,
+        }),
     }
 }
 

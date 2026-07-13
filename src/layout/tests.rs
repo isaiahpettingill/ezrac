@@ -57,6 +57,20 @@ fn bare_6502_layout_reserves_zero_page_and_hardware_stack() {
 }
 
 #[test]
+fn bare_m68k_layout_uses_a_24_bit_stack_and_ram() {
+    let layout = Layout::bare_m68k();
+    layout.validate().unwrap();
+
+    assert_eq!(layout.load.get(), 0x000100);
+    assert_eq!(layout.entry.get(), 0x000100);
+    assert_eq!(layout.stack.get(), 0xFF0000);
+    assert_eq!(
+        layout_symbol_value(&layout, "EZRA_RAM_BASE"),
+        Some(0x080000)
+    );
+}
+
+#[test]
 fn ez80_test_harness_layouts_validate() {
     let flat = Layout::ez80_test_flat();
     let split = Layout::ez80_test_split();

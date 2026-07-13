@@ -93,20 +93,22 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
         .and_then(|target| parse_target_triple(target).ok())
         .map(|target| target.cpu)
         .unwrap_or(CpuFamily::Ez80);
-    for diagnostic in collect_ez80_semantic_diagnostics(
-        &resolved,
-        AssemblyOptions {
-            cpu,
-            debug_comments: options.debug_comments,
-            default_sdk_symbols: options.default_sdk_symbols,
-            ..AssemblyOptions::default()
-        },
-    ) {
-        if !diagnostics
-            .iter()
-            .any(|existing| diagnostic_is_covered_by(existing, &diagnostic))
-        {
-            diagnostics.push(diagnostic);
+    if cpu != CpuFamily::M68k {
+        for diagnostic in collect_ez80_semantic_diagnostics(
+            &resolved,
+            AssemblyOptions {
+                cpu,
+                debug_comments: options.debug_comments,
+                default_sdk_symbols: options.default_sdk_symbols,
+                ..AssemblyOptions::default()
+            },
+        ) {
+            if !diagnostics
+                .iter()
+                .any(|existing| diagnostic_is_covered_by(existing, &diagnostic))
+            {
+                diagnostics.push(diagnostic);
+            }
         }
     }
     if let Err(error) = check_source_with_sdk_and_overrides(source, options, sdk, source_overrides)
@@ -197,6 +199,15 @@ fn check_source_with_sdk_and_overrides(
     }
     let assembly = if cpu == CpuFamily::Mos6502 {
         emit_mos6502_assembly_with_options(&program, assembly_options)
+    } else if cpu == CpuFamily::M68k {
+        #[cfg(feature = "m68k")]
+        {
+            crate::asm::emit_m68k_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "m68k"))]
+        {
+            unreachable!("m68k targets require the m68k Cargo feature")
+        }
     } else {
         emit_ez80_assembly_with_options(&program, assembly_options)
     }

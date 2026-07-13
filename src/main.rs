@@ -27,6 +27,9 @@ use ezra::{
     vm::TestRunOptions,
 };
 
+#[cfg(feature = "m68k")]
+use ezra::asm::emit_m68k_assembly_with_options;
+
 #[cfg(feature = "lsp")]
 mod lsp_server;
 
@@ -769,6 +772,15 @@ fn emit_source_assembly(
         emit_lr35902_assembly_with_options(program, options)
     } else if options.cpu == CpuFamily::Mos6502 {
         emit_mos6502_assembly_with_options(program, options)
+    } else if options.cpu == CpuFamily::M68k {
+        #[cfg(feature = "m68k")]
+        {
+            emit_m68k_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "m68k"))]
+        {
+            unreachable!("m68k targets require the m68k Cargo feature")
+        }
     } else {
         emit_ez80_assembly_with_options(program, options)
     }
@@ -2515,6 +2527,7 @@ fn default_layout_for_target(target: &str) -> Layout {
         match cpu {
             AssemblerCpu::Ez80 => Layout::bare_ez80(),
             AssemblerCpu::Mos6502 => Layout::bare_6502(),
+            AssemblerCpu::M68k => Layout::bare_m68k(),
             _ => Layout::bare_16(cpu.as_str()),
         }
     } else if target.starts_with("zxspectrum-z80") {
@@ -2535,6 +2548,8 @@ fn default_layout_for_target(target: &str) -> Layout {
         Layout::ez80_test_flat()
     } else if target.starts_with("ezra-test-split-ez80") {
         Layout::ez80_test_split()
+    } else if target.split('-').any(|part| part == "m68k") {
+        Layout::bare_m68k()
     } else if target.split('-').any(|part| part == "cpm") {
         Layout::cpm_z80_com()
     } else if target.split('-').any(|part| part == "z80") {
@@ -3198,6 +3213,15 @@ fn print_targets() {
             output: "bin",
             sdk: "none",
             status: "bare eZ80 target",
+        },
+        #[cfg(feature = "m68k")]
+        TargetRow {
+            triple: "generic-m68k-bare",
+            cpu: "m68k",
+            address_width_bits: 24,
+            output: "bin",
+            sdk: "none",
+            status: "experimental scalar source target",
         },
     ];
 

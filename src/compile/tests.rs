@@ -702,6 +702,34 @@ fn cpm_z80_target_uses_builtin_console_sdk() {
     }));
 }
 
+#[cfg(feature = "m68k")]
+#[test]
+fn checks_scalar_source_for_generic_m68k_target() {
+    let source = r#"
+        global total: u16 = 1
+        fn increment(value: u16) -> u16 { return value + total }
+        fn main() {
+            let result: u16 = increment(2)
+            if result == 3 { total = result }
+        }
+    "#;
+    let report = check_source_with_sdk(
+        source,
+        &CompileOptions {
+            source: PathBuf::from("m68k.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: false,
+        },
+        &SdkResolver {
+            target: Some("generic-m68k-bare".to_owned()),
+            sdk_roots: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    assert!(report.has_main);
+}
+
 #[test]
 fn cpm_z80_target_uses_builtin_fcb_and_dma_sdks() {
     let source = r#"

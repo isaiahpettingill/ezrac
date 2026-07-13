@@ -12,7 +12,7 @@ The compiler identifies the CPU by scanning target components for one of:
 ez80 z80 z80n z180 i8080 8080 i8085 8085 m68k
 ```
 
-Only CPUs with an implemented memory model can be resolved. `m68k` triples parse, but they are rejected because no target profile is implemented yet.
+Only CPUs with an implemented memory model can be resolved. M68k support is enabled with Cargo's optional `m68k` feature.
 
 ## Support Levels
 
@@ -53,8 +53,27 @@ The current production-quality source path is eZ80-oriented. Z80-family and 8080
 | `bare-i8080` | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8085` | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-ez80` | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
+| `generic-m68k-bare` | Motorola 68000 | 24 | `.bin` | none | Experimental scalar source target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
+
+## Generic M68k
+
+Target:
+
+```text
+generic-m68k-bare
+```
+
+Build with the optional backend enabled:
+
+```sh
+cargo run --features m68k -- build --target generic-m68k-bare src/main.ezra
+```
+
+The initial target emits a raw big-endian 68000 image, uses a 24-bit address space, initializes `SP` from the target layout, calls `main`, then loops. EZRA scalar values and returns use `D0`; `D1` and `D2` are compiler scratch registers. Calls pass arguments through compiler-owned static slots, so recursive calls are not supported yet.
+
+The source backend lowers EZRA scalar and 24-bit pointer values, arrays, structs, strings, arithmetic, comparisons, shifts, XOR, control flow, calls, memory helpers, MMIO, and inline assembly. The generic M68k target rejects separate port I/O because the 68000 exposes memory-mapped hardware instead. No platform SDK or Sega Genesis packaging is included in this generic target.
 
 ## Agon Light MOS
 
