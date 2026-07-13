@@ -36,12 +36,17 @@ pub fn text(program: &TbirProgram) -> String {
         match declaration {
             TbirDeclaration::Function {
                 name,
+                params,
+                return_type,
+                body,
                 effects,
                 recursive,
                 tail_recursive,
                 loop_candidates,
+                ..
             } => out.push_str(&format!(
-                "fn {name} effects={effects:?} recursive={recursive} tail_recursive={tail_recursive} loops={loop_candidates}\n"
+                "fn {name} params={params:?} return={return_type:?} body={} effects={effects:?} recursive={recursive} tail_recursive={tail_recursive} loops={loop_candidates}\n",
+                body.len()
             )),
             TbirDeclaration::Object { name, kind } => {
                 out.push_str(&format!("object {name} kind={kind:?}\n"));

@@ -1,4 +1,9 @@
-use crate::{asm::AssemblyOptions, ast::Program, diagnostic::Diagnostic, hir::HirProgram};
+use crate::{
+    asm::AssemblyOptions,
+    ast::{AsmInput, AsmOutput, AssignOp, Expr, Place, Program, Type},
+    diagnostic::Diagnostic,
+    hir::HirProgram,
+};
 
 pub mod diagnostics;
 pub mod dump;
@@ -51,6 +56,11 @@ pub enum TbirAccess {
 pub enum TbirDeclaration {
     Function {
         name: String,
+        public: bool,
+        attrs: Vec<String>,
+        params: Vec<TbirParam>,
+        return_type: Option<Type>,
+        body: Vec<TbirStmt>,
         effects: Vec<TbirEffect>,
         recursive: bool,
         tail_recursive: bool,
@@ -60,6 +70,53 @@ pub enum TbirDeclaration {
         name: String,
         kind: TbirObjectKind,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TbirParam {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TbirStmt {
+    Let {
+        name: String,
+        ty: Type,
+        value: Expr,
+    },
+    Assign {
+        target: Place,
+        op: AssignOp,
+        value: Expr,
+    },
+    If {
+        condition: Expr,
+        then_body: Vec<TbirStmt>,
+        else_body: Vec<TbirStmt>,
+    },
+    While {
+        condition: Expr,
+        body: Vec<TbirStmt>,
+    },
+    Loop {
+        body: Vec<TbirStmt>,
+    },
+    Break,
+    Continue,
+    Return(Option<Expr>),
+    Asm {
+        volatile: bool,
+        inputs: Vec<AsmInput>,
+        outputs: Vec<AsmOutput>,
+        clobbers: Vec<String>,
+        lines: Vec<String>,
+    },
+    PortWrite {
+        port: String,
+        value: Expr,
+    },
+    Eval(Expr),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

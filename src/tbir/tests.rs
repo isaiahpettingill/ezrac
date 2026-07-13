@@ -80,6 +80,7 @@ fn tbir_preserves_function_analysis() {
                 recursive,
                 tail_recursive,
                 loop_candidates,
+                ..
             } if name == "count" => Some((effects, *recursive, *tail_recursive, *loop_candidates)),
             _ => None,
         })

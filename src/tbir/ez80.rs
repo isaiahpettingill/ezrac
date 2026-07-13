@@ -1,6 +1,6 @@
 use crate::{
     asm::AssemblyOptions,
-    ast::Program,
+    ast::{Declaration, Program, Stmt},
     diagnostic::Diagnostic,
     hir::{HirDeclaration, HirProgram},
     target::{Address24, CpuFamily, memory_model_for_cpu},
@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     TbirAccess, TbirDeclaration, TbirEffect, TbirMemoryModel, TbirMemoryRegion, TbirObjectKind,
-    TbirProgram, TbirTarget, diagnostics, optimize,
+    TbirParam, TbirProgram, TbirStmt, TbirTarget, diagnostics, optimize,
 };
 
 pub fn lower(
@@ -21,8 +21,12 @@ pub fn lower(
     let pointer_width_bits = memory_model_for_cpu(options.cpu)
         .map(|model| model.pointer_width_bits as u8)
         .unwrap_or(24);
-    let declarations = hir.declarations.iter().map(lower_declaration).collect();
     let (lowered_program, mut optimizations) = optimize::optimize_program(lowered_program);
+    let declarations = hir
+        .declarations
+        .iter()
+        .map(|declaration| lower_declaration(declaration, &lowered_program))
+        .collect();
     optimizations.tail_call_candidates = hir
         .declarations
         .iter()
@@ -205,15 +209,41 @@ fn region(
     }
 }
 
-fn lower_declaration(declaration: &HirDeclaration) -> TbirDeclaration {
+fn lower_declaration(declaration: &HirDeclaration, program: &Program) -> TbirDeclaration {
     match declaration {
-        HirDeclaration::Function(function) => TbirDeclaration::Function {
-            name: function.sig.name.clone(),
-            effects: vec![TbirEffect::Call],
-            recursive: function.analysis.recursive,
-            tail_recursive: function.analysis.tail_recursive,
-            loop_candidates: function.analysis.loop_candidates,
-        },
+        HirDeclaration::Function(function) => {
+            let source = program
+                .declarations
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Declaration::Function(source) if source.name == function.sig.name => {
+                        Some(source)
+                    }
+                    _ => None,
+                });
+            TbirDeclaration::Function {
+                name: function.sig.name.clone(),
+                public: function.sig.public,
+                attrs: function.attrs.clone(),
+                params: function
+                    .sig
+                    .params
+                    .iter()
+                    .map(|param| TbirParam {
+                        name: param.name.clone(),
+                        ty: param.ty.clone(),
+                    })
+                    .collect(),
+                return_type: function.sig.return_type.clone(),
+                body: source
+                    .map(|source| lower_stmts(&source.body))
+                    .unwrap_or_default(),
+                effects: function_effects(source.map_or(&function.body, |source| &source.body)),
+                recursive: function.analysis.recursive,
+                tail_recursive: function.analysis.tail_recursive,
+                loop_candidates: function.analysis.loop_candidates,
+            }
+        }
         HirDeclaration::Const(object) => object_decl(&object.name, TbirObjectKind::Const),
         HirDeclaration::Alias { name, .. } => object_decl(name, TbirObjectKind::Alias),
         HirDeclaration::Port(object) => object_decl(&object.name, TbirObjectKind::Port),
@@ -224,6 +254,158 @@ fn lower_declaration(declaration: &HirDeclaration) -> TbirDeclaration {
         HirDeclaration::ExternFunction(sig) => {
             object_decl(&sig.name, TbirObjectKind::ExternFunction)
         }
+    }
+}
+
+fn lower_stmts(stmts: &[Stmt]) -> Vec<TbirStmt> {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::Let { name, ty, value } => TbirStmt::Let {
+                name: name.clone(),
+                ty: ty.clone(),
+                value: value.clone(),
+            },
+            Stmt::Assign { target, op, value } => TbirStmt::Assign {
+                target: target.clone(),
+                op: *op,
+                value: value.clone(),
+            },
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => TbirStmt::If {
+                condition: condition.clone(),
+                then_body: lower_stmts(then_body),
+                else_body: lower_stmts(else_body),
+            },
+            Stmt::While { condition, body } => TbirStmt::While {
+                condition: condition.clone(),
+                body: lower_stmts(body),
+            },
+            Stmt::Loop { body } => TbirStmt::Loop {
+                body: lower_stmts(body),
+            },
+            Stmt::Break => TbirStmt::Break,
+            Stmt::Continue => TbirStmt::Continue,
+            Stmt::Return(value) => TbirStmt::Return(value.clone()),
+            Stmt::Asm {
+                volatile,
+                inputs,
+                outputs,
+                clobbers,
+                lines,
+            } => TbirStmt::Asm {
+                volatile: *volatile,
+                inputs: inputs.clone(),
+                outputs: outputs.clone(),
+                clobbers: clobbers.clone(),
+                lines: lines.clone(),
+            },
+            Stmt::Out { port, value } => TbirStmt::PortWrite {
+                port: port.clone(),
+                value: value.clone(),
+            },
+            Stmt::Expr(expr) => TbirStmt::Eval(expr.clone()),
+        })
+        .collect()
+}
+
+fn function_effects(stmts: &[Stmt]) -> Vec<TbirEffect> {
+    let mut effects = Vec::new();
+    collect_effects(stmts, &mut effects);
+    if effects.is_empty() {
+        effects.push(TbirEffect::Pure);
+    }
+    effects
+}
+
+fn collect_effects(stmts: &[Stmt], effects: &mut Vec<TbirEffect>) {
+    for stmt in stmts {
+        let effect = match stmt {
+            Stmt::Out { .. } => Some(TbirEffect::PortIo),
+            Stmt::Asm { .. } => Some(TbirEffect::InlineAsm),
+            Stmt::Expr(crate::ast::Expr::Call { .. }) => Some(TbirEffect::Call),
+            Stmt::Assign { target, .. } if matches!(target, crate::ast::Place::Deref(_)) => {
+                Some(TbirEffect::VolatileMemory)
+            }
+            _ => None,
+        };
+        if let Some(effect) = effect
+            && !effects.contains(&effect)
+        {
+            effects.push(effect);
+        }
+        match stmt {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::Return(Some(value))
+            | Stmt::Out { value, .. }
+            | Stmt::Expr(value) => collect_expr_effects(value, effects),
+            Stmt::If { condition, .. } | Stmt::While { condition, .. } => {
+                collect_expr_effects(condition, effects)
+            }
+            _ => {}
+        }
+        match stmt {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_effects(then_body, effects);
+                collect_effects(else_body, effects);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => collect_effects(body, effects),
+            _ => {}
+        }
+    }
+}
+
+fn collect_expr_effects(expr: &crate::ast::Expr, effects: &mut Vec<TbirEffect>) {
+    use crate::ast::{AccessSegment, Expr};
+    match expr {
+        Expr::Call { args, .. } => {
+            if !effects.contains(&TbirEffect::Call) {
+                effects.push(TbirEffect::Call);
+            }
+            for arg in args {
+                collect_expr_effects(arg, effects);
+            }
+        }
+        Expr::In(_) => {
+            if !effects.contains(&TbirEffect::PortIo) {
+                effects.push(TbirEffect::PortIo);
+            }
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_effects(value, effects);
+            }
+        }
+        Expr::Index { index, .. }
+        | Expr::AddressOfIndex { index, .. }
+        | Expr::Deref(index)
+        | Expr::Unary { expr: index, .. }
+        | Expr::Cast { expr: index, .. } => collect_expr_effects(index, effects),
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_expr_effects(index, effects);
+                }
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_effects(value, effects);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_effects(left, effects);
+            collect_expr_effects(right, effects);
+        }
+        _ => {}
     }
 }
 
