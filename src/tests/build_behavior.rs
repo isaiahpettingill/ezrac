@@ -223,6 +223,46 @@ fn bare_z80_source_build_starts_at_zero_without_header() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn generic_6502_source_build_writes_raw_binary() {
+    let root = temp_root("generic_6502_source_bin");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+            volatile mmio BORDER: ptr<u8> = 0xD020
+            global frame: u16 = 0
+            fn main() {
+                frame += 1
+                *(BORDER) = cast<u8>(frame)
+            }
+        "#,
+    )
+    .unwrap();
+
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        input_kind: Some(InputKind::Ezra),
+        assembler_cpu: None,
+        layout_path: None,
+        target: Some("generic-6502-bare".to_owned()),
+    })
+    .unwrap();
+    let assembly = std::fs::read_to_string(outputs.asm).unwrap();
+    let map = std::fs::read_to_string(outputs.map).unwrap();
+    let binary = std::fs::read(outputs.executable).unwrap();
+
+    assert!(assembly.contains("; target: MOS 6502"), "{assembly}");
+    assert!(map.contains(".text        0x000200"), "{map}");
+    assert_eq!(&binary[..4], &[0xD8, 0xA2, 0xFF, 0x9A]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn bare_z80n_source_build_accepts_z80n_inline_asm() {
     let root = temp_root("bare_z80n_source_inline_asm");

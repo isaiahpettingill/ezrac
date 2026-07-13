@@ -6,7 +6,10 @@ use std::{
 };
 
 use ezra::{
-    asm::{AssemblyOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options},
+    asm::{
+        AssemblyOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
+        emit_mos6502_assembly_with_options,
+    },
     ast::Program,
     cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
     compile::{SdkResolver, load_program_with_sdk},
@@ -763,6 +766,8 @@ fn emit_source_assembly(
 ) -> Result<String, ezra::diagnostic::Diagnostic> {
     if options.cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(program, options)
+    } else if options.cpu == CpuFamily::Mos6502 {
+        emit_mos6502_assembly_with_options(program, options)
     } else {
         emit_ez80_assembly_with_options(program, options)
     }
@@ -2497,7 +2502,9 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 }
 
 fn default_layout_for_target(target: &str) -> Layout {
-    if target.starts_with("chip8-") || target == "vm-chip8" {
+    if target == "generic-6502-bare" {
+        Layout::bare_6502()
+    } else if target.starts_with("chip8-") || target == "vm-chip8" {
         Layout::chip8("chip8")
     } else if target.starts_with("schip-") || target.starts_with("superchip-") {
         Layout::chip8("schip")
@@ -2506,6 +2513,7 @@ fn default_layout_for_target(target: &str) -> Layout {
     } else if let Some(cpu) = bare_target_cpu(target) {
         match cpu {
             AssemblerCpu::Ez80 => Layout::bare_ez80(),
+            AssemblerCpu::Mos6502 => Layout::bare_6502(),
             _ => Layout::bare_16(cpu.as_str()),
         }
     } else if target.starts_with("zxspectrum-z80") {
@@ -2872,11 +2880,13 @@ fn write_syntax_file(path: &Path, contents: &str) -> Result<(), String> {
 }
 
 fn bare_target_cpu(target: &str) -> Option<AssemblerCpu> {
-    let mut parts = target.split('-');
-    if parts.next()? != "bare" {
+    let parts = target.split('-').collect::<Vec<_>>();
+    if !parts.contains(&"bare") {
         return None;
     }
-    parts.find_map(|part| AssemblerCpu::parse(part).ok())
+    parts
+        .into_iter()
+        .find_map(|part| AssemblerCpu::parse(part).ok())
 }
 
 fn assembly_options_from_layout(

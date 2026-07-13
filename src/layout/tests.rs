@@ -41,6 +41,22 @@ fn z80_default_layout_validates_and_stays_in_16_bit_address_space() {
 }
 
 #[test]
+fn bare_6502_layout_reserves_zero_page_and_hardware_stack() {
+    let layout = Layout::bare_6502();
+    layout.validate().unwrap();
+
+    assert_eq!(layout.load.get(), 0x0200);
+    assert_eq!(layout.entry.get(), 0x0200);
+    assert_eq!(layout.stack.get(), 0x01FF);
+    assert!(
+        layout
+            .regions
+            .iter()
+            .any(|region| region.name == "zero_page")
+    );
+}
+
+#[test]
 fn ez80_test_harness_layouts_validate() {
     let flat = Layout::ez80_test_flat();
     let split = Layout::ez80_test_split();

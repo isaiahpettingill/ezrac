@@ -82,6 +82,59 @@ pub struct Layout {
 }
 
 impl Layout {
+    pub fn bare_6502() -> Self {
+        Self {
+            name: "bare_6502".to_owned(),
+            load: Address24::new(0x0200),
+            entry: Address24::new(0x0200),
+            stack: Address24::new(0x01FF),
+            regions: vec![
+                region(
+                    "zero_page",
+                    0x0000,
+                    0x00FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "stack",
+                    0x0100,
+                    0x01FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "code",
+                    0x0200,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x8000, 0x9FFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xA000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xC000, 0xDFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xE000,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+            ],
+            sections: bare_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0200)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0200)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0200)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x01FF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x8000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
+            ],
+        }
+    }
+
     pub fn chip8(dialect: &str) -> Self {
         let (end, stack) = if dialect == "xochip" {
             (0xFFFF, 0xFFFF)

@@ -6,14 +6,14 @@ use std::{
 
 use crate::{
     asm::ez80::emitter::collect_ez80_semantic_diagnostics,
-    asm::{AssemblyOptions, emit_ez80_assembly_with_options},
+    asm::{AssemblyOptions, emit_ez80_assembly_with_options, emit_mos6502_assembly_with_options},
     ast::{
         AccessPath, AccessSegment, CfgPredicate, Declaration, EmbedSource, Expr, Function, Place,
         Program, Stmt, Type,
     },
     diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
     parser::parse_program,
-    target::{DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple},
+    target::{CpuFamily, DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,16 +165,36 @@ fn check_source_with_sdk_and_overrides(
     }
     validate_main_signature(program.main_function().expect("main presence checked"))
         .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
-    let assembly = emit_ez80_assembly_with_options(
-        &program,
-        AssemblyOptions {
-            debug_comments: options.debug_comments,
-            default_sdk_symbols: options.default_sdk_symbols,
-            ..AssemblyOptions::default()
-        },
-    )
+    let cpu = sdk
+        .target
+        .as_deref()
+        .map(parse_target_triple)
+        .transpose()
+        .map_err(Diagnostic::new)?
+        .map(|target| target.cpu)
+        .unwrap_or(CpuFamily::Ez80);
+    let mut assembly_options = AssemblyOptions {
+        cpu,
+        debug_comments: options.debug_comments,
+        default_sdk_symbols: options.default_sdk_symbols,
+        ..AssemblyOptions::default()
+    };
+    if cpu == CpuFamily::Mos6502 {
+        assembly_options.load_addr = crate::target::Address24::new(0x0200);
+        assembly_options.entry_addr = crate::target::Address24::new(0x0200);
+        assembly_options.code_base = crate::target::Address24::new(0x0200);
+        assembly_options.stack_top = crate::target::Address24::new(0x01FF);
+        assembly_options.ram_base = crate::target::Address24::new(0xA000);
+        assembly_options.rodata_base = crate::target::Address24::new(0x8000);
+        assembly_options.asset_base = crate::target::Address24::new(0xC000);
+    }
+    let assembly = if cpu == CpuFamily::Mos6502 {
+        emit_mos6502_assembly_with_options(&program, assembly_options)
+    } else {
+        emit_ez80_assembly_with_options(&program, assembly_options)
+    }
     .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
-    crate::vm::assemble_ez80_subset_at(&assembly, 0)
+    crate::vm::assemble_subset_with_symbols_at(cpu.into(), &assembly, 0)
         .map_err(|error| error.with_location_if_missing(source_start_location(&options.source)))?;
 
     Ok(CompileReport {
