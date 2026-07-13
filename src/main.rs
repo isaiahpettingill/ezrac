@@ -726,7 +726,6 @@ fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String>
             | CpuFamily::I8080
             | CpuFamily::I8085
             | CpuFamily::Lr35902
-            | CpuFamily::M6800
     ) {
         return Ok(());
     }

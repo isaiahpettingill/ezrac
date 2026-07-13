@@ -7,7 +7,7 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
-use crate::asm::{ez80 as asm_meta, m6800};
+use crate::asm::{ez80 as asm_meta, m68k as asm_m68k, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -337,7 +337,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::I8080 => CpuMode::I8080,
         CpuFamily::I8085 => CpuMode::I8085,
         CpuFamily::M68k => CpuMode::Z80,
-        CpuFamily::Lr35902 | CpuFamily::M6800 => CpuMode::Z80,
+        CpuFamily::Lr35902 | CpuFamily::M6800 | CpuFamily::Mos6502 => CpuMode::Z80,
     }
 }
 
@@ -901,6 +901,10 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
                 "assembler does not support M6800 instruction `{text}`"
             ))
         });
+    } else if cpu == AssemblerCpu::M68k {
+        return asm_m68k::instruction_len(text);
+    } else if cpu == AssemblerCpu::Mos6502 {
+        return crate::asm::mos6502::instruction_len(text);
     }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
@@ -925,6 +929,12 @@ fn emit_instruction(
             )));
         };
         bytes.extend(encoded);
+    } else if cpu == AssemblerCpu::M68k {
+        bytes.extend(asm_m68k::encode(text, labels, pc, true)?);
+    } else if cpu == AssemblerCpu::Mos6502 {
+        bytes.extend(crate::asm::mos6502::encode_instruction(
+            text, labels, pc, true,
+        )?);
     } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
@@ -1368,7 +1378,7 @@ fn push16(bytes: &mut Vec<u8>, value: u32) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
+pub(crate) fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
     let next_pc = (pc + 2) & 0xFF_FFFF;
     let offset = target as i64 - next_pc as i64;
     if !(-128..=127).contains(&offset) {
@@ -1406,7 +1416,7 @@ fn looks_like_label_ref(text: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
 }
 
-fn parse_number(text: &str) -> Result<u32, Diagnostic> {
+pub(crate) fn parse_number(text: &str) -> Result<u32, Diagnostic> {
     let text = text.trim().trim_end_matches(',');
     if let Some(hex) = text.strip_suffix('h') {
         u32::from_str_radix(hex, 16)

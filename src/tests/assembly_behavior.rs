@@ -598,3 +598,26 @@ fn m6800_rejects_non_m6800_instruction() {
 
     assert!(error.message.contains("M6800 instruction"), "{error}");
 }
+
+#[test]
+fn m6800_target_rejects_ezra_source_codegen() {
+    let root = temp_root("m6800_source_codegen");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    let error = build_source_with_build_options(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: false,
+        input_kind: Some(InputKind::Ezra),
+        assembler_cpu: None,
+        layout_path: None,
+        target: Some("bare-m6800".to_owned()),
+    })
+    .unwrap_err();
+
+    assert!(error.contains("CPU `m6800`"), "{error}");
+
+    let _ = std::fs::remove_dir_all(root);
+}

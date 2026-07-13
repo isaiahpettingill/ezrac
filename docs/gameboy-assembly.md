@@ -122,23 +122,25 @@ fn main() {
 ```
 
 Complete projects live under `examples/gameboy`: `serial-hello`, `background`,
-`sprite`, and `input-audio`. Source projects can import these built-in modules
+`sprite`, `input-audio`, and `color-input`. Source projects can import these built-in modules
 on both DMG and CGB targets:
 
 - `gb.video`: safe LCD shutdown, VRAM byte copying, background-map clearing,
-  and standard BG/OBJ LCD setup.
+  standard BG/OBJ LCD setup, and SCX scroll helpers.
 - `gb.sprites`: blank background tile setup, OAM sprite display, and hide-all.
 - `gb.serial`: zero-terminated serial output for emulator consoles and link
   diagnostics.
 - `gb.input`: normalized active-high reads for Right, Left, Up, Down, A, B,
-  Select, and Start, plus wait helpers.
+  Select, and Start, plus per-control wait helpers.
+- `gb.color`: CGB RGB555 background and sprite palette uploads from embedded
+  8-byte palette assets.
 - `gb.audio`: APU setup, pulse beep playback, embedded 32-sample wave loading,
   and wave-channel playback.
 
 Embedded assets can now be passed directly to SDK calls such as
 `sprites.upload_tile1(&player)` and `audio.load_wave(&wave)`; applications do
 not need inline assembly for ordinary sprite textures, tile uploads, serial
-strings, or wave-table audio.
+strings, button waits, CGB palette uploads, or wave-table audio.
 
 The backend currently emits 32 KiB ROM-only cartridges; mapper banking,
 high-level expression lowering, and interrupt functions remain future
