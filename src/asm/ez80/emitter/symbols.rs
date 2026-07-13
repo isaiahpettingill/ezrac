@@ -1024,6 +1024,7 @@ impl Symbols {
                 .globals
                 .get(name)
                 .copied()
+                .or_else(|| self.embeds.get(name).map(|embed| embed.variable))
                 .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))?,
             Expr::AddressOfIndex { name, index } => {
                 self.const_array_element_variable(name, index)?
@@ -1041,6 +1042,11 @@ impl Symbols {
                 .global_types
                 .get(name)
                 .cloned()
+                .or_else(|| {
+                    self.embeds
+                        .contains_key(name)
+                        .then(|| Type::Named("u8".to_owned()))
+                })
                 .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))?,
             Expr::AddressOfIndex { name, .. } => self.array_element_type(name)?,
             Expr::AddressOfField { base, field } => self.field_type(base, field)?,

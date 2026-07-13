@@ -25,7 +25,7 @@ embed cool_palette: bytes = bytes [
 ]
 
 fn fill_demo_map() {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber h, clobber l, clobber flags, clobber memory) {
         "ld hl, 9800h"
         "ld bc, 0400h"
         "ld d, 1"

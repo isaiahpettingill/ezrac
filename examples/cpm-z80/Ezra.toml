@@ -1,0 +1,5 @@
+[project]
+name = "cpm-z80-examples"
+
+[build]
+target = "cpm-2.2-z80"

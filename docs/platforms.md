@@ -16,44 +16,45 @@ Only CPUs with an implemented memory model can be resolved. M68k support is enab
 
 ## Support Levels
 
-This repository contains three different kinds of platform support:
+Platform support is tiered by its strongest published evidence:
 
-```text
-Source target      EZRA source can be parsed, lowered, assembled, and packaged for the target.
-Assembly target    Handwritten assembly can be assembled and packaged for the target.
-SDK scaffold       Built-in EZRA SDK modules exist, but target behavior may still need backend work.
-```
+| Tier | Meaning |
+| --- | --- |
+| **Tier 1** | Examples are built and behaviorally verified on a real third-party libretro core. |
+| **Tier 2** | Source behavior is covered by automated compiler, VM/emulator, SDK, and packaging tests, but not a published real-core run. |
+| **Tier 3** | Build, assembly, or packaging paths are tested; runtime behavior on target hardware or a real core is not yet published. |
+| **Tier 4** | Target profile or SDK scaffolding exists, but substantial backend or runtime validation remains. |
 
-The current production-quality source path is eZ80-oriented. Z80-family and 8080-family source targets have target profiles and layouts, but generated-code maturity varies; use `assemble` when you need exact machine control on those platforms.
+Tier 1 is not a claim that every program or hardware feature works. It means the repository's representative examples passed the assertions listed in the [published real-core results](real-core-test-results.md). The current production-quality source path remains eZ80-oriented; use `assemble` when exact machine control is required.
 
 ## Target Summary
 
-| Target pattern | CPU | Address width | Default output | Built-in SDK | Status |
-| --- | --- | ---: | --- | --- | --- |
-| `agonlight-mos-ez80` | eZ80 ADL | 24 | Agon MOS `.bin` | `agon.*` | Main source target |
-| `custom-unknown-ez80` | eZ80 ADL | 24 | `.bin` | none | Generic eZ80 source target |
-| `ez180n-ez80` | eZ80 ADL | 24 | `.gaem` | `ez180n.*` | ez180N libretro console target |
-| `ezra-test-flat-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
-| `ezra-test-split-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
-| `ti84plusce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
-| `ti83premiumce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
-| `zxspectrum-z80` | Z80 | 16 | `.bin` | `zx.*` | Experimental Z80 target |
-| `gameboy-dmg-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | EZRA source and assembly DMG target |
-| `gameboy-color-lr35902` | LR35902 | 16 | `.gbc` | vendored `asm/gb` macros | EZRA source and assembly CGB target |
-| `ti83-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
-| `ti83plus-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
-| `ti84-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
-| `ti84plus-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
-| `cpm-*-z80` | Z80 | 16 | `.com` | `cpm.*` | Assembly examples; source backend still maturing |
-| `cpm-*-i8080` | 8080 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
-| `cpm-*-i8085` | 8085 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
-| `bare-z80` | Z80 | 16 | `.bin` | none | Bare assembly/source scaffold |
-| `bare-z80n` | Z80N | 16 | `.bin` | none | Bare assembly/source scaffold |
-| `bare-z180` | Z180 | 16 | `.bin` | none | Bare assembly/source scaffold |
-| `bare-i8080` | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
-| `bare-i8085` | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
-| `bare-ez80` | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
-| `generic-m68k-bare` | Motorola 68000 | 24 | `.bin` | none | Experimental scalar source target |
+| Target pattern | Tier | CPU | Address width | Default output | Built-in SDK | Status |
+| --- | ---: | --- | ---: | --- | --- | --- |
+| `agonlight-mos-ez80` | 2 | eZ80 ADL | 24 | Agon MOS `.bin` | `agon.*` | Main source target; real-core publication pending |
+| `custom-unknown-ez80` | 2 | eZ80 ADL | 24 | `.bin` | none | Generic eZ80 source target |
+| `ez180n-ez80` | 1 | eZ80 ADL | 24 | `.gaem` | `ez180n.*` | Three examples verified on ez180N nightly |
+| `ezra-test-flat-ez80` | 2 | eZ80 ADL | 24 | `.bin` | `harness.*` | Automated test harness target |
+| `ezra-test-split-ez80` | 2 | eZ80 ADL | 24 | `.bin` | `harness.*` | Automated test harness target |
+| `ti84plusce-ez80` | 3 | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
+| `ti83premiumce-ez80` | 3 | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
+| `zxspectrum-z80` | 1 | Z80 | 16 | `.tap` | `zx.*` | Hello example verified on Fuse |
+| `gameboy-dmg-lr35902` | 1 | LR35902 | 16 | `.gb` | `gb.*` | Four DMG examples verified on mGBA |
+| `gameboy-color-lr35902` | 1 | LR35902 | 16 | `.gbc` | `gb.*` | CGB input example verified on mGBA |
+| `ti83-z80` | 3 | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `ti83plus-z80` | 3 | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `ti84-z80` | 3 | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `ti84plus-z80` | 3 | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
+| `cpm-2.2-z80` | 1 | Z80 | 16 | `.com` | `cpm.*` | Seven source/assembly examples verified on ep128emu IS-DOS |
+| `cpm-*-i8080` | 4 | 8080 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
+| `cpm-*-i8085` | 4 | 8085 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
+| `bare-z80` | 4 | Z80 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-z80n` | 4 | Z80N | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-z180` | 4 | Z180 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-i8080` | 4 | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-i8085` | 4 | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
+| `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Experimental scalar source target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
 
@@ -259,7 +260,7 @@ Target:
 zxspectrum-z80
 ```
 
-Default output is raw `.bin`. Built-in SDK modules are:
+Default output is an auto-start `.tap` containing a BASIC loader and CODE block. Built-in SDK modules are:
 
 ```text
 zx.rom

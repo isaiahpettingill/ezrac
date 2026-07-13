@@ -2,7 +2,7 @@
 
 // Clears tile zero so it can be used as a blank background tile.
 pub fn clear_background_tile() {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber h, clobber l, clobber flags, clobber memory) {
         "ld hl, 8000h"
         "ld b, 16"
         "xor a"
@@ -15,7 +15,7 @@ pub fn clear_background_tile() {
 
 // Uploads one embedded 8x8 2bpp texture to tile slot one.
 pub fn upload_tile1(texture: ptr<u8>) {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
         "ld de, 8010h"
         "ld b, 16"
         ".gb_sprites_upload:"
@@ -29,7 +29,7 @@ pub fn upload_tile1(texture: ptr<u8>) {
 
 // Configures OAM entry zero at screen position (80, 68), using tile one.
 pub fn show_centered_tile1() {
-    asm volatile {
+    asm volatile(clobber a, clobber flags, clobber memory) {
         "ld a, 84"
         "ld (0FE00h), a"
         "ld a, 88"
@@ -42,7 +42,7 @@ pub fn show_centered_tile1() {
 }
 
 pub fn hide_all() {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
         "ld hl, 0FE00h"
         "ld b, 40"
         "xor a"

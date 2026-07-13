@@ -8,8 +8,9 @@ use ezra::{
     ast::{Declaration, Expr, Function, Stmt, Type},
     compile::{
         CompileOptions, SdkResolver, builtin_sdk_modules,
-        check_source_diagnostics_with_sdk_and_overrides, parse_and_resolve_imports_with_sdk,
-        resolve_import_source,
+        check_module_diagnostics_with_sdk_and_overrides,
+        check_source_semantic_diagnostics_with_sdk_and_overrides,
+        parse_and_resolve_imports_with_sdk, resolve_import_source,
     },
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
     layout::parse_layout,
@@ -388,28 +389,38 @@ impl Server {
                     continue;
                 }
             };
-            diagnostics.extend(
-                check_source_diagnostics_with_sdk_and_overrides(
+            let options = CompileOptions {
+                source: path.clone(),
+                debug_comments: false,
+                default_sdk_symbols: true,
+            };
+            let is_bundled_sdk = bundled_sdk_context(&path).is_some();
+            let path_diagnostics = if is_bundled_sdk {
+                check_module_diagnostics_with_sdk_and_overrides(
                     &source,
-                    &CompileOptions {
-                        source: path.clone(),
-                        debug_comments: false,
-                        default_sdk_symbols: true,
-                    },
+                    &options,
                     &sdk,
                     &source_overrides,
                 )
-                .into_iter()
-                .map(|diagnostic| {
-                    let diagnostic_path = diagnostic
-                        .span
-                        .as_ref()
-                        .map(|span| span.file.clone())
-                        .unwrap_or_else(|| path.clone());
-                    (diagnostic_path, diagnostic)
-                }),
-            );
-            diagnostics.extend(project_layout_diagnostics(&path));
+            } else {
+                check_source_semantic_diagnostics_with_sdk_and_overrides(
+                    &source,
+                    &options,
+                    &sdk,
+                    &source_overrides,
+                )
+            };
+            diagnostics.extend(path_diagnostics.into_iter().map(|diagnostic| {
+                let diagnostic_path = diagnostic
+                    .span
+                    .as_ref()
+                    .map(|span| span.file.clone())
+                    .unwrap_or_else(|| path.clone());
+                (diagnostic_path, diagnostic)
+            }));
+            if !is_bundled_sdk {
+                diagnostics.extend(project_layout_diagnostics(&path));
+            }
         }
 
         let mut publications = self
@@ -491,15 +502,26 @@ fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
         Ok(sdk) => sdk,
         Err(error) => return vec![error],
     };
-    ezra::compile::check_source_diagnostics_with_sdk(
-        &document.text,
-        &CompileOptions {
-            source: document.path.clone(),
-            debug_comments: false,
-            default_sdk_symbols: true,
-        },
-        &sdk,
-    )
+    let options = CompileOptions {
+        source: document.path.clone(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+    };
+    if bundled_sdk_context(&document.path).is_some() {
+        check_module_diagnostics_with_sdk_and_overrides(
+            &document.text,
+            &options,
+            &sdk,
+            &HashMap::new(),
+        )
+    } else {
+        check_source_semantic_diagnostics_with_sdk_and_overrides(
+            &document.text,
+            &options,
+            &sdk,
+            &HashMap::new(),
+        )
+    }
 }
 
 fn project_source_path(path: &Path) -> Result<PathBuf, Diagnostic> {
@@ -523,7 +545,54 @@ fn normalize_document_path(path: &Path) -> PathBuf {
     })
 }
 
+struct BundledSdkContext {
+    target: &'static str,
+    sdk_root: PathBuf,
+}
+
+fn bundled_sdk_context(path: &Path) -> Option<BundledSdkContext> {
+    let toolchains =
+        normalize_document_path(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("toolchains"));
+    let path = normalize_document_path(path);
+    let relative = path.strip_prefix(&toolchains).ok()?;
+    if relative
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("ezra")
+    {
+        return None;
+    }
+
+    let mut components = relative.components();
+    let toolchain = components.next()?.as_os_str().to_str()?;
+    if components.next()?.as_os_str().to_str()? != "sdk" {
+        return None;
+    }
+    let target = match toolchain {
+        "gameboy-lr35902" => "gameboy-dmg-lr35902",
+        "tice-ez80" => "ti84plusce-ez80",
+        "ti-z80" => "ti84plus-z80",
+        "agonlight-mos-ez80" => "agonlight-mos-ez80",
+        "cpm-2.2-z80" => "cpm-2.2-z80",
+        "ez180n-ez80" => "ez180n-ez80",
+        "ezra-test-ez80" => "ezra-test-ez80",
+        "zxspectrum-z80" => "zxspectrum-z80",
+        _ => return None,
+    };
+    Some(BundledSdkContext {
+        target,
+        sdk_root: toolchains.join(toolchain).join("sdk"),
+    })
+}
+
 fn sdk_for_path(path: &Path) -> Result<SdkResolver, Diagnostic> {
+    if let Some(context) = bundled_sdk_context(path) {
+        return Ok(SdkResolver {
+            target: Some(context.target.to_owned()),
+            sdk_roots: vec![context.sdk_root],
+        });
+    }
+
     let project = load_nearest_project_config(path)?;
     Ok(SdkResolver {
         target: project

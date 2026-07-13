@@ -1970,20 +1970,66 @@ fn zx_spectrum_tap_bytes(
     }
     let load = u16::try_from(settings.layout.load.get())
         .map_err(|_| "ZX Spectrum load address exceeds 16-bit address space".to_owned())?;
+    let entry = u16::try_from(settings.layout.entry.get())
+        .map_err(|_| "ZX Spectrum entry address exceeds 16-bit address space".to_owned())?;
+    let ram_top = load
+        .checked_sub(1)
+        .ok_or_else(|| "ZX Spectrum CODE load address must be above zero".to_owned())?;
     let length = u16::try_from(code.len())
         .map_err(|_| "ZX Spectrum CODE block exceeds 65535 bytes".to_owned())?;
+    let name = zx_tap_name(settings, output_path);
 
-    let mut header = Vec::with_capacity(17);
-    header.push(3); // CODE header
-    header.extend_from_slice(&zx_tap_name(settings, output_path));
-    header.extend_from_slice(&length.to_le_bytes());
-    header.extend_from_slice(&load.to_le_bytes());
-    header.extend_from_slice(&0u16.to_le_bytes());
+    let mut loader = Vec::new();
+    let mut clear = vec![0xfd, b' ']; // CLEAR
+    push_zx_basic_integer(&mut clear, ram_top);
+    push_zx_basic_line(&mut loader, 10, &clear)?;
+    push_zx_basic_line(&mut loader, 20, &[0xef, b' ', b'"', b'"', b' ', 0xaf])?; // LOAD "" CODE
+    let mut run = vec![0xf9, b' ', 0xc0, b' ']; // RANDOMIZE USR
+    push_zx_basic_integer(&mut run, entry);
+    push_zx_basic_line(&mut loader, 30, &run)?;
+    let loader_length = u16::try_from(loader.len())
+        .map_err(|_| "ZX Spectrum BASIC loader exceeds 65535 bytes".to_owned())?;
 
-    let mut out = Vec::with_capacity(4 + header.len() + code.len());
-    push_zx_tap_block(&mut out, 0x00, &header)?;
-    push_zx_tap_block(&mut out, 0xFF, code)?;
+    let mut loader_header = Vec::with_capacity(17);
+    loader_header.push(0); // BASIC program header
+    loader_header.extend_from_slice(&name);
+    loader_header.extend_from_slice(&loader_length.to_le_bytes());
+    loader_header.extend_from_slice(&10u16.to_le_bytes()); // auto-start at line 10
+    loader_header.extend_from_slice(&loader_length.to_le_bytes());
+
+    let mut code_header = Vec::with_capacity(17);
+    code_header.push(3); // CODE header
+    code_header.extend_from_slice(&name);
+    code_header.extend_from_slice(&length.to_le_bytes());
+    code_header.extend_from_slice(&load.to_le_bytes());
+    code_header.extend_from_slice(&0u16.to_le_bytes());
+
+    let mut out =
+        Vec::with_capacity(8 + loader_header.len() + loader.len() + code_header.len() + code.len());
+    push_zx_tap_block(&mut out, 0x00, &loader_header)?;
+    push_zx_tap_block(&mut out, 0xff, &loader)?;
+    push_zx_tap_block(&mut out, 0x00, &code_header)?;
+    push_zx_tap_block(&mut out, 0xff, code)?;
     Ok(out)
+}
+
+fn push_zx_basic_integer(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(value.to_string().as_bytes());
+    out.push(0x0e); // numeric literal marker
+    out.extend_from_slice(&[0x00, 0x00, value as u8, (value >> 8) as u8, 0x00]);
+}
+
+fn push_zx_basic_line(out: &mut Vec<u8>, number: u16, body: &[u8]) -> Result<(), String> {
+    let length = body
+        .len()
+        .checked_add(1)
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| "ZX Spectrum BASIC line exceeds 65535 bytes".to_owned())?;
+    out.extend_from_slice(&number.to_be_bytes());
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(body);
+    out.push(0x0d);
+    Ok(())
 }
 
 fn zx_tap_name(settings: &BuildSettings, output_path: Option<&Path>) -> [u8; 10] {
@@ -2515,48 +2561,7 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 }
 
 fn default_layout_for_target(target: &str) -> Layout {
-    if target == "generic-6502-bare" {
-        Layout::bare_6502()
-    } else if target.starts_with("chip8-") || target == "vm-chip8" {
-        Layout::chip8("chip8")
-    } else if target.starts_with("schip-") || target.starts_with("superchip-") {
-        Layout::chip8("schip")
-    } else if target.starts_with("xochip-") {
-        Layout::chip8("xochip")
-    } else if let Some(cpu) = bare_target_cpu(target) {
-        match cpu {
-            AssemblerCpu::Ez80 => Layout::bare_ez80(),
-            AssemblerCpu::Mos6502 => Layout::bare_6502(),
-            AssemblerCpu::M68k => Layout::bare_m68k(),
-            _ => Layout::bare_16(cpu.as_str()),
-        }
-    } else if target.starts_with("zxspectrum-z80") {
-        Layout::zx_spectrum_z80()
-    } else if target.starts_with("gameboy-") {
-        Layout::game_boy_lr35902()
-    } else if target.starts_with("arduboy-") {
-        Layout::bare_16("arduboy_avr")
-    } else if is_ti_ce_target(target) {
-        Layout::ti_ce_ez80(target)
-    } else if is_ti_z80_target(target) {
-        Layout::ti_z80(target)
-    } else if target.starts_with("agonlight-mos-ez80") {
-        Layout::agon_light_mos()
-    } else if target.starts_with("ez180n-ez80") {
-        Layout::ez180n()
-    } else if target.starts_with("ezra-test-flat-ez80") {
-        Layout::ez80_test_flat()
-    } else if target.starts_with("ezra-test-split-ez80") {
-        Layout::ez80_test_split()
-    } else if target.split('-').any(|part| part == "m68k") {
-        Layout::bare_m68k()
-    } else if target.split('-').any(|part| part == "cpm") {
-        Layout::cpm_z80_com()
-    } else if target.split('-').any(|part| part == "z80") {
-        Layout::z80_default()
-    } else {
-        Layout::ezra_default()
-    }
+    ezra::layout::default_layout_for_target(target)
 }
 
 fn init_project(options: &InitOptions) -> Result<(), String> {

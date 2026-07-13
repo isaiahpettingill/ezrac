@@ -4584,7 +4584,13 @@ impl Emitter {
     }
 
     fn emit_variable_address(&mut self, name: &str) -> Result<(), Diagnostic> {
-        let variable = self.variable(name)?;
+        let variable = self
+            .symbols
+            .embeds
+            .get(name)
+            .map(|embed| embed.variable)
+            .or_else(|| self.variable_opt(name))
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))?;
         self.line(&format!("    ld hl, {:06X}h", variable.addr));
         Ok(())
     }
@@ -5288,6 +5294,9 @@ impl Emitter {
                 Ok(Type::Ptr(Box::new(self.access_type(&path)?)))
             }
             Expr::AddressOf(name) => {
+                if self.symbols.embeds.contains_key(name) {
+                    return Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned()))));
+                }
                 let Some(ty) = self.variable_type(name) else {
                     return Err(Diagnostic::new(format!("unknown variable `{name}`")));
                 };

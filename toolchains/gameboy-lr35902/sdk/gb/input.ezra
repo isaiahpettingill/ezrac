@@ -12,7 +12,7 @@ pub const SELECT: u8 = 0x40
 pub const START: u8 = 0x80
 
 pub fn read() {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber flags, clobber memory) {
         "ld a, 20h"
         "ldh (00h), a"
         "ldh a, (00h)"
@@ -37,7 +37,7 @@ pub fn read() {
 
 // Waits until any active-high button bit in mask is held.
 pub fn wait(mask: u8) {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
         "ld c, l"
         ".gb_input_wait_mask:"
         "call _read"

@@ -1,8 +1,8 @@
 // Serial helpers useful for emulator consoles and link-cable diagnostics.
 
 // Sends the zero-terminated string at HL using the internal serial clock.
-pub fn send_cstr(message: ptr<u8>) {
-    asm volatile {
+pub fn send_cstr(text: ptr<u8>) {
+    asm volatile(clobber a, clobber h, clobber l, clobber flags, clobber memory) {
         ".gb_serial_next:"
         "ld a, (hl+)"
         "and a"

@@ -2,7 +2,7 @@
 
 // Safely disables the LCD whether execution started through a boot ROM or directly.
 pub fn begin_update() {
-    asm volatile {
+    asm volatile(clobber a, clobber flags, clobber memory) {
         "ldh a, (40h)"
         "bit 7, a"
         "ret z"
@@ -17,7 +17,7 @@ pub fn begin_update() {
 
 // Clears the 32x32 background map to tile zero.
 pub fn clear_background() {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber h, clobber l, clobber flags, clobber memory) {
         "ld hl, 9800h"
         "ld bc, 0400h"
         "ld d, 0"
@@ -33,7 +33,7 @@ pub fn clear_background() {
 
 // HL = source, DE = VRAM destination, B = byte count.
 pub fn copy_bytes(source: ptr<u8>, destination: u16, count: u8) {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
         ".gb_video_copy:"
         "ld a, (hl+)"
         "ld (de), a"
@@ -45,7 +45,7 @@ pub fn copy_bytes(source: ptr<u8>, destination: u16, count: u8) {
 
 // Initializes CGB BG and OBJ palette zero. These registers are harmless on DMG.
 pub fn initialize_palettes() {
-    asm volatile {
+    asm volatile(clobber a, clobber flags, clobber memory) {
         "ld a, 80h"
         "ldh (68h), a"
         "ld a, 0FFh"
@@ -85,7 +85,7 @@ pub fn initialize_palettes() {
 
 pub fn enable_background() {
     initialize_palettes()
-    asm volatile {
+    asm volatile(clobber a, clobber memory) {
         "ld a, 0E4h"
         "ldh (47h), a"
         "ld a, 91h"
@@ -95,7 +95,7 @@ pub fn enable_background() {
 
 pub fn enable_background_and_sprites() {
     initialize_palettes()
-    asm volatile {
+    asm volatile(clobber a, clobber memory) {
         "ld a, 0E4h"
         "ldh (47h), a"
         "ldh (48h), a"
@@ -106,7 +106,7 @@ pub fn enable_background_and_sprites() {
 
 // Adds amount to the background X scroll register (SCX).
 pub fn scroll_x_forward(amount: u8) {
-    asm volatile {
+    asm volatile(clobber a, clobber flags, clobber memory) {
         "ldh a, (43h)"
         "add a, l"
         "ldh (43h), a"
@@ -115,7 +115,7 @@ pub fn scroll_x_forward(amount: u8) {
 
 // Subtracts amount from the background X scroll register (SCX).
 pub fn scroll_x_backward(amount: u8) {
-    asm volatile {
+    asm volatile(clobber a, clobber flags, clobber memory) {
         "ldh a, (43h)"
         "sub l"
         "ldh (43h), a"
