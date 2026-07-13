@@ -1970,20 +1970,66 @@ fn zx_spectrum_tap_bytes(
     }
     let load = u16::try_from(settings.layout.load.get())
         .map_err(|_| "ZX Spectrum load address exceeds 16-bit address space".to_owned())?;
+    let entry = u16::try_from(settings.layout.entry.get())
+        .map_err(|_| "ZX Spectrum entry address exceeds 16-bit address space".to_owned())?;
+    let ram_top = load
+        .checked_sub(1)
+        .ok_or_else(|| "ZX Spectrum CODE load address must be above zero".to_owned())?;
     let length = u16::try_from(code.len())
         .map_err(|_| "ZX Spectrum CODE block exceeds 65535 bytes".to_owned())?;
+    let name = zx_tap_name(settings, output_path);
 
-    let mut header = Vec::with_capacity(17);
-    header.push(3); // CODE header
-    header.extend_from_slice(&zx_tap_name(settings, output_path));
-    header.extend_from_slice(&length.to_le_bytes());
-    header.extend_from_slice(&load.to_le_bytes());
-    header.extend_from_slice(&0u16.to_le_bytes());
+    let mut loader = Vec::new();
+    let mut clear = vec![0xfd, b' ']; // CLEAR
+    push_zx_basic_integer(&mut clear, ram_top);
+    push_zx_basic_line(&mut loader, 10, &clear)?;
+    push_zx_basic_line(&mut loader, 20, &[0xef, b' ', b'"', b'"', b' ', 0xaf])?; // LOAD "" CODE
+    let mut run = vec![0xf9, b' ', 0xc0, b' ']; // RANDOMIZE USR
+    push_zx_basic_integer(&mut run, entry);
+    push_zx_basic_line(&mut loader, 30, &run)?;
+    let loader_length = u16::try_from(loader.len())
+        .map_err(|_| "ZX Spectrum BASIC loader exceeds 65535 bytes".to_owned())?;
 
-    let mut out = Vec::with_capacity(4 + header.len() + code.len());
-    push_zx_tap_block(&mut out, 0x00, &header)?;
-    push_zx_tap_block(&mut out, 0xFF, code)?;
+    let mut loader_header = Vec::with_capacity(17);
+    loader_header.push(0); // BASIC program header
+    loader_header.extend_from_slice(&name);
+    loader_header.extend_from_slice(&loader_length.to_le_bytes());
+    loader_header.extend_from_slice(&10u16.to_le_bytes()); // auto-start at line 10
+    loader_header.extend_from_slice(&loader_length.to_le_bytes());
+
+    let mut code_header = Vec::with_capacity(17);
+    code_header.push(3); // CODE header
+    code_header.extend_from_slice(&name);
+    code_header.extend_from_slice(&length.to_le_bytes());
+    code_header.extend_from_slice(&load.to_le_bytes());
+    code_header.extend_from_slice(&0u16.to_le_bytes());
+
+    let mut out =
+        Vec::with_capacity(8 + loader_header.len() + loader.len() + code_header.len() + code.len());
+    push_zx_tap_block(&mut out, 0x00, &loader_header)?;
+    push_zx_tap_block(&mut out, 0xff, &loader)?;
+    push_zx_tap_block(&mut out, 0x00, &code_header)?;
+    push_zx_tap_block(&mut out, 0xff, code)?;
     Ok(out)
+}
+
+fn push_zx_basic_integer(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(value.to_string().as_bytes());
+    out.push(0x0e); // numeric literal marker
+    out.extend_from_slice(&[0x00, 0x00, value as u8, (value >> 8) as u8, 0x00]);
+}
+
+fn push_zx_basic_line(out: &mut Vec<u8>, number: u16, body: &[u8]) -> Result<(), String> {
+    let length = body
+        .len()
+        .checked_add(1)
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| "ZX Spectrum BASIC line exceeds 65535 bytes".to_owned())?;
+    out.extend_from_slice(&number.to_be_bytes());
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(body);
+    out.push(0x0d);
+    Ok(())
 }
 
 fn zx_tap_name(settings: &BuildSettings, output_path: Option<&Path>) -> [u8; 10] {

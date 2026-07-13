@@ -467,8 +467,14 @@ fn assembly_build_respects_custom_layout_entry() {
     let tape = std::fs::read(outputs.executable).unwrap();
 
     assert!(map.contains(".text        0x000220"), "{map}");
-    assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x0200);
-    assert_eq!(tape[21 + 3 + 0x20], 0xC9);
+    let loader_data_length = usize::from(u16::from_le_bytes([tape[21], tape[22]]));
+    let code_header = 21 + 2 + loader_data_length;
+    assert_eq!(
+        u16::from_le_bytes([tape[code_header + 16], tape[code_header + 17]]),
+        0x0200
+    );
+    let code_data = code_header + 21;
+    assert_eq!(tape[code_data + 3 + 0x20], 0xC9);
 
     let _ = std::fs::remove_dir_all(root);
 }

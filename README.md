@@ -101,6 +101,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
+- `docs/real-core-tests.md` explains how to run the opt-in `play96` example suites against real libretro cores.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `REMAINING_WORK.md` tracks known gaps and follow-up work.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
@@ -116,3 +117,5 @@ cargo fmt
 cargo test --quiet
 git diff --check
 ```
+
+Real-core example tests are ignored by default because they require third-party libretro shared libraries. See [`docs/real-core-tests.md`](docs/real-core-tests.md) for setup and commands.

@@ -37,7 +37,7 @@ The current production-quality source path is eZ80-oriented. Z80-family and 8080
 | `ezra-test-split-ez80` | eZ80 ADL | 24 | `.bin` | `harness.*` | Test harness target |
 | `ti84plusce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
 | `ti83premiumce-ez80` | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
-| `zxspectrum-z80` | Z80 | 16 | `.bin` | `zx.*` | Experimental Z80 target |
+| `zxspectrum-z80` | Z80 | 16 | `.tap` | `zx.*` | Experimental Z80 target |
 | `gameboy-dmg-lr35902` | LR35902 | 16 | `.gb` | vendored `asm/gb` macros | EZRA source and assembly DMG target |
 | `gameboy-color-lr35902` | LR35902 | 16 | `.gbc` | vendored `asm/gb` macros | EZRA source and assembly CGB target |
 | `ti83-z80` | Z80 | 16 | `.8xp` | `ti.*` | Experimental TI Z80 target |
@@ -259,7 +259,7 @@ Target:
 zxspectrum-z80
 ```
 
-Default output is raw `.bin`. Built-in SDK modules are:
+Default output is an auto-start `.tap` containing a BASIC loader and CODE block. Built-in SDK modules are:
 
 ```text
 zx.rom

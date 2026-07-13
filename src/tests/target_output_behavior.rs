@@ -1,5 +1,18 @@
 use super::*;
 
+fn zx_tap_blocks(tape: &[u8]) -> Vec<(u8, &[u8])> {
+    let mut blocks = Vec::new();
+    let mut offset = 0;
+    while offset < tape.len() {
+        let length = usize::from(u16::from_le_bytes([tape[offset], tape[offset + 1]]));
+        let block = &tape[offset + 2..offset + 2 + length];
+        blocks.push((block[0], &block[1..block.len() - 1]));
+        offset += length + 2;
+    }
+    assert_eq!(offset, tape.len());
+    blocks
+}
+
 #[test]
 fn game_boy_targets_write_valid_dmg_and_cgb_roms() {
     use ez80::{Cpu, Machine, PlainMachine};
@@ -257,14 +270,26 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
         outputs.executable.extension().and_then(|ext| ext.to_str()),
         Some("tap")
     );
-    assert_eq!(u16::from_le_bytes([tape[0], tape[1]]), 19);
-    assert_eq!(tape[2], 0x00);
-    assert_eq!(tape[3], 3);
-    assert!(u16::from_le_bytes([tape[14], tape[15]]) > 0);
-    assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x8000);
-    let data_block = 21;
-    assert_eq!(tape[data_block + 2], 0xFF);
-    assert_eq!(&tape[data_block + 3..data_block + 6], &[0xF3, 0x31, 0x00]);
+    let blocks = zx_tap_blocks(&tape);
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0].0, 0x00);
+    assert_eq!(blocks[0].1[0], 0); // BASIC program
+    assert_eq!(u16::from_le_bytes([blocks[0].1[13], blocks[0].1[14]]), 10);
+    assert_eq!(blocks[1].0, 0xff);
+    assert!(
+        blocks[1]
+            .1
+            .windows(6)
+            .any(|bytes| bytes == [0xef, b' ', b'"', b'"', b' ', 0xaf])
+    );
+    assert_eq!(blocks[2].0, 0x00);
+    assert_eq!(blocks[2].1[0], 3); // CODE
+    assert_eq!(
+        u16::from_le_bytes([blocks[2].1[13], blocks[2].1[14]]),
+        0x8000
+    );
+    assert_eq!(blocks[3].0, 0xff);
+    assert_eq!(&blocks[3].1[..3], &[0xF3, 0x31, 0x00]);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -284,7 +309,11 @@ fn spectrum_tap_preserves_a_custom_load_address() {
     .unwrap();
     settings.layout.load = Address24::new(0x8001);
     let tape = zx_spectrum_tap_bytes(&settings, None, &[0x00]).unwrap();
-    assert_eq!(u16::from_le_bytes([tape[16], tape[17]]), 0x8001);
+    let blocks = zx_tap_blocks(&tape);
+    assert_eq!(
+        u16::from_le_bytes([blocks[2].1[13], blocks[2].1[14]]),
+        0x8001
+    );
 }
 
 #[test]
