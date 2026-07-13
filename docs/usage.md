@@ -401,3 +401,8 @@ Layouts define load, entry, stack, memory regions, output sections, and named sy
 ## Editor Support
 
 Syntax-highlighting assets are documented in `docs/editor-syntax.md`. The shared parser source of truth is `src/ezra.pest`.
+
+
+## Motorola 6800 assembler
+
+Standalone Motorola 6800 assembly is available with `ezrac assemble --cpu m6800 --target bare-m6800`; see [m6800-assembly.md](m6800-assembly.md) for syntax and instruction coverage.
