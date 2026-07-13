@@ -206,7 +206,7 @@ pub struct CheckedEz80Program {
 impl CheckedEz80Program {
     pub fn from_program(program: &Program, options: &AssemblyOptions) -> Result<Self, Diagnostic> {
         let hir = HirProgram::from_ast(program)?;
-        let tbir = TbirProgram::for_ez80(&hir, program, options)?;
+        let tbir = TbirProgram::lower(&hir, program, options)?;
         Ok(Self { hir, tbir })
     }
 }

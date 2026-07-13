@@ -3,7 +3,7 @@ use crate::{
     ast::Program,
     diagnostic::Diagnostic,
     hir::{HirDeclaration, HirProgram},
-    target::{Address24, CpuFamily},
+    target::{Address24, CpuFamily, memory_model_for_cpu},
 };
 
 use super::{
@@ -16,8 +16,11 @@ pub fn lower(
     lowered_program: &Program,
     options: &AssemblyOptions,
 ) -> Result<TbirProgram, Diagnostic> {
-    diagnostics::validate_ez80_program(lowered_program)?;
+    diagnostics::validate_program(lowered_program, options.cpu)?;
     let memory = memory_model(options)?;
+    let pointer_width_bits = memory_model_for_cpu(options.cpu)
+        .map(|model| model.pointer_width_bits as u8)
+        .unwrap_or(24);
     let declarations = hir.declarations.iter().map(lower_declaration).collect();
     let (lowered_program, mut optimizations) = optimize::optimize_program(lowered_program);
     optimizations.tail_call_candidates = hir
@@ -39,18 +42,15 @@ pub fn lower(
                 CpuFamily::Z180 => "z180".to_owned(),
                 _ => "ez80-adl".to_owned(),
             },
-            pointer_width_bits: if is_z80_family_16bit(options.cpu) {
-                16
-            } else {
-                24
-            },
-            native_int_widths: if is_z80_family_16bit(options.cpu) {
+            pointer_width_bits,
+            native_int_widths: if pointer_width_bits == 16 {
                 vec![8, 16]
             } else {
                 vec![8, 16, 24]
             },
             prefer_code_size: true,
             has_cache: false,
+            supports_port_io: supports_port_io(options.cpu),
         },
         memory,
         declarations,
@@ -60,9 +60,12 @@ pub fn lower(
 }
 
 fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic> {
-    if is_z80_family_16bit(options.cpu) {
+    let address_width_bits = memory_model_for_cpu(options.cpu)
+        .map(|model| model.address_width_bits as u8)
+        .unwrap_or(24);
+    if address_width_bits == 16 {
         return Ok(TbirMemoryModel {
-            address_width_bits: 16,
+            address_width_bits,
             regions: vec![
                 region(
                     "code",
@@ -167,10 +170,15 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
     })
 }
 
-fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
+fn supports_port_io(cpu: CpuFamily) -> bool {
     matches!(
         cpu,
-        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::I8080 | CpuFamily::I8085
+        CpuFamily::Ez80
+            | CpuFamily::Z80
+            | CpuFamily::Z80N
+            | CpuFamily::Z180
+            | CpuFamily::I8080
+            | CpuFamily::I8085
     )
 }
 

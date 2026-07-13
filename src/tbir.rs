@@ -22,6 +22,7 @@ pub struct TbirTarget {
     pub native_int_widths: Vec<u8>,
     pub prefer_code_size: bool,
     pub has_cache: bool,
+    pub supports_port_io: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,12 +94,20 @@ pub struct TbirOptimizationReport {
 }
 
 impl TbirProgram {
-    pub fn for_ez80(
+    pub fn lower(
         hir: &HirProgram,
         lowered_program: &Program,
         options: &AssemblyOptions,
     ) -> Result<Self, Diagnostic> {
         ez80::lower(hir, lowered_program, options)
+    }
+
+    pub fn for_ez80(
+        hir: &HirProgram,
+        lowered_program: &Program,
+        options: &AssemblyOptions,
+    ) -> Result<Self, Diagnostic> {
+        Self::lower(hir, lowered_program, options)
     }
 
     pub fn dump_text(&self) -> String {

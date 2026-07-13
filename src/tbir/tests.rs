@@ -144,6 +144,64 @@ fn tbir_rejects_ez80_mmio_outside_24_bit_range() {
     );
 }
 
+#[test]
+fn tbir_rejects_ports_for_mmio_only_cpus() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "port PPU: u8 = 0x2000\nfn main() {}",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let options = AssemblyOptions {
+        cpu: crate::target::CpuFamily::Mos6502,
+        ..AssemblyOptions::default()
+    };
+    let error = TbirProgram::lower(&hir, &program, &options).unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "target CPU `6502` does not support separate port I/O; declare `PPU` as mmio instead"
+    );
+}
+
+#[test]
+fn tbir_rejects_port_operations_for_mmio_only_cpus() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn main() { let status: u8 = in STATUS }",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let options = AssemblyOptions {
+        cpu: crate::target::CpuFamily::Mos6502,
+        ..AssemblyOptions::default()
+    };
+    let error = TbirProgram::lower(&hir, &program, &options).unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "target CPU `6502` does not support separate port I/O `STATUS`; use mmio instead"
+    );
+}
+
+#[test]
+fn tbir_accepts_16_bit_mmio_for_6502() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "volatile mmio PPU: ptr<u8> = 0x2000\nfn main() {}",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let options = AssemblyOptions {
+        cpu: crate::target::CpuFamily::Mos6502,
+        ..AssemblyOptions::default()
+    };
+    let tbir = TbirProgram::lower(&hir, &program, &options).unwrap();
+
+    assert!(!tbir.target.supports_port_io);
+    assert_eq!(tbir.target.pointer_width_bits, 16);
+}
+
 fn object_kind(tbir: &TbirProgram, name: &str) -> Option<TbirObjectKind> {
     tbir.declarations.iter().find_map(|decl| match decl {
         TbirDeclaration::Object {
