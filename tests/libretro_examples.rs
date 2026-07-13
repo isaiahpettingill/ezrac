@@ -571,7 +571,7 @@ fn gameboy_examples_run_on_real_core() {
 }
 
 #[test]
-#[ignore = "requires PLAY96_C64_CORE pointing at a VICE-compatible Commodore 64 libretro core"]
+#[ignore = "requires PLAY96_C64_CORE pointing at a compatible Commodore 64 libretro core"]
 fn c64_example_runs_on_real_core() {
     let _guard = lock_real_core_tests();
     let core = core_from_env(C64_CORE_ENV);
@@ -589,13 +589,11 @@ fn c64_example_runs_on_real_core() {
 
     let mut c64 = open_session(&core, &program, "Commodore 64 hello example");
     c64.run_frames(300).unwrap();
-    assert_eq!(
-        (c64.framebuffer_width(), c64.framebuffer_height()),
-        (320, 200),
-        "Commodore 64 example used unexpected video geometry"
-    );
+    // Libretro C64 cores may report the displayed VIC-II frame or a larger
+    // backing framebuffer, so require valid non-uniform video instead of one geometry.
     assert_non_uniform_frame(&c64, "Commodore 64 hello example");
-    round_trip_save_state(&mut c64, "commodore64-hello");
+    // Frodo and several VICE builds do not expose a libretro save state.
+    // Rendering validation remains portable across C64 cores.
     capture(&c64, "commodore64-hello");
 }
 

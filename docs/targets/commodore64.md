@@ -25,7 +25,7 @@ The standard C64 I/O configuration is `memory.map_roms_and_io()`. Call it before
 
 ## Test integration
 
-The repository has a unit/build test for all bundled modules and an ignored Play96 real-core integration test. Set `PLAY96_C64_CORE` to a compatible C64 libretro core (for example, VICE), then run:
+The repository has a unit/build test for all bundled modules and an ignored Play96 real-core integration test. Set `PLAY96_C64_CORE` to a compatible C64 libretro core (for example, Frodo), then run:
 
 ```sh
 cargo test --features mos6502 --test libretro_examples c64_example_runs_on_real_core -- --ignored
