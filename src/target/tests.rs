@@ -86,6 +86,18 @@ fn resolves_bare_targets_without_default_sdk_symbols() {
     assert!(!target.default_sdk_symbols);
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn resolves_generic_bare_6502_target() {
+    let profile = resolve_target_profile(Some("generic-6502-bare")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Mos6502);
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.output_format, OutputFormat::RawBin);
+    assert!(!profile.default_sdk_symbols);
+    assert!(!profile.supports_port_io());
+}
+
 #[test]
 fn ti_calculator_targets_default_to_8xp_output() {
     for target in [

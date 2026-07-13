@@ -215,6 +215,20 @@ pub struct TargetProfile {
     pub output_format: OutputFormat,
 }
 
+impl TargetProfile {
+    pub const fn supports_port_io(&self) -> bool {
+        matches!(
+            self.triple.cpu,
+            CpuFamily::Ez80
+                | CpuFamily::Z80
+                | CpuFamily::Z80N
+                | CpuFamily::Z180
+                | CpuFamily::I8080
+                | CpuFamily::I8085
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TargetMemoryModel {
     pub pointer_width_bits: u16,

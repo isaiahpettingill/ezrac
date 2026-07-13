@@ -716,7 +716,7 @@ fn resolve_build_settings(
     })
 }
 
-fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
+fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
     if matches!(
         settings.target.triple.cpu,
         CpuFamily::Ez80
@@ -726,12 +726,13 @@ fn ensure_ez80_codegen_supported(settings: &BuildSettings) -> Result<(), String>
             | CpuFamily::I8080
             | CpuFamily::I8085
             | CpuFamily::Lr35902
+            | CpuFamily::Mos6502
     ) {
         return Ok(());
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is only implemented for eZ80 ADL, Z80-family, 8080-family, and LR35902 targets; use `assemble` for hand-written AVR assembly or another supported source target",
+        "target `{}` uses CPU `{}`, but EZRA source codegen is not implemented for that CPU; use `assemble` for hand-written assembly or another supported source target",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
@@ -916,7 +917,7 @@ fn build_ezra_source(
             .to_string()
     })?;
     apply_asset_configuration(&mut program, settings);
-    ensure_ez80_codegen_supported(settings)?;
+    ensure_source_codegen_supported(settings)?;
     let assembly = emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
@@ -2205,7 +2206,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
         return Err(format!("layout is invalid:\n{message}"));
     }
     validate_layout_for_target(&settings)?;
-    ensure_ez80_codegen_supported(&settings)?;
+    ensure_source_codegen_supported(&settings)?;
     let assembly = emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
@@ -2362,8 +2363,8 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
         IrStage::Hir => print!("{}", hir.dump_text()),
         IrStage::Tbir => {
             validate_layout_for_target(&settings)?;
-            ensure_ez80_codegen_supported(&settings)?;
-            let tbir = TbirProgram::for_ez80(
+            ensure_source_codegen_supported(&settings)?;
+            let tbir = TbirProgram::lower(
                 &hir,
                 &program,
                 &assembly_options_from_layout_and_program(
@@ -2396,7 +2397,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         return Err(format!("layout is invalid:\n{message}"));
     }
     validate_layout_for_target(&settings)?;
-    ensure_ez80_codegen_supported(&settings)?;
+    ensure_source_codegen_supported(&settings)?;
     emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
@@ -2441,7 +2442,7 @@ fn check_source_with_layout(
         return Err(format!("layout is invalid:\n{message}"));
     }
     validate_layout_for_target(&settings)?;
-    ensure_ez80_codegen_supported(&settings)?;
+    ensure_source_codegen_supported(&settings)?;
     emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
