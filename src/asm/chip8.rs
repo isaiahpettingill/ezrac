@@ -29,11 +29,13 @@ impl Chip8Dialect {
 
 pub fn instruction_len(dialect: Chip8Dialect, text: &str) -> Result<usize, Diagnostic> {
     let text = normalize(text);
-    if dialect.supports_xo() && text.starts_with("long i, ") {
-        Ok(4)
-    } else {
-        Ok(2)
+    if text.starts_with("long i, ") {
+        if dialect.supports_xo() {
+            return Ok(4);
+        }
+        return Err(unsupported(dialect, &text));
     }
+    Ok(2)
 }
 
 pub fn encode_instruction(
@@ -44,6 +46,9 @@ pub fn encode_instruction(
 ) -> Result<Vec<u8>, Diagnostic> {
     let text = normalize(text);
     if let Some(addr) = text.strip_prefix("long i, ") {
+        if !dialect.supports_xo() {
+            return Err(unsupported(dialect, &text));
+        }
         let value = value(addr, labels, pc)?;
         if value > 0xFFFF {
             return Err(Diagnostic::new(format!(

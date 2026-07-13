@@ -269,7 +269,7 @@ Supported fields:
 [build].target          target triple
 [build].output          output format: bin, com, hex, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
-[build].assembler_cpu   i8080, i8085, z80, z80n, z180, or ez80
+[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, or 6502
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
@@ -379,7 +379,7 @@ ezrac assemble --target cpm-2.2-z80 --map hello.map examples/cpm-z80/hello-char.
 ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/hello-char.asm
 ```
 
-The assembler accepts the implemented 8080, 8085, Z80, Z80N, Z180, and eZ80 subset. See `docs/ez80-opcode-coverage.md` for opcode coverage notes.
+The assembler accepts the implemented 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and 6502 subsets. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
 
 ## Custom Layouts
 
@@ -401,3 +401,8 @@ Layouts define load, entry, stack, memory regions, output sections, and named sy
 ## Editor Support
 
 Syntax-highlighting assets are documented in `docs/editor-syntax.md`. The shared parser source of truth is `src/ezra.pest`.
+
+
+## Motorola 6800 assembler
+
+Standalone Motorola 6800 assembly is available with `ezrac assemble --cpu m6800 --target bare-m6800`; see [m6800-assembly.md](m6800-assembly.md) for syntax and instruction coverage.

@@ -128,7 +128,13 @@ fn game_boy_targets_compile_ezra_source_with_embedded_assets() {
 #[test]
 fn game_boy_source_examples_build_as_roms() {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gameboy");
-    for name in ["serial-hello", "background", "sprite", "input-audio"] {
+    for name in [
+        "serial-hello",
+        "background",
+        "sprite",
+        "input-audio",
+        "color-input",
+    ] {
         let source = examples.join(name).join("src/main.ezra");
         for (target, cgb_flag) in [
             ("gameboy-dmg-lr35902", 0x00),

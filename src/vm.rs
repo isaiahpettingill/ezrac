@@ -7,7 +7,7 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
-use crate::asm::{chip8 as chip8_asm, ez80 as asm_meta};
+use crate::asm::{chip8 as chip8_asm, ez80 as asm_meta, m68k as asm_m68k, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -337,8 +337,12 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::I8080 => CpuMode::I8080,
         CpuFamily::I8085 => CpuMode::I8085,
         CpuFamily::M68k => CpuMode::Z80,
-        CpuFamily::Lr35902 => CpuMode::Z80,
-        CpuFamily::Chip8 | CpuFamily::SuperChip | CpuFamily::XoChip => CpuMode::Z80,
+        CpuFamily::Lr35902
+        | CpuFamily::M6800
+        | CpuFamily::Mos6502
+        | CpuFamily::Chip8
+        | CpuFamily::SuperChip
+        | CpuFamily::XoChip => CpuMode::Z80,
     }
 }
 
@@ -898,6 +902,16 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     }
     if let Some(dialect) = chip8_dialect(cpu) {
         return chip8_asm::instruction_len(dialect, text);
+    } else if cpu == AssemblerCpu::M6800 {
+        return m6800::instruction_len(text)?.ok_or_else(|| {
+            Diagnostic::new(format!(
+                "assembler does not support M6800 instruction `{text}`"
+            ))
+        });
+    } else if cpu == AssemblerCpu::M68k {
+        return asm_m68k::instruction_len(text);
+    } else if cpu == AssemblerCpu::Mos6502 {
+        return crate::asm::mos6502::instruction_len(text);
     }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
@@ -917,6 +931,19 @@ fn emit_instruction(
         bytes.extend(encode_lr35902(text, labels, pc, true)?);
     } else if let Some(dialect) = chip8_dialect(cpu) {
         bytes.extend(chip8_asm::encode_instruction(dialect, text, labels, pc)?);
+    } else if cpu == AssemblerCpu::M6800 {
+        let Some(encoded) = m6800::emit_instruction(text, labels, pc)? else {
+            return Err(Diagnostic::new(format!(
+                "assembler does not support M6800 instruction `{text}`"
+            )));
+        };
+        bytes.extend(encoded);
+    } else if cpu == AssemblerCpu::M68k {
+        bytes.extend(asm_m68k::encode(text, labels, pc, true)?);
+    } else if cpu == AssemblerCpu::Mos6502 {
+        bytes.extend(crate::asm::mos6502::encode_instruction(
+            text, labels, pc, true,
+        )?);
     } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
@@ -1369,7 +1396,7 @@ fn push16(bytes: &mut Vec<u8>, value: u32) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
+pub(crate) fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
     let next_pc = (pc + 2) & 0xFF_FFFF;
     let offset = target as i64 - next_pc as i64;
     if !(-128..=127).contains(&offset) {
@@ -1407,7 +1434,7 @@ fn looks_like_label_ref(text: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
 }
 
-fn parse_number(text: &str) -> Result<u32, Diagnostic> {
+pub(crate) fn parse_number(text: &str) -> Result<u32, Diagnostic> {
     let text = text.trim().trim_end_matches(',');
     if let Some(hex) = text.strip_suffix('h') {
         u32::from_str_radix(hex, 16)

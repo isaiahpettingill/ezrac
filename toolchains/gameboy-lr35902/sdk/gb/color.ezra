@@ -1,0 +1,36 @@
+// Game Boy Color palette helpers. Palette data uses native little-endian CGB
+// RGB555 entries: two bytes per color, four colors per palette.
+
+// Writes eight bytes from HL to the selected CGB palette data register.
+fn write_palette_bytes() {
+    asm volatile {
+        "ld b, 8"
+        ".gb_color_write_palette_bytes:"
+        "ld a, (hl+)"
+        "ldh (c), a"
+        "dec b"
+        "jr nz, .gb_color_write_palette_bytes"
+    }
+}
+
+// Copies four RGB555 colors into CGB background palette zero.
+// Passing an embedded 8-byte asset is the usual pattern:
+// color.set_background_palette0(&palette)
+pub fn set_background_palette0(source: ptr<u8>) {
+    asm volatile {
+        "ld a, 80h"
+        "ldh (68h), a"
+        "ld c, 69h"
+        "call _write_palette_bytes"
+    }
+}
+
+// Copies four RGB555 colors into CGB object/sprite palette zero.
+pub fn set_sprite_palette0(source: ptr<u8>) {
+    asm volatile {
+        "ld a, 80h"
+        "ldh (6Ah), a"
+        "ld c, 6Bh"
+        "call _write_palette_bytes"
+    }
+}
