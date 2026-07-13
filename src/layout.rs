@@ -82,6 +82,53 @@ pub struct Layout {
 }
 
 impl Layout {
+    pub fn bare_m68k() -> Self {
+        Self {
+            name: "bare_m68k".to_owned(),
+            load: Address24::new(0x000100),
+            entry: Address24::new(0x000100),
+            stack: Address24::new(0xFF0000),
+            regions: vec![
+                region(
+                    "code",
+                    0x000100,
+                    0x03FFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x040000, 0x07FFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x080000,
+                    0x0FFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0x100000, 0x1FFFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0x200000,
+                    0x20FFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xFE0000,
+                    0xFF0000,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: bare_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x000100)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x000100)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x000100)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xFF0000)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x080000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x040000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x100000)),
+            ],
+        }
+    }
+
     pub fn bare_6502() -> Self {
         Self {
             name: "bare_6502".to_owned(),

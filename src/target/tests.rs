@@ -120,14 +120,17 @@ fn ez180n_targets_default_to_gaem_output() {
     assert_eq!(target.output_format.extension(), "gaem");
 }
 
-#[test]
 #[cfg(feature = "m68k")]
-fn rejects_cpus_without_target_profiles_for_now() {
-    let error = resolve_target_profile(Some("sega-genesis-m68k")).unwrap_err();
-    assert!(
-        error.contains("no target profile is implemented"),
-        "{error}"
-    );
+#[test]
+fn resolves_generic_bare_m68k_target() {
+    let profile = resolve_target_profile(Some("generic-m68k-bare")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::M68k);
+    assert_eq!(profile.memory.pointer_width_bits, 24);
+    assert_eq!(profile.memory.address_width_bits, 24);
+    assert_eq!(profile.output_format, OutputFormat::RawBin);
+    assert!(!profile.default_sdk_symbols);
+    assert!(!profile.supports_port_io());
 }
 
 #[test]

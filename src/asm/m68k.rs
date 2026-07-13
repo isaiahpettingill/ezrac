@@ -151,6 +151,11 @@ fn encode_words(
             ea(&ops[1], labels, pc, resolve)?,
             imm(&ops[0], labels, pc, resolve)?,
         )),
+        "eor" => Ok(a::eor(
+            dreg(&ops[0])?,
+            sz.unwrap_or(Size::Word),
+            ea(&ops[1], labels, pc, resolve)?,
+        )),
         "cmpi" => Ok(a::cmpi(
             sz.unwrap_or(Size::Word),
             ea(&ops[1], labels, pc, resolve)?,
@@ -171,6 +176,14 @@ fn encode_words(
         "divu" => Ok(a::divu(dreg(&ops[1])?, ea(&ops[0], labels, pc, resolve)?)),
         "divs" => Ok(a::divs(dreg(&ops[1])?, ea(&ops[0], labels, pc, resolve)?)),
         "chk" => Ok(a::chk(dreg(&ops[1])?, ea(&ops[0], labels, pc, resolve)?)),
+        "lsl" | "lsr" | "asl" | "asr" => w1(shift(
+            op.as_str(),
+            sz.unwrap_or(Size::Word),
+            &ops,
+            labels,
+            pc,
+            resolve,
+        )?),
         _ if op.starts_with('b') => Ok(a::bcc(
             cond(&op[1..])?,
             branch_disp(&ops, pc, labels, resolve)?,
@@ -185,6 +198,40 @@ fn encode_words(
             "test assembler does not support 68000 instruction `{text}`"
         ))),
     }
+}
+
+fn shift(
+    op: &str,
+    size: Size,
+    operands: &[String],
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<u16, Diagnostic> {
+    if operands.len() != 2 {
+        return Err(Diagnostic::new(format!("invalid 68000 {op} operands")));
+    }
+    let count = operands[0].trim();
+    let (count, register_count) = if let Some(value) = count.strip_prefix('#') {
+        let value = val(value, labels, pc, resolve)?;
+        if !(1..=8).contains(&value) {
+            return Err(Diagnostic::new("68000 shift count must be in 1..8"));
+        }
+        (if value == 8 { 0 } else { value as u16 }, false)
+    } else {
+        (u16::from(dreg(count)?), true)
+    };
+    let destination = u16::from(dreg(&operands[1])?);
+    let direction = if op.ends_with('l') {
+        Direction::Left
+    } else {
+        Direction::Right
+    };
+    Ok(if op.starts_with("ls") {
+        a::lsr(count, direction, size, register_count, destination)
+    } else {
+        a::asr(count, direction, size, register_count, destination)
+    })
 }
 struct Split<'a> {
     size: Option<Size>,
@@ -356,6 +403,26 @@ fn two_ea(
     pc: u32,
     r: bool,
 ) -> Result<Vec<u16>, Diagnostic> {
+    // m68000-rs rejects register-to-register forms for these otherwise valid
+    // instructions. They have a compact, fixed encoding on the 68000.
+    if let (Ok(source), Ok(destination)) = (dreg(&o[0]), dreg(&o[1])) {
+        let base = match op {
+            "add" => 0xD000,
+            "sub" => 0x9000,
+            "and" => 0xC000,
+            "or" => 0x8000,
+            "cmp" => 0xB000,
+            _ => unreachable!(),
+        };
+        let size_bits = match sz {
+            Size::Byte => 0x0000,
+            Size::Word => 0x0040,
+            Size::Long => 0x0080,
+        };
+        return Ok(vec![
+            base | (u16::from(destination) << 9) | size_bits | u16::from(source),
+        ]);
+    }
     if let Ok(d) = dreg(&o[1]) {
         let am = ea(&o[0], l, pc, r)?;
         return Ok(match op {

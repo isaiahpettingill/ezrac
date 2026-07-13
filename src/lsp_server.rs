@@ -1953,6 +1953,8 @@ const DOCUMENTED_TARGETS: &[&str] = &[
     "bare-i8080",
     "bare-i8085",
     "bare-ez80",
+    #[cfg(feature = "m68k")]
+    "generic-m68k-bare",
 ];
 
 #[cfg(test)]

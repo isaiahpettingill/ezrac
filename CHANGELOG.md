@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.22
+
+- Added the feature-gated `generic-m68k-bare` source target with a 24-bit layout and raw binary output.
+- Added M68k lowering for scalar and 24-bit values, pointers, arrays, structs, strings, memory helpers, control flow, calls, and inline assembly.
+- Expanded the M68000 assembler with register XOR and arithmetic/logical shift instructions.
+
 ## 0.1.21
 
 - Added standalone assemblers for MOS 6502, M6800, M68000, CHIP-8/SUPER-CHIP/XO-CHIP, and AVR targets.
