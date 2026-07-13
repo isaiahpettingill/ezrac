@@ -260,19 +260,19 @@ fn ea(s: &str, l: &HashMap<String, u32>, pc: u32, r: bool) -> Result<AM, Diagnos
     }
 }
 fn val(s: &str, l: &HashMap<String, u32>, _pc: u32, r: bool) -> Result<u32, Diagnostic> {
-    let s = s.trim().trim_start_matches('#').trim_start_matches('$');
+    let s = s.trim().trim_start_matches('#');
     if let Some(v) = l.get(s) {
         return Ok(*v);
     }
     if !r && s.chars().any(|c| c.is_alphabetic() || c == '_') {
         return Ok(0);
     }
-    if let Some(h) = s.strip_prefix("0x") {
+    if let Some(h) = s.strip_prefix('$') {
+        u32::from_str_radix(h, 16)
+    } else if let Some(h) = s.strip_prefix("0x") {
         u32::from_str_radix(h, 16)
     } else if s.ends_with('h') {
         u32::from_str_radix(&s[..s.len() - 1], 16)
-    } else if s.chars().all(|c| c.is_ascii_hexdigit()) && s.starts_with('$') {
-        u32::from_str_radix(s, 16)
     } else {
         s.parse()
     }

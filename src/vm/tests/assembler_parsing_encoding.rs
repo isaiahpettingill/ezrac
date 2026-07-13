@@ -1,4 +1,5 @@
 use super::*;
+use crate::target::parse_target_triple;
 
 #[test]
 fn z80_assembler_uses_16_bit_absolute_branches() {
@@ -1270,6 +1271,7 @@ fn m68k_assembler_has_distinct_cpu_mode_and_golden_encodings() {
         ("rts", &[0x4E, 0x75]),
         ("moveq #7, d0", &[0x70, 0x07]),
         ("move.w #1234h, d0", &[0x30, 0x3C, 0x12, 0x34]),
+        ("move.w #$1234, d0", &[0x30, 0x3C, 0x12, 0x34]),
         ("move.l d0, (a0)", &[0x20, 0x80]),
         ("lea 1234h, a0", &[0x41, 0xF8, 0x12, 0x34]),
         ("addq.w #1, d0", &[0x52, 0x40]),
@@ -1302,5 +1304,50 @@ fn m68k_assembler_resolves_labels_and_rejects_z80_aliasing() {
     assert!(
         error.message.contains("68000") || error.message.contains("m68k"),
         "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn mos6502_assembler_encodes_common_addressing_modes() {
+    let bytes = assemble_subset_with_symbols_at(
+        AssemblerCpu::Mos6502,
+        "start:\nlda #01h\nsta $0200\nldx #$05\nloop:\ndex\nbne loop\njmp (1234h)\n",
+        0xC000,
+    )
+    .unwrap();
+    assert_eq!(
+        bytes.bytes,
+        [
+            0xA9, 0x01, 0x8D, 0x00, 0x02, 0xA2, 0x05, 0xCA, 0xD0, 0xFD, 0x6C, 0x34, 0x12,
+        ]
+    );
+}
+
+#[test]
+fn mos6502_assembler_sizes_decimal_immediates() {
+    let bytes = assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, "lda #1\n", 0xC000).unwrap();
+
+    assert_eq!(bytes.bytes, [0xA9, 0x01]);
+}
+
+#[test]
+fn mos6502_assembler_keeps_label_operands_absolute() {
+    let bytes =
+        assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, "label:\nnop\nlda label\n", 0)
+            .unwrap();
+
+    assert_eq!(bytes.bytes, [0xEA, 0xAD, 0x00, 0x00]);
+}
+
+#[test]
+fn mos6502_is_parsed_as_own_assembler_cpu_family() {
+    assert_eq!(AssemblerCpu::parse("6502").unwrap(), AssemblerCpu::Mos6502);
+    assert_eq!(
+        AssemblerCpu::parse("mos6502").unwrap(),
+        AssemblerCpu::Mos6502
+    );
+    assert_eq!(
+        parse_target_triple("c64-6502-bare").unwrap().cpu,
+        CpuFamily::Mos6502
     );
 }
