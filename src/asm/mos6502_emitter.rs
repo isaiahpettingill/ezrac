@@ -52,6 +52,7 @@ struct Emitter {
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
+    function_ram_bases: Vec<u32>,
     r0: Storage,
     r1: Storage,
     r2: Storage,
@@ -70,6 +71,7 @@ impl Emitter {
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
+            function_ram_bases: Vec::new(),
             r0,
             r1,
             r2,
@@ -160,6 +162,7 @@ impl Emitter {
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
         self.return_types.push(function.return_type.clone());
+        self.function_ram_bases.push(self.model.next_ram_address());
 
         if interrupt && !naked {
             self.line("    pha");
@@ -200,6 +203,7 @@ impl Emitter {
 
         self.return_types.pop();
         self.return_labels.pop();
+        self.function_ram_bases.pop();
         self.scopes.pop();
         Ok(())
     }
@@ -421,7 +425,9 @@ impl Emitter {
                     self.load_constant(value, width);
                 } else {
                     let binding = self.binding(name)?;
-                    self.copy(binding.storage, self.r0, u32::from(width));
+                    let source_width = self.model.type_width(&binding.ty)?;
+                    self.copy(binding.storage, self.r0, u32::from(source_width));
+                    self.extend_result(source_width, width, type_is_signed(&binding.ty));
                 }
             }
             Expr::In(port) => {
@@ -453,16 +459,23 @@ impl Emitter {
                 self.extend_result(element_width, width, false);
             }
             Expr::Field { base, field } => {
-                let binding = self.binding(base)?;
-                let field = self.model.field(&binding.ty, field)?;
-                self.copy(
-                    Storage {
-                        address: binding.storage.address + field.offset,
-                        size: field.size,
-                    },
-                    self.r0,
-                    u32::from(width),
-                );
+                let constant_name = format!("{base}.{field}");
+                if let Some(value) = self.model.constants.get(&constant_name).copied() {
+                    self.load_constant(value, width);
+                } else {
+                    let binding = self.binding(base)?;
+                    let field = self.model.field(&binding.ty, field)?.clone();
+                    let source_width = self.model.type_width(&field.ty)?;
+                    self.copy(
+                        Storage {
+                            address: binding.storage.address + field.offset,
+                            size: field.size,
+                        },
+                        self.r0,
+                        u32::from(source_width),
+                    );
+                    self.extend_result(source_width, width, type_is_signed(&field.ty));
+                }
             }
             Expr::Access(path) => {
                 let (ty, _) = self.emit_access_address(path)?;
@@ -540,8 +553,10 @@ impl Emitter {
             }
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
-                self.copy_result_to_zp();
+                let destination = self.model.allocate(2)?;
+                self.copy(self.r0, destination, 2);
                 self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
+                self.set_zp_from_storage(POINTER_ZP, destination);
                 self.lda(self.r0.address);
                 self.line(&format!("    ldy #$00"));
                 self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
@@ -574,30 +589,24 @@ impl Emitter {
                 args.len()
             )));
         }
+        let mut evaluated_args = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let ty = &signature.params[index];
             self.emit_expr(arg, ty)?;
-            self.copy(
-                self.r0,
-                signature.argument_slots[index],
-                self.model.type_size(ty)?,
-            );
+            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            self.copy(self.r0, storage, storage.size);
+            evaluated_args.push(storage);
         }
-        let mut saved = self
-            .scopes
-            .last()
-            .map(|scope| {
-                scope
-                    .values()
-                    .map(|binding| binding.storage)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        saved.sort_by_key(|storage| storage.address);
-        saved.dedup();
-        for storage in &saved {
-            for offset in 0..storage.size {
-                self.lda(storage.address + offset);
+        for (storage, argument_slot) in evaluated_args.into_iter().zip(&signature.argument_slots) {
+            self.copy(storage, *argument_slot, storage.size);
+        }
+        let saved = self.function_ram_bases.last().map(|base| Storage {
+            address: *base,
+            size: self.model.next_ram_address() - *base,
+        });
+        if let Some(saved) = saved {
+            for offset in 0..saved.size {
+                self.lda(saved.address + offset);
                 self.line("    pha");
             }
         }
@@ -612,10 +621,10 @@ impl Emitter {
         if let Some(return_storage) = return_storage {
             self.copy(self.r0, return_storage, return_storage.size);
         }
-        for storage in saved.iter().rev() {
-            for offset in (0..storage.size).rev() {
+        if let Some(saved) = saved {
+            for offset in (0..saved.size).rev() {
                 self.line("    pla");
-                self.sta(storage.address + offset);
+                self.sta(saved.address + offset);
             }
         }
         if let Some(return_storage) = return_storage {
@@ -1208,7 +1217,12 @@ impl Emitter {
                 element_type(&self.model.resolved_type(&self.binding(name)?.ty)?)
             }
             Expr::Field { base, field } => {
-                Ok(self.model.field(&self.binding(base)?.ty, field)?.ty.clone())
+                let constant_name = format!("{base}.{field}");
+                if let Some(ty) = self.model.constant_types.get(&constant_name) {
+                    Ok(ty.clone())
+                } else {
+                    Ok(self.model.field(&self.binding(base)?.ty, field)?.ty.clone())
+                }
             }
             Expr::AddressOfIndex { name, .. } => Ok(Type::Ptr(Box::new(element_type(
                 &self.model.resolved_type(&self.binding(name)?.ty)?,
@@ -1658,11 +1672,12 @@ fn sanitize(name: &str) -> String {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mos6502"))]
 mod tests {
     use std::path::Path;
 
     use crate::{asm::AssemblyOptions, parser::parse_program, target::CpuFamily};
+    use mos6502::{cpu::CPU, instruction::Nmos6502, memory::Bus, registers::StackPointer};
 
     use super::*;
 
@@ -1684,6 +1699,72 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    struct TestBus {
+        bytes: Box<[u8; 0x1_0000]>,
+    }
+
+    impl TestBus {
+        fn new() -> Self {
+            Self {
+                bytes: Box::new([0; 0x1_0000]),
+            }
+        }
+
+        fn byte(&self, address: u16) -> u8 {
+            self.bytes[usize::from(address)]
+        }
+    }
+
+    impl Bus for TestBus {
+        fn get_byte(&mut self, address: u16) -> u8 {
+            self.bytes[usize::from(address)]
+        }
+
+        fn set_byte(&mut self, address: u16, value: u8) {
+            self.bytes[usize::from(address)] = value;
+        }
+    }
+
+    fn run(source: &str, instruction_budget: usize) -> TestBus {
+        let assembly = emit(source);
+        let assembled = crate::vm::assemble_subset_with_symbols_at(
+            crate::target::AssemblerCpu::Mos6502,
+            &assembly,
+            0x0200,
+        )
+        .unwrap();
+        let exit = u16::try_from(
+            assembled
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == "__ezra_exit")
+                .expect("emitter exit symbol")
+                .addr,
+        )
+        .unwrap();
+        let mut bus = TestBus::new();
+        for (offset, byte) in assembled.bytes.iter().copied().enumerate() {
+            bus.set_byte(0x0200 + offset as u16, byte);
+        }
+        let mut cpu = CPU::new(bus, Nmos6502);
+        cpu.registers.program_counter = 0x0200;
+        cpu.registers.stack_pointer = StackPointer(0xFF);
+        for _ in 0..instruction_budget {
+            if cpu.registers.program_counter == exit {
+                return cpu.memory;
+            }
+            assert!(
+                cpu.single_step(),
+                "6502 stopped at ${:04X}\n{assembly}",
+                cpu.registers.program_counter
+            );
+        }
+        panic!(
+            "6502 execution exceeded {instruction_budget} instructions at ${:04X}\n{assembly}",
+            cpu.registers.program_counter
+        );
     }
 
     #[test]
@@ -1784,5 +1865,186 @@ mod tests {
             0x0200,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn executes_integer_arithmetic_and_signed_comparisons() {
+        let memory = run(
+            r#"
+                volatile mmio RESULT0: ptr<u8> = 0xFF00
+                volatile mmio RESULT1: ptr<u8> = 0xFF01
+                volatile mmio RESULT2: ptr<u8> = 0xFF02
+                volatile mmio RESULT3: ptr<u8> = 0xFF03
+                fn main() {
+                    let product: u16 = (7 + 5) * 3
+                    *(RESULT0) = cast<u8>(product)
+                    *(RESULT1) = cast<u8>(product / 5)
+                    *(RESULT2) = cast<u8>(product % 5)
+                    let negative: i16 = -20
+                    *(RESULT3) = cast<u8>(negative < -3)
+                }
+            "#,
+            50_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 36);
+        assert_eq!(memory.byte(0xFF01), 7);
+        assert_eq!(memory.byte(0xFF02), 1);
+        assert_eq!(memory.byte(0xFF03), 1);
+    }
+
+    #[test]
+    fn executes_calls_and_recursion() {
+        let memory = run(
+            r#"
+                volatile mmio RESULT: ptr<u8> = 0xFF00
+                fn factorial(n: u8) -> u8 {
+                    if n <= 1 { return 1 }
+                    return n * factorial(n - 1)
+                }
+                fn main() { *(RESULT) = factorial(5) }
+            "#,
+            100_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 120);
+    }
+
+    #[test]
+    fn executes_nested_calls_without_clobbering_outer_arguments() {
+        let memory = run(
+            r#"
+                volatile mmio RESULT: ptr<u8> = 0xFF00
+                fn sum(left: u8, right: u8) -> u8 { return left + right }
+                fn main() { *(RESULT) = sum(5, sum(2, 3)) }
+            "#,
+            20_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 10);
+    }
+
+    #[test]
+    fn executes_aggregates_pointers_and_memory_builtins() {
+        let memory = run(
+            r#"
+                struct Pair { left: u8 right: u16 }
+                volatile mmio RESULT0: ptr<u8> = 0xFF00
+                volatile mmio RESULT1: ptr<u8> = 0xFF01
+                fn main() {
+                    let bytes: [u8; 4] = [1, 2, 3, 4]
+                    let copy: [u8; 4] = bytes
+                    let pair: Pair = Pair { left: copy[2], right: 0x1234 }
+                    let pair_copy: Pair = pair
+                    let pointer: ptr<u8> = &bytes[0]
+                    *(pointer + 1) = pair_copy.left + 6
+                    mem.memset(&copy[0], 0, 4)
+                    mem.memcpy(&copy[0], &bytes[0], 4)
+                    *(RESULT0) = copy[1]
+                    *(RESULT1) = cast<u8>(pair_copy.right)
+                }
+            "#,
+            100_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 9);
+        assert_eq!(memory.byte(0xFF01), 0x34);
+    }
+
+    #[test]
+    fn executes_short_circuit_boolean_expressions() {
+        let memory = run(
+            r#"
+                volatile mmio RESULT: ptr<u8> = 0xFF00
+                global calls: u8 = 0
+                fn called() -> bool { calls += 1 return true }
+                fn main() {
+                    let first: bool = false && called()
+                    let second: bool = true || called()
+                    *(RESULT) = calls
+                }
+            "#,
+            20_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 0);
+    }
+
+    #[test]
+    fn executes_wide_and_signed_arithmetic() {
+        let memory = run(
+            r#"
+                volatile mmio RESULT0: ptr<u8> = 0xFF00
+                volatile mmio RESULT1: ptr<u8> = 0xFF01
+                volatile mmio RESULT2: ptr<u8> = 0xFF02
+                volatile mmio RESULT3: ptr<u8> = 0xFF03
+                volatile mmio RESULT4: ptr<u8> = 0xFF04
+                fn main() {
+                    let wide: u24 = 0x010203 + 0x000102
+                    *(RESULT0) = cast<u8>(wide)
+                    *(RESULT1) = cast<u8>(wide >> 8)
+                    *(RESULT2) = cast<u8>(wide >> 16)
+                    let dividend: i16 = -20
+                    let divisor: i16 = 3
+                    *(RESULT3) = cast<u8>(dividend / divisor)
+                    *(RESULT4) = cast<u8>(dividend % divisor)
+                }
+            "#,
+            100_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 0x05);
+        assert_eq!(memory.byte(0xFF01), 0x03);
+        assert_eq!(memory.byte(0xFF02), 0x01);
+        assert_eq!(memory.byte(0xFF03), 0xFA);
+        assert_eq!(memory.byte(0xFF04), 0xFE);
+    }
+
+    #[test]
+    fn executes_dynamic_indexes_and_loop_control() {
+        let memory = run(
+            r#"
+                struct Point { x: u8 y: u16 }
+                volatile mmio RESULT0: ptr<u8> = 0xFF00
+                volatile mmio RESULT1: ptr<u8> = 0xFF01
+                fn main() {
+                    let points: [Point; 2] = [
+                        Point { x: 1, y: 0x0203 },
+                        Point { x: 4, y: 0x0506 }
+                    ]
+                    let index: u8 = 1
+                    let i: u8 = 0
+                    let sum: u8 = 0
+                    while i < 6 {
+                        i += 1
+                        if i == 2 { continue }
+                        if i == 5 { break }
+                        sum += i
+                    }
+                    mem.poke8(RESULT0, points[index].x)
+                    mem.poke8(RESULT1, sum)
+                }
+            "#,
+            100_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 4);
+        assert_eq!(memory.byte(0xFF01), 8);
+    }
+
+    #[test]
+    fn executes_global_embed_and_string_initialization() {
+        let memory = run(
+            r#"
+                embed data: bytes = bytes [0x11, 0x22, 0x33]
+                global values: [u8; 3] = [4, 5, 6]
+                volatile mmio RESULT0: ptr<u8> = 0xFF00
+                volatile mmio RESULT1: ptr<u8> = 0xFF01
+                volatile mmio RESULT2: ptr<u8> = 0xFF02
+                fn main() {
+                    let text: ptr<u8> = "OK"
+                    *(RESULT0) = values[1]
+                    *(RESULT1) = *(data.ptr + 1)
+                    *(RESULT2) = *text
+                }
+            "#,
+            20_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 5);
+        assert_eq!(memory.byte(0xFF01), 0x22);
+        assert_eq!(memory.byte(0xFF02), b'O');
     }
 }

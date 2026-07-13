@@ -30,3 +30,6 @@ m6800 = []
 m68k = ["dep:m68000"]
 mos6502 = []
 lsp = ["dep:lsp", "dep:serde", "dep:serde_json"]
+
+[dev-dependencies]
+mos6502 = "0.10.1"

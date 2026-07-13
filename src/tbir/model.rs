@@ -105,6 +105,10 @@ impl SemanticModel {
         self.max_address
     }
 
+    pub const fn next_ram_address(&self) -> u32 {
+        self.next_ram
+    }
+
     pub fn allocate(&mut self, size: u32) -> Result<Storage, Diagnostic> {
         let storage = allocate_from(&mut self.next_ram, size, 1, self.max_address)?;
         Ok(storage)
