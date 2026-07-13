@@ -269,3 +269,12 @@ fn cli_target_overrides_project_target() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn examples_ignore_generated_artifacts_but_not_handwritten_assembly() {
+    let gitignore =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".gitignore")).unwrap();
+
+    assert!(gitignore.contains("/examples/**/target"), "{gitignore}");
+    assert!(!gitignore.contains("/examples/**/*.asm"), "{gitignore}");
+}

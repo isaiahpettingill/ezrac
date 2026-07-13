@@ -15,6 +15,10 @@ pub fn set_address(address: u16) {
     dma_call_de(DMA_SET_DMA_ADDRESS, address)
 }
 
+pub fn set_buffer(buffer: ptr<u8>) {
+    set_address(cast<u16>(buffer))
+}
+
 pub fn reset_default() {
     set_address(DEFAULT_ADDRESS)
 }

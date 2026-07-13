@@ -1,10 +1,10 @@
 use super::*;
 
 #[test]
-fn cpm_bdos_function_2_outputs_characters_and_function_0_exits() {
+fn cpm_bdos_function_9_outputs_text_and_function_0_exits() {
     let run = run_assembly_test_with_cpu_options_at(
         CpuFamily::Z80,
-        include_str!("../../../examples/cpm-z80/hello-line.asm"),
+        include_str!("../../../examples/cpm-z80/console-output.asm"),
         &TestRunOptions {
             instruction_budget: 1_000,
             initial_ports: Vec::new(),
@@ -16,7 +16,7 @@ fn cpm_bdos_function_2_outputs_characters_and_function_0_exits() {
     .unwrap();
 
     assert!(run.halted, "{run:?}");
-    assert_eq!(run.debug_output, b"EZRA\r\n");
+    assert_eq!(run.debug_output, b"Hello from EZRA on CP/M\r\n");
     assert_eq!(run.failure, None);
 }
 

@@ -541,7 +541,7 @@ fn cpm_z80_target_uses_builtin_bdos_sdk() {
 
             fn main() {
                 bdos.console_output(65)
-                bdos.exit()
+                bdos.system_reset()
             }
         "#;
     let sdk = SdkResolver {
@@ -557,7 +557,7 @@ fn cpm_z80_target_uses_builtin_bdos_sdk() {
         matches!(decl, Declaration::Function(function) if function.name == "bdos.console_output")
     }));
     assert!(program.declarations.iter().any(|decl| {
-        matches!(decl, Declaration::Function(function) if function.name == "cpm.bdos.exit")
+        matches!(decl, Declaration::Function(function) if function.name == "cpm.bdos.system_reset")
     }));
 }
 
@@ -603,8 +603,8 @@ fn cpm_bdos_sdk_exposes_all_cpm_2_2_system_calls() {
                 bdos.read_random(0x005C)
                 bdos.write_random(0x005C)
                 bdos.compute_file_size(0x005C)
-                bdos.set_random_record(0x005C)
-                bdos.reset_drive(1)
+                bdos.populate_random_record(0x005C)
+                let reset_status: u8 = bdos.reset_drive(1)
                 bdos.access_drive(1)
                 bdos.free_drive(1)
                 bdos.write_random_with_zero_fill(0x005C)
@@ -696,6 +696,9 @@ fn cpm_z80_target_uses_builtin_console_sdk() {
     }));
     assert!(program.declarations.iter().any(|decl| {
         matches!(decl, Declaration::Function(function) if function.name == "console.key_available")
+    }));
+    assert!(program.declarations.iter().any(|decl| {
+        matches!(decl, Declaration::Function(function) if function.name == "console.read_line")
     }));
 }
 

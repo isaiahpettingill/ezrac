@@ -337,14 +337,15 @@ cargo run -- build examples/agon-mos/sdk-showcase/src/main.ezra
 Assemble a CP/M example:
 
 ```sh
-cargo run -- assemble --target cpm-2.2-z80 examples/cpm-z80/hello-char.asm
+cargo run -- build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
 Build a CP/M source example:
 
 ```sh
-cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/hello-source.ezra
-cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/file-control.ezra
+cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/console-output.ezra
+cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/line-input.ezra
+cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/file-read.ezra
 ```
 
 ## SDK Imports
@@ -375,8 +376,8 @@ Given `import device.video`, `ezrac` looks for `device/video.ezra` under each SD
 Use `assemble` for direct one-file assembly output, or `build --input-kind assembly` to route assembly through the normal target artifact layout.
 
 ```sh
-ezrac assemble --target cpm-2.2-z80 --map hello.map examples/cpm-z80/hello-char.asm
-ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/hello-char.asm
+ezrac assemble --target cpm-2.2-z80 --map console-output.map examples/cpm-z80/console-output.asm
+ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
 The assembler accepts the implemented 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and 6502 subsets. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.

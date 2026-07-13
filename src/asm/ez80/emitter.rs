@@ -225,7 +225,12 @@ pub fn emit_ez80_assembly_from_checked(
     validate_main_signature(main)?;
     validate_all_function_calls(program, &symbols.functions)?;
     let recursive_call_edges = recursive_call_edges(program, &symbols.functions);
-    validate_all_function_bodies(program, symbols.clone(), recursive_call_edges.clone())?;
+    validate_all_function_bodies(
+        program,
+        symbols.clone(),
+        options.clone(),
+        recursive_call_edges.clone(),
+    )?;
     let emitted_functions = reachable_function_names(program, &symbols);
     let cpu = options.cpu;
 
@@ -260,6 +265,9 @@ fn peephole_cleanup(assembly: &str) -> String {
     let mut previous_redundant_load = None;
 
     for line in assembly.lines() {
+        if line.trim() == "ld hl, hl" {
+            continue;
+        }
         let redundant_load = redundant_load_key(line);
         if redundant_load.is_some() && redundant_load == previous_redundant_load {
             continue;
@@ -2744,7 +2752,12 @@ impl Emitter {
         match (&source_type, &target_type) {
             (Type::Ptr(_), Type::Ptr(_)) => Ok(()),
             (Type::Ptr(_), Type::Named(name)) if name == "bool" => Ok(()),
-            (Type::Ptr(_), Type::Named(name)) if is_raw_address_type(name) => Ok(()),
+            (Type::Ptr(_), Type::Named(name))
+                if is_raw_address_type(name)
+                    || (name == "u16" && self.cpu_uses_16_bit_pointers()) =>
+            {
+                Ok(())
+            }
             (Type::Ptr(_), Type::Named(_)) => Err(Diagnostic::new(
                 "pointer-to-integer casts produce u24 or ptr24",
             )),
@@ -2754,6 +2767,10 @@ impl Emitter {
             )),
             _ => Ok(()),
         }
+    }
+
+    fn cpu_uses_16_bit_pointers(&self) -> bool {
+        is_z80_family_16bit(self.cpu)
     }
 
     fn emit_expr_to_hl(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
@@ -6320,9 +6337,10 @@ fn validate_all_function_calls(
 fn validate_all_function_bodies(
     program: &Program,
     symbols: Symbols,
+    options: AssemblyOptions,
     recursive_call_edges: HashSet<(String, String)>,
 ) -> Result<(), Diagnostic> {
-    let mut emitter = Emitter::new(symbols, AssemblyOptions::default(), recursive_call_edges);
+    let mut emitter = Emitter::new(symbols, options, recursive_call_edges);
     emitter.disable_dead_code_elimination();
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;

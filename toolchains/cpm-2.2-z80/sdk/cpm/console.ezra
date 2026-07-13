@@ -3,21 +3,22 @@ pub const CR: u8 = 13
 pub const CTRL_Z: u8 = 26
 pub const DIRECT_IO_POLL: u8 = 0xFF
 
-const SYSTEM_RESET: u8 = 0
-const CONSOLE_INPUT: u8 = 1
-const CONSOLE_OUTPUT: u8 = 2
-const DIRECT_CONSOLE_IO: u8 = 6
-const PRINT_STRING: u8 = 9
-const GET_CONSOLE_STATUS: u8 = 11
+const CONSOLE_SYSTEM_RESET: u8 = 0
+const CONSOLE_INPUT_FUNCTION: u8 = 1
+const CONSOLE_OUTPUT_FUNCTION: u8 = 2
+const CONSOLE_DIRECT_IO: u8 = 6
+const CONSOLE_PRINT_STRING: u8 = 9
+const CONSOLE_READ_BUFFER: u8 = 10
+const CONSOLE_STATUS: u8 = 11
 
-fn call(function: u8) {
+fn console_call(function: u8) {
     asm volatile(in function: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
         "ld c, {function}"
         "call 0005h"
     }
 }
 
-fn call_e(function: u8, value: u8) {
+fn console_call_e(function: u8, value: u8) {
     asm volatile(in function: u8 as reg8, in value: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
         "ld c, {function}"
         "ld e, {value}"
@@ -25,7 +26,7 @@ fn call_e(function: u8, value: u8) {
     }
 }
 
-fn call_de(function: u8, value: u16) {
+fn console_call_de(function: u8, value: u16) {
     asm volatile(in function: u8 as reg8, in value: u16 as reg16, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
         "ld c, {function}"
         "ex de, {value}"
@@ -33,7 +34,7 @@ fn call_de(function: u8, value: u16) {
     }
 }
 
-fn call_a(function: u8) -> u8 {
+fn console_call_a(function: u8) -> u8 {
     let result: u8 = 0
     asm volatile(in function: u8 as reg8, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
         "ld c, {function}"
@@ -43,7 +44,7 @@ fn call_a(function: u8) -> u8 {
     return result
 }
 
-fn call_de_a(function: u8, value: u16) -> u8 {
+fn console_call_de_a(function: u8, value: u16) -> u8 {
     let result: u8 = 0
     asm volatile(in function: u8 as reg8, in value: u16 as reg16, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
         "ld c, {function}"
@@ -55,23 +56,27 @@ fn call_de_a(function: u8, value: u16) -> u8 {
 }
 
 pub fn write(ch: u8) {
-    call_e(CONSOLE_OUTPUT, ch)
+    console_call_e(CONSOLE_OUTPUT_FUNCTION, ch)
 }
 
 pub fn read() -> u8 {
-    return call_a(CONSOLE_INPUT)
+    return console_call_a(CONSOLE_INPUT_FUNCTION)
 }
 
 pub fn try_read() -> u8 {
-    return call_de_a(DIRECT_CONSOLE_IO, cast<u16>(DIRECT_IO_POLL))
+    return console_call_de_a(CONSOLE_DIRECT_IO, cast<u16>(DIRECT_IO_POLL))
 }
 
 pub fn key_available() -> u8 {
-    return call_a(GET_CONSOLE_STATUS)
+    return console_call_a(CONSOLE_STATUS)
 }
 
 pub fn print_dollar(address: u16) {
-    call_de(PRINT_STRING, address)
+    console_call_de(CONSOLE_PRINT_STRING, address)
+}
+
+pub fn read_line(buffer: ptr<u8>) {
+    console_call_de(CONSOLE_READ_BUFFER, cast<u16>(buffer))
 }
 
 pub fn newline() {
@@ -85,5 +90,5 @@ pub fn print_line_dollar(address: u16) {
 }
 
 pub fn exit() {
-    call(SYSTEM_RESET)
+    console_call(CONSOLE_SYSTEM_RESET)
 }

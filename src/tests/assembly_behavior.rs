@@ -82,7 +82,7 @@ fn cpm_z80_examples_assemble_as_com_programs() {
     std::fs::create_dir_all(&root).unwrap();
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80");
 
-    for name in ["exit", "hello-char", "hello-line"] {
+    for name in ["console-output", "exit", "file-read", "line-input"] {
         let output = root.join(format!("{name}.com"));
         assemble_file(&AssembleOptions {
             path: examples

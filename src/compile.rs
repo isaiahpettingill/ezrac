@@ -87,9 +87,16 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
             ));
         }
     }
+    let cpu = sdk
+        .target
+        .as_deref()
+        .and_then(|target| parse_target_triple(target).ok())
+        .map(|target| target.cpu)
+        .unwrap_or(CpuFamily::Ez80);
     for diagnostic in collect_ez80_semantic_diagnostics(
         &resolved,
         AssemblyOptions {
+            cpu,
             debug_comments: options.debug_comments,
             default_sdk_symbols: options.default_sdk_symbols,
             ..AssemblyOptions::default()

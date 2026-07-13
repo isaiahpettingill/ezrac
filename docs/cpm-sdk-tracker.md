@@ -16,7 +16,7 @@ The current output format is `.com`, loaded at `0x0100` in the transient program
 - CP/M source builds exist for Z80, 8080, and 8085 target profiles.
 - Built-in SDK modules exist for `cpm.bdos`, `cpm.console`, `cpm.fcb`, and `cpm.dma`.
 - Assembly examples exist under `examples/cpm-z80`.
-- Source examples exist at `examples/cpm-z80/hello-source.ezra` and `examples/cpm-z80/file-control.ezra`.
+- Source examples for console output, line input, and FCB file reads exist under `examples/cpm-z80`.
 - The VM test harness emulates BDOS 0, 2, and 9 for basic console-output tests.
 
 ## SDK Modules
@@ -33,7 +33,8 @@ Planned module set:
 
 ## BDOS Coverage
 
-`cpm.bdos` should expose every CP/M 2.2 BDOS function 0-40:
+`cpm.bdos` exposes every standard CP/M 2.2 BDOS function: 0-37 and 40. Functions
+38 and 39 are MP/M extensions and are also available for compatible systems.
 
 | Fn | Name | SDK status | VM status |
 | ---: | --- | --- | --- |
@@ -88,7 +89,7 @@ Planned module set:
 - CR/LF newline helper: `console.newline`.
 - `$`-terminated string output: `console.print_dollar`.
 - `$`-terminated line output: `console.print_line_dollar`.
-- Buffered line input wrapper around BDOS 10: pending.
+- Buffered line input wrapper around BDOS 10: `console.read_line`.
 - Decimal/hex formatting helpers: pending.
 - Backspace/editing helpers for simple text UIs: pending.
 
@@ -101,7 +102,7 @@ Planned module set:
 - Wrap open, close, make, delete, rename, search-first, search-next.
 - Wrap sequential read/write using the current DMA address.
 - Wrap random read/write, compute-file-size, and set-random-record.
-- Provide DMA buffer setup helpers and examples: `cpm.dma` and `examples/cpm-z80/file-control.ezra` done.
+- Provide DMA buffer setup helpers and examples: `cpm.dma` and `examples/cpm-z80/file-read.ezra` done.
 - Document CP/M wildcard semantics and drive numbering.
 
 ## Runtime And Tooling Checklist
@@ -116,7 +117,7 @@ Planned module set:
 
 ## Usage Notes
 
-Normal EZRA string literals are zero-terminated. CP/M BDOS function 9 requires `$` termination. The current SDK exposes raw `u16` address wrappers for function 9; ergonomic string-literal and embed address passing is pending pointer-to-16-bit-address support.
+Normal EZRA string literals are zero-terminated. CP/M BDOS function 9 requires `$` termination. The SDK exposes raw `u16` address wrappers for function 9 and pointer-based wrappers for buffered input, FCB, and DMA operations.
 
 ```ezra
 import cpm.console
