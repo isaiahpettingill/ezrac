@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.21
+
+- Added standalone assemblers for MOS 6502, M6800, M68000, CHIP-8/SUPER-CHIP/XO-CHIP, and AVR targets.
+- Added Game Boy Color palette, input, and scrolling SDK helpers plus an interactive color example.
+- Expanded the CP/M BDOS SDK to cover all CP/M 2.2 system calls.
+- Gated processor families behind Cargo features; Intel, Z80-family, and LR35902 support remain enabled by default.
+
 ## 0.1.20
 
 - Added direct EZRA source builds for DMG `.gb` and Game Boy Color `.gbc` ROMs, with LR35902 emulator-backed tests and complete assembler verification.
