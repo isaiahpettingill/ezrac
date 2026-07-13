@@ -1,6 +1,10 @@
 use super::*;
 use std::fs;
 
+fn repository_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
 #[test]
 fn built_in_completion_modules_follow_project_target() {
     let sdk = SdkResolver {
@@ -71,6 +75,78 @@ fn completion_includes_members_of_target_sdk_modules() {
     }));
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bundled_sdk_documents_use_target_context_and_do_not_require_main() {
+    let path = repository_path("toolchains/ez180n-ez80/sdk/ez180n/console.ezra");
+    let document = OpenDocument {
+        text: fs::read_to_string(&path).unwrap(),
+        path: path.clone(),
+        version: None,
+    };
+
+    let sdk = sdk_for_path(&path).unwrap();
+    assert_eq!(sdk.target.as_deref(), Some("ez180n-ez80"));
+    assert_eq!(
+        sdk.sdk_roots,
+        vec![normalize_document_path(&repository_path(
+            "toolchains/ez180n-ez80/sdk"
+        ))]
+    );
+    let diagnostics = check_document_diagnostics(&document);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn cpm_examples_resolve_the_built_in_sdk_from_their_project_target() {
+    let path = repository_path("examples/cpm-z80/console-output.ezra");
+    let document = OpenDocument {
+        text: fs::read_to_string(&path).unwrap(),
+        path: path.clone(),
+        version: None,
+    };
+
+    let sdk = sdk_for_path(&path).unwrap();
+    assert_eq!(sdk.target.as_deref(), Some("cpm-2.2-z80"));
+    let diagnostics = check_document_diagnostics(&document);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn gameboy_examples_resolve_embeds_and_target_sdk_modules() {
+    for relative in [
+        "examples/gameboy/background/src/main.ezra",
+        "examples/gameboy/color-input/src/main.ezra",
+        "examples/gameboy/input-audio/src/main.ezra",
+        "examples/gameboy/serial-hello/src/main.ezra",
+        "examples/gameboy/sprite/src/main.ezra",
+    ] {
+        let path = repository_path(relative);
+        let document = OpenDocument {
+            text: fs::read_to_string(&path).unwrap(),
+            path,
+            version: None,
+        };
+
+        let diagnostics = check_document_diagnostics(&document);
+        assert!(diagnostics.is_empty(), "{relative}: {diagnostics:#?}");
+    }
+}
+
+#[test]
+fn bundled_gameboy_sdk_modules_are_diagnostic_clean() {
+    for module in ["audio", "color", "input", "serial", "sprites", "video"] {
+        let path = repository_path(&format!("toolchains/gameboy-lr35902/sdk/gb/{module}.ezra"));
+        let document = OpenDocument {
+            text: fs::read_to_string(&path).unwrap(),
+            path,
+            version: None,
+        };
+
+        let diagnostics = check_document_diagnostics(&document);
+        assert!(diagnostics.is_empty(), "gb.{module}: {diagnostics:#?}");
+    }
 }
 
 #[test]

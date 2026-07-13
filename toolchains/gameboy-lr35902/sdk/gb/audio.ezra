@@ -1,7 +1,7 @@
 // Game Boy APU helpers and embedded wave-table playback.
 
 pub fn enable() {
-    asm volatile {
+    asm volatile(clobber a, clobber memory) {
         "ld a, 80h"
         "ldh (26h), a"
         "ld a, 77h"
@@ -12,14 +12,14 @@ pub fn enable() {
 }
 
 pub fn disable() {
-    asm volatile {
+    asm volatile(clobber a, clobber flags, clobber memory) {
         "xor a"
         "ldh (26h), a"
     }
 }
 
 pub fn play_beep() {
-    asm volatile {
+    asm volatile(clobber a, clobber memory) {
         "ld a, 80h"
         "ldh (11h), a"
         "ld a, 0F3h"
@@ -33,7 +33,7 @@ pub fn play_beep() {
 
 // Loads 16 packed bytes (32 four-bit samples) from the embedded asset in HL.
 pub fn load_wave(samples: ptr<u8>) {
-    asm volatile {
+    asm volatile(clobber a, clobber b, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
         "xor a"
         "ldh (1Ah), a"
         "ld de, 0FF30h"
@@ -48,7 +48,7 @@ pub fn load_wave(samples: ptr<u8>) {
 }
 
 pub fn play_wave() {
-    asm volatile {
+    asm volatile(clobber a, clobber flags, clobber memory) {
         "ld a, 80h"
         "ldh (1Ah), a"
         "xor a"

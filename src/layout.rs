@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::diagnostic::Diagnostic;
 use crate::target::{
-    Address24, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR,
-    EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
+    Address24, AssemblerCpu, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
+    EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
 };
 use pest::{Parser, iterators::Pair};
 use pest_derive::Parser;
@@ -79,6 +79,72 @@ pub struct Layout {
     pub regions: Vec<Region>,
     pub sections: Vec<Section>,
     pub symbols: Vec<Symbol>,
+}
+
+pub fn default_layout_for_target(target: &str) -> Layout {
+    if target == "generic-6502-bare" {
+        Layout::bare_6502()
+    } else if target.starts_with("chip8-") || target == "vm-chip8" {
+        Layout::chip8("chip8")
+    } else if target.starts_with("schip-") || target.starts_with("superchip-") {
+        Layout::chip8("schip")
+    } else if target.starts_with("xochip-") {
+        Layout::chip8("xochip")
+    } else if let Some(cpu) = bare_target_cpu(target) {
+        match cpu {
+            AssemblerCpu::Ez80 => Layout::bare_ez80(),
+            AssemblerCpu::Mos6502 => Layout::bare_6502(),
+            AssemblerCpu::M68k => Layout::bare_m68k(),
+            _ => Layout::bare_16(cpu.as_str()),
+        }
+    } else if target.starts_with("zxspectrum-z80") {
+        Layout::zx_spectrum_z80()
+    } else if target.starts_with("gameboy-") {
+        Layout::game_boy_lr35902()
+    } else if target.starts_with("arduboy-") {
+        Layout::bare_16("arduboy_avr")
+    } else if is_ti_ce_target(target) {
+        Layout::ti_ce_ez80(target)
+    } else if is_ti_z80_target(target) {
+        Layout::ti_z80(target)
+    } else if target.starts_with("agonlight-mos-ez80") {
+        Layout::agon_light_mos()
+    } else if target.starts_with("ez180n-ez80") {
+        Layout::ez180n()
+    } else if target.starts_with("ezra-test-flat-ez80") {
+        Layout::ez80_test_flat()
+    } else if target.starts_with("ezra-test-split-ez80") {
+        Layout::ez80_test_split()
+    } else if target.split('-').any(|part| part == "m68k") {
+        Layout::bare_m68k()
+    } else if target.split('-').any(|part| part == "cpm") {
+        Layout::cpm_z80_com()
+    } else if target.split('-').any(|part| part == "z80") {
+        Layout::z80_default()
+    } else {
+        Layout::ezra_default()
+    }
+}
+
+fn bare_target_cpu(target: &str) -> Option<AssemblerCpu> {
+    let parts = target.split('-').collect::<Vec<_>>();
+    if !parts.contains(&"bare") {
+        return None;
+    }
+    parts
+        .into_iter()
+        .find_map(|part| AssemblerCpu::parse(part).ok())
+}
+
+fn is_ti_ce_target(target: &str) -> bool {
+    target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80")
+}
+
+fn is_ti_z80_target(target: &str) -> bool {
+    target.starts_with("ti83-z80")
+        || target.starts_with("ti83plus-z80")
+        || target.starts_with("ti84-z80")
+        || target.starts_with("ti84plus-z80")
 }
 
 impl Layout {

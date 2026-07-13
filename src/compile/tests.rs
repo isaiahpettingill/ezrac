@@ -26,6 +26,26 @@ fn accepts_minimal_main() {
 }
 
 #[test]
+fn diagnostics_treat_embedded_assets_as_global_values() {
+    let options = CompileOptions {
+        source: PathBuf::from("embedded.ezra"),
+        debug_comments: false,
+        default_sdk_symbols: true,
+    };
+    let diagnostics = check_source_diagnostics(
+        "embed data: bytes = bytes [1, 2]\nfn main() { let address: ptr<u8> = &data }\n",
+        &options,
+    );
+
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.message != "unknown value `data`"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn reports_missing_main() {
     let options = CompileOptions {
         source: PathBuf::from("game.ezra"),

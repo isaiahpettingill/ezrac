@@ -12,8 +12,11 @@ use crate::{
         Program, Stmt, Type,
     },
     diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
+    layout::default_layout_for_target,
     parser::parse_program,
-    target::{CpuFamily, DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple},
+    target::{
+        Address24, CpuFamily, DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple,
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +61,35 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
     sdk: &SdkResolver,
     source_overrides: &HashMap<PathBuf, String>,
 ) -> Vec<Diagnostic> {
+    check_diagnostics_with_sdk_and_overrides(source, options, sdk, source_overrides, true, true)
+}
+
+pub fn check_source_semantic_diagnostics_with_sdk_and_overrides(
+    source: &str,
+    options: &CompileOptions,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Vec<Diagnostic> {
+    check_diagnostics_with_sdk_and_overrides(source, options, sdk, source_overrides, true, false)
+}
+
+pub fn check_module_diagnostics_with_sdk_and_overrides(
+    source: &str,
+    options: &CompileOptions,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Vec<Diagnostic> {
+    check_diagnostics_with_sdk_and_overrides(source, options, sdk, source_overrides, false, false)
+}
+
+fn check_diagnostics_with_sdk_and_overrides(
+    source: &str,
+    options: &CompileOptions,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+    require_main: bool,
+    validate_codegen: bool,
+) -> Vec<Diagnostic> {
     let root = match parse_program(&options.source, source) {
         Ok(program) => program,
         Err(error) => return vec![error],
@@ -96,12 +128,12 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
     if cpu != CpuFamily::M68k {
         for diagnostic in collect_ez80_semantic_diagnostics(
             &resolved,
-            AssemblyOptions {
+            diagnostic_assembly_options(
+                sdk.target.as_deref(),
                 cpu,
-                debug_comments: options.debug_comments,
-                default_sdk_symbols: options.default_sdk_symbols,
-                ..AssemblyOptions::default()
-            },
+                options.debug_comments,
+                options.default_sdk_symbols,
+            ),
         ) {
             if !diagnostics
                 .iter()
@@ -111,7 +143,22 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
             }
         }
     }
-    if let Err(error) = check_source_with_sdk_and_overrides(source, options, sdk, source_overrides)
+    let final_error = if require_main && validate_codegen {
+        check_source_with_sdk_and_overrides(source, options, sdk, source_overrides).err()
+    } else if require_main {
+        match resolved.main_function() {
+            Some(main) => validate_main_signature(main)
+                .map_err(|error| locate_source_diagnostic(error, source, &options.source))
+                .err(),
+            None => Some(Diagnostic::at(
+                source_start_location(&options.source),
+                "missing required `fn main()`",
+            )),
+        }
+    } else {
+        None
+    };
+    if let Some(error) = final_error
         && !diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message == error.message)
@@ -119,6 +166,60 @@ pub fn check_source_diagnostics_with_sdk_and_overrides(
         diagnostics.push(error);
     }
     diagnostics
+}
+
+fn diagnostic_assembly_options(
+    target: Option<&str>,
+    cpu: CpuFamily,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+) -> AssemblyOptions {
+    let target = target.unwrap_or(DEFAULT_TARGET_TRIPLE);
+    let layout = if cpu == CpuFamily::Mos6502 {
+        crate::layout::Layout::bare_6502()
+    } else {
+        default_layout_for_target(target)
+    };
+    let symbol = |name: &str| {
+        layout
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .map(|symbol| symbol.value)
+    };
+    let is_16_bit = memory_model_for_cpu(cpu).is_some_and(|model| model.address_width_bits <= 16);
+    let ram_fallback = is_16_bit.then_some(Address24::new(0xA000));
+    let rodata_fallback = is_16_bit.then_some(Address24::new(0x8000));
+    let asset_fallback = is_16_bit.then_some(Address24::new(0xC000));
+    let low_fallback = is_16_bit.then_some(Address24::new(0));
+    let defaults = AssemblyOptions::default();
+
+    AssemblyOptions {
+        cpu,
+        debug_comments,
+        default_sdk_symbols,
+        mos_executable: layout.name == "agon_light_mos",
+        load_addr: symbol("EZRA_LOAD_ADDR").unwrap_or(layout.load),
+        entry_addr: symbol("EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
+        code_base: symbol("EZRA_CODE_BASE").unwrap_or(layout.entry),
+        stack_top: symbol("EZRA_STACK_TOP").unwrap_or(layout.stack),
+        ram_base: symbol("EZRA_RAM_BASE")
+            .or(ram_fallback)
+            .unwrap_or(defaults.ram_base),
+        vram_base: symbol("EZRA_VRAM_BASE")
+            .or(low_fallback)
+            .unwrap_or(defaults.vram_base),
+        audio_base: symbol("EZRA_AUDIO_BASE")
+            .or(low_fallback)
+            .unwrap_or(defaults.audio_base),
+        asset_base: symbol("EZRA_ASSET_BASE")
+            .or(asset_fallback)
+            .unwrap_or(defaults.asset_base),
+        rodata_base: symbol("EZRA_RODATA_BASE")
+            .or(rodata_fallback)
+            .unwrap_or(defaults.rodata_base),
+        section_bases: Vec::new(),
+    }
 }
 
 fn diagnostic_is_covered_by(existing: &Diagnostic, candidate: &Diagnostic) -> bool {
@@ -182,21 +283,12 @@ fn check_source_with_sdk_and_overrides(
         .map_err(Diagnostic::new)?
         .map(|target| target.cpu)
         .unwrap_or(CpuFamily::Ez80);
-    let mut assembly_options = AssemblyOptions {
+    let assembly_options = diagnostic_assembly_options(
+        sdk.target.as_deref(),
         cpu,
-        debug_comments: options.debug_comments,
-        default_sdk_symbols: options.default_sdk_symbols,
-        ..AssemblyOptions::default()
-    };
-    if cpu == CpuFamily::Mos6502 {
-        assembly_options.load_addr = crate::target::Address24::new(0x0200);
-        assembly_options.entry_addr = crate::target::Address24::new(0x0200);
-        assembly_options.code_base = crate::target::Address24::new(0x0200);
-        assembly_options.stack_top = crate::target::Address24::new(0x01FF);
-        assembly_options.ram_base = crate::target::Address24::new(0xA000);
-        assembly_options.rodata_base = crate::target::Address24::new(0x8000);
-        assembly_options.asset_base = crate::target::Address24::new(0xC000);
-    }
+        options.debug_comments,
+        options.default_sdk_symbols,
+    );
     let assembly = if cpu == CpuFamily::Mos6502 {
         emit_mos6502_assembly_with_options(&program, assembly_options)
     } else if cpu == CpuFamily::M68k {
