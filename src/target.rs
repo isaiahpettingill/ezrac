@@ -55,24 +55,61 @@ pub enum AssemblerCpu {
 
 impl AssemblerCpu {
     pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "i8080" | "8080" => Ok(Self::I8080),
-            "i8085" | "8085" => Ok(Self::I8085),
-            "z80" => Ok(Self::Z80),
-            "z80n" => Ok(Self::Z80N),
-            "z180" => Ok(Self::Z180),
-            "ez80" => Ok(Self::Ez80),
-            "lr35902" | "gameboy" | "gb" => Ok(Self::Lr35902),
-            "avr" | "atmega32u4" => Ok(Self::Avr),
-            "chip8" | "chip-8" => Ok(Self::Chip8),
-            "schip" | "superchip" | "super-chip" => Ok(Self::SuperChip),
-            "xochip" | "xo-chip" => Ok(Self::XoChip),
-            "m6800" | "6800" => Ok(Self::M6800),
-            "m68k" | "68000" | "m68000" => Ok(Self::M68k),
-            "6502" | "mos6502" | "m6502" => Ok(Self::Mos6502),
-            _ => Err(format!(
-                "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, m6800, m68k, chip8, schip, xochip, or avr"
-            )),
+        let cpu = match value {
+            "i8080" | "8080" => Self::I8080,
+            "i8085" | "8085" => Self::I8085,
+            "z80" => Self::Z80,
+            "z80n" => Self::Z80N,
+            "z180" => Self::Z180,
+            "ez80" => Self::Ez80,
+            "lr35902" | "gameboy" | "gb" => Self::Lr35902,
+            "avr" | "atmega32u4" => Self::Avr,
+            "chip8" | "chip-8" => Self::Chip8,
+            "schip" | "superchip" | "super-chip" => Self::SuperChip,
+            "xochip" | "xo-chip" => Self::XoChip,
+            "m6800" | "6800" => Self::M6800,
+            "m68k" | "68000" | "m68000" => Self::M68k,
+            "6502" | "mos6502" | "m6502" => Self::Mos6502,
+            _ => {
+                return Err(format!(
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, m6800, m68k, chip8, schip, xochip, or avr"
+                ));
+            }
+        };
+        if cpu.is_enabled() {
+            Ok(cpu)
+        } else {
+            Err(format!(
+                "assembler CPU `{}` requires the `{}` Cargo feature",
+                cpu.as_str(),
+                cpu.feature_name()
+            ))
+        }
+    }
+
+    pub const fn is_enabled(self) -> bool {
+        match self {
+            Self::I8080 | Self::I8085 => cfg!(feature = "intel"),
+            Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80 => cfg!(feature = "z80"),
+            Self::Lr35902 => cfg!(feature = "lr35902"),
+            Self::Avr => cfg!(feature = "avr"),
+            Self::Chip8 | Self::SuperChip | Self::XoChip => cfg!(feature = "chip8"),
+            Self::M6800 => cfg!(feature = "m6800"),
+            Self::M68k => cfg!(feature = "m68k"),
+            Self::Mos6502 => cfg!(feature = "mos6502"),
+        }
+    }
+
+    pub const fn feature_name(self) -> &'static str {
+        match self {
+            Self::I8080 | Self::I8085 => "intel",
+            Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80 => "z80",
+            Self::Lr35902 => "lr35902",
+            Self::Avr => "avr",
+            Self::Chip8 | Self::SuperChip | Self::XoChip => "chip8",
+            Self::M6800 => "m6800",
+            Self::M68k => "m68k",
+            Self::Mos6502 => "mos6502",
         }
     }
 
@@ -349,6 +386,13 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             _ => None,
         })
         .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;
+    let assembler_cpu = AssemblerCpu::from(cpu);
+    if !assembler_cpu.is_enabled() {
+        return Err(format!(
+            "target triple `{value}` requires the `{}` Cargo feature",
+            assembler_cpu.feature_name()
+        ));
+    }
     Ok(TargetTriple {
         value: value.to_owned(),
         cpu,

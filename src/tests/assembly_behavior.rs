@@ -548,6 +548,7 @@ fn cpm_z80_harness_runs_complex_assembly_fixture_and_com_format() {
 }
 
 #[test]
+#[cfg(feature = "avr")]
 fn arduboy_avr_assembly_smoke_test_writes_hex() {
     let root = temp_root("arduboy_avr_assembly");
     std::fs::create_dir_all(&root).unwrap();
@@ -577,6 +578,7 @@ fn arduboy_avr_assembly_smoke_test_writes_hex() {
 }
 
 #[test]
+#[cfg(feature = "avr")]
 fn avr_aliases_encode_their_underlying_instructions() {
     let cases = [
         ("clr r16", vec![0x00, 0x27]),
@@ -592,6 +594,7 @@ fn avr_aliases_encode_their_underlying_instructions() {
 }
 
 #[test]
+#[cfg(feature = "chip8")]
 fn chip8_family_assembly_targets_encode_dialect_opcodes() {
     let root = temp_root("assemble_chip8_family");
     std::fs::create_dir_all(&root).unwrap();
@@ -635,6 +638,7 @@ fn chip8_family_assembly_targets_encode_dialect_opcodes() {
 }
 
 #[test]
+#[cfg(feature = "chip8")]
 fn chip8_rejects_xochip_long_i_instruction() {
     let error =
         ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::Chip8, "long i, 0x1234\n", 0x0200)
@@ -644,6 +648,7 @@ fn chip8_rejects_xochip_long_i_instruction() {
 }
 
 #[test]
+#[cfg(feature = "m6800")]
 fn assemble_file_writes_m6800_raw_binary() {
     let root = temp_root("assemble_m6800_file");
     std::fs::create_dir_all(&root).unwrap();
@@ -687,6 +692,7 @@ fn assemble_file_writes_m6800_raw_binary() {
 }
 
 #[test]
+#[cfg(feature = "m6800")]
 fn m6800_rejects_non_m6800_instruction() {
     let error =
         ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::M6800, "ld a, 7Fh\n", 0x1000)
@@ -696,6 +702,7 @@ fn m6800_rejects_non_m6800_instruction() {
 }
 
 #[test]
+#[cfg(feature = "m6800")]
 fn m6800_target_rejects_ezra_source_codegen() {
     let root = temp_root("m6800_source_codegen");
     std::fs::create_dir_all(&root).unwrap();

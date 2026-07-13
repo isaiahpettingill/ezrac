@@ -1,6 +1,7 @@
 use super::*;
 
 #[test]
+#[cfg(feature = "m68k")]
 fn parses_target_triples_with_optional_versions() {
     assert_eq!(
         parse_target_triple("agonlight-console8-ez80-1.0")
@@ -108,6 +109,7 @@ fn ez180n_targets_default_to_gaem_output() {
 }
 
 #[test]
+#[cfg(feature = "m68k")]
 fn rejects_cpus_without_target_profiles_for_now() {
     let error = resolve_target_profile(Some("sega-genesis-m68k")).unwrap_err();
     assert!(
@@ -149,6 +151,7 @@ fn resolves_game_boy_assembly_targets() {
 }
 
 #[test]
+#[cfg(feature = "avr")]
 fn resolves_arduboy_avr_target_profile() {
     let profile = super::resolve_target_profile(Some("arduboy-avr")).unwrap();
     assert_eq!(profile.triple.cpu, super::CpuFamily::Avr);
@@ -157,6 +160,7 @@ fn resolves_arduboy_avr_target_profile() {
 }
 
 #[test]
+#[cfg(feature = "chip8")]
 fn resolves_chip8_family_assembly_targets() {
     for (target, cpu, bits, assembler) in [
         ("chip8-vm-chip8", CpuFamily::Chip8, 12, AssemblerCpu::Chip8),

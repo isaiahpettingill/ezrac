@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "mos6502")]
 use crate::target::parse_target_triple;
 
 #[test]
@@ -1265,6 +1266,7 @@ fn rejects_assembly_labels_outside_address_space() {
 }
 
 #[test]
+#[cfg(feature = "m68k")]
 fn m68k_assembler_has_distinct_cpu_mode_and_golden_encodings() {
     let cases: &[(&str, &[u8])] = &[
         ("nop", &[0x4E, 0x71]),
@@ -1291,6 +1293,7 @@ fn m68k_assembler_has_distinct_cpu_mode_and_golden_encodings() {
 }
 
 #[test]
+#[cfg(feature = "m68k")]
 fn m68k_assembler_resolves_labels_and_rejects_z80_aliasing() {
     let assembled = assemble_subset_with_symbols_at(
         AssemblerCpu::M68k,
@@ -1308,6 +1311,7 @@ fn m68k_assembler_resolves_labels_and_rejects_z80_aliasing() {
 }
 
 #[test]
+#[cfg(feature = "mos6502")]
 fn mos6502_assembler_encodes_common_addressing_modes() {
     let bytes = assemble_subset_with_symbols_at(
         AssemblerCpu::Mos6502,
@@ -1324,6 +1328,7 @@ fn mos6502_assembler_encodes_common_addressing_modes() {
 }
 
 #[test]
+#[cfg(feature = "mos6502")]
 fn mos6502_assembler_sizes_decimal_immediates() {
     let bytes = assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, "lda #1\n", 0xC000).unwrap();
 
@@ -1331,6 +1336,7 @@ fn mos6502_assembler_sizes_decimal_immediates() {
 }
 
 #[test]
+#[cfg(feature = "mos6502")]
 fn mos6502_assembler_keeps_label_operands_absolute() {
     let bytes =
         assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, "label:\nnop\nlda label\n", 0)
@@ -1340,6 +1346,7 @@ fn mos6502_assembler_keeps_label_operands_absolute() {
 }
 
 #[test]
+#[cfg(feature = "mos6502")]
 fn mos6502_is_parsed_as_own_assembler_cpu_family() {
     assert_eq!(AssemblerCpu::parse("6502").unwrap(), AssemblerCpu::Mos6502);
     assert_eq!(

@@ -12,7 +12,7 @@ name = "ezra"
 [dependencies]
 ez80 = "0.5.0"
 lsp = { version = "0.1.1", optional = true }
-m68000 = "0.2.3"
+m68000 = { version = "0.2.3", optional = true }
 pest = "2.8.7"
 pest_derive = "2.8.7"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
@@ -20,5 +20,13 @@ serde_json = { version = "1.0.150", optional = true }
 toml = "1.1.2"
 
 [features]
-default = []
+default = ["intel", "z80", "lr35902"]
+intel = []
+z80 = []
+lr35902 = []
+avr = []
+chip8 = []
+m6800 = []
+m68k = ["dep:m68000"]
+mos6502 = []
 lsp = ["dep:lsp", "dep:serde", "dep:serde_json"]

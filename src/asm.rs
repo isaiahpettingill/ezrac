@@ -3,6 +3,7 @@ pub mod chip8;
 pub mod ez80;
 pub mod lr35902;
 pub mod m6800;
+#[cfg(feature = "m68k")]
 pub mod m68k;
 pub mod mos6502;
 

@@ -7,7 +7,9 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
-use crate::asm::{avr, chip8 as chip8_asm, ez80 as asm_meta, m68k as asm_m68k, m6800};
+#[cfg(feature = "m68k")]
+use crate::asm::m68k as asm_m68k;
+use crate::asm::{avr, chip8 as chip8_asm, ez80 as asm_meta, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -418,6 +420,13 @@ pub fn assemble_subset_with_options_at(
     base_addr: u32,
     options: &AssemblerSourceOptions,
 ) -> Result<AssembledProgram, Diagnostic> {
+    if !cpu.is_enabled() {
+        return Err(Diagnostic::new(format!(
+            "assembler CPU `{}` requires the `{}` Cargo feature",
+            cpu.as_str(),
+            cpu.feature_name()
+        )));
+    }
     if base_addr > Address24::MAX {
         return Err(Diagnostic::new(format!(
             "assembly base address 0x{base_addr:X} is outside the 24-bit address space"
@@ -903,17 +912,22 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     }
     if cpu == AssemblerCpu::Avr {
         return avr::instruction_len(text);
-    } else if let Some(dialect) = chip8_dialect(cpu) {
+    }
+    if let Some(dialect) = chip8_dialect(cpu) {
         return chip8_asm::instruction_len(dialect, text);
-    } else if cpu == AssemblerCpu::M6800 {
+    }
+    if cpu == AssemblerCpu::M6800 {
         return m6800::instruction_len(text)?.ok_or_else(|| {
             Diagnostic::new(format!(
                 "assembler does not support M6800 instruction `{text}`"
             ))
         });
-    } else if cpu == AssemblerCpu::M68k {
+    }
+    #[cfg(feature = "m68k")]
+    if cpu == AssemblerCpu::M68k {
         return asm_m68k::instruction_len(text);
-    } else if cpu == AssemblerCpu::Mos6502 {
+    }
+    if cpu == AssemblerCpu::Mos6502 {
         return crate::asm::mos6502::instruction_len(text);
     }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
@@ -932,24 +946,37 @@ fn emit_instruction(
 ) -> Result<(), Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
         bytes.extend(encode_lr35902(text, labels, pc, true)?);
-    } else if cpu == AssemblerCpu::Avr {
+        return Ok(());
+    }
+    if cpu == AssemblerCpu::Avr {
         bytes.extend(avr::encode_instruction(text, labels, pc)?);
-    } else if let Some(dialect) = chip8_dialect(cpu) {
+        return Ok(());
+    }
+    if let Some(dialect) = chip8_dialect(cpu) {
         bytes.extend(chip8_asm::encode_instruction(dialect, text, labels, pc)?);
-    } else if cpu == AssemblerCpu::M6800 {
+        return Ok(());
+    }
+    if cpu == AssemblerCpu::M6800 {
         let Some(encoded) = m6800::emit_instruction(text, labels, pc)? else {
             return Err(Diagnostic::new(format!(
                 "assembler does not support M6800 instruction `{text}`"
             )));
         };
         bytes.extend(encoded);
-    } else if cpu == AssemblerCpu::M68k {
+        return Ok(());
+    }
+    #[cfg(feature = "m68k")]
+    if cpu == AssemblerCpu::M68k {
         bytes.extend(asm_m68k::encode(text, labels, pc, true)?);
-    } else if cpu == AssemblerCpu::Mos6502 {
+        return Ok(());
+    }
+    if cpu == AssemblerCpu::Mos6502 {
         bytes.extend(crate::asm::mos6502::encode_instruction(
             text, labels, pc, true,
         )?);
-    } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
+        return Ok(());
+    }
+    if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
     } else if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
