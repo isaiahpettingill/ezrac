@@ -1281,6 +1281,22 @@ fn mos6502_assembler_encodes_common_addressing_modes() {
 }
 
 #[test]
+fn mos6502_assembler_sizes_decimal_immediates() {
+    let bytes = assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, "lda #1\n", 0xC000).unwrap();
+
+    assert_eq!(bytes.bytes, [0xA9, 0x01]);
+}
+
+#[test]
+fn mos6502_assembler_keeps_label_operands_absolute() {
+    let bytes =
+        assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, "label:\nnop\nlda label\n", 0)
+            .unwrap();
+
+    assert_eq!(bytes.bytes, [0xEA, 0xAD, 0x00, 0x00]);
+}
+
+#[test]
 fn mos6502_is_parsed_as_own_assembler_cpu_family() {
     assert_eq!(AssemblerCpu::parse("6502").unwrap(), AssemblerCpu::Mos6502);
     assert_eq!(

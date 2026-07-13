@@ -109,7 +109,7 @@ fn parse_operand(
     if let Some(expr) = operand.strip_suffix(",x") {
         let v = value_or(expr, labels, pc, resolve, 0x100)?;
         return Ok((
-            if v <= 0xff {
+            if operand_is_numeric(expr) && v <= 0xff {
                 Mode::ZeroPageX
             } else {
                 Mode::AbsoluteX
@@ -120,7 +120,7 @@ fn parse_operand(
     if let Some(expr) = operand.strip_suffix(",y") {
         let v = value_or(expr, labels, pc, resolve, 0x100)?;
         return Ok((
-            if v <= 0xff {
+            if operand_is_numeric(expr) && v <= 0xff {
                 Mode::ZeroPageY
             } else {
                 Mode::AbsoluteY
@@ -130,13 +130,18 @@ fn parse_operand(
     }
     let v = value_or(operand, labels, pc, resolve, 0x100)?;
     Ok((
-        if v <= 0xff {
+        if operand_is_numeric(operand) && v <= 0xff {
             Mode::ZeroPage
         } else {
             Mode::Absolute
         },
         v,
     ))
+}
+
+fn operand_is_numeric(expr: &str) -> bool {
+    let expr = expr.trim();
+    expr == "$" || expr.starts_with('$') || parse_number(expr).is_ok()
 }
 
 fn value_or(
@@ -161,10 +166,10 @@ fn value_or(
     }) {
         return Ok(v);
     }
-    if resolve {
-        parse_number(expr)
-    } else {
-        Ok(unresolved)
+    match parse_number(expr) {
+        Ok(value) => Ok(value),
+        Err(_) if !resolve => Ok(unresolved),
+        Err(error) => Err(error),
     }
 }
 
