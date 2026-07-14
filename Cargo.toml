@@ -13,7 +13,7 @@ name = "ezra"
 ez80 = "0.5.0"
 mos6502 = { version = "0.10.1", optional = true }
 lsp = { version = "0.1.1", optional = true }
-m6800 = { version = "0.1.0", optional = true, git = "https://github.com/isaiahpettingill/m6800-rs.git", rev = "7c6054b65d31074a8738c7adf6b47acee2a62e5a" }
+m6800 = { version = "0.1.0", optional = true }
 m68000 = { version = "0.2.3", optional = true }
 pest = "2.8.7"
 pest_derive = "2.8.7"

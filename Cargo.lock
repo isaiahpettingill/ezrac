@@ -144,7 +144,8 @@ dependencies = [
 [[package]]
 name = "m6800"
 version = "0.1.0"
-source = "git+https://github.com/isaiahpettingill/m6800-rs.git?rev=7c6054b65d31074a8738c7adf6b47acee2a62e5a#7c6054b65d31074a8738c7adf6b47acee2a62e5a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c356adc9ac7552cde3b0a80d578a523eb34824a799c51a5a9871bd0698b60a2b"
 
 [[package]]
 name = "m68000"
