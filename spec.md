@@ -111,7 +111,7 @@ Examples of future classic Z80 targets include `cpm-2.2-z80` and `zxspectrum-z80
 
 ### 2.3 Future CPU Profiles
 
-Non-Z80 targets, such as `sega-genesis-m68k` or `appleii-m68k`, require a target-neutral middle IR and target-specific backends before they are considered supported. Their SDKs and layouts follow the same target-profile model.
+Non-Z80 targets use the target-neutral HIR and target-bound TBIR stages plus target-specific backends. MOS 6502 EZRA source compilation is implemented; AVR currently supports standalone assembly but not EZRA source code generation. Other non-Z80 source backends remain target-specific work. Their SDKs and layouts follow the same target-profile model.
 
 ---
 
@@ -2174,7 +2174,7 @@ source
   -> emulator test runner when requested
 ```
 
-The current implementation may lower directly toward eZ80 ADL assembly, but the specification requires explicit HIR and TBIR stages before treating advanced diagnostics, target-aware optimization, or additional CPU families as production quality.
+The current implementation has explicit HIR and TBIR stages before machine lowering, including the MOS 6502 source backend. Advanced diagnostics, target-aware optimization, and additional CPU-family backends remain incomplete.
 
 ### 40.1 HIR and TBIR
 

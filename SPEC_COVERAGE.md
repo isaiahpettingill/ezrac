@@ -7,7 +7,7 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 | Spec | Status | Evidence | Remaining gap |
 | --- | --- | --- | --- |
 | 1. Purpose | Implemented | CLI, compiler, assembler, layouts, SDKs, and emulator tests are integrated in `src/main.rs`. | None for the stated purpose. |
-| 2. Target and CPU model | Partial | `src/target.rs` models eZ80, Z80, Z80N, Z180, 8080, and 8085 with width checks. | Non-Z80 source backends remain #49–#66. |
+| 2. Target and CPU model | Partial | `src/target.rs` models eZ80, Z80, Z80N, Z180, 8080, 8085, MOS 6502, AVR, and other CPU families with target memory models; MOS 6502 EZRA source compilation lowers through HIR and TBIR. | AVR and several other CPU families currently support standalone assembly but not EZRA source code generation. |
 | 3. Cartridge kinds | Implemented | `src/cart.rs` and target output selection cover EZRA cartridges and target-owned formats. | Future targets may add formats. |
 | 4. Address space | Implemented | `Address24`, layout validation, section-fit, stack, and VM bounds tests enforce current address spaces. | None for current targets. |
 | 5. Cartridge header | Implemented | Header serialization and cartridge map/table tests cover fixed fields and absolute addresses. | Reserved fields remain undefined. |
@@ -29,7 +29,7 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 | 23. Ports | Implemented | Typed declarations, input/output, target symbols, ordering, and emulator metadata are tested. | Availability remains target-owned. |
 | 24–25. Operators/casts | Implemented | Constant/runtime arithmetic, bitwise, shifts, comparisons, signed behavior, pointers, and casts are tested. | None known. |
 | 26. Control flow | Implemented | `if`, `while`, `loop`, breaks, continues, returns, dead branches, and reachability are tested. | More TBIR optimization remains #15–#16. |
-| 27–29. Functions and ABI | Implemented | Parameters, spills, recursion, returns, frames, inline/naked functions, and extern calls are tested on current backends. | Future CPUs need ABIs. |
+| 27–29. Functions and ABI | Implemented | Parameters, spills, recursion, returns, frames, inline/naked functions, and extern calls are tested on current source backends, including MOS 6502. | CPUs without source code generation, such as AVR, need source backends and ABIs. |
 | 30. Inline assembly | Implemented | Operand classes, substitution, outputs, clobbers, effects, naked restrictions, CPU gating, and execution are tested. | Exhaustive eZ80 syntax remains #4. |
 | 31. Interrupts | Implemented | Signatures, calls, prologues/epilogues, `reti`, and invalid forms are tested. | Vector installation belongs in SDKs. |
 | 32–34. Runtime/SDKs | Partial | Agon, TI, CP/M, Spectrum, and harness SDK modules have build/execution coverage. | Complete platform APIs remain #9, #23, #38, #48, #56, and #58. |
@@ -38,7 +38,7 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 | 37. Runtime helpers | Implemented | Arithmetic, memcpy, memset, signed operations, debug, and test helpers execute in VM tests. | Future backends need helper ABIs. |
 | 38. Assembly output | Partial | Generated/standalone assembly, CPU modes, global section linking, includes, maps, and formats are tested. | Exhaustive UM0077 enumeration remains #4. |
 | 39. Test runner | Partial | The architecture-selectable runner supports eZ80, Z80, Z80N, Z180, i8080, and i8085 through the `ez80` backend, with budgets, memory, ports, traps, stacks, CP/M BDOS basics, and CI status. | Add emulator backends for non-`ez80` CPU families as targets are implemented. |
-| 40. Compiler pipeline | Partial | AST → HIR → TBIR → assembly → assembler → layout is explicit and dumpable with safe optimization tests. | New backends and advanced passes remain #14–#16 and #49–#66. |
+| 40. Compiler pipeline | Partial | AST → HIR → TBIR → assembly → assembler → layout is explicit and dumpable; MOS 6502 source compilation also uses the HIR/TBIR path. Safe TBIR optimization tests cover the implemented subset. | Advanced passes remain #14–#16; source backends remain for CPU families such as AVR. |
 | 41. Diagnostics | Partial | Structured spans, UTF-16 LSP ranges, cross-file multi-reference errors, import/include provenance, and CLI locations are tested. | AST-native semantic spans and full multi-error type checking remain. |
 | 42. Grammar sketch | Implemented | `src/ezra.pest` is the executable grammar with parser tests. | Prose must follow grammar changes. |
 | 43. Design rules | Partial | Explicit widths, target profiles, strict casts, SDK ownership, readable assembly, and deterministic tests are enforced. | Future backends and broader SDKs remain incomplete. |

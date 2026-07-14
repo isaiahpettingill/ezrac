@@ -104,9 +104,8 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/real-core-tests.md` explains how to run the opt-in `play96` example suites against real libretro cores.
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
-- `REMAINING_WORK.md` tracks known gaps and follow-up work.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
-- The main source target is Agon Light MOS on eZ80 ADL. Additional eZ80, Z80-family, 8080-family, TI, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
+- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports MOS 6502 targets; AVR currently supports hand-written assembly through `assemble`, not EZRA source code generation. Additional eZ80, Z80-family, 8080-family, TI, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
 - Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.
