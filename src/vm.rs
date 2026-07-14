@@ -10,11 +10,13 @@ use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 #[cfg(feature = "m6800")]
 use ::m6800::{Cpu as M6800Cpu, MemoryBus as M6800MemoryBus};
 
+use crate::asm::mos6502::Mos6502Variant;
+
 #[cfg(feature = "m68k")]
 use crate::asm::m68k as asm_m68k;
 #[cfg(feature = "tms9900")]
 use crate::asm::tms9900;
-use crate::asm::{avr, chip8 as chip8_asm, ez80 as asm_meta, m6800};
+use crate::asm::{avr, ez80 as asm_meta, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -88,6 +90,7 @@ pub struct TestRunner {
 
 impl Default for TestRunner {
     fn default() -> Self {
+        #[allow(unused_mut)]
         let mut backends: Vec<Box<dyn EmulatorBackend>> = vec![Box::new(Ez80Emulator)];
 
         #[cfg(feature = "m6800")]
@@ -420,8 +423,7 @@ fn address_width_for_family(cpu_family: CpuFamily) -> u8 {
 
 fn address_limit_for_family(cpu_family: CpuFamily) -> u32 {
     match cpu_family {
-        CpuFamily::Ez80 => Address24::MAX,
-        CpuFamily::Chip8 | CpuFamily::SuperChip => 0x0FFF,
+        CpuFamily::Ez80 | CpuFamily::Wdc65C816 => Address24::MAX,
         _ => u16::MAX as u32,
     }
 }
@@ -460,10 +462,10 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::Lr35902
         | CpuFamily::M6800
         | CpuFamily::Mos6502
-        | CpuFamily::Tms9900
-        | CpuFamily::Chip8
-        | CpuFamily::SuperChip
-        | CpuFamily::XoChip => CpuMode::Z80,
+        | CpuFamily::Cmos65C02
+        | CpuFamily::Wdc65C816
+        | CpuFamily::Ricoh2A03
+        | CpuFamily::Tms9900 => CpuMode::Z80,
         CpuFamily::Avr => CpuMode::Z80,
     }
 }
@@ -1032,9 +1034,6 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Avr {
         return avr::instruction_len(text);
     }
-    if let Some(dialect) = chip8_dialect(cpu) {
-        return chip8_asm::instruction_len(dialect, text);
-    }
     if cpu == AssemblerCpu::M6800 {
         return m6800::instruction_len(text)?.ok_or_else(|| {
             Diagnostic::new(format!(
@@ -1046,8 +1045,8 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::M68k {
         return asm_m68k::instruction_len(text);
     }
-    if cpu == AssemblerCpu::Mos6502 {
-        return crate::asm::mos6502::instruction_len(text);
+    if let Some(variant) = mos6502_variant(cpu) {
+        return crate::asm::mos6502::instruction_len_for_variant(text, variant);
     }
     #[cfg(feature = "tms9900")]
     if cpu == AssemblerCpu::Tms9900 {
@@ -1079,10 +1078,6 @@ fn emit_instruction(
         bytes.extend(avr::encode_instruction(text, labels, pc)?);
         return Ok(());
     }
-    if let Some(dialect) = chip8_dialect(cpu) {
-        bytes.extend(chip8_asm::encode_instruction(dialect, text, labels, pc)?);
-        return Ok(());
-    }
     if cpu == AssemblerCpu::M6800 {
         let Some(encoded) = m6800::emit_instruction(text, labels, pc)? else {
             return Err(Diagnostic::new(format!(
@@ -1097,9 +1092,9 @@ fn emit_instruction(
         bytes.extend(asm_m68k::encode(text, labels, pc, true)?);
         return Ok(());
     }
-    if cpu == AssemblerCpu::Mos6502 {
-        bytes.extend(crate::asm::mos6502::encode_instruction(
-            text, labels, pc, true,
+    if let Some(variant) = mos6502_variant(cpu) {
+        bytes.extend(crate::asm::mos6502::encode_instruction_for_variant(
+            text, labels, pc, true, variant,
         )?);
         return Ok(());
     }
@@ -1176,11 +1171,12 @@ fn z80_imm16_load(cpu: AssemblerCpu, text: &str) -> Option<(u8, &str)> {
     Some((opcode, value))
 }
 
-fn chip8_dialect(cpu: AssemblerCpu) -> Option<chip8_asm::Chip8Dialect> {
+fn mos6502_variant(cpu: AssemblerCpu) -> Option<Mos6502Variant> {
     match cpu {
-        AssemblerCpu::Chip8 => Some(chip8_asm::Chip8Dialect::Chip8),
-        AssemblerCpu::SuperChip => Some(chip8_asm::Chip8Dialect::SuperChip),
-        AssemblerCpu::XoChip => Some(chip8_asm::Chip8Dialect::XoChip),
+        AssemblerCpu::Mos6502 => Some(Mos6502Variant::Nmos6502),
+        AssemblerCpu::Cmos65C02 => Some(Mos6502Variant::Cmos65C02),
+        AssemblerCpu::Wdc65C816 => Some(Mos6502Variant::Wdc65C816),
+        AssemblerCpu::Ricoh2A03 => Some(Mos6502Variant::Ricoh2A03),
         _ => None,
     }
 }

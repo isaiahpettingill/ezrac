@@ -1182,10 +1182,6 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
         || settings.target.triple.value.starts_with("zxspectrum-z80")
         || settings.target.triple.value.starts_with("gameboy-")
         || settings.target.triple.value.starts_with("commodore64-6502")
-        || matches!(
-            settings.target.triple.cpu,
-            CpuFamily::Chip8 | CpuFamily::SuperChip | CpuFamily::XoChip
-        )
         || is_ti_ce_target(&settings.target.triple.value)
         || is_ti_z80_target(&settings.target.triple.value)
 }
@@ -1662,7 +1658,6 @@ fn assembly_feature_enabled(feature: &str) -> bool {
         "z80" => cfg!(feature = "z80"),
         "lr35902" => cfg!(feature = "lr35902"),
         "avr" => cfg!(feature = "avr"),
-        "chip8" => cfg!(feature = "chip8"),
         "m6800" => cfg!(feature = "m6800"),
         "m68k" => cfg!(feature = "m68k"),
         "mos6502" => cfg!(feature = "mos6502"),
@@ -3354,30 +3349,6 @@ fn print_targets() {
             output: "gb",
             sdk: "vendored asm/gb",
             status: "EZRA source and assembly CGB target",
-        },
-        TargetRow {
-            triple: "chip8-vm-chip8",
-            cpu: "chip8",
-            address_width_bits: 12,
-            output: "bin",
-            sdk: "none",
-            status: "assembly-only CHIP-8 target",
-        },
-        TargetRow {
-            triple: "schip-vm-schip",
-            cpu: "schip",
-            address_width_bits: 12,
-            output: "bin",
-            sdk: "none",
-            status: "assembly-only SUPER-CHIP target",
-        },
-        TargetRow {
-            triple: "xochip-vm-xochip",
-            cpu: "xochip",
-            address_width_bits: 16,
-            output: "bin",
-            sdk: "none",
-            status: "assembly-only XO-CHIP target",
         },
         TargetRow {
             triple: "ti83-z80",

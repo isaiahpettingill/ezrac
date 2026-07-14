@@ -1,5 +1,4 @@
 pub mod avr;
-pub mod chip8;
 pub mod ez80;
 pub mod lr35902;
 pub mod m6800;

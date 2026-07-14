@@ -6,9 +6,9 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, TMS9900, AVR, CHIP-8 variants, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, and M68k requires `m68k`.
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, TMS9900, AVR, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, and M68k requires `m68k`.
 
-Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have EZRA source code generation; AVR, CHIP-8-family, M6800, and TMS9900 targets are currently assembly-only through the public CLI. MOS 6502 and optional M68k targets have target-specific EZRA source emitters.
+Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have EZRA source code generation; AVR, M6800, and TMS9900 targets are currently assembly-only through the public CLI. MOS 6502 and optional M68k targets have target-specific EZRA source emitters.
 
 ## Support Levels
 
