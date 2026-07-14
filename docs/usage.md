@@ -276,7 +276,10 @@ Supported fields:
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
+[lsp].mode              application (default) or library
 ```
+
+`[lsp].mode = "library"` makes the language server type-check the configured source and its SDK imports without requiring `fn main()`. It does not add shared-library output; `build` remains executable-only.
 
 The parser also accepts a `[cartridge]` table with `layout` and optional `manifest`, but cartridge packaging is still evolving.
 

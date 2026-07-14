@@ -71,6 +71,9 @@ file = "layouts/custom.ezralayout"
 
 [sdk]
 paths = ["sdk"]
+
+[lsp]
+mode = "application" # or "library" for an importable SDK/module project
 ```
 
 - `[build].target` selects the target profile. `agonlight-mos-ez80` builds a normal Agon MOS executable.
@@ -79,6 +82,7 @@ paths = ["sdk"]
 - `[test].target` selects the target used by project test discovery. `ezrac test` discovers `tests/**/*.ezra` in deterministic path order, builds artifacts under `target/<target>/`, and runs each test. CLI `--target` overrides `[test].target`, which overrides `[build].target`.
 - `[layout].file` points at a custom layout file.
 - `[sdk].paths` adds project SDK source roots in addition to bundled target SDKs.
+- `[lsp].mode = "library"` checks the configured source and imports as a library module without requiring `fn main()`. Library mode supports LSP diagnostics and SDK imports, but `build` still creates executables only.
 
 ## Agon Light MOS
 
