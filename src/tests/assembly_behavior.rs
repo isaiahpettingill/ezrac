@@ -698,6 +698,43 @@ fn assemble_file_writes_m6800_raw_binary() {
 }
 
 #[test]
+#[cfg(feature = "tms9900")]
+fn assemble_file_writes_tms9900_raw_binary() {
+    let root = temp_root("assemble_tms9900_file");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.asm");
+    let output_path = root.join("main.bin");
+    std::fs::write(
+        &source_path,
+        r#"
+            start:
+                li r1, >1234
+                mov r1, @>8c00
+                jmp start
+        "#,
+    )
+    .unwrap();
+
+    assemble_file(&AssembleOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        output: Some(output_path.to_string_lossy().into_owned()),
+        base_addr: Some(0xa000),
+        assembler_cpu: None,
+        layout_path: None,
+        map_path: None,
+        target: Some("bare-tms9900".to_owned()),
+    })
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        [0x02, 0x01, 0x12, 0x34, 0xc0, 0x60, 0x8c, 0x00, 0x10, 0xfb]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 #[cfg(feature = "m6800")]
 fn m6800_rejects_non_m6800_instruction() {
     let error =

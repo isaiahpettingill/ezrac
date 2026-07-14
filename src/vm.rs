@@ -9,6 +9,8 @@ use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
 #[cfg(feature = "m68k")]
 use crate::asm::m68k as asm_m68k;
+#[cfg(feature = "tms9900")]
+use crate::asm::tms9900;
 use crate::asm::{avr, chip8 as chip8_asm, ez80 as asm_meta, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
@@ -342,6 +344,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::Lr35902
         | CpuFamily::M6800
         | CpuFamily::Mos6502
+        | CpuFamily::Tms9900
         | CpuFamily::Chip8
         | CpuFamily::SuperChip
         | CpuFamily::XoChip => CpuMode::Z80,
@@ -930,6 +933,10 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Mos6502 {
         return crate::asm::mos6502::instruction_len(text);
     }
+    #[cfg(feature = "tms9900")]
+    if cpu == AssemblerCpu::Tms9900 {
+        return tms9900::instruction_len(text);
+    }
     if let Some((opcode, _)) = z80_imm16_load(cpu, text) {
         let prefix_len = usize::from(opcode == 0xDD || opcode == 0xFD);
         return Ok(prefix_len + 3);
@@ -978,6 +985,11 @@ fn emit_instruction(
         bytes.extend(crate::asm::mos6502::encode_instruction(
             text, labels, pc, true,
         )?);
+        return Ok(());
+    }
+    #[cfg(feature = "tms9900")]
+    if cpu == AssemblerCpu::Tms9900 {
+        bytes.extend(tms9900::encode_instruction(text, labels, pc)?);
         return Ok(());
     }
     if let Some((opcode, value)) = z80_imm16_load(cpu, text) {

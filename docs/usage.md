@@ -119,7 +119,7 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, and `.8080` are treated as assembly.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `chip8`, `m6800`, `m68k`, or `mos6502` (for example, `cargo run --features avr -- assemble --cpu avr program.asm`). AVR support is assembly-only; its implemented assembler subset includes register/immediate ALU operations, branches, `in`/`out`, and `rjmp`/`rcall`, rather than a complete AVR instruction set or EZRA source backend.
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `chip8`, `m6800`, `m68k`, `mos6502`, or `tms9900` (for example, `cargo run --features tms9900 -- assemble --target bare-tms9900 program.asm`). AVR and TMS9900 support are assembly-only; AVR implements a focused instruction subset, while TMS9900 syntax is documented in [`tms9900-assembly.md`](tms9900-assembly.md).
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 
@@ -269,7 +269,7 @@ Supported fields:
 [build].target          target triple
 [build].output          output format: bin, com, gaem, hex, tap, gb, prg, crt, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
-[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, avr, chip8, schip, xochip, m6800, m68k, or 6502 (optional families require their Cargo feature)
+[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, avr, chip8, schip, xochip, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
@@ -390,7 +390,7 @@ ezrac assemble --target cpm-2.2-z80 --map console-output.map examples/cpm-z80/co
 ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
-The assembler accepts implemented instruction subsets for 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for AVR, CHIP-8 variants, M6800, and M68k when built with their Cargo features. AVR is assembly-only and intentionally implements a subset; see diagnostics for unsupported instructions. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
+The assembler accepts implemented instruction subsets for 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for AVR, CHIP-8 variants, M6800, M68k, and TMS9900 when built with their Cargo features. AVR and TMS9900 are assembly-only; see [`tms9900-assembly.md`](tms9900-assembly.md) for TMS9900 syntax and scope. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
 
 ## Custom Layouts
 

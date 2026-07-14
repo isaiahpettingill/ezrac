@@ -98,6 +98,19 @@ fn resolves_generic_bare_6502_target() {
     assert!(!profile.supports_port_io());
 }
 
+#[cfg(feature = "tms9900")]
+#[test]
+fn resolves_bare_tms9900_target() {
+    let profile = resolve_target_profile(Some("bare-tms9900")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Tms9900);
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert_eq!(profile.output_format, OutputFormat::RawBin);
+    assert!(!profile.default_sdk_symbols);
+    assert!(!profile.supports_port_io());
+}
+
 #[cfg(feature = "mos6502")]
 #[test]
 fn commodore64_target_defaults_to_prg_output() {

@@ -29,6 +29,7 @@ chip8 = []
 m6800 = []
 m68k = ["dep:m68000"]
 mos6502 = []
+tms9900 = []
 lsp = ["dep:lsp", "dep:serde", "dep:serde_json"]
 
 [dev-dependencies]

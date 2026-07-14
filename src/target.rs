@@ -33,6 +33,7 @@ pub enum CpuFamily {
     SuperChip,
     XoChip,
     Mos6502,
+    Tms9900,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +52,7 @@ pub enum AssemblerCpu {
     M6800,
     M68k,
     Mos6502,
+    Tms9900,
 }
 
 impl AssemblerCpu {
@@ -70,9 +72,10 @@ impl AssemblerCpu {
             "m6800" | "6800" => Self::M6800,
             "m68k" | "68000" | "m68000" => Self::M68k,
             "6502" | "mos6502" | "m6502" => Self::Mos6502,
+            "tms9900" | "9900" => Self::Tms9900,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, m6800, m68k, chip8, schip, xochip, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, tms9900, m6800, m68k, chip8, schip, xochip, or avr"
                 ));
             }
         };
@@ -97,6 +100,7 @@ impl AssemblerCpu {
             Self::M6800 => cfg!(feature = "m6800"),
             Self::M68k => cfg!(feature = "m68k"),
             Self::Mos6502 => cfg!(feature = "mos6502"),
+            Self::Tms9900 => cfg!(feature = "tms9900"),
         }
     }
 
@@ -110,6 +114,7 @@ impl AssemblerCpu {
             Self::M6800 => "m6800",
             Self::M68k => "m68k",
             Self::Mos6502 => "mos6502",
+            Self::Tms9900 => "tms9900",
         }
     }
 
@@ -129,6 +134,7 @@ impl AssemblerCpu {
             Self::M6800 => "m6800",
             Self::M68k => "m68k",
             Self::Mos6502 => "6502",
+            Self::Tms9900 => "tms9900",
         }
     }
 
@@ -143,6 +149,7 @@ impl AssemblerCpu {
             | Self::M6800
             | Self::M68k
             | Self::Mos6502
+            | Self::Tms9900
             | Self::Chip8
             | Self::SuperChip
             | Self::XoChip => None,
@@ -176,6 +183,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::XoChip => Self::XoChip,
             CpuFamily::M6800 => Self::M6800,
             CpuFamily::Mos6502 => Self::Mos6502,
+            CpuFamily::Tms9900 => Self::Tms9900,
         }
     }
 }
@@ -197,6 +205,7 @@ impl CpuFamily {
             Self::XoChip => "xochip",
             Self::M6800 => "m6800",
             Self::Mos6502 => "6502",
+            Self::Tms9900 => "tms9900",
         }
     }
 }
@@ -340,10 +349,12 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
-        CpuFamily::Lr35902 | CpuFamily::M6800 | CpuFamily::Mos6502 => Some(TargetMemoryModel {
-            pointer_width_bits: 16,
-            address_width_bits: 16,
-        }),
+        CpuFamily::Lr35902 | CpuFamily::M6800 | CpuFamily::Mos6502 | CpuFamily::Tms9900 => {
+            Some(TargetMemoryModel {
+                pointer_width_bits: 16,
+                address_width_bits: 16,
+            })
+        }
         CpuFamily::Chip8 | CpuFamily::SuperChip => Some(TargetMemoryModel {
             pointer_width_bits: 12,
             address_width_bits: 12,
@@ -410,6 +421,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "xochip" => Some(CpuFamily::XoChip),
             "m6800" | "6800" => Some(CpuFamily::M6800),
             "6502" | "mos6502" | "m6502" => Some(CpuFamily::Mos6502),
+            "tms9900" | "9900" => Some(CpuFamily::Tms9900),
             _ => None,
         })
         .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;

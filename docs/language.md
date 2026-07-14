@@ -130,7 +130,7 @@ global buffer: [u8; 16] = [0, 0, 0, 0]
 global framebuffer: ptr<u8> = 0x080000
 ```
 
-The target controls pointer width. eZ80 and the generic M68k target use 24-bit pointers. Z80-family, 8080/8085, LR35902, MOS 6502, and AVR targets use 16-bit pointers. CHIP-8 uses 12-bit pointers, while XO-CHIP uses 16-bit pointers.
+The target controls pointer width. eZ80 and the generic M68k target use 24-bit pointers. Z80-family, 8080/8085, LR35902, MOS 6502, TMS9900, and AVR targets use 16-bit pointers. CHIP-8 uses 12-bit pointers, while XO-CHIP uses 16-bit pointers.
 
 ## Literals
 

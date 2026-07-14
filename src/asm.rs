@@ -9,6 +9,8 @@ pub mod m68k;
 pub mod m68k_emitter;
 pub mod mos6502;
 pub mod mos6502_emitter;
+#[cfg(feature = "tms9900")]
+pub mod tms9900;
 
 pub use ez80::{
     AssemblyOptions, CheckedEz80Program, emit_ez80_assembly, emit_ez80_assembly_from_checked,

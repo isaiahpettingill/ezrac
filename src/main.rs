@@ -3308,6 +3308,15 @@ fn print_targets() {
             sdk: "none",
             status: "bare eZ80 target",
         },
+        #[cfg(feature = "tms9900")]
+        TargetRow {
+            triple: "bare-tms9900",
+            cpu: "tms9900",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "assembly-only TMS9900 target",
+        },
         #[cfg(feature = "m68k")]
         TargetRow {
             triple: "generic-m68k-bare",
