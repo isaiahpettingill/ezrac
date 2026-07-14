@@ -7,6 +7,9 @@ use std::{
 
 use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
+#[cfg(feature = "m6800")]
+use ::m6800::{Cpu as M6800Cpu, MemoryBus as M6800MemoryBus};
+
 #[cfg(feature = "m68k")]
 use crate::asm::m68k as asm_m68k;
 #[cfg(feature = "tms9900")]
@@ -85,7 +88,12 @@ pub struct TestRunner {
 
 impl Default for TestRunner {
     fn default() -> Self {
-        Self::new(vec![Box::new(Ez80Emulator)])
+        let mut backends: Vec<Box<dyn EmulatorBackend>> = vec![Box::new(Ez80Emulator)];
+
+        #[cfg(feature = "m6800")]
+        backends.push(Box::new(M6800Emulator));
+
+        Self::new(backends)
     }
 }
 
@@ -289,6 +297,114 @@ impl EmulatorBackend for Ez80Emulator {
             instructions: options.instruction_budget,
             debug_output: machine.debug_output,
             ports: machine.ports,
+            failure: Some(TestRunFailure::Timeout),
+        })
+    }
+}
+
+#[cfg(feature = "m6800")]
+pub struct M6800Emulator;
+
+#[cfg(feature = "m6800")]
+struct M6800TestMemory {
+    data: Vec<u8>,
+    pub ports: [u8; 256],
+    pub halted: bool,
+    pub result_code: u8,
+    pub debug_output: Vec<u8>,
+}
+
+#[cfg(feature = "m6800")]
+impl M6800TestMemory {
+    fn new() -> Self {
+        Self {
+            data: vec![0; 0x10000],
+            ports: [0; 256],
+            halted: false,
+            result_code: 0,
+            debug_output: Vec::new(),
+        }
+    }
+
+    fn load(&mut self, base: u16, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            let addr = base.wrapping_add(i as u16);
+            self.data[addr as usize] = b;
+        }
+    }
+}
+
+#[cfg(feature = "m6800")]
+impl M6800MemoryBus for M6800TestMemory {
+    fn read(&self, address: u16) -> u8 {
+        self.data[address as usize]
+    }
+
+    fn write(&mut self, address: u16, value: u8) {
+        match address {
+            0xFFF0 => self.debug_output.push(value),
+            0xFFF1 => self.result_code = value,
+            0xFFF2 if value == 1 => self.halted = true,
+            _ => self.data[address as usize] = value,
+        }
+    }
+}
+
+#[cfg(feature = "m6800")]
+impl EmulatorBackend for M6800Emulator {
+    fn supports(&self, cpu_family: CpuFamily) -> bool {
+        cpu_family == CpuFamily::M6800
+    }
+
+    fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+        if image.base_addr > 0xFFFF {
+            return Err(Diagnostic::new(format!(
+                "test image base address 0x{:X} is outside the 16-bit address space",
+                image.base_addr
+            )));
+        }
+        if options.stack_top > 0xFFFF {
+            return Err(Diagnostic::new(format!(
+                "test stack top 0x{:X} is outside the 16-bit address space",
+                options.stack_top
+            )));
+        }
+
+        let code_start = image.base_addr as u16;
+        let mut memory = M6800TestMemory::new();
+        for (address, value) in &options.initial_memory {
+            if *address <= 0xFFFF {
+                memory.data[*address as usize] = *value as u8;
+            }
+        }
+        memory.load(code_start, &image.bytes);
+
+        let mut cpu = M6800Cpu::new(memory);
+        cpu.reg.pc = code_start;
+        cpu.reg.sp = options.stack_top as u16;
+        cpu.reset = false;
+
+        for _instruction in 0..options.instruction_budget {
+            cpu.step();
+
+            if cpu.halt {
+                return Ok(TestRun {
+                    halted: true,
+                    result_code: cpu.memory.result_code,
+                    instructions: _instruction + 1,
+                    debug_output: cpu.memory.debug_output.clone(),
+                    ports: cpu.memory.ports,
+                    failure: None,
+                });
+            }
+        }
+
+        Ok(TestRun {
+            halted: false,
+            result_code: cpu.memory.result_code,
+            instructions: options.instruction_budget,
+            debug_output: cpu.memory.debug_output,
+            ports: cpu.memory.ports,
             failure: Some(TestRunFailure::Timeout),
         })
     }

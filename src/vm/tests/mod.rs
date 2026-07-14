@@ -33,3 +33,5 @@ mod execution_control_flow;
 mod fixtures;
 #[cfg(feature = "mos6502")]
 mod mos6502_backend;
+#[cfg(feature = "m6800")]
+mod m6800_backend;

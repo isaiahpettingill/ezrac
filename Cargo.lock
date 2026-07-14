@@ -47,6 +47,7 @@ version = "0.1.24"
 dependencies = [
  "ez80",
  "lsp",
+ "m6800",
  "m68000",
  "mos6502",
  "pest",
@@ -124,6 +125,11 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "m6800"
+version = "0.1.0"
+source = "git+https://github.com/isaiahpettingill/m6800-rs.git?rev=7c6054b65d31074a8738c7adf6b47acee2a62e5a#7c6054b65d31074a8738c7adf6b47acee2a62e5a"
 
 [[package]]
 name = "m68000"
