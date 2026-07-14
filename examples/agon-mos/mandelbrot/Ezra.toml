@@ -1,0 +1,7 @@
+[project]
+name = "agon-mandelbrot"
+
+[build]
+input = "src/main.ezra"
+target = "agonlight-mos-ez80"
+executable = "agon-mandelbrot"

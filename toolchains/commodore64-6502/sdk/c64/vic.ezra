@@ -37,9 +37,10 @@ pub const LIGHT_GRAY: u8 = 15
 
 pub fn border(color: u8) { *(cast<ptr<u8>>(cast<u24>(BORDER))) = color & 15 }
 pub fn background(color: u8) { *(cast<ptr<u8>>(cast<u24>(BACKGROUND))) = color & 15 }
-pub fn set_raster(line: u16) { let control: u8 = *(cast<ptr<u8>>(cast<u24>(CONTROL1))) & 0x7F; *(cast<ptr<u8>>(cast<u24>(RASTER))) = cast<u8>(line); if line > 255 { *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = control | 0x80 } else { *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = control } }
-pub fn raster() -> u16 { return cast<u16>(*(cast<ptr<u8>>(cast<u24>(RASTER)))) | ((cast<u16>(*(cast<ptr<u8>>(cast<u24>(CONTROL1)))) & 0x80) << 1) }
-pub fn wait_raster(line: u16) { let waiting: u8 = 0; while raster() != line { waiting = waiting } }
+pub fn set_raster(line: u8) { *(cast<ptr<u8>>(cast<u24>(RASTER))) = line }
+pub fn raster() -> u8 { return *(cast<ptr<u8>>(cast<u24>(RASTER))) }
+pub fn wait_raster(line: u8) { let waiting: u8 = 0; while raster() != line { waiting = waiting } }
+pub fn set_raster_high(line: u16) { *(cast<ptr<u8>>(cast<u24>(RASTER))) = cast<u8>(line); let control: u8 = *(cast<ptr<u8>>(cast<u24>(CONTROL1))) & 0x7F; if line > 255 { *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = control | 0x80 } else { *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = control } }
 pub fn screen_address(x: u8, y: u8) -> u16 { return SCREEN_RAM + cast<u16>(y) * cast<u16>(SCREEN_COLUMNS) + cast<u16>(x) }
 pub fn color_address(x: u8, y: u8) -> u16 { return COLOR_RAM + cast<u16>(y) * cast<u16>(SCREEN_COLUMNS) + cast<u16>(x) }
 pub fn put_char(x: u8, y: u8, character: u8) { *(cast<ptr<u8>>(cast<u24>(screen_address(x, y)))) = character }

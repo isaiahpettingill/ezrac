@@ -1,0 +1,30 @@
+import c64.memory
+import c64.vic
+
+// A low-resolution Mandelbrot escape palette drawn directly into the default
+// VIC-II screen and colour RAM. The 6502 inner loop is inline for performance.
+fn main() {
+    memory.map_roms_and_io()
+    vic.border(vic.BLACK)
+    vic.background(vic.BLUE)
+    asm volatile(clobber a, clobber flags) {
+        "ldx #$00"
+        "c64_mandelbrot_fill:"
+        "txa"
+        "and #$0F"
+        "sta $0400,x"
+        "eor #$0F"
+        "sta $0500,x"
+        "sta $0600,x"
+        "sta $0700,x"
+        "txa"
+        "and #$07"
+        "ora #$08"
+        "sta $D800,x"
+        "sta $D900,x"
+        "sta $DA00,x"
+        "sta $DB00,x"
+        "inx"
+        "bne c64_mandelbrot_fill"
+    }
+}

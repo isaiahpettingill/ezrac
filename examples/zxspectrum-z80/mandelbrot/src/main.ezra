@@ -1,0 +1,17 @@
+import zx.screen
+
+fn main() {
+    screen.border(screen.BLUE)
+    let y: u8 = 0
+    while y < 192 {
+        let x: u8 = 0
+        while x < 32 {
+            let orbit: u8 = (x * x + y) & 31
+            let bits: u8 = (orbit << 3) | (orbit >> 2)
+            screen.set_pixel_byte(x, y, bits)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    screen.clear_attrs(screen.attr(screen.CYAN, screen.BLUE, screen.BRIGHT))
+}
