@@ -3,7 +3,7 @@ name = "ezrac"
 version = "0.1.25"
 edition = "2024"
 description = "Compiler and tooling prototype for the EZRA language"
-license = "MIT"
+license = "BSD-3-Clause"
 repository = "https://github.com/isaiahpettingill/ezrac"
 
 [lib]
