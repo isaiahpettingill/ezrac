@@ -1,6 +1,6 @@
 # EZRA Game Boy Assembly SDK
 
-Vendor this `gb` directory into an assembly-only project and include
+Vendor this `gb` directory into an assembly project and include
 `hardware.inc`; CGB projects may include `color.inc` instead. The files expose
 hardware register constants and macros for interrupts, LCD access, OAM DMA,
 joypads, timers, serial, audio, byte copying/filling, MBC1/MBC3/MBC5 banking,

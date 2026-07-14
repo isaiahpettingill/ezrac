@@ -1,25 +1,28 @@
 # EZRA HIR and TBIR Design
 
-This document specifies EZRA's main compiler intermediate representations. The goal is a complete design that fits EZRA's real use case: target-specific low-level programs, strong hardware-aware diagnostics, safe optimization, readable assembly, and reusable shared libraries for algorithms and math.
+This document describes EZRA's HIR/TBIR architecture and its intended evolution. The implementation includes in-memory HIR and TBIR forms, and `ezrac emit-ir --stage hir|tbir` prints inspectable text dumps. It does not yet implement every analysis, diagnostic, optimization, or machine-level representation described below.
 
 EZRA does not require a generic backend-neutral IR. Full applications and games are expected to be compiled for one selected target. Cross-platform EZRA code is expected mostly in shared libraries that avoid target-specific hardware behavior.
 
 ## Pipeline
 
+The current source path is:
+
 ```text
 source
   -> pest parse tree
   -> AST
-  -> typed HIR
-  -> target-bound IR (TBIR)
-  -> machine lowering
-  -> EZRA target assembly
-  -> metadata-generated target assembler
-  -> configured binary layout emitter
-  -> final binary/package
+  -> HIR
+  -> TBIR
+  -> target source emitter
+  -> target assembler
+  -> configured binary/package emitter
+  -> final artifact
 ```
 
-HIR and TBIR may be represented in memory as Rust structs. A serialized IR cache may be binary. Textual IR is useful for debugging and tests, but it is not the required primary format. If binary IR is used, the compiler must still provide an inspectable dump format and preserve source locations for diagnostics.
+HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions and coarse effects, applies the implemented simplification passes, and supplies the lowered program to the source emitters. It is not yet a fully lowered basic-block or register-allocation IR.
+
+The remaining sections use design language (`should`, `must`, and planned examples) to define the intended direction. HIR and TBIR are Rust structs in memory today; textual dumps are provided for debugging and tests, not as a stable serialized IR format.
 
 ## Design Goals
 

@@ -6,13 +6,9 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for one of:
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, AVR, CHIP-8 variants, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, AVR requires `avr`, and M68k requires `m68k`.
 
-```text
-ez80 z80 z80n z180 i8080 8080 i8085 8085 m68k
-```
-
-Only CPUs with an implemented memory model can be resolved. M68k support is enabled with Cargo's optional `m68k` feature.
+Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have EZRA source code generation; AVR, CHIP-8-family, and M6800 targets are currently assembly-only through the public CLI. MOS 6502 and optional M68k targets have target-specific EZRA source emitters.
 
 ## Support Levels
 
@@ -54,7 +50,10 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-i8080` | 4 | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8085` | 4 | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
-| `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Experimental scalar source target |
+| `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
+| `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
+| `arduboy-*-avr` | 3 | AVR | 16 | Intel HEX `.hex` | none | Optional `avr` feature; assembly-only profile |
+| `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
 
@@ -66,15 +65,13 @@ Target:
 generic-m68k-bare
 ```
 
-Build with the optional backend enabled:
+Build EZRA source with the optional backend enabled:
 
 ```sh
 cargo run --features m68k -- build --target generic-m68k-bare src/main.ezra
 ```
 
-The initial target emits a raw big-endian 68000 image, uses a 24-bit address space, initializes `SP` from the target layout, calls `main`, then loops. EZRA scalar values and returns use `D0`; `D1` and `D2` are compiler scratch registers. Calls pass arguments through compiler-owned static slots, so recursive calls are not supported yet.
-
-The source backend lowers EZRA scalar and 24-bit pointer values, arrays, structs, strings, arithmetic, comparisons, shifts, XOR, control flow, calls, memory helpers, MMIO, and inline assembly. The generic M68k target rejects separate port I/O because the 68000 exposes memory-mapped hardware instead. No platform SDK or Sega Genesis packaging is included in this generic target.
+The generic target emits a raw big-endian 68000 image in a 24-bit address space, initializes `SP` from the target layout, calls `main`, then loops. EZRA scalar values and returns use `D0`; `D1` and `D2` are compiler scratch registers. Calls pass arguments through compiler-owned static slots, so recursive calls are not supported yet. There is no platform SDK or Sega Genesis packaging.
 
 ## Agon Light MOS
 
@@ -292,7 +289,7 @@ Target:
 commodore64-6502
 ```
 
-This MOS 6510 (6502-compatible) target has direct EZRA-to-6502 code generation and writes a `.prg` executable. The first two bytes are the little-endian `$080D` load address; code starts at `$080D`. The package does not include a BASIC stub, so launch it with `SYS 2061`, a monitor, or a compatible emulator/loader.
+This MOS 6510 (6502-compatible) target has direct EZRA-to-6502 code generation and writes a `.prg` executable. The file starts with the little-endian `$0801` BASIC load address and includes a tokenized `10 SYS2061` loader; machine code starts at `$080D`. PRG autostart loaders such as VICE can launch it directly. The `mos6502` Cargo feature is required.
 
 Bundled modules are `c64.vic` (VIC-II graphics, screen/color RAM, raster, IRQ, sprites), `c64.sid` (three SID voices and filters), `c64.cia` (keyboard, joysticks, timers, IRQ), and `c64.memory` (6510 `$0001` ROM/I/O banking). Call `memory.map_roms_and_io()` before hardware MMIO after changing bank state. See `docs/targets/commodore64.md` for register API details and Play96 real-core validation.
 
@@ -307,10 +304,7 @@ gameboy-dmg-lr35902
 gameboy-color-lr35902
 ```
 
-These are assembly-only targets with a dedicated LR35902 assembler. They do
-not inherit Z80-only instructions or EZRA source code generation. Both produce
-32 KiB ROM-only cartridges with the Nintendo logo, entry stub, title,
-DMG/CGB compatibility flag, and valid header/global checksums. DMG output uses
+These targets support both EZRA source compilation and handwritten assembly through a dedicated LR35902 assembler. They do not inherit Z80-only instructions. Both produce 32 KiB ROM-only cartridges with the Nintendo logo, entry stub, title, DMG/CGB compatibility flag, and valid header/global checksums. DMG output uses
 `.gb`; Game Boy Color output uses `.gbc`. Code begins at
 `0x0150`; the ROM header occupies `0x0100..0x014F`.
 
@@ -444,7 +438,7 @@ target = "ti84plusce-ez80"
 output = "8xp"
 ```
 
-Valid output formats are `bin`, `com`, `hex`, `tap`, `gb`, `prg`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output and Commodore 64 `.prg` output are target-checked, as are TI app formats: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
+Valid output formats are `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output and Commodore 64 `.prg`/`.crt` output are target-checked, as are TI app formats: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
 
 ## Adding A New Platform
 

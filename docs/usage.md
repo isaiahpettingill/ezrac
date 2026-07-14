@@ -119,7 +119,7 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, and `.8080` are treated as assembly.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `chip8`, `m6800`, `m68k`, or `mos6502` (for example, `cargo run --features avr -- assemble --cpu avr program.asm`).
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `chip8`, `m6800`, `m68k`, or `mos6502` (for example, `cargo run --features avr -- assemble --cpu avr program.asm`). AVR support is assembly-only; its implemented assembler subset includes register/immediate ALU operations, branches, `in`/`out`, and `rjmp`/`rcall`, rather than a complete AVR instruction set or EZRA source backend.
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 
@@ -267,9 +267,9 @@ Supported fields:
 ```text
 [build].input           default source path when running `ezrac build` without a file
 [build].target          target triple
-[build].output          output format: bin, com, hex, tap, gb, prg, 8xp, 8ek, or 8xk
+[build].output          output format: bin, com, gaem, hex, tap, gb, prg, crt, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
-[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, or 6502
+[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, avr, chip8, schip, xochip, m6800, m68k, or 6502 (optional families require their Cargo feature)
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
@@ -304,10 +304,12 @@ Supported output format names:
 ```text
 bin                 raw binary bytes
 com                 CP/M .COM image
+gaem                ez180N cartridge image
 hex, ihex, intel-hex Intel HEX text
 tap, zxtap          ZX Spectrum tape image
 gb, gameboy         Game Boy ROM image
 prg, c64            Commodore 64 program image
+crt, commodore64-crt Commodore 64 standard cartridge image
 8xp, ti8xp          TI protected program file
 8ek, ti8ek          TI CE app-style file
 8xk, ti8xk          classic TI app-style file
@@ -316,10 +318,12 @@ prg, c64            Commodore 64 program image
 Target defaults:
 
 ```text
+ez180N Libretro Console       gaem
 CP/M targets                 com
 ZX Spectrum targets          tap
-Game Boy targets             gb
+Game Boy targets             gb (`.gbc` filename for CGB builds)
 Commodore 64 target          prg
+Arduboy AVR targets          hex
 TI calculator targets        8xp
 all other targets            bin
 ```
@@ -386,7 +390,7 @@ ezrac assemble --target cpm-2.2-z80 --map console-output.map examples/cpm-z80/co
 ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
-The assembler accepts the implemented 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and 6502 subsets. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
+The assembler accepts implemented instruction subsets for 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for AVR, CHIP-8 variants, M6800, and M68k when built with their Cargo features. AVR is assembly-only and intentionally implements a subset; see diagnostics for unsupported instructions. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
 
 ## Custom Layouts
 
