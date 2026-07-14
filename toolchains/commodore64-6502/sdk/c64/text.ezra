@@ -1,0 +1,82 @@
+// C64 text helpers. Screen RAM stores VIC screen codes, not PETSCII or ASCII.
+pub const CHAR_SPACE: u8 = 0x20
+pub const CHAR_0: u8 = 0x30
+pub const CHAR_1: u8 = 0x31
+pub const CHAR_2: u8 = 0x32
+pub const CHAR_3: u8 = 0x33
+pub const CHAR_4: u8 = 0x34
+pub const CHAR_5: u8 = 0x35
+pub const CHAR_6: u8 = 0x36
+pub const CHAR_7: u8 = 0x37
+pub const CHAR_8: u8 = 0x38
+pub const CHAR_9: u8 = 0x39
+pub const CHAR_A: u8 = 1
+pub const CHAR_B: u8 = 2
+pub const CHAR_C: u8 = 3
+pub const CHAR_D: u8 = 4
+pub const CHAR_E: u8 = 5
+pub const CHAR_F: u8 = 6
+pub const CHAR_G: u8 = 7
+pub const CHAR_H: u8 = 8
+pub const CHAR_I: u8 = 9
+pub const CHAR_J: u8 = 10
+pub const CHAR_K: u8 = 11
+pub const CHAR_L: u8 = 12
+pub const CHAR_M: u8 = 13
+pub const CHAR_N: u8 = 14
+pub const CHAR_O: u8 = 15
+pub const CHAR_P: u8 = 16
+pub const CHAR_Q: u8 = 17
+pub const CHAR_R: u8 = 18
+pub const CHAR_S: u8 = 19
+pub const CHAR_T: u8 = 20
+pub const CHAR_U: u8 = 21
+pub const CHAR_V: u8 = 22
+pub const CHAR_W: u8 = 23
+pub const CHAR_X: u8 = 24
+pub const CHAR_Y: u8 = 25
+pub const CHAR_Z: u8 = 26
+pub const CHAR_EXCLAMATION: u8 = 0x21
+pub const CHAR_QUOTE: u8 = 0x22
+pub const CHAR_HASH: u8 = 0x23
+pub const CHAR_DOLLAR: u8 = 0x24
+pub const CHAR_PERCENT: u8 = 0x25
+pub const CHAR_AMPERSAND: u8 = 0x26
+pub const CHAR_APOSTROPHE: u8 = 0x27
+pub const CHAR_LEFT_PAREN: u8 = 0x28
+pub const CHAR_RIGHT_PAREN: u8 = 0x29
+pub const CHAR_PLUS: u8 = 0x2B
+pub const CHAR_COMMA: u8 = 0x2C
+pub const CHAR_MINUS: u8 = 0x2D
+pub const CHAR_PERIOD: u8 = 0x2E
+pub const CHAR_SLASH: u8 = 0x2F
+pub const CHAR_COLON: u8 = 0x3A
+pub const CHAR_SEMICOLON: u8 = 0x3B
+pub const CHAR_LESS_THAN: u8 = 0x3C
+pub const CHAR_EQUALS: u8 = 0x3D
+pub const CHAR_GREATER_THAN: u8 = 0x3E
+pub const CHAR_QUESTION: u8 = 0x3F
+// PETSCII stream controls for KERNAL output, not values for screen RAM.
+pub const PETSCII_RETURN: u8 = 0x0D
+pub const PETSCII_CURSOR_DOWN: u8 = 0x11
+pub const PETSCII_REVERSE_ON: u8 = 0x12
+pub const PETSCII_HOME: u8 = 0x13
+pub const PETSCII_DELETE: u8 = 0x14
+pub const PETSCII_CURSOR_RIGHT: u8 = 0x1D
+pub const PETSCII_REVERSE_OFF: u8 = 0x92
+pub const PETSCII_CLEAR: u8 = 0x93
+pub const PETSCII_CURSOR_LEFT: u8 = 0x9D
+
+pub fn ascii_screen_code(ch: u8) -> u8 {
+    if ch >= 'A' && ch <= 'Z' { return ch - 'A' + CHAR_A }
+    if ch >= 'a' && ch <= 'z' { return ch - 'a' + CHAR_A }
+    return ch
+}
+
+pub fn put_ascii(x: u8, y: u8, text: ptr<u8>) {
+    let index: u8 = 0
+    while *(text + index) != 0 && x + index < 40 {
+        *(cast<ptr<u8>>(cast<u24>(0x0400 + cast<u16>(y) * 40 + cast<u16>(x + index)))) = ascii_screen_code(*(text + index))
+        index = index + 1
+    }
+}

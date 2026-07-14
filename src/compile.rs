@@ -1048,6 +1048,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/color.ezra"),
                 "gb.color",
             )),
+            "gb.text" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/text.ezra"),
+                "gb.text",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {
@@ -1083,6 +1087,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             "agon.vdp" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/vdp.ezra"),
                 "agon.vdp",
+            )),
+            "agon.text" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/text.ezra"),
+                "agon.text",
             )),
             _ => None,
         }
@@ -1136,6 +1144,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/commodore64-6502/sdk/c64/memory.ezra"),
                 "c64.memory",
             )),
+            "c64.text" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/commodore64-6502/sdk/c64/text.ezra"),
+                "c64.text",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("zxspectrum-z80")) {
@@ -1168,6 +1180,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/interrupt.ezra"),
                 "zx.interrupt",
             )),
+            "zx.text" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/text.ezra"),
+                "zx.text",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("ezra-test-")) {
@@ -1196,6 +1212,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/console.ezra"),
                 "cpm.console",
             )),
+            "cpm.text" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/text.ezra"),
+                "cpm.text",
+            )),
             "cpm.dma" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/dma.ezra"),
                 "cpm.dma",
@@ -1222,6 +1242,8 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "gb.serial",
         "gb.input",
         "gb.audio",
+        "gb.color",
+        "gb.text",
         "agon.buffers",
         "agon.console",
         "agon.mos",
@@ -1230,6 +1252,7 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "agon.mouse",
         "agon.sprites",
         "agon.vdp",
+        "agon.text",
         "ez180n.console",
         "tice.os",
         "tice.lcd",
@@ -1242,11 +1265,18 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "zx.sound",
         "zx.memory",
         "zx.interrupt",
+        "zx.text",
+        "c64.vic",
+        "c64.sid",
+        "c64.cia",
+        "c64.memory",
+        "c64.text",
         "harness.io",
         "harness.layout",
         "harness.memory",
         "cpm.bdos",
         "cpm.console",
+        "cpm.text",
         "cpm.dma",
         "cpm.fcb",
     ];

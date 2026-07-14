@@ -1,0 +1,9 @@
+// Game Boy tile maps contain application-defined tile IDs, not a hardware character set.
+pub const MAP_WIDTH: u8 = 32
+pub const MAP_HEIGHT: u8 = 32
+pub const BG_MAP_0: u16 = 0x9800
+pub const BG_MAP_1: u16 = 0x9C00
+// Map an ASCII string into a font whose uppercase A starts at letter_base and 0 at digit_base.
+// Call only while VRAM is writable (during VBlank or after video.begin_update()).
+pub fn ascii_tile(ch: u8, letter_base: u8, digit_base: u8, space_tile: u8) -> u8 { if ch >= 'A' && ch <= 'Z' { return letter_base + ch - 'A' } if ch >= 'a' && ch <= 'z' { return letter_base + ch - 'a' } if ch >= '0' && ch <= '9' { return digit_base + ch - '0' } return space_tile }
+pub fn put_ascii(map: u16, x: u8, y: u8, text: ptr<u8>, letter_base: u8, digit_base: u8, space_tile: u8) { let index: u8 = 0; while *(text + index) != 0 && x + index < MAP_WIDTH { *(cast<ptr<u8>>(cast<u24>(map + cast<u16>(y) * 32 + cast<u16>(x + index)))) = ascii_tile(*(text + index), letter_base, digit_base, space_tile); index = index + 1 } }
