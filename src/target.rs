@@ -248,6 +248,7 @@ pub enum OutputFormat {
     GameBoyGb,
     ArduinoHex,
     Commodore64Prg,
+    Commodore64Crt,
 }
 
 impl OutputFormat {
@@ -264,6 +265,7 @@ impl OutputFormat {
             Self::GameBoyGb => "gb",
             Self::ArduinoHex => "hex",
             Self::Commodore64Prg => "prg",
+            Self::Commodore64Crt => "crt",
         }
     }
 }
@@ -375,8 +377,9 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "tap" | "zxtap" | "spectrum-tap" => Ok(OutputFormat::ZxSpectrumTap),
         "gb" | "gameboy" | "gameboy-gb" => Ok(OutputFormat::GameBoyGb),
         "prg" | "c64" | "commodore64-prg" => Ok(OutputFormat::Commodore64Prg),
+        "crt" | "commodore64-crt" => Ok(OutputFormat::Commodore64Crt),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }

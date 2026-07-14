@@ -49,6 +49,7 @@ pub struct AssemblyOptions {
     pub debug_comments: bool,
     pub default_sdk_symbols: bool,
     pub mos_executable: bool,
+    pub c64_executable: bool,
     pub load_addr: Address24,
     pub entry_addr: Address24,
     pub code_base: Address24,
@@ -68,6 +69,7 @@ impl Default for AssemblyOptions {
             debug_comments: false,
             default_sdk_symbols: true,
             mos_executable: false,
+            c64_executable: false,
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
             code_base: EZRA_CODE_BASE,
@@ -6684,10 +6686,7 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
         };
         let calls = reachable_calls_for_body(&function.body, symbols);
         graph.insert(function.name.clone(), calls);
-        if function.name == "main"
-            || function.public
-            || has_attr(function, "naked")
-            || has_attr(function, "interrupt")
+        if function.name == "main" || has_attr(function, "naked") || has_attr(function, "interrupt")
         {
             seeds.push(function.name.clone());
         }

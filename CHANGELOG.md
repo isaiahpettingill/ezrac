@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.24
+
+- Added a tokenized `10 SYS2061` BASIC autostart loader to Commodore 64 `.prg` output so VICE launches C64 programs automatically.
+- Added `output = "crt"` for autostarting standard 8 KiB C64 CRT cartridges.
+- Eliminated unreachable functions from executable output regardless of their visibility, substantially reducing imported SDK code.
+- Added C64 keyboard polling through `cia.key_pressed(key)` and made C64 programs return to BASIC after `main` exits.
+
+## 0.1.23
+
+- Added the `commodore64-6502` target with C64 `.prg` output, a 16-bit C64 memory layout, MOS 6502 source code generation, and bundled `c64.vic`, `c64.sid`, `c64.cia`, `c64.memory`, and `c64.text` SDK modules.
+- Added target-aware platform text SDK helpers for supported systems.
+
 ## 0.1.22
 
 - Added the feature-gated `generic-m68k-bare` source target with a 24-bit layout and raw binary output.

@@ -211,10 +211,55 @@ fn commodore64_source_example_builds_as_prg() {
     );
     let program = std::fs::read(outputs.executable).unwrap();
     assert!(program.len() > 2);
-    assert_eq!(&program[..2], &0x080Du16.to_le_bytes());
+    assert_eq!(&program[..2], &0x0801u16.to_le_bytes());
     assert_eq!(
-        program[2], 0xD8,
-        "C64 program should begin with CLD startup code"
+        &program[2..14],
+        &[
+            0x0B, 0x08, 0x0A, 0x00, 0x9E, b'2', b'0', b'6', b'1', 0x00, 0x00, 0x00
+        ],
+        "C64 PRG should include a BASIC `10 SYS2061` autostart loader"
+    );
+    assert_eq!(
+        program[14], 0xD8,
+        "C64 program should begin with CLD startup code after its loader"
+    );
+}
+
+#[cfg(feature = "mos6502")]
+#[test]
+fn commodore64_crt_build_writes_a_standard_autostart_cartridge() {
+    let root = temp_root("commodore64_crt");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.ezra");
+    std::fs::write(&source, "fn main() {}\n").unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        "[build]\ninput = \"main.ezra\"\ntarget = \"commodore64-6502\"\noutput = \"crt\"\n",
+    )
+    .unwrap();
+
+    let outputs = build_source_with_build_options(&BuildCommandOptions::with_path(
+        source.to_string_lossy().into_owned(),
+        false,
+    ))
+    .unwrap();
+    assert_eq!(
+        outputs
+            .executable
+            .extension()
+            .and_then(|value| value.to_str()),
+        Some("crt")
+    );
+    let cartridge = std::fs::read(outputs.executable).unwrap();
+    assert_eq!(&cartridge[..16], b"C64 CARTRIDGE   ");
+    assert_eq!(&cartridge[0x40..0x44], b"CHIP");
+    assert_eq!(
+        &cartridge[0x50..0x59],
+        &[0x09, 0x80, 0x09, 0x80, b'C', b'B', b'M', b'8', b'0']
+    );
+    assert_eq!(
+        cartridge[0x59], 0xD8,
+        "C64 cartridge entry should begin with CLD"
     );
 }
 

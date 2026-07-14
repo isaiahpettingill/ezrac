@@ -156,10 +156,11 @@ fn parses_output_formats() {
     assert_eq!(parse_output_format("tap"), Ok(OutputFormat::ZxSpectrumTap));
     assert_eq!(parse_output_format("gb"), Ok(OutputFormat::GameBoyGb));
     assert_eq!(parse_output_format("prg"), Ok(OutputFormat::Commodore64Prg));
+    assert_eq!(parse_output_format("crt"), Ok(OutputFormat::Commodore64Crt));
     let error = parse_output_format("bad").unwrap_err();
     assert!(
         error.contains(
-            "expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `8xp`, `8ek`, or `8xk`"
+            "expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
         ),
         "{error}"
     );

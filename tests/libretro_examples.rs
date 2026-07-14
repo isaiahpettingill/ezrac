@@ -583,7 +583,7 @@ fn c64_example_runs_on_real_core() {
     assert!(image.len() > 2, "C64 PRG has no program payload");
     assert_eq!(
         &image[..2],
-        &0x080Du16.to_le_bytes(),
+        &0x0801u16.to_le_bytes(),
         "C64 PRG has the wrong load address"
     );
 

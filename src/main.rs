@@ -681,7 +681,11 @@ fn resolve_build_settings(
             .as_ref()
             .and_then(|project| project.layout_file.clone())
     });
-    let layout = load_layout(layout_path.as_deref(), &target.triple.value)?;
+    let layout = match layout_path.as_deref() {
+        Some(path) => load_layout(Some(path), &target.triple.value)?,
+        None if output_format == OutputFormat::Commodore64Crt => Layout::commodore64_crt(),
+        None => default_layout_for_target(&target.triple.value),
+    };
     let default_sdk_symbols = options.default_sdk_symbols() && target.default_sdk_symbols;
     let sdk = SdkResolver {
         target: Some(target.triple.value.clone()),
@@ -1833,6 +1837,9 @@ fn build_executable_bytes(
     if settings.output_format == OutputFormat::Commodore64Prg {
         return commodore64_prg_bytes(settings, code);
     }
+    if settings.output_format == OutputFormat::Commodore64Crt {
+        return commodore64_crt_bytes(settings, code);
+    }
     if matches!(
         settings.output_format,
         OutputFormat::Ti8ek | OutputFormat::Ti8xk
@@ -1857,11 +1864,73 @@ fn commodore64_prg_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8
             settings.target.triple.value
         ));
     }
-    let load = u16::try_from(settings.layout.load.get())
-        .map_err(|_| "Commodore 64 load address exceeds 16 bits".to_owned())?;
-    let mut output = Vec::with_capacity(code.len() + 2);
-    output.extend_from_slice(&load.to_le_bytes());
+    if settings.layout.load.get() != 0x080D || settings.layout.entry.get() != 0x080D {
+        return Err("Commodore 64 PRG layouts must load and enter at 0x080D".to_owned());
+    }
+
+    // BASIC starts at $0801. This tokenized `10 SYS2061` line invokes the
+    // machine-code entry point at $080D when a PRG is autostarted by VICE.
+    const BASIC_AUTOSTART: [u8; 12] = [
+        0x0B, 0x08, // next BASIC line at $080B
+        0x0A, 0x00, // line 10
+        0x9E, // SYS token
+        b'2', b'0', b'6', b'1', 0x00, // SYS2061
+        0x00, 0x00, // end of BASIC program
+    ];
+
+    let mut output = Vec::with_capacity(code.len() + 2 + BASIC_AUTOSTART.len());
+    output.extend_from_slice(&0x0801u16.to_le_bytes());
+    output.extend_from_slice(&BASIC_AUTOSTART);
     output.extend_from_slice(code);
+    Ok(output)
+}
+
+fn commodore64_crt_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
+    if !settings.target.triple.value.starts_with("commodore64-6502") {
+        return Err(format!(
+            "target `{}` does not support Commodore 64 .crt output",
+            settings.target.triple.value
+        ));
+    }
+    if settings.layout.load.get() != 0x8009 || settings.layout.entry.get() != 0x8009 {
+        return Err("standard Commodore 64 CRT layouts must load and enter at 0x8009".to_owned());
+    }
+    const ROM_SIZE: usize = 0x2000;
+    const CARTRIDGE_HEADER_SIZE: usize = 0x40;
+    const CHIP_HEADER_SIZE: usize = 0x10;
+    const CARTRIDGE_STARTUP_SIZE: usize = 9;
+    if code.len() > ROM_SIZE - CARTRIDGE_STARTUP_SIZE {
+        return Err(format!(
+            "program code is {} bytes, but the standard 8 KiB Commodore 64 CRT supports at most {} bytes; use a smaller program or a bank-switched cartridge format",
+            code.len(),
+            ROM_SIZE - CARTRIDGE_STARTUP_SIZE
+        ));
+    }
+
+    let mut output = Vec::with_capacity(CARTRIDGE_HEADER_SIZE + CHIP_HEADER_SIZE + ROM_SIZE);
+    output.extend_from_slice(b"C64 CARTRIDGE   ");
+    output.extend_from_slice(&0x40u32.to_be_bytes());
+    output.extend_from_slice(&0x0100u16.to_be_bytes());
+    output.extend_from_slice(&0u16.to_be_bytes()); // Standard cartridge hardware type.
+    output.push(0); // EXROM asserted: 8 KiB cartridge mode.
+    output.push(1); // GAME inactive.
+    output.extend_from_slice(&[0; 6]);
+    let mut name = [0u8; 32];
+    name[..10].copy_from_slice(b"EZRA C64  ");
+    output.extend_from_slice(&name);
+
+    output.extend_from_slice(b"CHIP");
+    output.extend_from_slice(&(u32::try_from(CHIP_HEADER_SIZE + ROM_SIZE).unwrap()).to_be_bytes());
+    output.extend_from_slice(&0u16.to_be_bytes()); // ROM chip.
+    output.extend_from_slice(&0u16.to_be_bytes()); // Bank 0.
+    output.extend_from_slice(&0x8000u16.to_be_bytes());
+    output.extend_from_slice(&(ROM_SIZE as u16).to_be_bytes());
+
+    output.extend_from_slice(&0x8009u16.to_le_bytes()); // Cold-start vector.
+    output.extend_from_slice(&0x8009u16.to_le_bytes()); // Warm-start vector.
+    output.extend_from_slice(b"CBM80");
+    output.extend_from_slice(code);
+    output.resize(CARTRIDGE_HEADER_SIZE + CHIP_HEADER_SIZE + ROM_SIZE, 0xFF);
     Ok(output)
 }
 
@@ -2940,6 +3009,7 @@ fn assembly_options_from_layout(
         debug_comments,
         default_sdk_symbols,
         mos_executable: layout.name == "agon_light_mos",
+        c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),

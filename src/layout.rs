@@ -315,6 +315,74 @@ impl Layout {
         }
     }
 
+    pub fn commodore64_crt() -> Self {
+        Self {
+            name: "commodore64_crt".to_owned(),
+            load: Address24::new(0x8009),
+            entry: Address24::new(0x8009),
+            stack: Address24::new(0x01FF),
+            regions: vec![
+                region(
+                    "zero_page",
+                    0x0002,
+                    0x00FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "stack",
+                    0x0100,
+                    0x01FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "scratch",
+                    0x0200,
+                    0x07FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "code",
+                    0x8009,
+                    0x9FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region(
+                    "ram",
+                    0xC000,
+                    0xCFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "io",
+                    0xD000,
+                    0xDFFF,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 1),
+                section(".text", "code", 1),
+                section(".rodata", "code", 1),
+                section(".data", "code", 1),
+                section(".bss", "code", 1),
+                section(".assets", "code", 1),
+                section(".scratch", "code", 1),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x8009)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x8009)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x8009)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x01FF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xC000)),
+            ],
+        }
+    }
+
     pub fn chip8(dialect: &str) -> Self {
         let (end, stack) = if dialect == "xochip" {
             (0xFFFF, 0xFFFF)

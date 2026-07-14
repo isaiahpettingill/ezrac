@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     asm::AssemblyOptions,
@@ -56,10 +56,11 @@ struct Emitter {
     r0: Storage,
     r1: Storage,
     r2: Storage,
+    c64_executable: bool,
 }
 
 impl Emitter {
-    fn new(mut model: SemanticModel, _options: AssemblyOptions) -> Self {
+    fn new(mut model: SemanticModel, options: AssemblyOptions) -> Self {
         let r0 = model.allocate(3).expect("6502 result scratch allocation");
         let r1 = model.allocate(3).expect("6502 rhs scratch allocation");
         let r2 = model.allocate(3).expect("6502 work scratch allocation");
@@ -75,6 +76,7 @@ impl Emitter {
             r0,
             r1,
             r2,
+            c64_executable: options.c64_executable,
         }
     }
 
@@ -89,10 +91,17 @@ impl Emitter {
         self.emit_static_initializers(program)?;
         self.line("    jsr _main");
         self.line("__ezra_exit:");
-        self.line("    jmp __ezra_exit");
+        if self.c64_executable {
+            self.line("    jmp $A474"); // BASIC warm start.
+        } else {
+            self.line("    jmp __ezra_exit");
+        }
 
+        let emitted_functions = reachable_function_names(program, &self.model);
         for declaration in &program.declarations {
-            if let Declaration::Function(function) = declaration {
+            if let Declaration::Function(function) = declaration
+                && emitted_functions.contains(&function.name)
+            {
                 self.emit_function(function)?;
             }
         }
@@ -1656,6 +1665,155 @@ fn assign_binary(op: AssignOp) -> BinaryOp {
     }
 }
 
+fn reachable_function_names(program: &Program, model: &SemanticModel) -> HashSet<String> {
+    let mut graph = HashMap::new();
+    let mut roots = vec!["main".to_owned()];
+
+    for declaration in &program.declarations {
+        match declaration {
+            Declaration::Function(function) => {
+                let mut calls = Vec::new();
+                collect_stmt_calls(&function.body, &mut calls);
+                graph.insert(
+                    function.name.clone(),
+                    calls
+                        .into_iter()
+                        .filter_map(|path| resolve_called_function(&path, model))
+                        .collect::<Vec<_>>(),
+                );
+                if function
+                    .attrs
+                    .iter()
+                    .any(|attr| attr == "naked" || attr == "interrupt")
+                {
+                    roots.push(function.name.clone());
+                }
+            }
+            Declaration::Global(global) => {
+                let mut calls = Vec::new();
+                collect_expr_calls(&global.value, &mut calls);
+                roots.extend(
+                    calls
+                        .into_iter()
+                        .filter_map(|path| resolve_called_function(&path, model)),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut pending = roots;
+    while let Some(name) = pending.pop() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        if let Some(calls) = graph.get(&name) {
+            pending.extend(calls.iter().cloned());
+        }
+    }
+    reachable
+}
+
+fn resolve_called_function(path: &[String], model: &SemanticModel) -> Option<String> {
+    let qualified = path.join(".");
+    if model.functions.contains_key(&qualified) {
+        Some(qualified)
+    } else {
+        path.last()
+            .filter(|name| model.functions.contains_key(*name))
+            .cloned()
+    }
+}
+
+fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<Vec<String>>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                collect_expr_calls(value, calls);
+            }
+            Stmt::Assign { target, value, .. } => {
+                collect_place_calls(target, calls);
+                collect_expr_calls(value, calls);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_calls(condition, calls);
+                collect_stmt_calls(then_body, calls);
+                collect_stmt_calls(else_body, calls);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_calls(condition, calls);
+                collect_stmt_calls(body, calls);
+            }
+            Stmt::Loop { body } => collect_stmt_calls(body, calls),
+            Stmt::Out { value, .. } => collect_expr_calls(value, calls),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_place_calls(place: &Place, calls: &mut Vec<Vec<String>>) {
+    match place {
+        Place::Index { index, .. } | Place::Deref(index) => collect_expr_calls(index, calls),
+        Place::Access(path) => collect_access_path_calls(path, calls),
+        Place::Ident(_) | Place::Field { .. } => {}
+    }
+}
+
+fn collect_expr_calls(expr: &Expr, calls: &mut Vec<Vec<String>>) {
+    match expr {
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_calls(value, calls);
+            }
+        }
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+            collect_expr_calls(index, calls);
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => collect_access_path_calls(path, calls),
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_calls(value, calls);
+            }
+        }
+        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+            collect_expr_calls(value, calls);
+        }
+        Expr::Call { path, args } => {
+            calls.push(path.clone());
+            for arg in args {
+                collect_expr_calls(arg, calls);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_calls(left, calls);
+            collect_expr_calls(right, calls);
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. }
+        | Expr::AddressOf(_) => {}
+    }
+}
+
+fn collect_access_path_calls(path: &AccessPath, calls: &mut Vec<Vec<String>>) {
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            collect_expr_calls(index, calls);
+        }
+    }
+}
+
 fn function_label(name: &str) -> String {
     format!("_{}", sanitize(name))
 }
@@ -1765,6 +1923,20 @@ mod tests {
             "6502 execution exceeded {instruction_budget} instructions at ${:04X}\n{assembly}",
             cpu.registers.program_counter
         );
+    }
+
+    #[test]
+    fn omits_unused_public_functions() {
+        let assembly = emit(
+            r#"
+                pub fn unused_sdk_helper() { }
+                fn used_helper() { }
+                fn main() { used_helper() }
+            "#,
+        );
+
+        assert!(assembly.contains("_used_helper:"), "{assembly}");
+        assert!(!assembly.contains("_unused_sdk_helper:"), "{assembly}");
     }
 
     #[test]
