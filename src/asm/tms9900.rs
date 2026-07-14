@@ -27,7 +27,7 @@ fn encode(
         let (source, destination) = split_operands(operands)?;
         let source = parse_operand(source, labels, resolve)?;
         let destination = parse_operand(destination, labels, resolve)?;
-        let mut bytes = word(base | ((source.field as u16) << 6) | destination.field as u16);
+        let mut bytes = word(base | ((destination.field as u16) << 6) | source.field as u16);
         bytes.extend(source.extensions);
         bytes.extend(destination.extensions);
         return Ok(bytes);
@@ -45,14 +45,14 @@ fn encode(
     }
 
     if let Some(base) = shift_base(&mnemonic) {
-        let (count, register) = split_operands(operands)?;
+        let (register, count) = split_operands(operands)?;
+        let register = register_number(register)?;
         let count = value(count, labels, resolve)?;
         if count > 15 {
             return Err(Diagnostic::new(format!(
                 "TMS9900 shift count `{count}` is outside 0..15"
             )));
         }
-        let register = register_number(register)?;
         return Ok(word(base | ((count as u16) << 4) | register as u16));
     }
 
@@ -108,18 +108,39 @@ fn encode(
         return Ok(bytes);
     }
 
-    if matches!(mnemonic.as_str(), "mpy" | "div") {
+    if matches!(
+        mnemonic.as_str(),
+        "coc" | "czc" | "xor" | "mpy" | "div" | "xop"
+    ) {
         let (source, destination) = split_operands(operands)?;
         let source = parse_operand(source, labels, resolve)?;
-        let destination = register_number(destination)?;
-        let base = if mnemonic == "mpy" { 0x3800 } else { 0x3c00 };
-        let mut bytes = word(base | ((source.field as u16) << 6) | destination as u16);
+        let destination = if mnemonic == "xop" {
+            value(destination, labels, resolve)?
+        } else {
+            u32::from(register_number(destination)?)
+        };
+        if destination > 15 {
+            return Err(Diagnostic::new(format!(
+                "TMS9900 {mnemonic} register/field `{destination}` is outside 0..15"
+            )));
+        }
+        let base = match mnemonic.as_str() {
+            "coc" => 0x2000,
+            "czc" => 0x2400,
+            "xor" => 0x2800,
+            "xop" => 0x2c00,
+            "mpy" => 0x3800,
+            "div" => 0x3c00,
+            _ => unreachable!("mnemonic checked above"),
+        };
+        let mut bytes = word(base | ((destination as u16) << 6) | source.field as u16);
         bytes.extend(source.extensions);
         return Ok(bytes);
     }
 
     match mnemonic.as_str() {
         "nop" if operands.is_empty() => Ok(word(0x1000)),
+        "rt" if operands.is_empty() => Ok(word(0x045b)),
         "idle" if operands.is_empty() => Ok(word(0x0340)),
         "rset" if operands.is_empty() => Ok(word(0x0360)),
         "rtwp" if operands.is_empty() => Ok(word(0x0380)),
@@ -293,7 +314,13 @@ fn parse_operand(
         let index = index
             .strip_suffix(')')
             .ok_or_else(|| Diagnostic::new(format!("invalid TMS9900 indexed operand `{text}`")))?;
-        (address.trim(), register_number(index.trim())?)
+        let register = register_number(index.trim())?;
+        if register == 0 {
+            return Err(Diagnostic::new(format!(
+                "TMS9900 indexed operand `{text}` cannot use R0; use @address instead"
+            )));
+        }
+        (address.trim(), register)
     } else {
         (symbolic.trim(), 0)
     };
@@ -404,6 +431,10 @@ fn word(value: u16) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libre99_core::{
+        bus::{Bus, FlatRam},
+        cpu::Cpu,
+    };
 
     #[test]
     fn encodes_core_instruction_formats() {
@@ -413,14 +444,14 @@ mod tests {
         );
         assert_eq!(
             encode_instruction("mov r1, *r2+", &HashMap::new(), 0).unwrap(),
-            [0xc0, 0x72]
+            [0xcc, 0x81]
         );
         assert_eq!(
             encode_instruction("a @>8300(r4), r5", &HashMap::new(), 0).unwrap(),
-            [0xa9, 0x05, 0x83, 0x00]
+            [0xa1, 0x64, 0x83, 0x00]
         );
         assert_eq!(
-            encode_instruction("sra 4, r6", &HashMap::new(), 0).unwrap(),
+            encode_instruction("sra r6, 4", &HashMap::new(), 0).unwrap(),
             [0x08, 0x46]
         );
         assert_eq!(
@@ -436,5 +467,86 @@ mod tests {
             encode_instruction("jmp loop", &labels, 0x1004).unwrap(),
             [0x10, 0xfd]
         );
+    }
+
+    #[test]
+    fn encodes_every_documented_instruction_format() {
+        let labels = HashMap::from([("target".to_owned(), 0x1008)]);
+        let cases = [
+            ("szcb *r1, @>8300(r2)", vec![0x58, 0x91, 0x83, 0x00]),
+            ("blwp @>0000", vec![0x04, 0x20, 0x00, 0x00]),
+            ("stwp r15", vec![0x02, 0xaf]),
+            ("limi >000F", vec![0x03, 0x00, 0x00, 0x0f]),
+            ("src r3, 15", vec![0x0b, 0xf3]),
+            ("jeq target", vec![0x13, 0x03]),
+            ("tb -128", vec![0x1f, 0x80]),
+            ("ldcr @>8c00, 8", vec![0x32, 0x20, 0x8c, 0x00]),
+            ("stcr *r4+, 1", vec![0x34, 0x74]),
+            ("mpy @>9000(r1), r2", vec![0x38, 0xa1, 0x90, 0x00]),
+            ("div r5, r6", vec![0x3d, 0x85]),
+            ("xop r1, 2", vec![0x2c, 0x81]),
+            ("rt", vec![0x04, 0x5b]),
+            ("rtwp", vec![0x03, 0x80]),
+        ];
+
+        for (text, expected) in cases {
+            assert_eq!(
+                encode_instruction(text, &labels, 0x1000).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_instruction_operands() {
+        for text in [
+            "li r16, 1",
+            "mov r0, @>1234(r16)",
+            "jmp >1001",
+            "sra 16, r0",
+            "sbo 128",
+            "ldcr r0, 16",
+            "not_an_instruction r0",
+        ] {
+            assert!(
+                encode_instruction(text, &HashMap::new(), 0x1000).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_words_use_tms9900_big_endian_order() {
+        let image = crate::vm::assemble_subset_with_symbols_at(
+            crate::target::AssemblerCpu::Tms9900,
+            "dw >1234\n",
+            0x1000,
+        )
+        .unwrap();
+        assert_eq!(image.bytes, [0x12, 0x34]);
+    }
+
+    #[test]
+    fn emitted_instructions_execute_on_libre99() {
+        let source = ["li r1, >1234", "ai r1, 1", "mov r1, @>9000"].join("\n");
+        let bytes = crate::vm::assemble_subset_with_symbols_at(
+            crate::target::AssemblerCpu::Tms9900,
+            &source,
+            0x0100,
+        )
+        .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &bytes.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_wp(0x8300);
+        cpu.set_pc(0x0100);
+
+        for _ in 0..3 {
+            assert!(cpu.step(&mut ram) > 0);
+        }
+
+        assert_eq!(ram.read_word(0x8302), 0x1235);
+        assert_eq!(ram.read_word(0x9000), 0x1235);
     }
 }

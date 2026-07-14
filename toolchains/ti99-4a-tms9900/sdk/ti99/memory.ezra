@@ -1,0 +1,9 @@
+// TI-99/4A memory map constants.
+pub const SCRATCHPAD: u16 = 0x8300
+pub const SCRATCHPAD_END: u16 = 0x83FF
+pub const SOUND: u16 = 0x8400
+pub const VDP_READ: u16 = 0x8800
+pub const VDP_STATUS: u16 = 0x8802
+pub const VDP_WRITE: u16 = 0x8C00
+pub const VDP_CONTROL: u16 = 0x8C02
+pub const CARTRIDGE_ROM: u16 = 0x6000

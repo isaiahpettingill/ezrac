@@ -1,0 +1,24 @@
+// TI-99/4A TMS9918A VDP access helpers.
+pub const DATA: u16 = 0x8C00
+pub const STATUS: u16 = 0x8802
+pub const CONTROL: u16 = 0x8C02
+
+// The TMS9918A transfers byte values through the high byte of the TMS9900 bus.
+pub fn write_data(value: u8) {
+    asm volatile {
+        "swpb r0"
+        "movb r0, @>8c00"
+        "swpb r0"
+    }
+}
+
+pub fn write_control(value: u8) {
+    asm volatile {
+        "swpb r0"
+        "movb r0, @>8c02"
+        "swpb r0"
+    }
+}
+
+// Reading status requires a target-specific assembly wrapper because the VDP
+// returns its byte in the high half of the TMS9900 data bus.

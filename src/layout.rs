@@ -97,6 +97,8 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::game_boy_lr35902()
     } else if target.starts_with("commodore64-6502") {
         Layout::commodore64_6502()
+    } else if target.starts_with("ti99-4a-tms9900") {
+        Layout::ti99_4a_tms9900()
     } else if target.starts_with("arduboy-") {
         Layout::bare_16("arduboy_avr")
     } else if is_ti_ce_target(target) {
@@ -373,6 +375,115 @@ impl Layout {
                 symbol("EZRA_CODE_BASE", Address24::new(0x8009)),
                 symbol("EZRA_STACK_TOP", Address24::new(0x01FF)),
                 symbol("EZRA_RAM_BASE", Address24::new(0xC000)),
+            ],
+        }
+    }
+
+    pub fn ti99_4a_tms9900() -> Self {
+        Self {
+            name: "ti99_4a_tms9900".to_owned(),
+            // The image starts at the cartridge ROM base. The generated
+            // cartridge header selects the code label as its menu entry.
+            load: Address24::new(0x6000),
+            entry: Address24::new(0x6000),
+            stack: Address24::new(0xCFFF),
+            regions: vec![
+                region(
+                    "console_rom",
+                    0x0000,
+                    0x1FFF,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::EXECUTE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "cartridge_rom",
+                    0x6000,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region(
+                    "scratchpad",
+                    0x8300,
+                    0x83FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "sound",
+                    0x8400,
+                    0x8400,
+                    &[
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "vdp_read",
+                    0x8800,
+                    0x8803,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "vdp_write",
+                    0x8C00,
+                    0x8C03,
+                    &[
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "grom",
+                    0x9800,
+                    0x9C03,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                // The target assumes the conventional 32 KiB expansion RAM.
+                region(
+                    "ram",
+                    0xA000,
+                    0xCFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+            ],
+            sections: vec![
+                section(".header", "cartridge_rom", 1),
+                section(".text", "cartridge_rom", 2),
+                section(".rodata", "cartridge_rom", 1),
+                section(".data", "ram", 1),
+                section(".bss", "ram", 1),
+                section(".assets", "cartridge_rom", 1),
+                section(".scratch", "ram", 1),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x6000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x6000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x6000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xCFFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x6000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x6000)),
+                symbol("TI99_WORKSPACE", Address24::new(0x8300)),
+                symbol("TI99_SOUND", Address24::new(0x8400)),
+                symbol("TI99_VDP_READ", Address24::new(0x8800)),
+                symbol("TI99_VDP_STATUS", Address24::new(0x8802)),
+                symbol("TI99_VDP_WRITE", Address24::new(0x8C00)),
+                symbol("TI99_VDP_CONTROL", Address24::new(0x8C02)),
+                symbol("TI99_GROM_READ", Address24::new(0x9800)),
+                symbol("TI99_GROM_WRITE", Address24::new(0x9C00)),
             ],
         }
     }

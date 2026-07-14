@@ -8,7 +8,7 @@ vendor-platform-cpu[-version]
 
 The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, TMS9900, AVR, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, and M68k requires `m68k`.
 
-Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have EZRA source code generation; AVR, M6800, and TMS9900 targets are currently assembly-only through the public CLI. MOS 6502 and optional M68k targets have target-specific EZRA source emitters.
+Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have complete EZRA source code generation; AVR and M6800 targets are assembly-only through the public CLI. MOS 6502, optional M68k, and optional TMS9900 targets have target-specific source emitters; the initial TMS9900 backend is a documented 8-/16-bit scalar subset.
 
 ## Support Levels
 
@@ -52,7 +52,8 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
-| `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; assembly-only target |
+| `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
+| `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
 | `arduboy-*-avr` | 3 | AVR | 16 | Intel HEX `.hex` | none | Optional `avr` feature; assembly-only profile |
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 
@@ -382,7 +383,7 @@ bare-i8085
 bare-tms9900
 ```
 
-Bare targets use raw `.bin` output and do not enable default SDK symbols. `bare-tms9900` is available with the optional `tms9900` feature and supports handwritten assembly only; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
+Bare targets use raw `.bin` output and do not enable default SDK symbols. `bare-tms9900` is available with the optional `tms9900` feature and supports the initial scalar source backend plus handwritten assembly; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
 
 ```text
 bare-ez80   24-bit address space, load 0x000000, stack 0xFFFFFF

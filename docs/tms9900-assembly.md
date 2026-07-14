@@ -1,6 +1,8 @@
 # TMS9900 Assembly
 
-The optional `tms9900` feature enables the standalone TMS9900 assembler and the generic `bare-tms9900` raw-binary target. It is intended for hand-written assembly; EZRA source compilation, a TI-99/4A cartridge format, SDK, and emulator-backed `ezrac test` runner are not included.
+The optional `tms9900` feature enables the standalone TMS9900 assembler, generic `bare-tms9900` raw-binary target, and the `ti99-4a-tms9900` source target. The TI-99/4A target emits a one-bank cartridge ROM beginning at `>6000`, including the standard cartridge header and an `EZRA` menu entry. It includes the embedded `ti99.console`, `ti99.input`, `ti99.memory`, `ti99.sound`, and `ti99.vdp` SDK modules.
+
+The initial source ABI evaluates scalar values in `R0`, uses `R1`/`R2` as scratch registers, and keeps arguments and call links in compiler-owned expansion RAM. Recursive functions are not supported. Source code currently supports 8- and 16-bit scalar variables, calls, basic arithmetic/bitwise operations, comparisons, loops, MMIO, and inline assembly; arrays, structs, 24-bit values, shifts, multiplication, division, and remainder remain unsupported by this backend.
 
 ## Build
 
@@ -34,9 +36,10 @@ The assembler supports the following instruction families:
 - shifts: `SRA`, `SRL`, `SLA`, and `SRC`
 - jumps: `JMP`, `JLT`, `JLE`, `JEQ`, `JHE`, `JGT`, `JNE`, `JNC`, `JOC`, `JNO`, `JL`, `JH`, and `JOP`
 - CRU operations: `SBO`, `SBZ`, `TB`, `LDCR`, and `STCR`
-- multiply and divide: `MPY` and `DIV`
+- workspace-register operations: `COC`, `CZC`, and `XOR`; multiply and divide: `MPY` and `DIV`; extended-operation dispatch: `XOP`
+- pseudo instructions: `NOP` and `RT`
 
-`NOP` is accepted as the `JMP 0` encoding. Jump targets must be word-aligned and fit the TMS9900 signed 8-bit word displacement range. `SBO`, `SBZ`, and `TB` accept signed CRU offsets from `-128` through `127`.
+`NOP` is accepted as the `JMP 0` encoding and `RT` as `B *R11`. Shift operands follow TI syntax: `SRA R6, 4` (register then count). Jump targets must be word-aligned and fit the TMS9900 signed 8-bit word displacement range. `SBO`, `SBZ`, and `TB` accept signed CRU offsets from `-128` through `127`. `dw` data words use the TMS9900's big-endian byte order.
 
 ## Example
 
@@ -50,3 +53,19 @@ loop:
 ```
 
 The generic bare target deliberately does not select TI-99/4A console ROM entry points, cartridge headers, VDP routines, or workspace conventions beyond the instructions explicitly written in the source.
+
+## TI-99/4A source target
+
+```sh
+cargo run --features tms9900 -- build --target ti99-4a-tms9900 examples/ti99-4a/hello.ezra
+```
+
+```ezra
+import ti99.vdp
+
+fn main() {
+    vdp.write_data('E')
+}
+```
+
+The emitted `.bin` is a raw 8 KiB-bank-compatible cartridge ROM. It assumes conventional 32 KiB expansion RAM at `>A000..>CFFF`; console scratchpad RAM at `>8300..>83FF` is reserved for the compiler workspace and hardware ABI.

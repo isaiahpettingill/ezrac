@@ -10,6 +10,9 @@ use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 #[cfg(feature = "m6800")]
 use ::m6800::{Cpu as M6800Cpu, MemoryBus as M6800MemoryBus};
 
+#[cfg(feature = "mos6502")]
+use mos6502::{cpu::CPU, memory::Bus as _, registers::StackPointer};
+
 use crate::asm::mos6502::Mos6502Variant;
 
 #[cfg(feature = "m68k")]
@@ -95,6 +98,9 @@ impl Default for TestRunner {
 
         #[cfg(feature = "m6800")]
         backends.push(Box::new(M6800Emulator));
+
+        #[cfg(feature = "mos6502")]
+        backends.push(Box::new(Mos6502Emulator));
 
         Self::new(backends)
     }
@@ -413,6 +419,155 @@ impl EmulatorBackend for M6800Emulator {
     }
 }
 
+#[cfg(feature = "mos6502")]
+pub struct Mos6502Emulator;
+
+#[cfg(feature = "mos6502")]
+const MOS6502_IO_BASE: u16 = 0xFF00;
+
+#[cfg(feature = "mos6502")]
+const MOS6502_DEBUG_ADDR: u16 = MOS6502_IO_BASE + 0x0C;
+
+#[cfg(feature = "mos6502")]
+const MOS6502_RESULT_ADDR: u16 = MOS6502_IO_BASE + 0x0D;
+
+#[cfg(feature = "mos6502")]
+const MOS6502_HALT_ADDR: u16 = MOS6502_IO_BASE + 0x0E;
+
+#[cfg(feature = "mos6502")]
+struct Mos6502Bus {
+    bytes: Box<[u8; 0x1_0000]>,
+    halted: bool,
+    result_code: u8,
+    debug_output: Vec<u8>,
+    ports: [u8; 256],
+}
+
+#[cfg(feature = "mos6502")]
+impl Mos6502Bus {
+    fn new() -> Self {
+        Self {
+            bytes: Box::new([0; 0x1_0000]),
+            halted: false,
+            result_code: 0,
+            debug_output: Vec::new(),
+            ports: [0; 256],
+        }
+    }
+}
+
+#[cfg(feature = "mos6502")]
+impl mos6502::memory::Bus for Mos6502Bus {
+    fn get_byte(&mut self, address: u16) -> u8 {
+        self.bytes[usize::from(address)]
+    }
+
+    fn set_byte(&mut self, address: u16, value: u8) {
+        self.bytes[usize::from(address)] = value;
+        match address {
+            MOS6502_DEBUG_ADDR => self.debug_output.push(value),
+            MOS6502_RESULT_ADDR => self.result_code = value,
+            MOS6502_HALT_ADDR => self.halted = value != 0,
+            _ => {}
+        }
+        if address >= MOS6502_IO_BASE {
+            self.ports[usize::from(address - MOS6502_IO_BASE)] = value;
+        }
+    }
+}
+
+#[cfg(feature = "mos6502")]
+fn run_mos6502_with_variant<V: mos6502::Variant + Default>(
+    image: &TestImage,
+    options: &TestRunOptions,
+) -> Result<TestRun, Diagnostic> {
+    let end = image
+        .base_addr
+        .checked_add(image.bytes.len() as u32)
+        .filter(|end| *end <= 0x1_0000)
+        .ok_or_else(|| Diagnostic::new("6502 test image exceeds 16-bit address space"))?;
+    if !(0x0100..=0x01FF).contains(&options.stack_top) {
+        return Err(Diagnostic::new(
+            "6502 test stack must be inside hardware stack page $0100-$01FF",
+        ));
+    }
+    let base = u16::try_from(image.base_addr)
+        .map_err(|_| Diagnostic::new("6502 test image base is outside address space"))?;
+    let mut bus = Mos6502Bus::new();
+    for (port, value) in &options.initial_ports {
+        bus.set_byte(MOS6502_IO_BASE + u16::from(*port), *value);
+    }
+    for (address, value) in &options.initial_memory {
+        let address = u16::try_from(*address)
+            .map_err(|_| Diagnostic::new("6502 initial memory address is outside address space"))?;
+        bus.set_byte(address, *value);
+    }
+    for (offset, byte) in image.bytes.iter().copied().enumerate() {
+        bus.set_byte(base + offset as u16, byte);
+    }
+
+    let mut cpu = CPU::new(bus, V::default());
+    cpu.registers.program_counter = base;
+    cpu.registers.stack_pointer = StackPointer(options.stack_top as u8);
+    let mut instructions = 0;
+    let failure = loop {
+        if cpu.memory.halted {
+            break None;
+        }
+        if instructions >= options.instruction_budget {
+            break Some(TestRunFailure::Timeout);
+        }
+        let pc = u32::from(cpu.registers.program_counter);
+        if pc < image.base_addr || pc >= end {
+            break Some(TestRunFailure::ExecutionOutsideMappedMemory { pc });
+        }
+        let step = catch_unwind(AssertUnwindSafe(|| cpu.single_step()));
+        match step {
+            Ok(true) => instructions += 1,
+            Ok(false) | Err(_) => {
+                break Some(TestRunFailure::IllegalInstruction { pc });
+            }
+        }
+    };
+
+    Ok(TestRun {
+        halted: cpu.memory.halted,
+        result_code: cpu.memory.result_code,
+        instructions,
+        debug_output: cpu.memory.debug_output,
+        ports: cpu.memory.ports,
+        failure,
+    })
+}
+
+#[cfg(feature = "mos6502")]
+impl EmulatorBackend for Mos6502Emulator {
+    fn supports(&self, cpu_family: CpuFamily) -> bool {
+        matches!(
+            cpu_family,
+            CpuFamily::Mos6502 | CpuFamily::Cmos65C02 | CpuFamily::Ricoh2A03
+        )
+    }
+
+    fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+        match image.cpu_family {
+            CpuFamily::Mos6502 => {
+                run_mos6502_with_variant::<mos6502::instruction::Nmos6502>(image, options)
+            }
+            CpuFamily::Cmos65C02 => {
+                run_mos6502_with_variant::<mos6502::instruction::Cmos6502>(image, options)
+            }
+            CpuFamily::Ricoh2A03 => {
+                run_mos6502_with_variant::<mos6502::instruction::Ricoh2a03>(image, options)
+            }
+            _ => Err(Diagnostic::new(format!(
+                "no test emulator is registered for CPU `{}`",
+                image.cpu_family.as_str()
+            ))),
+        }
+    }
+}
+
 fn address_width_for_family(cpu_family: CpuFamily) -> u8 {
     if cpu_family == CpuFamily::Ez80 {
         24
@@ -689,7 +844,7 @@ pub fn assemble_subset_with_options_at(
                 pc = new_pc;
             }
             AsmLine::Data(values) => {
-                emit_data(values, &labels, pc, &mut bytes).map_err(|error| {
+                emit_data(cpu, values, &labels, pc, &mut bytes).map_err(|error| {
                     error.with_location_if_missing(line_location(&instruction, options))
                 })?;
                 pc = checked_assembly_pc_advance(pc, data_len(values) as u32).map_err(|error| {
@@ -946,6 +1101,7 @@ fn data_len(values: &[DataValue]) -> usize {
 }
 
 fn emit_data(
+    cpu: AssemblerCpu,
     values: &[DataValue],
     labels: &HashMap<String, u32>,
     pc: u32,
@@ -954,7 +1110,19 @@ fn emit_data(
     for value in values {
         match value {
             DataValue::Byte(expr) => bytes.push(eval_u8(expr, labels, pc)?),
-            DataValue::Word(expr) => push16(bytes, eval_expr(expr, labels, pc)?)?,
+            DataValue::Word(expr) => {
+                let value = eval_expr(expr, labels, pc)?;
+                if cpu == AssemblerCpu::Tms9900 {
+                    let value = u16::try_from(value).map_err(|_| {
+                        Diagnostic::new(format!(
+                            "TMS9900 word value 0x{value:X} is outside the 16-bit address space"
+                        ))
+                    })?;
+                    bytes.extend(value.to_be_bytes());
+                } else {
+                    push16(bytes, value)?;
+                }
+            }
             DataValue::Bytes(raw) => bytes.extend(raw),
         }
     }
@@ -1633,14 +1801,16 @@ fn looks_like_label_ref(text: &str) -> bool {
 
 pub(crate) fn parse_number(text: &str) -> Result<u32, Diagnostic> {
     let text = text.trim().trim_end_matches(',');
-    if let Some(hex) = text.strip_suffix('h') {
+    let parsed = if let Some(hex) = text.strip_prefix('>') {
+        u32::from_str_radix(hex.strip_suffix('h').unwrap_or(hex), 16)
+    } else if let Some(hex) = text.strip_suffix('h') {
         u32::from_str_radix(hex, 16)
     } else if let Some(hex) = text.strip_prefix("0x") {
         u32::from_str_radix(hex, 16)
     } else {
         text.parse()
-    }
-    .map_err(|_| Diagnostic::new(format!("invalid numeric operand `{text}`")))
+    };
+    parsed.map_err(|_| Diagnostic::new(format!("invalid numeric operand `{text}`")))
 }
 
 fn push24(bytes: &mut Vec<u8>, value: u32) {

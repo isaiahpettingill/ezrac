@@ -1,0 +1,10 @@
+// TI SN76489 sound generator.
+pub const WRITE: u16 = 0x8400
+
+pub fn write(value: u8) {
+    asm volatile {
+        "swpb r0"
+        "movb r0, @>8400"
+        "swpb r0"
+    }
+}

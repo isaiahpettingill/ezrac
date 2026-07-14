@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.25
+
+- Added the optional TMS9900 source backend and a `ti99-4a-tms9900` target that emits a bootable TI-99/4A cartridge ROM.
+- Expanded the TMS9900 assembler, corrected dual-operand encodings, and added Libre99 CPU-backed assembler and source-codegen tests.
+- Added bundled `ti99.*` SDK modules plus TI-99/4A Mandelbrot tile-study and atom-sprite-animation examples.
+
+
 ## 0.1.24
 
 - Added a tokenized `10 SYS2061` BASIC autostart loader to Commodore 64 `.prg` output so VICE launches C64 programs automatically.

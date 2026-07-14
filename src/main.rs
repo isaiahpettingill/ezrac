@@ -29,6 +29,8 @@ use ezra::{
 
 #[cfg(feature = "m68k")]
 use ezra::asm::emit_m68k_assembly_with_options;
+#[cfg(feature = "tms9900")]
+use ezra::asm::emit_tms9900_assembly_with_options;
 
 #[cfg(feature = "lsp")]
 mod lsp_server;
@@ -789,6 +791,7 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::I8085
             | CpuFamily::Lr35902
             | CpuFamily::Mos6502
+            | CpuFamily::Tms9900
     ) {
         return Ok(());
     }
@@ -828,6 +831,15 @@ fn emit_source_assembly(
         emit_lr35902_assembly_with_options(program, options)
     } else if options.cpu == CpuFamily::Mos6502 {
         emit_mos6502_assembly_with_options(program, options)
+    } else if options.cpu == CpuFamily::Tms9900 {
+        #[cfg(feature = "tms9900")]
+        {
+            emit_tms9900_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "tms9900"))]
+        {
+            unreachable!("TMS9900 targets require the tms9900 Cargo feature")
+        }
     } else if options.cpu == CpuFamily::M68k {
         #[cfg(feature = "m68k")]
         {
@@ -1184,6 +1196,7 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
         || settings.target.triple.value.starts_with("commodore64-6502")
         || is_ti_ce_target(&settings.target.triple.value)
         || is_ti_z80_target(&settings.target.triple.value)
+        || settings.target.triple.value.starts_with("ti99-4a-tms9900")
 }
 
 fn is_ti_ce_target(target: &str) -> bool {
@@ -3456,12 +3469,21 @@ fn print_targets() {
         },
         #[cfg(feature = "tms9900")]
         TargetRow {
+            triple: "ti99-4a-tms9900",
+            cpu: "tms9900",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "ti99.*",
+            status: "TI-99/4A cartridge source target",
+        },
+        #[cfg(feature = "tms9900")]
+        TargetRow {
             triple: "bare-tms9900",
             cpu: "tms9900",
             address_width_bits: 16,
             output: "bin",
             sdk: "none",
-            status: "assembly-only TMS9900 target",
+            status: "bare TMS9900 source/assembly target",
         },
         #[cfg(feature = "m68k")]
         TargetRow {

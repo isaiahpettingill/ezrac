@@ -98,7 +98,9 @@ impl AssemblerCpu {
             Self::Avr => cfg!(feature = "avr"),
             Self::M6800 => cfg!(feature = "m6800"),
             Self::M68k => cfg!(feature = "m68k"),
-            Self::Mos6502 | Self::Cmos65C02 | Self::Wdc65C816 | Self::Ricoh2A03 => cfg!(feature = "mos6502"),
+            Self::Mos6502 | Self::Cmos65C02 | Self::Wdc65C816 | Self::Ricoh2A03 => {
+                cfg!(feature = "mos6502")
+            }
             Self::Tms9900 => cfg!(feature = "tms9900"),
         }
     }
@@ -347,18 +349,19 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
-        CpuFamily::Lr35902 | CpuFamily::M6800 | CpuFamily::Mos6502 | CpuFamily::Cmos65C02 | CpuFamily::Ricoh2A03 | CpuFamily::Tms9900 => {
-            Some(TargetMemoryModel {
-                pointer_width_bits: 16,
-                address_width_bits: 16,
-            })
-        }
-        CpuFamily::Wdc65C816 => {
-            Some(TargetMemoryModel {
-                pointer_width_bits: 24,
-                address_width_bits: 24,
-            })
-        }
+        CpuFamily::Lr35902
+        | CpuFamily::M6800
+        | CpuFamily::Mos6502
+        | CpuFamily::Cmos65C02
+        | CpuFamily::Ricoh2A03
+        | CpuFamily::Tms9900 => Some(TargetMemoryModel {
+            pointer_width_bits: 16,
+            address_width_bits: 16,
+        }),
+        CpuFamily::Wdc65C816 => Some(TargetMemoryModel {
+            pointer_width_bits: 24,
+            address_width_bits: 24,
+        }),
         CpuFamily::Avr => Some(TargetMemoryModel {
             pointer_width_bits: 16,
             address_width_bits: 16,

@@ -57,7 +57,10 @@ pub fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
 
 /// Returns the assembled length of a single instruction for a specific
 /// 6502-family variant (NMOS, 65C02, 65C816, or 2A03).
-pub fn instruction_len_for_variant(text: &str, variant: Mos6502Variant) -> Result<usize, Diagnostic> {
+pub fn instruction_len_for_variant(
+    text: &str,
+    variant: Mos6502Variant,
+) -> Result<usize, Diagnostic> {
     Ok(encode(text, &HashMap::new(), 0, false, variant)?.len())
 }
 
@@ -148,9 +151,11 @@ fn encode(
             out.push(low[1]);
         }
         Mode::ZeroPageIndirect => out.push(u8_value(operand, value)?),
-        Mode::Absolute | Mode::AbsoluteX | Mode::AbsoluteY | Mode::Indirect | Mode::IndexedIndirectX => {
-            push16(&mut out, value)?
-        }
+        Mode::Absolute
+        | Mode::AbsoluteX
+        | Mode::AbsoluteY
+        | Mode::Indirect
+        | Mode::IndexedIndirectX => push16(&mut out, value)?,
         Mode::AbsoluteLong => push24(&mut out, value)?,
         Mode::IndirectLong => push16(&mut out, value)?,
     }
@@ -175,13 +180,19 @@ fn parse_operand(
         return Ok((Mode::Immediate, value_or(expr, labels, pc, resolve, 0)?));
     }
     if is_branch_long(mnemonic) {
-        return Ok((Mode::RelativeLong, value_or(operand, labels, pc, resolve, 0)?));
+        return Ok((
+            Mode::RelativeLong,
+            value_or(operand, labels, pc, resolve, 0)?,
+        ));
     }
     if is_branch(mnemonic) {
         return Ok((Mode::Relative, value_or(operand, labels, pc, resolve, 0)?));
     }
     if mnemonic == "per" {
-        return Ok((Mode::RelativeLong, value_or(operand, labels, pc, resolve, 0)?));
+        return Ok((
+            Mode::RelativeLong,
+            value_or(operand, labels, pc, resolve, 0)?,
+        ));
     }
     if mnemonic == "mvp" || mnemonic == "mvn" {
         let parts: Vec<&str> = operand.split(',').collect();
@@ -204,8 +215,10 @@ fn parse_operand(
         .and_then(|s| s.strip_suffix(",x)"))
     {
         let v = value_or(inner, labels, pc, resolve, 0)?;
-        if variant != Mos6502Variant::Nmos6502 && variant != Mos6502Variant::Ricoh2A03
-            && operand_is_numeric(inner) && v > 0xff
+        if variant != Mos6502Variant::Nmos6502
+            && variant != Mos6502Variant::Ricoh2A03
+            && operand_is_numeric(inner)
+            && v > 0xff
         {
             return Ok((Mode::IndexedIndirectX, v));
         }
@@ -222,7 +235,10 @@ fn parse_operand(
     }
     if let Some(inner) = operand.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         if variant == Mos6502Variant::Wdc65C816 {
-            return Ok((Mode::IndirectLong, value_or(inner, labels, pc, resolve, 0x100)?));
+            return Ok((
+                Mode::IndirectLong,
+                value_or(inner, labels, pc, resolve, 0x100)?,
+            ));
         }
         return Err(Diagnostic::new(format!(
             "assembler does not support {} instruction `{mnemonic} [{inner}]`",
@@ -232,10 +248,17 @@ fn parse_operand(
     if let Some(inner) = operand.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
         let v = value_or(inner, labels, pc, resolve, 0x100)?;
         // On 65C02/65C816, ($12) for ALU ops is (zp) indirect, not JMP indirect
-        if variant != Mos6502Variant::Nmos6502 && variant != Mos6502Variant::Ricoh2A03
-            && matches!(mnemonic, "adc" | "and" | "cmp" | "eor" | "lda" | "ora" | "sbc" | "sta")
+        if variant != Mos6502Variant::Nmos6502
+            && variant != Mos6502Variant::Ricoh2A03
+            && matches!(
+                mnemonic,
+                "adc" | "and" | "cmp" | "eor" | "lda" | "ora" | "sbc" | "sta"
+            )
         {
-            return Ok((Mode::ZeroPageIndirect, value_or(inner, labels, pc, resolve, 0)?));
+            return Ok((
+                Mode::ZeroPageIndirect,
+                value_or(inner, labels, pc, resolve, 0)?,
+            ));
         }
         return Ok((Mode::Indirect, v));
     }
@@ -287,12 +310,21 @@ fn parse_operand(
             _ => {}
         }
     }
-    if operand_is_numeric(operand) && v <= 0x00ff_ffff && variant == Mos6502Variant::Wdc65C816
-        && matches!(mnemonic, "jmp" | "jsr" | "lda" | "sta" | "adc" | "sbc" | "and" | "ora" | "eor" | "cmp")
+    if operand_is_numeric(operand)
+        && v <= 0x00ff_ffff
+        && variant == Mos6502Variant::Wdc65C816
+        && matches!(
+            mnemonic,
+            "jmp" | "jsr" | "lda" | "sta" | "adc" | "sbc" | "and" | "ora" | "eor" | "cmp"
+        )
     {
         let explicit_long = operand.contains(':') || operand.starts_with('!');
         if v > 0xffff || explicit_long {
-            let inner = if explicit_long { operand.trim_start_matches('!') } else { operand };
+            let inner = if explicit_long {
+                operand.trim_start_matches('!')
+            } else {
+                operand
+            };
             let mode = match mnemonic {
                 "jmp" if explicit_long => Mode::AbsoluteLong,
                 "jsr" if explicit_long => Mode::AbsoluteLong,
@@ -318,8 +350,12 @@ fn parse_operand(
 
 fn operand_is_numeric(expr: &str) -> bool {
     let expr = expr.trim();
-    expr.starts_with('>') || expr.starts_with('^') || expr.starts_with('!')
-        || expr == "$" || expr.starts_with('$') || parse_number(expr).is_ok()
+    expr.starts_with('>')
+        || expr.starts_with('^')
+        || expr.starts_with('!')
+        || expr == "$"
+        || expr.starts_with('$')
+        || parse_number(expr).is_ok()
 }
 
 fn value_or(
@@ -366,7 +402,9 @@ fn push16(out: &mut Vec<u8>, value: u32) -> Result<(), Diagnostic> {
 
 fn push24(out: &mut Vec<u8>, value: u32) -> Result<(), Diagnostic> {
     if value > 0xffffff {
-        return Err(Diagnostic::new(format!("6502 address 0x{value:X} is outside 24-bit range")));
+        return Err(Diagnostic::new(format!(
+            "6502 address 0x{value:X} is outside 24-bit range"
+        )));
     }
     out.extend(value.to_le_bytes()[..3].iter());
     Ok(())
@@ -455,28 +493,54 @@ fn opcode(m: &str, mode: Mode, variant: Mos6502Variant) -> Option<u8> {
         ("sbc", Mode::IndirectIndexed, _) => Some(0xF1),
 
         // 65C02
-        ("bra", Mode::Relative, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x80),
+        ("bra", Mode::Relative, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x80)
+        }
         ("phx", Mode::Implied, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0xDA),
         ("phy", Mode::Implied, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x5A),
         ("plx", Mode::Implied, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0xFA),
         ("ply", Mode::Implied, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x7A),
         ("stp", Mode::Implied, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0xDB),
         ("wai", Mode::Implied, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0xCB),
-        ("inc", Mode::Accumulator, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x1A),
-        ("dec", Mode::Accumulator, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x3A),
+        ("inc", Mode::Accumulator, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x1A)
+        }
+        ("dec", Mode::Accumulator, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x3A)
+        }
         // 65C02 BIT immediate and JMP (abs,X)
-        ("bit", Mode::Immediate, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x89),
-        ("jmp", Mode::IndexedIndirectX, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x7C),
+        ("bit", Mode::Immediate, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x89)
+        }
+        ("jmp", Mode::IndexedIndirectX, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x7C)
+        }
 
         // 65C02 (zp) indirect for ALU/load-store
-        ("ora", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x12),
-        ("and", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x32),
-        ("eor", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x52),
-        ("adc", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x72),
-        ("sta", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0x92),
-        ("lda", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0xB2),
-        ("cmp", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0xD2),
-        ("sbc", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => Some(0xF2),
+        ("ora", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x12)
+        }
+        ("and", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x32)
+        }
+        ("eor", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x52)
+        }
+        ("adc", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x72)
+        }
+        ("sta", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0x92)
+        }
+        ("lda", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0xB2)
+        }
+        ("cmp", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0xD2)
+        }
+        ("sbc", Mode::ZeroPageIndirect, Mos6502Variant::Cmos65C02 | Mos6502Variant::Wdc65C816) => {
+            Some(0xF2)
+        }
 
         // 65C816 XBA, XCE, COP, BRL, RTL
         ("xba", Mode::Implied, Mos6502Variant::Wdc65C816) => Some(0xEB),
@@ -736,7 +800,8 @@ fn opcode_group(m: &str, mode: Mode, variant: Mos6502Variant) -> Option<u8> {
             ],
         ),
     ];
-    let base = rows.iter()
+    let base = rows
+        .iter()
         .find(|(name, _)| *name == m)
         .and_then(|(_, modes)| {
             modes
@@ -786,18 +851,45 @@ fn opcode_65c02_group(m: &str, mode: Mode) -> Option<u8> {
 }
 
 fn is_bit_branch(m: &str) -> bool {
-    matches!(m, "bbr0" | "bbr1" | "bbr2" | "bbr3" | "bbr4" | "bbr5" | "bbr6" | "bbr7"
-        | "bbs0" | "bbs1" | "bbs2" | "bbs3" | "bbs4" | "bbs5" | "bbs6" | "bbs7")
+    matches!(
+        m,
+        "bbr0"
+            | "bbr1"
+            | "bbr2"
+            | "bbr3"
+            | "bbr4"
+            | "bbr5"
+            | "bbr6"
+            | "bbr7"
+            | "bbs0"
+            | "bbs1"
+            | "bbs2"
+            | "bbs3"
+            | "bbs4"
+            | "bbs5"
+            | "bbs6"
+            | "bbs7"
+    )
 }
 
 fn bbr_bbs_opcode(m: &str, zp: u32, target: u32, pc: u32) -> Option<Vec<u8>> {
     let opcode = match m {
-        "bbr0" => Some(0x0Fu8), "bbr1" => Some(0x1F), "bbr2" => Some(0x2F),
-        "bbr3" => Some(0x3F), "bbr4" => Some(0x4F), "bbr5" => Some(0x5F),
-        "bbr6" => Some(0x6F), "bbr7" => Some(0x7F),
-        "bbs0" => Some(0x8Fu8), "bbs1" => Some(0x9F), "bbs2" => Some(0xAF),
-        "bbs3" => Some(0xBF), "bbs4" => Some(0xCF), "bbs5" => Some(0xDF),
-        "bbs6" => Some(0xEF), "bbs7" => Some(0xFF),
+        "bbr0" => Some(0x0Fu8),
+        "bbr1" => Some(0x1F),
+        "bbr2" => Some(0x2F),
+        "bbr3" => Some(0x3F),
+        "bbr4" => Some(0x4F),
+        "bbr5" => Some(0x5F),
+        "bbr6" => Some(0x6F),
+        "bbr7" => Some(0x7F),
+        "bbs0" => Some(0x8Fu8),
+        "bbs1" => Some(0x9F),
+        "bbs2" => Some(0xAF),
+        "bbs3" => Some(0xBF),
+        "bbs4" => Some(0xCF),
+        "bbs5" => Some(0xDF),
+        "bbs6" => Some(0xEF),
+        "bbs7" => Some(0xFF),
         _ => None,
     }?;
     let rel = relative_offset(pc.wrapping_add(1), target).ok()?;
@@ -828,15 +920,39 @@ mod tests {
     fn nmos_standard_opcodes() {
         assert_eq!(enc("lda #$10", Mos6502Variant::Nmos6502), vec![0xA9, 0x10]);
         assert_eq!(enc("lda $20", Mos6502Variant::Nmos6502), vec![0xA5, 0x20]);
-        assert_eq!(enc("lda $2000", Mos6502Variant::Nmos6502), vec![0xAD, 0x00, 0x20]);
+        assert_eq!(
+            enc("lda $2000", Mos6502Variant::Nmos6502),
+            vec![0xAD, 0x00, 0x20]
+        );
         assert_eq!(enc("lda $20,x", Mos6502Variant::Nmos6502), vec![0xB5, 0x20]);
-        assert_eq!(enc("lda $2000,x", Mos6502Variant::Nmos6502), vec![0xBD, 0x00, 0x20]);
-        assert_eq!(enc("lda $2000,y", Mos6502Variant::Nmos6502), vec![0xB9, 0x00, 0x20]);
-        assert_eq!(enc("lda ($20,x)", Mos6502Variant::Nmos6502), vec![0xA1, 0x20]);
-        assert_eq!(enc("lda ($20),y", Mos6502Variant::Nmos6502), vec![0xB1, 0x20]);
-        assert_eq!(enc("sta $1234", Mos6502Variant::Nmos6502), vec![0x8D, 0x34, 0x12]);
-        assert_eq!(enc("jmp $3456", Mos6502Variant::Nmos6502), vec![0x4C, 0x56, 0x34]);
-        assert_eq!(enc("jsr $5678", Mos6502Variant::Nmos6502), vec![0x20, 0x78, 0x56]);
+        assert_eq!(
+            enc("lda $2000,x", Mos6502Variant::Nmos6502),
+            vec![0xBD, 0x00, 0x20]
+        );
+        assert_eq!(
+            enc("lda $2000,y", Mos6502Variant::Nmos6502),
+            vec![0xB9, 0x00, 0x20]
+        );
+        assert_eq!(
+            enc("lda ($20,x)", Mos6502Variant::Nmos6502),
+            vec![0xA1, 0x20]
+        );
+        assert_eq!(
+            enc("lda ($20),y", Mos6502Variant::Nmos6502),
+            vec![0xB1, 0x20]
+        );
+        assert_eq!(
+            enc("sta $1234", Mos6502Variant::Nmos6502),
+            vec![0x8D, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("jmp $3456", Mos6502Variant::Nmos6502),
+            vec![0x4C, 0x56, 0x34]
+        );
+        assert_eq!(
+            enc("jsr $5678", Mos6502Variant::Nmos6502),
+            vec![0x20, 0x78, 0x56]
+        );
         assert_eq!(enc("beq $10", Mos6502Variant::Nmos6502), vec![0xF0, 0x0E]);
         assert_eq!(enc("nop", Mos6502Variant::Nmos6502), vec![0xEA]);
         assert_eq!(enc("sbc #$05", Mos6502Variant::Nmos6502), vec![0xE9, 0x05]);
@@ -857,20 +973,35 @@ mod tests {
     #[test]
     fn nmos_relative_branch() {
         // bcs $10 at PC=0 → offset = $10 - 2 = $0E
-        assert_eq!(enc_at("bcs $10", 0, Mos6502Variant::Nmos6502), vec![0xB0, 0x0E]);
+        assert_eq!(
+            enc_at("bcs $10", 0, Mos6502Variant::Nmos6502),
+            vec![0xB0, 0x0E]
+        );
         // bne label at PC=0x100, target = 0x0F8 → offset = 0x0F8 - (0x100 + 2) = -10 = 0xF6
         let mut labels = HashMap::new();
         labels.insert("label".to_string(), 0x0F8);
-        assert_eq!(encode("bne label", &labels, 0x100, true, Mos6502Variant::Nmos6502).unwrap(), vec![0xD0, 0xF6]);
+        assert_eq!(
+            encode("bne label", &labels, 0x100, true, Mos6502Variant::Nmos6502).unwrap(),
+            vec![0xD0, 0xF6]
+        );
     }
 
     // ── 65C02 opcodes ─────────────────────────────────────────────────────
 
     #[test]
     fn cmos_bra() {
-        assert_eq!(enc_at("bra $10", 0, Mos6502Variant::Cmos65C02), vec![0x80, 0x0E]);
-        assert_eq!(enc_at("bra $05", 2, Mos6502Variant::Cmos65C02), vec![0x80, 0x01]);
-        assert_eq!(enc_at("bra $02", 0, Mos6502Variant::Cmos65C02), vec![0x80, 0x00]);
+        assert_eq!(
+            enc_at("bra $10", 0, Mos6502Variant::Cmos65C02),
+            vec![0x80, 0x0E]
+        );
+        assert_eq!(
+            enc_at("bra $05", 2, Mos6502Variant::Cmos65C02),
+            vec![0x80, 0x01]
+        );
+        assert_eq!(
+            enc_at("bra $02", 0, Mos6502Variant::Cmos65C02),
+            vec![0x80, 0x00]
+        );
     }
 
     #[test]
@@ -902,9 +1033,18 @@ mod tests {
     #[test]
     fn cmos_stz() {
         assert_eq!(enc("stz $10", Mos6502Variant::Cmos65C02), vec![0x64, 0x10]);
-        assert_eq!(enc("stz $1234", Mos6502Variant::Cmos65C02), vec![0x9C, 0x34, 0x12]);
-        assert_eq!(enc("stz $10,x", Mos6502Variant::Cmos65C02), vec![0x74, 0x10]);
-        assert_eq!(enc("stz $1234,x", Mos6502Variant::Cmos65C02), vec![0x9E, 0x34, 0x12]);
+        assert_eq!(
+            enc("stz $1234", Mos6502Variant::Cmos65C02),
+            vec![0x9C, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("stz $10,x", Mos6502Variant::Cmos65C02),
+            vec![0x74, 0x10]
+        );
+        assert_eq!(
+            enc("stz $1234,x", Mos6502Variant::Cmos65C02),
+            vec![0x9E, 0x34, 0x12]
+        );
     }
 
     #[test]
@@ -928,40 +1068,75 @@ mod tests {
 
     #[test]
     fn cmos_jmp_indexed_indirect_x() {
-        assert_eq!(enc("jmp ($1234,x)", Mos6502Variant::Cmos65C02), vec![0x7C, 0x34, 0x12]);
+        assert_eq!(
+            enc("jmp ($1234,x)", Mos6502Variant::Cmos65C02),
+            vec![0x7C, 0x34, 0x12]
+        );
     }
 
     #[test]
     fn cmos_jmp_indexed_indirect_x_rejected_on_nmos() {
-        assert!(err("jmp ($1234,x)", Mos6502Variant::Nmos6502).contains("assembler does not support"));
+        assert!(
+            err("jmp ($1234,x)", Mos6502Variant::Nmos6502).contains("assembler does not support")
+        );
     }
 
     // ── 65C02 (zp) indirect ───────────────────────────────────────────────
 
     #[test]
     fn cmos_zp_indirect_adc() {
-        assert_eq!(enc("adc ($12)", Mos6502Variant::Cmos65C02), vec![0x72, 0x12]);
+        assert_eq!(
+            enc("adc ($12)", Mos6502Variant::Cmos65C02),
+            vec![0x72, 0x12]
+        );
     }
 
     #[test]
     fn cmos_zp_indirect_and_cmp_ora() {
-        assert_eq!(enc("and ($34)", Mos6502Variant::Cmos65C02), vec![0x32, 0x34]);
-        assert_eq!(enc("cmp ($56)", Mos6502Variant::Cmos65C02), vec![0xD2, 0x56]);
-        assert_eq!(enc("ora ($78)", Mos6502Variant::Cmos65C02), vec![0x12, 0x78]);
+        assert_eq!(
+            enc("and ($34)", Mos6502Variant::Cmos65C02),
+            vec![0x32, 0x34]
+        );
+        assert_eq!(
+            enc("cmp ($56)", Mos6502Variant::Cmos65C02),
+            vec![0xD2, 0x56]
+        );
+        assert_eq!(
+            enc("ora ($78)", Mos6502Variant::Cmos65C02),
+            vec![0x12, 0x78]
+        );
     }
 
     #[test]
     fn cmos_zp_indirect_eor_lda_sta_sbc() {
-        assert_eq!(enc("eor ($10)", Mos6502Variant::Cmos65C02), vec![0x52, 0x10]);
-        assert_eq!(enc("lda ($20)", Mos6502Variant::Cmos65C02), vec![0xB2, 0x20]);
-        assert_eq!(enc("sta ($30)", Mos6502Variant::Cmos65C02), vec![0x92, 0x30]);
-        assert_eq!(enc("sbc ($40)", Mos6502Variant::Cmos65C02), vec![0xF2, 0x40]);
+        assert_eq!(
+            enc("eor ($10)", Mos6502Variant::Cmos65C02),
+            vec![0x52, 0x10]
+        );
+        assert_eq!(
+            enc("lda ($20)", Mos6502Variant::Cmos65C02),
+            vec![0xB2, 0x20]
+        );
+        assert_eq!(
+            enc("sta ($30)", Mos6502Variant::Cmos65C02),
+            vec![0x92, 0x30]
+        );
+        assert_eq!(
+            enc("sbc ($40)", Mos6502Variant::Cmos65C02),
+            vec![0xF2, 0x40]
+        );
     }
 
     #[test]
     fn cmos_zp_indirect_works_on_65c816_too() {
-        assert_eq!(enc("adc ($12)", Mos6502Variant::Wdc65C816), vec![0x72, 0x12]);
-        assert_eq!(enc("lda ($20)", Mos6502Variant::Wdc65C816), vec![0xB2, 0x20]);
+        assert_eq!(
+            enc("adc ($12)", Mos6502Variant::Wdc65C816),
+            vec![0x72, 0x12]
+        );
+        assert_eq!(
+            enc("lda ($20)", Mos6502Variant::Wdc65C816),
+            vec![0xB2, 0x20]
+        );
     }
 
     #[test]
@@ -993,10 +1168,22 @@ mod tests {
     #[test]
     fn cmos_bbr_bbs() {
         // relative offset = target - (pc + 3) for 3-byte instruction
-        assert_eq!(enc_at("bbr0 $12,$20", 0, Mos6502Variant::Cmos65C02), vec![0x0F, 0x12, 0x1D]);
-        assert_eq!(enc_at("bbr4 $34,$50", 0, Mos6502Variant::Cmos65C02), vec![0x4F, 0x34, 0x4D]);
-        assert_eq!(enc_at("bbs0 $56,$80", 0, Mos6502Variant::Cmos65C02), vec![0x8F, 0x56, 0x7D]);
-        assert_eq!(enc_at("bbs7 $78,$60", 0, Mos6502Variant::Cmos65C02), vec![0xFF, 0x78, 0x5D]);
+        assert_eq!(
+            enc_at("bbr0 $12,$20", 0, Mos6502Variant::Cmos65C02),
+            vec![0x0F, 0x12, 0x1D]
+        );
+        assert_eq!(
+            enc_at("bbr4 $34,$50", 0, Mos6502Variant::Cmos65C02),
+            vec![0x4F, 0x34, 0x4D]
+        );
+        assert_eq!(
+            enc_at("bbs0 $56,$80", 0, Mos6502Variant::Cmos65C02),
+            vec![0x8F, 0x56, 0x7D]
+        );
+        assert_eq!(
+            enc_at("bbs7 $78,$60", 0, Mos6502Variant::Cmos65C02),
+            vec![0xFF, 0x78, 0x5D]
+        );
     }
 
     #[test]
@@ -1023,59 +1210,125 @@ mod tests {
     fn wdc816_block_move() {
         // MVP/MVN take dst_bank,src_bank as two-byte operand (LE)
         // mvp $00,$01 → src=$00, dst=$01 → packed 0x0001 → LE [0x01,0x00]
-        assert_eq!(enc("mvp $00,$01", Mos6502Variant::Wdc65C816), vec![0x44, 0x01, 0x00]);
-        assert_eq!(enc("mvn $FF,$80", Mos6502Variant::Wdc65C816), vec![0x54, 0x80, 0xFF]);
+        assert_eq!(
+            enc("mvp $00,$01", Mos6502Variant::Wdc65C816),
+            vec![0x44, 0x01, 0x00]
+        );
+        assert_eq!(
+            enc("mvn $FF,$80", Mos6502Variant::Wdc65C816),
+            vec![0x54, 0x80, 0xFF]
+        );
     }
 
     #[test]
     fn wdc816_push_effective() {
-        assert_eq!(enc("pea $1234", Mos6502Variant::Wdc65C816), vec![0xF4, 0x34, 0x12]);
-        assert_eq!(enc("pei ($10)", Mos6502Variant::Wdc65C816), vec![0xD4, 0x10]);
+        assert_eq!(
+            enc("pea $1234", Mos6502Variant::Wdc65C816),
+            vec![0xF4, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("pei ($10)", Mos6502Variant::Wdc65C816),
+            vec![0xD4, 0x10]
+        );
     }
 
     #[test]
     fn wdc816_per() {
         // per $10 at PC=0 → offset = $10 - (0 + 3) = $0D (16-bit)
-        assert_eq!(enc_at("per $10", 0, Mos6502Variant::Wdc65C816), vec![0x62, 0x0D, 0x00]);
-        assert_eq!(enc_at("per $05", 0, Mos6502Variant::Wdc65C816), vec![0x62, 0x02, 0x00]);
+        assert_eq!(
+            enc_at("per $10", 0, Mos6502Variant::Wdc65C816),
+            vec![0x62, 0x0D, 0x00]
+        );
+        assert_eq!(
+            enc_at("per $05", 0, Mos6502Variant::Wdc65C816),
+            vec![0x62, 0x02, 0x00]
+        );
     }
 
     #[test]
     fn wdc816_indexed_indirect_x() {
-        assert_eq!(enc("jmp ($1234,x)", Mos6502Variant::Wdc65C816), vec![0x7C, 0x34, 0x12]);
-        assert_eq!(enc("jsr ($5678,x)", Mos6502Variant::Wdc65C816), vec![0xFC, 0x78, 0x56]);
+        assert_eq!(
+            enc("jmp ($1234,x)", Mos6502Variant::Wdc65C816),
+            vec![0x7C, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("jsr ($5678,x)", Mos6502Variant::Wdc65C816),
+            vec![0xFC, 0x78, 0x56]
+        );
     }
 
     #[test]
     fn wdc816_absolute_long_jump() {
-        assert_eq!(enc("jmp !$123456", Mos6502Variant::Wdc65C816), vec![0x5C, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("jsr !$654321", Mos6502Variant::Wdc65C816), vec![0x22, 0x21, 0x43, 0x65]);
+        assert_eq!(
+            enc("jmp !$123456", Mos6502Variant::Wdc65C816),
+            vec![0x5C, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("jsr !$654321", Mos6502Variant::Wdc65C816),
+            vec![0x22, 0x21, 0x43, 0x65]
+        );
     }
 
     #[test]
     fn wdc816_indirect_long_jmp() {
-        assert_eq!(enc("jmp [$1234]", Mos6502Variant::Wdc65C816), vec![0xDC, 0x34, 0x12]);
+        assert_eq!(
+            enc("jmp [$1234]", Mos6502Variant::Wdc65C816),
+            vec![0xDC, 0x34, 0x12]
+        );
     }
 
     #[test]
     fn wdc816_absolute_long_alu() {
-        assert_eq!(enc("lda !$123456", Mos6502Variant::Wdc65C816), vec![0xAF, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("sta !$123456", Mos6502Variant::Wdc65C816), vec![0x8F, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("adc !$123456", Mos6502Variant::Wdc65C816), vec![0x6F, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("sbc !$123456", Mos6502Variant::Wdc65C816), vec![0xEF, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("and !$123456", Mos6502Variant::Wdc65C816), vec![0x2F, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("ora !$123456", Mos6502Variant::Wdc65C816), vec![0x0F, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("eor !$123456", Mos6502Variant::Wdc65C816), vec![0x4F, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("cmp !$123456", Mos6502Variant::Wdc65C816), vec![0xCF, 0x56, 0x34, 0x12]);
+        assert_eq!(
+            enc("lda !$123456", Mos6502Variant::Wdc65C816),
+            vec![0xAF, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("sta !$123456", Mos6502Variant::Wdc65C816),
+            vec![0x8F, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("adc !$123456", Mos6502Variant::Wdc65C816),
+            vec![0x6F, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("sbc !$123456", Mos6502Variant::Wdc65C816),
+            vec![0xEF, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("and !$123456", Mos6502Variant::Wdc65C816),
+            vec![0x2F, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("ora !$123456", Mos6502Variant::Wdc65C816),
+            vec![0x0F, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("eor !$123456", Mos6502Variant::Wdc65C816),
+            vec![0x4F, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("cmp !$123456", Mos6502Variant::Wdc65C816),
+            vec![0xCF, 0x56, 0x34, 0x12]
+        );
     }
 
     #[test]
     fn wdc816_auto_long_for_sufficiently_large_address() {
         // Without `!`, values > 0xFFFF should use AbsoluteLong
-        assert_eq!(enc("lda $123456", Mos6502Variant::Wdc65C816), vec![0xAF, 0x56, 0x34, 0x12]);
-        assert_eq!(enc("sta $123456", Mos6502Variant::Wdc65C816), vec![0x8F, 0x56, 0x34, 0x12]);
+        assert_eq!(
+            enc("lda $123456", Mos6502Variant::Wdc65C816),
+            vec![0xAF, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc("sta $123456", Mos6502Variant::Wdc65C816),
+            vec![0x8F, 0x56, 0x34, 0x12]
+        );
         // Values ≤ 0xFFFF still use normal absolute
-        assert_eq!(enc("lda $1234", Mos6502Variant::Wdc65C816), vec![0xAD, 0x34, 0x12]);
+        assert_eq!(
+            enc("lda $1234", Mos6502Variant::Wdc65C816),
+            vec![0xAD, 0x34, 0x12]
+        );
     }
 
     #[test]
@@ -1122,8 +1375,14 @@ mod tests {
     #[test]
     fn wdc816_brl() {
         // brl $10 at PC=0 → offset = $10 - (0 + 3) = $0D (16-bit)
-        assert_eq!(enc_at("brl $10", 0, Mos6502Variant::Wdc65C816), vec![0x82, 0x0D, 0x00]);
-        assert_eq!(enc_at("brl $0120", 0, Mos6502Variant::Wdc65C816), vec![0x82, 0x1D, 0x01]);
+        assert_eq!(
+            enc_at("brl $10", 0, Mos6502Variant::Wdc65C816),
+            vec![0x82, 0x0D, 0x00]
+        );
+        assert_eq!(
+            enc_at("brl $0120", 0, Mos6502Variant::Wdc65C816),
+            vec![0x82, 0x1D, 0x01]
+        );
     }
 
     #[test]
@@ -1192,8 +1451,14 @@ mod tests {
     #[test]
     fn ricoh_standard_nmos_opcodes_still_work() {
         assert_eq!(enc("lda #$10", Mos6502Variant::Ricoh2A03), vec![0xA9, 0x10]);
-        assert_eq!(enc("sta $2000", Mos6502Variant::Ricoh2A03), vec![0x8D, 0x00, 0x20]);
-        assert_eq!(enc("jsr $2000", Mos6502Variant::Ricoh2A03), vec![0x20, 0x00, 0x20]);
+        assert_eq!(
+            enc("sta $2000", Mos6502Variant::Ricoh2A03),
+            vec![0x8D, 0x00, 0x20]
+        );
+        assert_eq!(
+            enc("jsr $2000", Mos6502Variant::Ricoh2A03),
+            vec![0x20, 0x00, 0x20]
+        );
         assert_eq!(enc("nop", Mos6502Variant::Ricoh2A03), vec![0xEA]);
         assert_eq!(enc("tax", Mos6502Variant::Ricoh2A03), vec![0xAA]);
     }
@@ -1219,23 +1484,62 @@ mod tests {
 
     #[test]
     fn test_instruction_len_for_variant() {
-        assert_eq!(instruction_len_for_variant("nop", Mos6502Variant::Nmos6502).unwrap(), 1);
-        assert_eq!(instruction_len_for_variant("nop", Mos6502Variant::Cmos65C02).unwrap(), 1);
-        assert_eq!(instruction_len_for_variant("nop", Mos6502Variant::Wdc65C816).unwrap(), 1);
-        assert_eq!(instruction_len_for_variant("nop", Mos6502Variant::Ricoh2A03).unwrap(), 1);
+        assert_eq!(
+            instruction_len_for_variant("nop", Mos6502Variant::Nmos6502).unwrap(),
+            1
+        );
+        assert_eq!(
+            instruction_len_for_variant("nop", Mos6502Variant::Cmos65C02).unwrap(),
+            1
+        );
+        assert_eq!(
+            instruction_len_for_variant("nop", Mos6502Variant::Wdc65C816).unwrap(),
+            1
+        );
+        assert_eq!(
+            instruction_len_for_variant("nop", Mos6502Variant::Ricoh2A03).unwrap(),
+            1
+        );
 
-        assert_eq!(instruction_len_for_variant("bra $10", Mos6502Variant::Cmos65C02).unwrap(), 2);
-        assert_eq!(instruction_len_for_variant("bra $10", Mos6502Variant::Wdc65C816).unwrap(), 2);
+        assert_eq!(
+            instruction_len_for_variant("bra $10", Mos6502Variant::Cmos65C02).unwrap(),
+            2
+        );
+        assert_eq!(
+            instruction_len_for_variant("bra $10", Mos6502Variant::Wdc65C816).unwrap(),
+            2
+        );
 
-        assert_eq!(instruction_len_for_variant("phx", Mos6502Variant::Cmos65C02).unwrap(), 1);
-        assert_eq!(instruction_len_for_variant("phx", Mos6502Variant::Wdc65C816).unwrap(), 1);
+        assert_eq!(
+            instruction_len_for_variant("phx", Mos6502Variant::Cmos65C02).unwrap(),
+            1
+        );
+        assert_eq!(
+            instruction_len_for_variant("phx", Mos6502Variant::Wdc65C816).unwrap(),
+            1
+        );
 
-        assert_eq!(instruction_len_for_variant("lda !$123456", Mos6502Variant::Wdc65C816).unwrap(), 4);
-        assert_eq!(instruction_len_for_variant("jmp !$123456", Mos6502Variant::Wdc65C816).unwrap(), 4);
-        assert_eq!(instruction_len_for_variant("per $10", Mos6502Variant::Wdc65C816).unwrap(), 3);
-        assert_eq!(instruction_len_for_variant("pea $1234", Mos6502Variant::Wdc65C816).unwrap(), 3);
+        assert_eq!(
+            instruction_len_for_variant("lda !$123456", Mos6502Variant::Wdc65C816).unwrap(),
+            4
+        );
+        assert_eq!(
+            instruction_len_for_variant("jmp !$123456", Mos6502Variant::Wdc65C816).unwrap(),
+            4
+        );
+        assert_eq!(
+            instruction_len_for_variant("per $10", Mos6502Variant::Wdc65C816).unwrap(),
+            3
+        );
+        assert_eq!(
+            instruction_len_for_variant("pea $1234", Mos6502Variant::Wdc65C816).unwrap(),
+            3
+        );
 
-        assert_eq!(instruction_len_for_variant("sbc #$05", Mos6502Variant::Ricoh2A03).unwrap(), 2);
+        assert_eq!(
+            instruction_len_for_variant("sbc #$05", Mos6502Variant::Ricoh2A03).unwrap(),
+            2
+        );
     }
 
     // ── encode_instruction_for_variant ────────────────────────────────────
@@ -1250,7 +1554,8 @@ mod tests {
             0x1000,
             true,
             Mos6502Variant::Nmos6502,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(bytes, vec![0x4C, 0x00, 0x20]);
 
         let bytes = encode_instruction_for_variant(
@@ -1259,7 +1564,8 @@ mod tests {
             0x1FF0,
             true,
             Mos6502Variant::Nmos6502,
-        ).unwrap();
+        )
+        .unwrap();
         // offset = 0x2000 - (0x1FF0 + 2) = 0x2000 - 0x1FF2 = 0x0E
         assert_eq!(bytes, vec![0xF0, 0x0E]);
     }
