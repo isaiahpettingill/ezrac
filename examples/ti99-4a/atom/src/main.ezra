@@ -1,30 +1,11 @@
-// TMS9918A hardware-sprite animation: sprite zero is the orbiting electron,
-// while sprite one is the fixed nucleus.
-fn main() {
-    asm volatile {
-        // Enable Graphics I, display, 16x16 sprites, and the sprite tables.
-        "li r0, >0000"
-        "movb r0, @>8c02"
-        "li r0, >8000"
-        "movb r0, @>8c02"
-        "li r0, >e200"
-        "movb r0, @>8c02"
-        "li r0, >8100"
-        "movb r0, @>8c02"
-        "li r0, >3600"
-        "movb r0, @>8c02"
-        "li r0, >8500"
-        "movb r0, @>8c02"
-        "li r0, >0700"
-        "movb r0, @>8c02"
-        "li r0, >8600"
-        "movb r0, @>8c02"
-        "li r0, >f100"
-        "movb r0, @>8c02"
-        "li r0, >8700"
-        "movb r0, @>8c02"
+// TMS9918A hardware-sprite animation. The SDK owns graphics setup, sprite
+// descriptors, and timing; the only inline assembly is the ROM pattern upload.
+import ti99.sprites
 
-        // Upload two 16x16 sprite patterns at >3800.
+fn main() {
+    sprites.enable_graphics()
+    asm volatile {
+        // Select sprite-pattern address >3800 for the ROM upload.
         "li r0, >0000"
         "movb r0, @>8c02"
         "li r0, >7800"
@@ -36,50 +17,21 @@ fn main() {
         "movb r0, @>8c00"
         "dec r1"
         "jgt atom_patterns"
-
-        "li r4, 48"
-        "atom_frame:"
-        // Write sprite attributes at >1B00: moving electron, fixed nucleus,
-        // then the >D0 end marker.
-        "li r0, >0000"
-        "movb r0, @>8c02"
-        "li r0, >5b00"
-        "movb r0, @>8c02"
-        "mov r4, r0"
-        "swpb r0"
-        "movb r0, @>8c00"
-        "li r0, >8800"
-        "movb r0, @>8c00"
-        "li r0, >0000"
-        "movb r0, @>8c00"
-        "li r0, >f100"
-        "movb r0, @>8c00"
-        "li r0, >5800"
-        "movb r0, @>8c00"
-        "li r0, >7800"
-        "movb r0, @>8c00"
-        "li r0, >0100"
-        "movb r0, @>8c00"
-        "li r0, >e500"
-        "movb r0, @>8c00"
-        "li r0, >d000"
-        "movb r0, @>8c00"
-
-        // Coarse frame delay, then move the electron along its vertical orbit.
-        "li r1, >1800"
-        "atom_delay:"
-        "dec r1"
-        "jgt atom_delay"
-        "inc r4"
-        "ci r4, 176"
-        "jlt atom_frame"
-        "li r4, 48"
-        "jmp atom_frame"
-
+        "jmp atom_patterns_done"
         "sprite_patterns:"
         "db >00, >00, >00, >18, >3c, >3c, >18, >00, >00, >00, >00, >00, >00, >00, >00, >00"
         "db >00, >00, >3c, >7e, >ff, >ff, >7e, >3c, >3c, >7e, >ff, >ff, >7e, >3c, >00, >00"
         "db >00, >00, >00, >18, >3c, >3c, >18, >00, >00, >00, >00, >00, >00, >00, >00, >00"
         "db >00, >00, >3c, >7e, >ff, >ff, >7e, >3c, >3c, >7e, >ff, >ff, >7e, >3c, >00, >00"
+        "atom_patterns_done:"
+    }
+
+    let y: u8 = 48
+    loop {
+        sprites.place(0, y, 136, 0, 15)
+        sprites.place(1, 88, 120, 1, 9)
+        sprites.wait(1)
+        y = y + 1
+        if y == 176 { y = 48 }
     }
 }

@@ -1,0 +1,29 @@
+// High-level TMS9918A sprite helpers built on ti99.vdp.
+import ti99.vdp
+
+pub fn enable() {
+    vdp.init_sprites()
+    vdp.hide_sprites()
+}
+
+pub fn enable_graphics() {
+    vdp.init_graphics()
+    enable()
+}
+
+pub fn hide_all() {
+    vdp.hide_sprites()
+}
+
+pub fn place(index: u8, y: u8, x: u8, pattern: u8, color: u8) {
+    vdp.set_sprite(index, y, x, pattern, color)
+}
+
+pub fn upload_sprite_patterns(source: ptr<u8>, length: u16) {
+    vdp.set_write_address(vdp.SPRITE_PATTERNS)
+    vdp.write_bytes(source, length)
+}
+
+pub fn wait(frames: u16) {
+    vdp.wait_frames(frames)
+}

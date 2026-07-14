@@ -1,0 +1,48 @@
+// High-level Graphics I helpers built on ti99.vdp.
+import ti99.vdp
+
+pub fn begin() {
+    vdp.init_graphics()
+    vdp.clear_name_table(0)
+}
+
+pub fn clear(tile: u8) {
+    vdp.clear_name_table(tile)
+}
+
+// Apply one TMS9918A foreground/background color byte to all character groups.
+pub fn set_color_byte(value: u8) {
+    asm volatile {
+        "li r1, >0000"
+        "movb r1, @>8c02"
+        "li r1, >6000"
+        "movb r1, @>8c02"
+        "swpb r0"
+        "li r1, 32"
+        "ti99_graphics_color_loop:"
+        "movb r0, @>8c00"
+        "dec r1"
+        "jgt ti99_graphics_color_loop"
+        "swpb r0"
+    }
+}
+
+pub fn upload_patterns(source: ptr<u8>, length: u16) {
+    vdp.set_write_address(vdp.PATTERN_TABLE)
+    vdp.write_bytes(source, length)
+}
+
+pub fn upload_patterns_at(address: u16, source: ptr<u8>, length: u16) {
+    vdp.set_write_address(address)
+    vdp.write_bytes(source, length)
+}
+
+pub fn fill_vram(address: u16, value: u8, length: u16) {
+    vdp.set_write_address(address)
+    vdp.fill(value, length)
+}
+
+pub fn write_tile(address: u16, tile: u8) {
+    vdp.set_write_address(address)
+    vdp.write_data(tile)
+}

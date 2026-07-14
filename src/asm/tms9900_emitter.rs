@@ -91,9 +91,14 @@ impl Emitter {
         self.emit_static_initializers(program)?;
         self.line("    bl @_main");
         self.line("__ezra_exit:");
-        self.line("    jmp __ezra_exit");
+        self.line("    b @__ezra_exit");
         for declaration in &program.declarations {
-            if let Declaration::Function(function) = declaration {
+            if let Declaration::Function(function) = declaration
+                && !function.name.contains('.')
+            {
+                // Imported qualified names are semantic aliases of the same
+                // function. Calls lower to the short assembly label, so
+                // emitting dotted aliases would duplicate inline-asm labels.
                 self.emit_function(function)?;
             }
         }
@@ -217,7 +222,7 @@ impl Emitter {
                 self.line("    ci r0, 0");
                 self.line(&format!("    jeq {otherwise}"));
                 self.emit_block(then_body)?;
-                self.line(&format!("    jmp {done}"));
+                self.line(&format!("    b @{done}"));
                 self.line(&format!("{otherwise}:"));
                 self.emit_block(else_body)?;
                 self.line(&format!("{done}:"));
@@ -234,7 +239,7 @@ impl Emitter {
                 self.line("    ci r0, 0");
                 self.line(&format!("    jeq {done}"));
                 self.emit_block(body)?;
-                self.line(&format!("    jmp {check}"));
+                self.line(&format!("    b @{check}"));
                 self.line(&format!("{done}:"));
                 self.loops.pop();
             }
@@ -247,7 +252,7 @@ impl Emitter {
                 });
                 self.line(&format!("{again}:"));
                 self.emit_block(body)?;
-                self.line(&format!("    jmp {again}"));
+                self.line(&format!("    b @{again}"));
                 self.line(&format!("{done}:"));
                 self.loops.pop();
             }
@@ -267,7 +272,7 @@ impl Emitter {
                     .last()
                     .expect("function return label")
                     .clone();
-                self.line(&format!("    jmp {label}"));
+                self.line(&format!("    b @{label}"));
             }
             Stmt::Asm {
                 inputs,
@@ -324,7 +329,7 @@ impl Emitter {
                         self.line("    ci r0, 0");
                         self.line(&format!("    jeq {yes}"));
                         self.line("    clr r0");
-                        self.line(&format!("    jmp {done}"));
+                        self.line(&format!("    b @{done}"));
                         self.line(&format!("{yes}:"));
                         self.line("    li r0, 1");
                         self.line(&format!("{done}:"));
@@ -338,19 +343,19 @@ impl Emitter {
                 self.emit_binary(*op, ty)?;
             }
             Expr::Cast { expr, .. } => self.emit_expr(expr, ty)?,
+            Expr::Field { base, field } => self.load_ident(&format!("{base}.{field}"), ty)?,
             Expr::Access(_)
             | Expr::AddressOfAccess(_)
             | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
-            | Expr::Field { .. }
             | Expr::AddressOfField { .. }
             | Expr::String(_)
             | Expr::Array(_)
             | Expr::StructInit { .. }
             | Expr::In(_) => {
-                return Err(Diagnostic::new(
-                    "this expression form is not implemented by the initial TMS9900 source backend",
-                ));
+                return Err(Diagnostic::new(format!(
+                    "TMS9900 expression `{expr:?}` is not implemented by the initial source backend"
+                )));
             }
         }
         Ok(())
@@ -375,13 +380,30 @@ impl Emitter {
                 args.len()
             )));
         }
+        if args.len() > 10 {
+            return Err(Diagnostic::new(format!(
+                "TMS9900 function `{name}` has {} arguments; the target ABI supports at most 10",
+                args.len()
+            )));
+        }
         for ((arg, ty), slot) in args
             .iter()
             .zip(&signature.params)
-            .zip(signature.argument_slots)
+            .zip(signature.argument_slots.iter().copied())
         {
             self.emit_expr(arg, ty)?;
             self.store_r0(slot, ty)?;
+        }
+        // Static argument slots keep ordinary EZRA functions simple. Loading
+        // the same values into R0..R9 also provides a stable ABI for naked
+        // platform wrappers, without exposing those slot addresses.
+        for (index, (ty, slot)) in signature
+            .params
+            .iter()
+            .zip(signature.argument_slots.iter().copied())
+            .enumerate()
+        {
+            self.load_register(slot, ty, index as u8)?;
         }
         self.line(&format!("    bl @{}", function_label(name)));
         Ok(())
@@ -441,7 +463,7 @@ impl Emitter {
                 self.line(&format!("    {jump} {short}"));
                 self.line("    ci r0, 0");
                 self.emit_boolean_from_jump("jne");
-                self.line(&format!("    jmp {done}"));
+                self.line(&format!("    b @{done}"));
                 self.line(&format!("{short}:"));
                 self.load_immediate(i64::from(op == BinaryOp::Or))?;
                 self.line(&format!("{done}:"));
@@ -463,7 +485,7 @@ impl Emitter {
         let done = self.next_label("comparison_done");
         self.line(&format!("    {jump} {yes}"));
         self.line("    clr r0");
-        self.line(&format!("    jmp {done}"));
+        self.line(&format!("    b @{done}"));
         self.line(&format!("{yes}:"));
         self.line("    li r0, 1");
         self.line(&format!("{done}:"));
@@ -558,16 +580,36 @@ impl Emitter {
     }
 
     fn load_r0(&mut self, storage: Storage, ty: &Type) -> Result<(), Diagnostic> {
-        self.load_address_r0(storage.address, ty)
+        self.load_register(storage, ty, 0)
+    }
+
+    fn load_register(
+        &mut self,
+        storage: Storage,
+        ty: &Type,
+        register: u8,
+    ) -> Result<(), Diagnostic> {
+        self.load_address_register(storage.address, ty, register)
     }
 
     fn load_address_r0(&mut self, address: u32, ty: &Type) -> Result<(), Diagnostic> {
+        self.load_address_register(address, ty, 0)
+    }
+
+    fn load_address_register(
+        &mut self,
+        address: u32,
+        ty: &Type,
+        register: u8,
+    ) -> Result<(), Diagnostic> {
+        let register = format!("r{register}");
         match scalar_width(&self.model, ty)? {
             1 => {
-                self.line(&format!("    movb @>{address:04X}, r0"));
-                self.line("    swpb r0");
+                self.line(&format!("    clr {register}"));
+                self.line(&format!("    movb @>{address:04X}, {register}"));
+                self.line(&format!("    swpb {register}"));
             }
-            2 => self.line(&format!("    mov @>{address:04X}, r0")),
+            2 => self.line(&format!("    mov @>{address:04X}, {register}")),
             _ => return Err(Diagnostic::new("TMS9900 source values must fit in 16 bits")),
         }
         Ok(())
@@ -634,7 +676,7 @@ impl Emitter {
             })?
             .clone();
         self.line(&format!(
-            "    jmp {}",
+            "    b @{}",
             if continue_loop {
                 labels.continue_label
             } else {
@@ -729,6 +771,43 @@ mod tests {
 
         // The function's static link is at >A000 and its first local follows.
         assert_eq!(ram.read_word(0xA002), 42);
+    }
+
+    #[test]
+    fn passes_naked_wrapper_arguments_in_registers() {
+        let assembly = emit(
+            r#"
+                naked fn capture(first: u8, second: u8) {
+                    asm volatile {
+                        "mov r0, @>9000"
+                        "mov r1, @>9002"
+                        "b *r11"
+                    }
+                }
+                fn main() { capture(0x12, 0x34) }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..40 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0x9000), 0x0012);
+        assert_eq!(ram.read_word(0x9002), 0x0034);
     }
 
     #[test]

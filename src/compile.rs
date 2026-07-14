@@ -780,6 +780,13 @@ fn resolve_program_imports(
             continue;
         };
         let (import_path, source) = read_import_source(&program.source_path, import, sdk)?;
+        // A module reached through an earlier import already contributed its
+        // declarations and aliases. Skipping it here prevents shared SDK
+        // dependencies from creating duplicate qualified aliases.
+        let normalized_import_path = normalize_path(&import_path);
+        if seen.contains(&normalized_import_path) && !stack.contains(&normalized_import_path) {
+            continue;
+        }
         let source = source_override(source_overrides, &import_path).unwrap_or(source);
         let mut imported = parse_program(&import_path, &source)?;
         imported.declarations = active_declarations(imported.declarations, sdk)?;
@@ -1141,9 +1148,17 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/console.ezra"),
                 "ti99.console",
             )),
+            "ti99.graphics" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/graphics.ezra"),
+                "ti99.graphics",
+            )),
             "ti99.input" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/input.ezra"),
                 "ti99.input",
+            )),
+            "ti99.sprites" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/sprites.ezra"),
+                "ti99.sprites",
             )),
             "ti99.memory" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/memory.ezra"),
@@ -1304,7 +1319,9 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "ti.os",
         "ti.lcd",
         "ti99.console",
+        "ti99.graphics",
         "ti99.input",
+        "ti99.sprites",
         "ti99.memory",
         "ti99.sound",
         "ti99.vdp",
