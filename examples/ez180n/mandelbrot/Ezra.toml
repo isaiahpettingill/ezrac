@@ -1,0 +1,7 @@
+[project]
+name = "ez180n-mandelbrot"
+
+[build]
+input = "src/main.ezra"
+target = "ez180n-ez80"
+executable = "ez180n-mandelbrot"

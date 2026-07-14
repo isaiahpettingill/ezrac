@@ -1,0 +1,7 @@
+[project]
+name = "c64-mandelbrot"
+
+[build]
+input = "src/main.ezra"
+target = "commodore64-6502"
+executable = "c64-mandelbrot"

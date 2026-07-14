@@ -545,11 +545,13 @@ fn void_inline_functions_keep_helper_calls_reachable() {
 #[test]
 fn recursive_inline_functions_fall_back_to_calls() {
     let source = r#"
-            pub inline fn self_call(value: u8) -> u8 {
-                return self_call(value)
+            inline fn self_call(value: u8) -> u8 {
+                if value == 0 { return 0 }
+                return self_call(value - 1) + 1
             }
 
             fn main() {
+                test.assert_eq_u8(self_call(3), 3, 1)
                 test.pass()
             }
         "#;

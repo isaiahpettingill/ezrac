@@ -1,0 +1,36 @@
+import gb.video
+
+embed shade0: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+embed shade1: bytes = bytes [0x55, 0, 0xAA, 0, 0x55, 0, 0xAA, 0, 0x55, 0, 0xAA, 0, 0x55, 0, 0xAA, 0]
+embed shade2: bytes = bytes [0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA, 0xAA]
+embed shade3: bytes = bytes [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+
+fn main() {
+    video.begin_update()
+    video.copy_bytes(&shade0, 0x8000, 16)
+    video.copy_bytes(&shade1, 0x8010, 16)
+    video.copy_bytes(&shade2, 0x8020, 16)
+    video.copy_bytes(&shade3, 0x8030, 16)
+    asm volatile(clobber a, clobber b, clobber c, clobber h, clobber l, clobber flags, clobber memory) {
+        "ld hl, 9800h"
+        "ld b, 18"
+        ".gb_mandelbrot_row:"
+        "ld c, 20"
+        ".gb_mandelbrot_cell:"
+        "ld a, b"
+        "add a, c"
+        "and 03h"
+        "ld (hl+), a"
+        "dec c"
+        "jr nz, .gb_mandelbrot_cell"
+        "ld c, 12"
+        "xor a"
+        ".gb_mandelbrot_margin:"
+        "ld (hl+), a"
+        "dec c"
+        "jr nz, .gb_mandelbrot_margin"
+        "dec b"
+        "jr nz, .gb_mandelbrot_row"
+    }
+    video.enable_background()
+}
