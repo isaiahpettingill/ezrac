@@ -78,8 +78,10 @@ ezrac build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--d
 Run generated code in the compiler's target VM test path:
 
 ```sh
-ezrac test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>
+ezrac test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra]
 ```
+
+With no file argument, `test` loads `Ezra.toml` from the current directory, discovers `tests/**/*.ezra` in deterministic path order, builds each artifact, and reports a per-test result plus a CI-friendly summary. Target selection is `--target`, then `[test].target`, then `[build].target`, then the compiler default.
 
 The built-in test runner uses the `ez80` emulator backend for eZ80 ADL, Z80,
 Z80N, Z180, i8080, and i8085 target profiles. eZ80 uses a 24-bit ADL address
@@ -167,8 +169,9 @@ with `%%` are hygienic per invocation.
 %delay 16
 ```
 
-Supported condition forms are `cpu("name")`, `target("triple")`, and
-`defined(NAME)`. Macros expand recursively up to 32 levels. The macro layer
+Supported condition forms are `cpu("name")`, `target("triple")`,
+`feature("name")`, and `defined(NAME)`. `feature` tests the Cargo feature set
+that compiled `ezrac` (for example, `feature("m68k")`). Macros expand recursively up to 32 levels. The macro layer
 does not compile or link `.ezra` SDK functions; reusable assembly APIs should
 be published as vendorable macro sets with explicit target ABI requirements.
 

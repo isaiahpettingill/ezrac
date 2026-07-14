@@ -17,7 +17,7 @@ ezrac check <file.ezra>
 ezrac emit-asm <file.ezra>
 ezrac emit-ir [--stage hir|tbir] <file.ezra>
 ezrac build <file.ezra>
-ezrac test <file.ezra>
+ezrac test [<file.ezra>]
 ezrac assemble [--base <addr>] [--output <file.bin>] <file.asm>
 ezrac init [--name <name>] [--target <triple>] [dir]
 ezrac install-syntax (--all | [--editor] <editor>...)
@@ -34,7 +34,7 @@ cargo run -- check <file.ezra>
 cargo run -- emit-asm <file.ezra>
 cargo run -- emit-ir [--stage hir|tbir] <file.ezra>
 cargo run -- build <file.ezra>
-cargo run -- test <file.ezra>
+cargo run -- test [<file.ezra>]
 cargo run -- assemble [--base <addr>] [--output <file.bin>] <file.asm>
 cargo run -- init [--name <name>] [--target <triple>] [dir]
 cargo run -- install-syntax (--all | [--editor] <editor>...)
@@ -63,6 +63,9 @@ target = "agonlight-mos-ez80"
 output = "bin"
 executable = "my-program"
 
+[test]
+target = "ezra-test-flat-ez80"
+
 [layout]
 file = "layouts/custom.ezralayout"
 
@@ -73,6 +76,7 @@ paths = ["sdk"]
 - `[build].target` selects the target profile. `agonlight-mos-ez80` builds a normal Agon MOS executable.
 - `[build].output` selects the executable format. The current default is raw `bin`; cartridge layouts are explicit configuration.
 - `[build].executable` overrides the artifact basename. Without it, the source file stem is used.
+- `[test].target` selects the target used by project test discovery. `ezrac test` discovers `tests/**/*.ezra` in deterministic path order, builds artifacts under `target/<target>/`, and runs each test. CLI `--target` overrides `[test].target`, which overrides `[build].target`.
 - `[layout].file` points at a custom layout file.
 - `[sdk].paths` adds project SDK source roots in addition to bundled target SDKs.
 

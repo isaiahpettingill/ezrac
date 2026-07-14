@@ -12,6 +12,7 @@ pub struct ProjectConfig {
     pub input_kind: Option<String>,
     pub assembler_cpu: Option<String>,
     pub executable: Option<String>,
+    pub test_target: Option<String>,
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
     pub assets: AssetConfig,
@@ -119,6 +120,12 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(required_string("build.executable"))
         .transpose()?;
 
+    let test_target = value
+        .get("test")
+        .and_then(|test| test.get("target"))
+        .map(required_string("test.target"))
+        .transpose()?;
+
     let layout_file = value
         .get("layout")
         .and_then(|layout| layout.get("file"))
@@ -154,6 +161,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         input_kind,
         assembler_cpu,
         executable,
+        test_target,
         layout_file,
         cartridge,
         assets,
