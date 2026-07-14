@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.26
+
+- Added `[lsp] mode = "library"` for SDK and module projects that need language-server diagnostics without an executable `main` function.
+- Added the public `ezra::api` in-process compiler API for compiling source strings to target assembly from Rust applications.
+- Added high-level `ti99.graphics` and `ti99.sprites` helpers plus TMS9918A VDP register, transfer, fill, sprite, and timing primitives.
+- Updated TI-99/4A Mandelbrot and atom examples to use the SDK helpers instead of duplicating VDP setup and sprite descriptor assembly.
+- Declared the package as BSD-3-Clause, matching the repository license.
+
 ## 0.1.25
 
 - Added the optional TMS9900 source backend and a `ti99-4a-tms9900` target that emits a bootable TI-99/4A cartridge ROM.
