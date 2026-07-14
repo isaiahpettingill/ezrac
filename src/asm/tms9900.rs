@@ -431,6 +431,7 @@ fn word(value: u16) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libre99_asm::{Options as Libre99AssemblerOptions, assemble as assemble_with_libre99};
     use libre99_core::{
         bus::{Bus, FlatRam},
         cpu::Cpu,
@@ -493,6 +494,35 @@ mod tests {
             assert_eq!(
                 encode_instruction(text, &labels, 0x1000).unwrap(),
                 expected,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_libre99_for_standard_instruction_encodings() {
+        let cases = [
+            "li r1, >1234",
+            "mov r1, *r2+",
+            "a @>8300(r4), r5",
+            "sra r6, 4",
+            "coc r1, r2",
+            "ldcr @>8c00, 8",
+            "mpy @>9000(r1), r2",
+            "rtwp",
+        ];
+        let options = Libre99AssemblerOptions {
+            auto_header: false,
+            ..Default::default()
+        };
+
+        for text in cases {
+            let libre99_source = text.to_ascii_uppercase().replace(", ", ",");
+            let libre99 = assemble_with_libre99(&format!("   {libre99_source}\n"), &options)
+                .unwrap_or_else(|diagnostics| panic!("Libre99 rejected `{text}`: {diagnostics:?}"));
+            assert_eq!(
+                encode_instruction(text, &HashMap::new(), 0).unwrap(),
+                libre99.image,
                 "{text}"
             );
         }
