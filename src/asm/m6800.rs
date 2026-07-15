@@ -106,6 +106,14 @@ const fn op(mnemonic: &'static str, mode: AddrMode, opcode: u8) -> Opcode {
 }
 fn generated(mnemonic: &str, mode: AddrMode) -> Option<Opcode> {
     let mnemonic = canonical_mnemonic(mnemonic)?;
+    if mnemonic == "jsr" {
+        return match mode {
+            AddrMode::Direct => Some(op(mnemonic, mode, 0x9D)),
+            AddrMode::Indexed => Some(op(mnemonic, mode, 0xAD)),
+            AddrMode::Extended => Some(op(mnemonic, mode, 0xBD)),
+            _ => None,
+        };
+    }
     OPS.iter()
         .copied()
         .find(|op| op.mnemonic == mnemonic && op.mode == mode)
@@ -199,6 +207,7 @@ fn canonical_mnemonic(m: &str) -> Option<&'static str> {
         "inc" => "inc",
         "tst" => "tst",
         "jmp" => "jmp",
+        "jsr" => "jsr",
         "clr" => "clr",
         "suba" => "suba",
         "cmpa" => "cmpa",
@@ -604,6 +613,18 @@ mod tests {
                 "{source}"
             );
             assert_eq!(instruction_len(&source).unwrap(), Some(2), "{source}");
+        }
+
+        for (source, expected) in [
+            ("jsr <12h", vec![0x9D, 0x12]),
+            ("jsr 12h, x", vec![0xAD, 0x12]),
+            ("jsr >1234h", vec![0xBD, 0x12, 0x34]),
+        ] {
+            assert_eq!(
+                emit_instruction(source, &labels(), 0x1000).unwrap(),
+                Some(expected),
+                "{source}"
+            );
         }
 
         let memory = [
