@@ -177,6 +177,7 @@ impl EmulatorBackend for Ez80Emulator {
                 | CpuFamily::Z180
                 | CpuFamily::I8080
                 | CpuFamily::I8085
+                | CpuFamily::Lr35902
         )
     }
 
@@ -208,7 +209,7 @@ impl EmulatorBackend for Ez80Emulator {
         let code_start = image.base_addr;
         let code_end =
             checked_code_end_for_family(code_start, image.bytes.len(), image.cpu_family)?;
-        let mut machine = TestMachine::new(address_limit);
+        let mut machine = TestMachine::new(address_limit, image.cpu_family == CpuFamily::Lr35902);
         for (port, value) in &options.initial_ports {
             machine.ports[*port as usize] = *value;
         }
@@ -460,8 +461,8 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::Z180 => CpuMode::Z180,
         CpuFamily::I8080 => CpuMode::I8080,
         CpuFamily::I8085 => CpuMode::I8085,
-        CpuFamily::M68k => CpuMode::Z80,
-        CpuFamily::Lr35902 | CpuFamily::M6800 | CpuFamily::Mos6502 | CpuFamily::Tms9900 => {
+        CpuFamily::Lr35902 => CpuMode::GameBoy,
+        CpuFamily::M68k | CpuFamily::M6800 | CpuFamily::Mos6502 | CpuFamily::Tms9900 => {
             CpuMode::Z80
         }
         CpuFamily::Avr | CpuFamily::Dcpu => CpuMode::Z80,
@@ -1656,10 +1657,11 @@ struct TestMachine {
     halted: bool,
     result_code: u8,
     debug_output: Vec<u8>,
+    memory_test_abi: bool,
 }
 
 impl TestMachine {
-    fn new(address_limit: u32) -> Self {
+    fn new(address_limit: u32, memory_test_abi: bool) -> Self {
         Self {
             memory: HashMap::new(),
             address_mask: address_limit,
@@ -1668,6 +1670,7 @@ impl TestMachine {
             halted: false,
             result_code: 0,
             debug_output: Vec::new(),
+            memory_test_abi,
         }
     }
 }
@@ -1681,7 +1684,16 @@ impl Machine for TestMachine {
     }
 
     fn poke(&mut self, address: u32, value: u8) {
-        self.memory.insert(address & self.address_mask, value);
+        let address = address & self.address_mask;
+        self.memory.insert(address, value);
+        if self.memory_test_abi {
+            match address {
+                0xFF80 => self.debug_output.push(value),
+                0xFF81 => self.result_code = value,
+                0xFF82 if value != 0 => self.halted = true,
+                _ => {}
+            }
+        }
     }
 
     fn use_cycles(&self, cycles: i32) {
