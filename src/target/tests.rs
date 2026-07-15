@@ -157,6 +157,19 @@ fn resolves_generic_bare_m68k_target() {
     assert!(!profile.supports_port_io());
 }
 
+#[cfg(feature = "dcpu")]
+#[test]
+fn resolves_generic_bare_dcpu_target() {
+    let profile = resolve_target_profile(Some("generic-dcpu-bare")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Dcpu);
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert_eq!(profile.output_format, OutputFormat::RawBin);
+    assert!(!profile.default_sdk_symbols);
+    assert!(!profile.supports_port_io());
+}
+
 #[test]
 fn parses_output_formats() {
     assert_eq!(parse_output_format("bin"), Ok(OutputFormat::RawBin));

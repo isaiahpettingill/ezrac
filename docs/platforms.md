@@ -6,9 +6,9 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, TMS9900, AVR, CHIP-8 variants, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, and M68k requires `m68k`.
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, TMS9900, DCPU-16, AVR, CHIP-8 variants, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, M68k requires `m68k`, and DCPU-16 requires `dcpu`.
 
-Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have EZRA source code generation; AVR, CHIP-8-family, M6800, and TMS9900 targets are currently assembly-only through the public CLI. MOS 6502 and optional M68k targets have target-specific EZRA source emitters.
+Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have EZRA source code generation; AVR, CHIP-8-family, DCPU-16, M6800, and TMS9900 targets are currently assembly-only through the public CLI. MOS 6502 and optional M68k targets have target-specific EZRA source emitters.
 
 ## Support Levels
 
@@ -53,6 +53,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; assembly-only target |
+| `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | none | Optional `dcpu` feature; assembly-only target |
 | `arduboy-*-avr` | 3 | AVR | 16 | Intel HEX `.hex` | none | Optional `avr` feature; assembly-only profile |
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 
@@ -379,10 +380,11 @@ bare-z80n
 bare-z180
 bare-i8080
 bare-i8085
+generic-dcpu-bare
 bare-tms9900
 ```
 
-Bare targets use raw `.bin` output and do not enable default SDK symbols. `bare-tms9900` is available with the optional `tms9900` feature and supports handwritten assembly only; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
+Bare targets use raw `.bin` output and do not enable default SDK symbols. `generic-dcpu-bare` is available with the optional `dcpu` feature for handwritten DCPU-16 assembly. `bare-tms9900` is available with the optional `tms9900` feature and supports handwritten assembly only; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
 
 ```text
 bare-ez80   24-bit address space, load 0x000000, stack 0xFFFFFF

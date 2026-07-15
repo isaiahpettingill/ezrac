@@ -2024,6 +2024,8 @@ const DOCUMENTED_TARGETS: &[&str] = &[
     "bare-ez80",
     #[cfg(feature = "tms9900")]
     "bare-tms9900",
+    #[cfg(feature = "dcpu")]
+    "generic-dcpu-bare",
     #[cfg(feature = "m68k")]
     "generic-m68k-bare",
 ];

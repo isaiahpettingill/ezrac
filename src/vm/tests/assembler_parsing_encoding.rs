@@ -1364,3 +1364,23 @@ fn mos6502_is_parsed_as_own_assembler_cpu_family() {
         CpuFamily::Mos6502
     );
 }
+
+#[test]
+#[cfg(feature = "dcpu")]
+fn assembles_dcpu_basic_and_special_instructions() {
+    use crate::target::AssemblerCpu;
+
+    let bytes = assemble_subset_with_symbols_at(
+        AssemblerCpu::Dcpu,
+        "start:\n    set a, 0x30\n    set [0x1000], a\n    jsr start\n",
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        bytes.bytes,
+        vec![0x01, 0x7c, 0x30, 0x00, 0xc1, 0x03, 0x00, 0x10, 0x20, 0x84]
+    );
+    assert_eq!(bytes.symbols[0].name, "start");
+    assert_eq!(bytes.symbols[0].addr, 0);
+}
