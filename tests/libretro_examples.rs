@@ -584,40 +584,53 @@ fn gameboy_color_input_runs_on_real_core() {
     let mut game = open_session(&core, &color_input, "Game Boy Color input example");
     game.run_frames(300).unwrap();
     assert_non_uniform_frame(&game, "Game Boy Color input example");
-    let warm_palette = game.frame_hash();
-    let warm_pixel = game.pixel_xrgb(0, 0).unwrap();
+    assert_eq!(
+        game.pixel_xrgb(0, 0).unwrap(),
+        0x00FF0000,
+        "initial tile one is not the warm red palette color"
+    );
+    assert_eq!(
+        game.pixel_xrgb(8, 0).unwrap(),
+        0x0000FB00,
+        "initial tile two is not the warm green palette color"
+    );
 
     pulse_button(&mut game, Button::A, 2, 3);
-    let cool_palette = game.frame_hash();
-    let cool_pixel = game.pixel_xrgb(0, 0).unwrap();
-    assert_ne!(
-        cool_palette, warm_palette,
-        "A input did not switch the Game Boy Color background palette"
+    assert_eq!(
+        game.pixel_xrgb(0, 0).unwrap(),
+        0x000000FF,
+        "A did not change tile one to the cool blue palette color"
     );
-    assert_ne!(
-        cool_pixel, warm_pixel,
-        "A input did not change the sampled Game Boy Color palette entry"
+    assert_eq!(
+        game.pixel_xrgb(8, 0).unwrap(),
+        0x00FF0000,
+        "A did not change tile two to the cool red palette color"
     );
 
     pulse_button(&mut game, Button::Right, 2, 3);
-    let scrolled = game.frame_hash();
-    assert_ne!(
-        scrolled, cool_palette,
-        "Right input did not scroll the Game Boy Color background"
+    assert_eq!(
+        game.pixel_xrgb(0, 0).unwrap(),
+        0x00FF0000,
+        "Right did not move tile two into the leftmost screen position"
     );
 
     pulse_button(&mut game, Button::Left, 2, 3);
-    let unscrolled = game.frame_hash();
-    assert_ne!(
-        unscrolled, scrolled,
-        "Left input did not reverse the Game Boy Color scroll"
+    assert_eq!(
+        game.pixel_xrgb(0, 0).unwrap(),
+        0x000000FF,
+        "Left did not restore tile one to the leftmost screen position"
     );
 
     pulse_button(&mut game, Button::B, 2, 3);
-    assert_ne!(
+    assert_eq!(
         game.pixel_xrgb(0, 0).unwrap(),
-        cool_pixel,
-        "B input did not restore the warm Game Boy Color palette"
+        0x00FF0000,
+        "B did not restore the warm red palette color"
+    );
+    assert_eq!(
+        game.pixel_xrgb(8, 0).unwrap(),
+        0x0000FB00,
+        "B did not restore the warm green palette color"
     );
     assert_deterministic_video_save_state(&mut game, "gameboy-color-input");
     capture(&game, "gameboy-color-input");
