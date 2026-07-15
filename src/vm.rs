@@ -374,9 +374,12 @@ impl EmulatorBackend for M6800Emulator {
 
         let code_start = image.base_addr as u16;
         let mut memory = M6800TestMemory::new();
+        for (port, value) in &options.initial_ports {
+            memory.ports[*port as usize] = *value;
+        }
         for (address, value) in &options.initial_memory {
             if *address <= 0xFFFF {
-                memory.data[*address as usize] = *value as u8;
+                memory.data[*address as usize] = *value;
             }
         }
         memory.load(code_start, &image.bytes);
@@ -389,7 +392,7 @@ impl EmulatorBackend for M6800Emulator {
         for _instruction in 0..options.instruction_budget {
             cpu.step();
 
-            if cpu.halt {
+            if cpu.halt || cpu.memory.halted {
                 return Ok(TestRun {
                     halted: true,
                     result_code: cpu.memory.result_code,
