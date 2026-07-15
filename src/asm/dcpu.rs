@@ -183,8 +183,15 @@ fn parse_operand(
     if let Some(code) = code {
         return Ok(Operand { code, extra: None });
     }
+    let force_next_word =
+        labels.contains_key(operand) || (!resolve_labels && !is_numeric_literal(operand));
     let value = value16(operand, labels, pc, resolve_labels)?;
-    if value <= 30 {
+    if force_next_word {
+        Ok(Operand {
+            code: 0x1f,
+            extra: Some(value),
+        })
+    } else if value <= 30 {
         Ok(Operand {
             code: 0x21 + value,
             extra: None,
@@ -210,21 +217,27 @@ fn value16(
 ) -> Result<u16, Diagnostic> {
     let text = text.trim();
     if let Some(value) = labels.get(text) {
-        return Ok(*value as u16);
+        return Ok((*value / 2) as u16);
     }
-    if !resolve_labels {
-        return Ok(0);
+    match parse_numeric_literal(text) {
+        Ok(value) => Ok(value as u16),
+        Err(_) if !resolve_labels => Ok(0),
+        Err(_) => Err(Diagnostic::new(format!("unknown DCPU operand `{text}`"))),
     }
-    let parsed = if let Some(hex) = text.strip_prefix("0x") {
+}
+
+fn is_numeric_literal(text: &str) -> bool {
+    parse_numeric_literal(text).is_ok()
+}
+
+fn parse_numeric_literal(text: &str) -> Result<u32, std::num::ParseIntError> {
+    if let Some(hex) = text.strip_prefix("0x") {
         u32::from_str_radix(hex, 16)
     } else if let Some(hex) = text.strip_suffix('h') {
         u32::from_str_radix(hex, 16)
     } else {
         text.parse::<u32>()
-    };
-    parsed
-        .map(|value| value as u16)
-        .map_err(|_| Diagnostic::new(format!("unknown DCPU operand `{text}`")))
+    }
 }
 
 fn words_to_bytes(words: &[u16]) -> Vec<u8> {

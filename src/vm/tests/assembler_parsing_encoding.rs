@@ -1367,20 +1367,48 @@ fn mos6502_is_parsed_as_own_assembler_cpu_family() {
 
 #[test]
 #[cfg(feature = "dcpu")]
-fn assembles_dcpu_basic_and_special_instructions() {
+fn assembles_and_runs_dcpu_program_in_reference_emulator() {
     use crate::target::AssemblerCpu;
+    use ::dcpu::{emulator::Cpu, types::Register};
 
-    let bytes = assemble_subset_with_symbols_at(
+    let image = assemble_subset_with_symbols_at(
         AssemblerCpu::Dcpu,
-        "start:\n    set a, 0x30\n    set [0x1000], a\n    jsr start\n",
+        "start:\n    set a, 0x30\n    add a, 2\n    set [0x1000], a\n    ife a, 0x32\n    set [0x1001], 1\n    jsr done\n    set [0x1001], 0\ndone:\n    set [0x1002], 2\n",
         0,
     )
     .unwrap();
+    let words = image
+        .bytes
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    let mut cpu = Cpu::default();
+    cpu.load(&words, 0);
 
+    for _ in 0..24 {
+        cpu.tick(&mut []).unwrap();
+    }
+
+    assert_eq!(cpu.registers[Register::A], 0x32);
+    assert_eq!(cpu.ram[0x1000], 0x32);
+    assert_eq!(cpu.ram[0x1001], 1);
+    assert_eq!(cpu.ram[0x1002], 2);
     assert_eq!(
-        bytes.bytes,
-        vec![0x01, 0x7c, 0x30, 0x00, 0xc1, 0x03, 0x00, 0x10, 0x20, 0x84]
+        image
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "start")
+            .unwrap()
+            .addr,
+        0
     );
-    assert_eq!(bytes.symbols[0].name, "start");
-    assert_eq!(bytes.symbols[0].addr, 0);
+    assert_eq!(
+        image
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "done")
+            .unwrap()
+            .addr,
+        26
+    );
 }
