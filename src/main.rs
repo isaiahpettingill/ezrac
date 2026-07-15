@@ -1667,6 +1667,7 @@ fn assembly_feature_enabled(feature: &str) -> bool {
         "m68k" => cfg!(feature = "m68k"),
         "mos6502" => cfg!(feature = "mos6502"),
         "tms9900" => cfg!(feature = "tms9900"),
+        "dcpu" => cfg!(feature = "dcpu"),
         "lsp" => cfg!(feature = "lsp"),
         _ => false,
     }
@@ -3491,6 +3492,15 @@ fn print_targets() {
             output: "bin",
             sdk: "none",
             status: "assembly-only TMS9900 target",
+        },
+        #[cfg(feature = "dcpu")]
+        TargetRow {
+            triple: "generic-dcpu-bare",
+            cpu: "dcpu",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "assembly-only DCPU-16 target",
         },
         #[cfg(feature = "m68k")]
         TargetRow {

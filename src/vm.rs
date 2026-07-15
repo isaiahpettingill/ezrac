@@ -10,6 +10,8 @@ use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 #[cfg(feature = "m6800")]
 use ::m6800::{Cpu as M6800Cpu, MemoryBus as M6800MemoryBus};
 
+#[cfg(feature = "dcpu")]
+use crate::asm::dcpu;
 #[cfg(feature = "m68k")]
 use crate::asm::m68k as asm_m68k;
 #[cfg(feature = "tms9900")]
@@ -464,7 +466,7 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         | CpuFamily::Chip8
         | CpuFamily::SuperChip
         | CpuFamily::XoChip => CpuMode::Z80,
-        CpuFamily::Avr => CpuMode::Z80,
+        CpuFamily::Avr | CpuFamily::Dcpu => CpuMode::Z80,
     }
 }
 
@@ -1049,6 +1051,10 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Mos6502 {
         return crate::asm::mos6502::instruction_len(text);
     }
+    #[cfg(feature = "dcpu")]
+    if cpu == AssemblerCpu::Dcpu {
+        return dcpu::instruction_len(text);
+    }
     #[cfg(feature = "tms9900")]
     if cpu == AssemblerCpu::Tms9900 {
         return tms9900::instruction_len(text);
@@ -1101,6 +1107,11 @@ fn emit_instruction(
         bytes.extend(crate::asm::mos6502::encode_instruction(
             text, labels, pc, true,
         )?);
+        return Ok(());
+    }
+    #[cfg(feature = "dcpu")]
+    if cpu == AssemblerCpu::Dcpu {
+        bytes.extend(dcpu::encode_instruction(text, labels, pc)?);
         return Ok(());
     }
     #[cfg(feature = "tms9900")]
