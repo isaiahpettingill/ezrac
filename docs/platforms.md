@@ -400,7 +400,7 @@ generic-dcpu-bare
 bare-tms9900
 ```
 
-Bare targets use raw `.bin` output and do not enable default SDK symbols. `generic-dcpu-bare` is available with the optional `dcpu` feature for handwritten DCPU-16 assembly. `bare-tms9900` is available with the optional `tms9900` feature and supports handwritten assembly only; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
+Bare targets use raw `.bin` output and do not enable default SDK symbols. `generic-dcpu-bare` is available with the optional `dcpu` feature for complete standalone DCPU-16 1.7 handwritten assembly; see [`dcpu-assembly.md`](dcpu-assembly.md). `bare-tms9900` is available with the optional `tms9900` feature and supports handwritten assembly only; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
 
 ```text
 bare-ez80   24-bit address space, load 0x000000, stack 0xFFFFFF
