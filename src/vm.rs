@@ -21,6 +21,8 @@ use crate::asm::tms9900;
 use crate::asm::{avr, ez80 as asm_meta, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
+#[cfg(feature = "dcpu")]
+use ::dcpu::emulator::{Cpu as DcpuCpu, cpu::OnDecodeError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestRun {
@@ -94,6 +96,8 @@ impl Default for TestRunner {
     fn default() -> Self {
         let mut backends: Vec<Box<dyn EmulatorBackend>> = vec![Box::new(Ez80Emulator)];
 
+        #[cfg(feature = "dcpu")]
+        backends.push(Box::new(DcpuEmulator));
         #[cfg(feature = "m6800")]
         backends.push(Box::new(M6800Emulator));
         #[cfg(feature = "m68k")]
@@ -306,6 +310,170 @@ impl EmulatorBackend for Ez80Emulator {
             ports: machine.ports,
             failure: Some(TestRunFailure::Timeout),
         })
+    }
+}
+
+#[cfg(feature = "dcpu")]
+pub struct DcpuEmulator;
+
+/// DCPU test ABI word addresses. A changed debug sequence emits the low byte
+/// of the debug value word; result and halt use the low byte of their words.
+#[cfg(feature = "dcpu")]
+const DCPU_DEBUG_SEQUENCE: u16 = 0xFFF0;
+#[cfg(feature = "dcpu")]
+const DCPU_DEBUG_VALUE: u16 = 0xFFF1;
+#[cfg(feature = "dcpu")]
+const DCPU_RESULT_CODE: u16 = 0xFFF2;
+#[cfg(feature = "dcpu")]
+const DCPU_HALT: u16 = 0xFFF3;
+#[cfg(feature = "dcpu")]
+const DCPU_ADDRESS_SPACE_BYTES: u32 = 0x2_0000;
+
+#[cfg(feature = "dcpu")]
+impl EmulatorBackend for DcpuEmulator {
+    fn supports(&self, cpu_family: CpuFamily) -> bool {
+        cpu_family == CpuFamily::Dcpu
+    }
+
+    fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+        let code_end = validate_dcpu_byte_range(image.base_addr, image.bytes.len(), "test image")?;
+        let stack_top = dcpu_aligned_byte_address_to_word(options.stack_top, "test stack top")?;
+        for (address, _) in &options.initial_memory {
+            dcpu_byte_address_to_word(*address, "test memory address")?;
+        }
+
+        let words = image
+            .bytes
+            .chunks_exact(2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>();
+        let mut cpu = DcpuCpu::new(OnDecodeError::Fail);
+        cpu.sp = std::num::Wrapping(stack_top);
+        cpu.ram[DCPU_DEBUG_SEQUENCE] = 0;
+        cpu.ram[DCPU_DEBUG_VALUE] = 0;
+        cpu.ram[DCPU_RESULT_CODE] = 0;
+        cpu.ram[DCPU_HALT] = 0;
+
+        for (address, value) in &options.initial_memory {
+            let word_address = dcpu_byte_address_to_word(*address, "test memory address")?;
+            let word = &mut cpu.ram[word_address];
+            if address & 1 == 0 {
+                *word = (*word & 0xFF00) | u16::from(*value);
+            } else {
+                *word = (*word & 0x00FF) | (u16::from(*value) << 8);
+            }
+        }
+        cpu.load(
+            &words,
+            dcpu_byte_address_to_word(image.base_addr, "test image base address")?,
+        );
+
+        let mut debug_sequence = cpu.ram[DCPU_DEBUG_SEQUENCE];
+        let mut debug_output = Vec::new();
+        for instruction in 0..options.instruction_budget {
+            let pc = u32::from(cpu.pc.0) * 2;
+            if pc < image.base_addr || pc >= code_end {
+                return Ok(dcpu_test_run(
+                    false,
+                    cpu.ram[DCPU_RESULT_CODE] as u8,
+                    instruction,
+                    debug_output,
+                    Some(TestRunFailure::ExecutionOutsideMappedMemory { pc }),
+                ));
+            }
+            if !matches!(
+                catch_unwind(AssertUnwindSafe(|| cpu.tick(&mut []))),
+                Ok(Ok(_))
+            ) {
+                return Ok(dcpu_test_run(
+                    false,
+                    cpu.ram[DCPU_RESULT_CODE] as u8,
+                    instruction,
+                    debug_output,
+                    Some(TestRunFailure::IllegalInstruction { pc }),
+                ));
+            }
+
+            let sequence = cpu.ram[DCPU_DEBUG_SEQUENCE];
+            if sequence != debug_sequence {
+                debug_sequence = sequence;
+                debug_output.push(cpu.ram[DCPU_DEBUG_VALUE] as u8);
+            }
+            if cpu.ram[DCPU_HALT] != 0 || cpu.halted {
+                return Ok(dcpu_test_run(
+                    true,
+                    cpu.ram[DCPU_RESULT_CODE] as u8,
+                    instruction + 1,
+                    debug_output,
+                    None,
+                ));
+            }
+        }
+
+        Ok(dcpu_test_run(
+            false,
+            cpu.ram[DCPU_RESULT_CODE] as u8,
+            options.instruction_budget,
+            debug_output,
+            Some(TestRunFailure::Timeout),
+        ))
+    }
+}
+
+#[cfg(feature = "dcpu")]
+fn validate_dcpu_byte_range(base: u32, len: usize, subject: &str) -> Result<u32, Diagnostic> {
+    dcpu_aligned_byte_address_to_word(base, &format!("{subject} base address"))?;
+    if len % 2 != 0 {
+        return Err(Diagnostic::new(format!(
+            "{subject} must contain an even number of bytes for DCPU word memory"
+        )));
+    }
+    let end = base
+        .checked_add(u32::try_from(len).map_err(|_| Diagnostic::new("test image is too large"))?)
+        .filter(|end| *end <= DCPU_ADDRESS_SPACE_BYTES)
+        .ok_or_else(|| {
+            Diagnostic::new(format!(
+                "{subject} exceeds the DCPU 16-bit word address space"
+            ))
+        })?;
+    Ok(end)
+}
+
+#[cfg(feature = "dcpu")]
+fn dcpu_byte_address_to_word(address: u32, subject: &str) -> Result<u16, Diagnostic> {
+    if address >= DCPU_ADDRESS_SPACE_BYTES {
+        return Err(Diagnostic::new(format!(
+            "{subject} 0x{address:X} is outside the DCPU 16-bit word address space"
+        )));
+    }
+    Ok((address / 2) as u16)
+}
+
+#[cfg(feature = "dcpu")]
+fn dcpu_aligned_byte_address_to_word(address: u32, subject: &str) -> Result<u16, Diagnostic> {
+    if address % 2 != 0 {
+        return Err(Diagnostic::new(format!(
+            "{subject} 0x{address:X} is not an aligned byte address in the DCPU 16-bit word address space"
+        )));
+    }
+    dcpu_byte_address_to_word(address, subject)
+}
+
+#[cfg(feature = "dcpu")]
+fn dcpu_test_run(
+    halted: bool,
+    result_code: u8,
+    instructions: u64,
+    debug_output: Vec<u8>,
+    failure: Option<TestRunFailure>,
+) -> TestRun {
+    TestRun {
+        halted,
+        result_code,
+        instructions,
+        debug_output,
+        ports: [0; 256],
+        failure,
     }
 }
 

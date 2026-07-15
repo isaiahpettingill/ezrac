@@ -29,6 +29,8 @@ fn temp_root(name: &str) -> std::path::PathBuf {
 
 mod assembler_parsing_encoding;
 mod cpu_behavior;
+#[cfg(feature = "dcpu")]
+mod dcpu_backend;
 mod execution_control_flow;
 mod fixtures;
 mod lr35902_backend;
