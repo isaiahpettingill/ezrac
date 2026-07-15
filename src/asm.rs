@@ -1,7 +1,7 @@
 pub mod avr;
 #[cfg(feature = "avr")]
 pub mod avr_emitter;
-pub mod chip8;
+
 #[cfg(feature = "dcpu")]
 pub mod dcpu;
 pub mod ez80;

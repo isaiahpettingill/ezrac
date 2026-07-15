@@ -16,7 +16,7 @@ use crate::asm::dcpu;
 use crate::asm::m68k as asm_m68k;
 #[cfg(feature = "tms9900")]
 use crate::asm::tms9900;
-use crate::asm::{avr, chip8 as chip8_asm, ez80 as asm_meta, m6800};
+use crate::asm::{avr, ez80 as asm_meta, m6800};
 use crate::diagnostic::{Diagnostic, SourceLocation};
 use crate::target::{Address24, AssemblerCpu, CpuFamily, EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 
@@ -423,7 +423,6 @@ fn address_width_for_family(cpu_family: CpuFamily) -> u8 {
 fn address_limit_for_family(cpu_family: CpuFamily) -> u32 {
     match cpu_family {
         CpuFamily::Ez80 => Address24::MAX,
-        CpuFamily::Chip8 | CpuFamily::SuperChip => 0x0FFF,
         _ => u16::MAX as u32,
     }
 }
@@ -459,13 +458,9 @@ fn cpu_mode_for_family(cpu: CpuFamily) -> CpuMode {
         CpuFamily::I8080 => CpuMode::I8080,
         CpuFamily::I8085 => CpuMode::I8085,
         CpuFamily::M68k => CpuMode::Z80,
-        CpuFamily::Lr35902
-        | CpuFamily::M6800
-        | CpuFamily::Mos6502
-        | CpuFamily::Tms9900
-        | CpuFamily::Chip8
-        | CpuFamily::SuperChip
-        | CpuFamily::XoChip => CpuMode::Z80,
+        CpuFamily::Lr35902 | CpuFamily::M6800 | CpuFamily::Mos6502 | CpuFamily::Tms9900 => {
+            CpuMode::Z80
+        }
         CpuFamily::Avr | CpuFamily::Dcpu => CpuMode::Z80,
     }
 }
@@ -1034,9 +1029,7 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Avr {
         return avr::instruction_len(text);
     }
-    if let Some(dialect) = chip8_dialect(cpu) {
-        return chip8_asm::instruction_len(dialect, text);
-    }
+
     if cpu == AssemblerCpu::M6800 {
         return m6800::instruction_len(text)?.ok_or_else(|| {
             Diagnostic::new(format!(
@@ -1085,10 +1078,7 @@ fn emit_instruction(
         bytes.extend(avr::encode_instruction(text, labels, pc)?);
         return Ok(());
     }
-    if let Some(dialect) = chip8_dialect(cpu) {
-        bytes.extend(chip8_asm::encode_instruction(dialect, text, labels, pc)?);
-        return Ok(());
-    }
+
     if cpu == AssemblerCpu::M6800 {
         let Some(encoded) = m6800::emit_instruction(text, labels, pc)? else {
             return Err(Diagnostic::new(format!(
@@ -1185,15 +1175,6 @@ fn z80_imm16_load(cpu: AssemblerCpu, text: &str) -> Option<(u8, &str)> {
         return None;
     }
     Some((opcode, value))
-}
-
-fn chip8_dialect(cpu: AssemblerCpu) -> Option<chip8_asm::Chip8Dialect> {
-    match cpu {
-        AssemblerCpu::Chip8 => Some(chip8_asm::Chip8Dialect::Chip8),
-        AssemblerCpu::SuperChip => Some(chip8_asm::Chip8Dialect::SuperChip),
-        AssemblerCpu::XoChip => Some(chip8_asm::Chip8Dialect::XoChip),
-        _ => None,
-    }
 }
 
 fn encode_lr35902(
