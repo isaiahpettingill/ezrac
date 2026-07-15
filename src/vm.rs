@@ -9,6 +9,8 @@ use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 
 #[cfg(feature = "m6800")]
 use ::m6800::{Cpu as M6800Cpu, MemoryBus as M6800MemoryBus};
+#[cfg(feature = "m68k")]
+use ::m68000::{M68000, MemoryAccess as M68kMemoryAccess, cpu_details::Mc68000};
 
 #[cfg(feature = "dcpu")]
 use crate::asm::dcpu;
@@ -94,6 +96,8 @@ impl Default for TestRunner {
 
         #[cfg(feature = "m6800")]
         backends.push(Box::new(M6800Emulator));
+        #[cfg(feature = "m68k")]
+        backends.push(Box::new(M68kEmulator));
 
         Self::new(backends)
     }
@@ -300,6 +304,182 @@ impl EmulatorBackend for Ez80Emulator {
             instructions: options.instruction_budget,
             debug_output: machine.debug_output,
             ports: machine.ports,
+            failure: Some(TestRunFailure::Timeout),
+        })
+    }
+}
+
+#[cfg(feature = "m68k")]
+pub struct M68kEmulator;
+
+#[cfg(feature = "m68k")]
+struct M68kTestMemory {
+    data: HashMap<u32, u8>,
+    ports: [u8; 256],
+    halted: bool,
+    result_code: u8,
+    debug_output: Vec<u8>,
+}
+
+#[cfg(feature = "m68k")]
+impl M68kTestMemory {
+    const DEBUG_OUTPUT: u32 = 0xFFFFF0;
+    const RESULT_CODE: u32 = 0xFFFFF1;
+    const HALT: u32 = 0xFFFFF2;
+
+    fn new() -> Self {
+        Self {
+            data: HashMap::new(),
+            ports: [0; 256],
+            halted: false,
+            result_code: 0,
+            debug_output: Vec::new(),
+        }
+    }
+
+    fn write_byte(&mut self, address: u32, value: u8) -> Option<()> {
+        if address > Address24::MAX {
+            return None;
+        }
+        self.data.insert(address, value);
+        match address {
+            Self::DEBUG_OUTPUT => self.debug_output.push(value),
+            Self::RESULT_CODE => self.result_code = value,
+            Self::HALT if value != 0 => self.halted = true,
+            _ => {}
+        }
+        Some(())
+    }
+}
+
+#[cfg(feature = "m68k")]
+impl M68kMemoryAccess for M68kTestMemory {
+    fn get_byte(&mut self, address: u32) -> Option<u8> {
+        (address <= Address24::MAX).then(|| self.data.get(&address).copied().unwrap_or(0))
+    }
+
+    fn get_word(&mut self, address: u32) -> Option<u16> {
+        Some((self.get_byte(address)? as u16) << 8 | self.get_byte(address.checked_add(1)?)? as u16)
+    }
+
+    fn set_byte(&mut self, address: u32, value: u8) -> Option<()> {
+        self.write_byte(address, value)
+    }
+
+    fn set_word(&mut self, address: u32, value: u16) -> Option<()> {
+        self.write_byte(address, (value >> 8) as u8)?;
+        self.write_byte(address.checked_add(1)?, value as u8)
+    }
+
+    fn reset_instruction(&mut self) {}
+}
+
+#[cfg(feature = "m68k")]
+impl EmulatorBackend for M68kEmulator {
+    fn supports(&self, cpu_family: CpuFamily) -> bool {
+        cpu_family == CpuFamily::M68k
+    }
+
+    fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+        if image.base_addr > Address24::MAX {
+            return Err(Diagnostic::new(format!(
+                "test image base address 0x{:X} is outside the 24-bit address space",
+                image.base_addr
+            )));
+        }
+        if options.stack_top > Address24::MAX {
+            return Err(Diagnostic::new(format!(
+                "test stack top 0x{:X} is outside the 24-bit address space",
+                options.stack_top
+            )));
+        }
+        for (address, _) in &options.initial_memory {
+            if *address > Address24::MAX {
+                return Err(Diagnostic::new(format!(
+                    "test memory address 0x{address:X} is outside the 24-bit address space"
+                )));
+            }
+        }
+
+        let code_start = image.base_addr;
+        let code_end = checked_code_end(code_start, image.bytes.len())?;
+        let mut memory = M68kTestMemory::new();
+        for (port, value) in &options.initial_ports {
+            memory.ports[*port as usize] = *value;
+        }
+        for (address, value) in &options.initial_memory {
+            memory.write_byte(*address, *value);
+        }
+        for (offset, byte) in image.bytes.iter().copied().enumerate() {
+            memory.write_byte(code_start + offset as u32, byte);
+        }
+
+        let mut cpu = M68000::<Mc68000>::new_no_reset();
+        cpu.regs.pc.0 = code_start;
+        cpu.regs.sp_mut().0 = options.stack_top;
+
+        for instruction in 0..options.instruction_budget {
+            let pc = cpu.regs.pc.0;
+            if pc > Address24::MAX || pc < code_start || pc >= code_end {
+                return Ok(TestRun {
+                    halted: false,
+                    result_code: memory.result_code,
+                    instructions: instruction,
+                    debug_output: memory.debug_output,
+                    ports: memory.ports,
+                    failure: Some(TestRunFailure::ExecutionOutsideMappedMemory { pc }),
+                });
+            }
+            let result = catch_unwind(AssertUnwindSafe(|| cpu.interpreter_exception(&mut memory)));
+            let Ok((_, exception)) = result else {
+                return Ok(TestRun {
+                    halted: false,
+                    result_code: memory.result_code,
+                    instructions: instruction,
+                    debug_output: memory.debug_output,
+                    ports: memory.ports,
+                    failure: Some(TestRunFailure::IllegalInstruction { pc }),
+                });
+            };
+            if exception.is_some() {
+                return Ok(TestRun {
+                    halted: false,
+                    result_code: memory.result_code,
+                    instructions: instruction,
+                    debug_output: memory.debug_output,
+                    ports: memory.ports,
+                    failure: Some(TestRunFailure::IllegalInstruction { pc }),
+                });
+            }
+            let sp = cpu.regs.sp();
+            if !stack_pointer_in_bounds(sp, options.stack_top) {
+                return Ok(TestRun {
+                    halted: false,
+                    result_code: memory.result_code,
+                    instructions: instruction + 1,
+                    debug_output: memory.debug_output,
+                    ports: memory.ports,
+                    failure: Some(TestRunFailure::StackOverflow { sp }),
+                });
+            }
+            if memory.halted || cpu.stop {
+                return Ok(TestRun {
+                    halted: true,
+                    result_code: memory.result_code,
+                    instructions: instruction + 1,
+                    debug_output: memory.debug_output,
+                    ports: memory.ports,
+                    failure: None,
+                });
+            }
+        }
+
+        Ok(TestRun {
+            halted: false,
+            result_code: memory.result_code,
+            instructions: options.instruction_budget,
+            debug_output: memory.debug_output,
+            ports: memory.ports,
             failure: Some(TestRunFailure::Timeout),
         })
     }

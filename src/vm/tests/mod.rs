@@ -34,5 +34,7 @@ mod fixtures;
 mod lr35902_backend;
 #[cfg(feature = "m6800")]
 mod m6800_backend;
+#[cfg(feature = "m68k")]
+mod m68k_backend;
 #[cfg(feature = "mos6502")]
 mod mos6502_backend;
