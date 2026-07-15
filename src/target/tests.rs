@@ -208,11 +208,21 @@ fn resolves_game_boy_assembly_targets() {
 
 #[test]
 #[cfg(feature = "avr")]
-fn resolves_arduboy_avr_target_profile() {
-    let profile = super::resolve_target_profile(Some("arduboy-avr")).unwrap();
-    assert_eq!(profile.triple.cpu, super::CpuFamily::Avr);
-    assert_eq!(profile.output_format, super::OutputFormat::ArduinoHex);
-    assert_eq!(profile.memory.pointer_width_bits, 16);
+fn resolves_arduboy_and_bare_avr_target_profiles() {
+    let arduboy = super::resolve_target_profile(Some("arduboy-avr")).unwrap();
+    assert_eq!(arduboy.triple.cpu, super::CpuFamily::Avr);
+    assert_eq!(arduboy.output_format, super::OutputFormat::ArduinoHex);
+    assert_eq!(arduboy.memory.pointer_width_bits, 16);
+
+    let bare = super::resolve_target_profile(Some("bare-avr")).unwrap();
+    assert_eq!(bare.triple.cpu, super::CpuFamily::Avr);
+    assert_eq!(bare.output_format, super::OutputFormat::RawBin);
+    assert!(!bare.default_sdk_symbols);
+
+    let arduboy_layout = crate::layout::default_layout_for_target("arduboy-avr");
+    assert_eq!(arduboy_layout.name, "arduboy_atmega32u4");
+    assert_eq!(arduboy_layout.stack.get(), 0x0AFF);
+    assert_eq!(arduboy_layout.regions[0].end.get(), 0x6FFF);
 }
 
 #[test]

@@ -82,7 +82,9 @@ pub struct Layout {
 }
 
 pub fn default_layout_for_target(target: &str) -> Layout {
-    if target == "generic-6502-bare" {
+    if target == "bare-avr" || target == "bare-atmega32u4" {
+        Layout::bare_avr()
+    } else if target == "generic-6502-bare" {
         Layout::bare_6502()
     } else if target.starts_with("chip8-") || target == "vm-chip8" {
         Layout::chip8("chip8")
@@ -104,7 +106,7 @@ pub fn default_layout_for_target(target: &str) -> Layout {
     } else if target.starts_with("commodore64-6502") {
         Layout::commodore64_6502()
     } else if target.starts_with("arduboy-") {
-        Layout::bare_16("arduboy_avr")
+        Layout::arduboy_atmega32u4()
     } else if is_ti_ce_target(target) {
         Layout::ti_ce_ez80(target)
     } else if is_ti_z80_target(target) {
@@ -422,6 +424,44 @@ impl Layout {
                 symbol("EZRA_ENTRY_ADDR", Address24::new(0x0200)),
                 symbol("EZRA_CODE_BASE", Address24::new(0x0200)),
                 symbol("EZRA_STACK_TOP", Address24::new(stack)),
+            ],
+        }
+    }
+
+    /// AVR has separate flash and SRAM address spaces. The current flat image
+    /// writer emits flash only, so every emitted section is deliberately placed
+    /// in flash. The stack symbol remains the hardware SRAM address used by the
+    /// AVR startup sequence.
+    pub fn bare_avr() -> Self {
+        Self::avr_flash_layout("bare_avr", 0x7FFF)
+    }
+
+    /// Arduboy's ATmega32U4 has 32 KiB of flash. The top 4 KiB is retained for
+    /// the Caterina bootloader, leaving application flash through 0x6FFF.
+    pub fn arduboy_atmega32u4() -> Self {
+        Self::avr_flash_layout("arduboy_atmega32u4", 0x6FFF)
+    }
+
+    fn avr_flash_layout(name: &str, flash_end: u32) -> Self {
+        Self {
+            name: name.to_owned(),
+            load: Address24::new(0),
+            entry: Address24::new(0),
+            // ATmega32U4 SRAM is 0x0100..0x0AFF; SPL/SPH are initialized by
+            // the AVR source backend before entering main.
+            stack: Address24::new(0x0AFF),
+            regions: vec![region(
+                "flash",
+                0,
+                flash_end,
+                &[RegionFlags::READ, RegionFlags::EXECUTE],
+            )],
+            sections: avr_flash_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0)),
+                symbol("EZRA_CODE_BASE", Address24::new(0)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x0AFF)),
             ],
         }
     }
@@ -1727,6 +1767,15 @@ fn section(name: &str, region: &str, align: u32) -> Section {
         region: region.to_owned(),
         align,
     }
+}
+
+fn avr_flash_sections() -> Vec<Section> {
+    [
+        ".header", ".text", ".rodata", ".data", ".bss", ".assets", ".scratch",
+    ]
+    .into_iter()
+    .map(|name| section(name, "flash", 2))
+    .collect()
 }
 
 fn bare_sections() -> Vec<Section> {

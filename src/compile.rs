@@ -1,3 +1,6 @@
+#[cfg(feature = "avr")]
+use crate::asm::emit_avr_assembly_with_options;
+
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -286,7 +289,16 @@ fn check_source_with_sdk_and_overrides(
         options.debug_comments,
         options.default_sdk_symbols,
     );
-    let assembly = if cpu == CpuFamily::Mos6502 {
+    let assembly = if cpu == CpuFamily::Avr {
+        #[cfg(feature = "avr")]
+        {
+            emit_avr_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "avr"))]
+        {
+            unreachable!("AVR targets require the avr Cargo feature")
+        }
+    } else if cpu == CpuFamily::Mos6502 {
         emit_mos6502_assembly_with_options(&program, assembly_options)
     } else if cpu == CpuFamily::M68k {
         #[cfg(feature = "m68k")]
@@ -1023,7 +1035,23 @@ fn builtin_sdk_path(import: &str) -> PathBuf {
 }
 
 fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
-    if target.is_some_and(|target| target.starts_with("gameboy-")) {
+    if target.is_some_and(|target| target.starts_with("arduboy-")) {
+        match import {
+            "arduboy.core" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/core.ezra"),
+                "arduboy.core",
+            )),
+            "arduboy.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/input.ezra"),
+                "arduboy.input",
+            )),
+            "arduboy.oled" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/oled.ezra"),
+                "arduboy.oled",
+            )),
+            _ => None,
+        }
+    } else if target.is_some_and(|target| target.starts_with("gameboy-")) {
         match import {
             "gb.video" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/video.ezra"),
@@ -1238,6 +1266,9 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
 /// LSP cannot advertise a module that import resolution would reject.
 pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
     const MODULES: &[&str] = &[
+        "arduboy.core",
+        "arduboy.input",
+        "arduboy.oled",
         "gb.video",
         "gb.sprites",
         "gb.serial",

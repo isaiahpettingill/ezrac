@@ -1,0 +1,53 @@
+// Minimal SPI/OLED transport for the Arduboy SSD1306 display.
+// `write`, `command`, and `data` accept one byte in r24.
+
+pub fn initialize_display() {
+    asm volatile(clobber r16, clobber memory) {
+        // PB0=CS, PB1=SCK, PB2=MOSI, PB7=RESET; PD4=DC.
+        "sbi 04h, 0"
+        "sbi 04h, 1"
+        "sbi 04h, 2"
+        "sbi 04h, 7"
+        "sbi 0Ah, 4"
+        "sbi 05h, 0"
+        "sbi 05h, 7"
+        "cbi 05h, 7"
+        "sbi 05h, 7"
+        // Enable SPI master mode at f_CPU / 2.
+        "ldi r16, 01h"
+        "out 2Dh, r16"
+        "ldi r16, 50h"
+        "out 2Ch, r16"
+    }
+    command(0xAE)
+    command(0xA4)
+    command(0xAF)
+}
+
+pub fn write(value: u8) {
+    asm volatile(clobber r18, clobber flags, clobber memory) {
+        "out 2Eh, r24"
+        ".oled_wait_complete:"
+        "in r18, 2Dh"
+        "sbrs r18, 7"
+        "rjmp .oled_wait_complete"
+    }
+}
+
+pub fn command(value: u8) {
+    asm volatile(clobber memory) {
+        "cbi 0Bh, 4"
+        "cbi 05h, 0"
+        "call _oled.write"
+        "sbi 05h, 0"
+    }
+}
+
+pub fn data(value: u8) {
+    asm volatile(clobber memory) {
+        "sbi 0Bh, 4"
+        "cbi 05h, 0"
+        "call _oled.write"
+        "sbi 05h, 0"
+    }
+}

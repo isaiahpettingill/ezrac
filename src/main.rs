@@ -27,6 +27,8 @@ use ezra::{
     vm::TestRunOptions,
 };
 
+#[cfg(feature = "avr")]
+use ezra::asm::emit_avr_assembly_with_options;
 #[cfg(feature = "m68k")]
 use ezra::asm::emit_m68k_assembly_with_options;
 
@@ -788,6 +790,7 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::I8080
             | CpuFamily::I8085
             | CpuFamily::Lr35902
+            | CpuFamily::Avr
             | CpuFamily::Mos6502
     ) {
         return Ok(());
@@ -826,6 +829,15 @@ fn emit_source_assembly(
     ezra::tbir::diagnostics::validate_program(program, options.cpu)?;
     if options.cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(program, options)
+    } else if options.cpu == CpuFamily::Avr {
+        #[cfg(feature = "avr")]
+        {
+            emit_avr_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "avr"))]
+        {
+            unreachable!("AVR targets require the avr Cargo feature")
+        }
     } else if options.cpu == CpuFamily::Mos6502 {
         emit_mos6502_assembly_with_options(program, options)
     } else if options.cpu == CpuFamily::M68k {
@@ -1181,6 +1193,7 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
         || bare_target_cpu(&settings.target.triple.value).is_some()
         || settings.target.triple.value.starts_with("zxspectrum-z80")
         || settings.target.triple.value.starts_with("gameboy-")
+        || settings.target.triple.value.starts_with("arduboy-")
         || settings.target.triple.value.starts_with("commodore64-6502")
         || matches!(
             settings.target.triple.cpu,
@@ -3501,6 +3514,24 @@ fn print_targets() {
             output: "bin",
             sdk: "none",
             status: "assembly-only DCPU-16 target",
+        },
+        #[cfg(feature = "avr")]
+        TargetRow {
+            triple: "bare-avr",
+            cpu: "avr",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "register-ABI AVR source/assembly target",
+        },
+        #[cfg(feature = "avr")]
+        TargetRow {
+            triple: "arduboy-avr",
+            cpu: "avr",
+            address_width_bits: 16,
+            output: "hex",
+            sdk: "arduboy.*",
+            status: "ATmega32U4 register-ABI source/assembly target",
         },
         #[cfg(feature = "m68k")]
         TargetRow {

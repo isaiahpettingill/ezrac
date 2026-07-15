@@ -1,0 +1,27 @@
+// Arduboy button bits returned by read(). Buttons are active-high in the result.
+pub const A: u8 = 0x01
+pub const B: u8 = 0x02
+pub const UP: u8 = 0x04
+pub const DOWN: u8 = 0x08
+pub const LEFT: u8 = 0x10
+pub const RIGHT: u8 = 0x20
+
+// Reads the six Arduboy buttons into r24. The result uses A, B, UP, DOWN,
+// LEFT, and RIGHT bit constants above.
+pub fn read() -> u8 {
+    asm volatile(clobber r18, clobber flags, clobber memory) {
+        "clr r24"
+        "sbis 0Ch, 6"
+        "ori r24, 01h"
+        "sbis 0Ch, 2"
+        "ori r24, 02h"
+        "sbis 0Fh, 7"
+        "ori r24, 04h"
+        "sbis 0Fh, 6"
+        "ori r24, 08h"
+        "sbis 0Fh, 5"
+        "ori r24, 10h"
+        "sbis 0Fh, 4"
+        "ori r24, 20h"
+    }
+}

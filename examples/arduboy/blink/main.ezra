@@ -1,0 +1,8 @@
+import arduboy.core
+import arduboy.oled
+
+fn main() {
+    core.initialize()
+    oled.initialize_display()
+    oled.command(0x40)
+}

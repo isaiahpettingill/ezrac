@@ -8,7 +8,7 @@ vendor-platform-cpu[-version]
 
 The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, TMS9900, DCPU-16, AVR, CHIP-8 variants, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, M68k requires `m68k`, and DCPU-16 requires `dcpu`.
 
-Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have EZRA source code generation; AVR, CHIP-8-family, DCPU-16, M6800, and TMS9900 targets are currently assembly-only through the public CLI. MOS 6502 and optional M68k targets have target-specific EZRA source emitters.
+Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have broad EZRA source code generation; CHIP-8-family, DCPU-16, M6800, and TMS9900 targets are assembly-only through the public CLI. MOS 6502 and optional M68k have target-specific source emitters, and AVR has a complete register-ABI source backend.
 
 ## Support Levels
 
@@ -54,10 +54,26 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; assembly-only target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | none | Optional `dcpu` feature; assembly-only target |
-| `arduboy-*-avr` | 3 | AVR | 16 | Intel HEX `.hex` | none | Optional `avr` feature; assembly-only profile |
+| `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
+| `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
+
+## AVR and Arduboy
+
+Build bare AVR source or the Arduboy ATmega32U4 target with the `avr` feature:
+
+```sh
+cargo run --features avr -- build --target bare-avr src/main.ezra
+cargo run --features avr -- build --target arduboy-avr src/main.ezra
+```
+
+`bare-avr` produces a raw flash image. `arduboy-avr` produces Intel HEX and reserves the upper 4 KiB of the ATmega32U4's 32 KiB flash for the Caterina bootloader. Both initialize the hardware stack to `0x0AFF`, clear `r1`, and call `main` from the reset entry.
+
+The AVR backend lowers scalar values, pointers, arrays, structs, strings, embedded data, control flow, calls, interrupts, and inline assembly through HIR, TBIR, and the target semantic model. Its register ABI starts byte arguments in `r24`, `r22`, `r20`, and `r18`, uses adjacent registers for wider values, and returns values in `r24` through `r26`. The bundled `arduboy.core`, `arduboy.input`, and `arduboy.oled` modules use this ABI; see `examples/arduboy/blink` for a buildable example.
+
+The backend allocates source-visible storage in the AVR data address space and emits initialization code for globals, strings, and embedded data. AVR builds are validated through lowering, exhaustive instruction encoding, assembly, and Intel HEX packaging tests.
 
 ## Generic M68k
 

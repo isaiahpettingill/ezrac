@@ -1,4 +1,6 @@
 pub mod avr;
+#[cfg(feature = "avr")]
+pub mod avr_emitter;
 pub mod chip8;
 #[cfg(feature = "dcpu")]
 pub mod dcpu;
@@ -14,6 +16,8 @@ pub mod mos6502_emitter;
 #[cfg(feature = "tms9900")]
 pub mod tms9900;
 
+#[cfg(feature = "avr")]
+pub use avr_emitter::emit_avr_assembly_with_options;
 pub use ez80::{
     AssemblyOptions, CheckedEz80Program, emit_ez80_assembly, emit_ez80_assembly_from_checked,
     emit_ez80_assembly_with_debug_comments, emit_ez80_assembly_with_options,

@@ -111,7 +111,7 @@ Examples of future classic Z80 targets include `cpm-2.2-z80` and `zxspectrum-z80
 
 ### 2.3 Future CPU Profiles
 
-Non-Z80 targets use the target-neutral HIR and target-bound TBIR stages plus target-specific backends. MOS 6502 EZRA source compilation is implemented; AVR currently supports standalone assembly but not EZRA source code generation. Other non-Z80 source backends remain target-specific work. Their SDKs and layouts follow the same target-profile model.
+Non-Z80 targets use the target-neutral HIR and target-bound TBIR stages plus target-specific backends. MOS 6502 EZRA source compilation is implemented; AVR has a complete HIR/TBIR-backed register-ABI source backend and instruction-set assembler. Other non-Z80 source backends remain target-specific work. Their SDKs and layouts follow the same target-profile model.
 
 ---
 
@@ -716,7 +716,7 @@ i24:   -8,388,608 to 8,388,607
 
 Unsigned arithmetic wraps modulo the type width.
 
-Signed arithmetic uses two’s-complement representation and wraps on overflow.
+Signed arithmetic uses twoâ€™s-complement representation and wraps on overflow.
 
 EZRA arithmetic is fully defined. It does not have undefined signed overflow.
 

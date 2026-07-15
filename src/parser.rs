@@ -1066,6 +1066,13 @@ fn type_storage_size(ty: &Type) -> Option<u8> {
 }
 
 fn is_allowed_asm_clobber(clobber: &str) -> bool {
+    let avr_register = clobber
+        .strip_prefix('r')
+        .and_then(|index| index.parse::<u8>().ok())
+        .is_some_and(|index| index < 32);
+    if avr_register {
+        return true;
+    }
     matches!(
         clobber,
         "a" | "f"
