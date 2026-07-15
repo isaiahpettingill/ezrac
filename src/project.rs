@@ -2,6 +2,13 @@ use std::path::{Path, PathBuf};
 
 use crate::diagnostic::Diagnostic;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LspMode {
+    #[default]
+    Application,
+    Library,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectConfig {
     pub path: PathBuf,
@@ -12,6 +19,8 @@ pub struct ProjectConfig {
     pub input_kind: Option<String>,
     pub assembler_cpu: Option<String>,
     pub executable: Option<String>,
+    pub lsp_mode: LspMode,
+    pub test_target: Option<String>,
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
     pub assets: AssetConfig,
@@ -119,6 +128,27 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(required_string("build.executable"))
         .transpose()?;
 
+    let lsp_mode = value
+        .get("lsp")
+        .and_then(|lsp| lsp.get("mode"))
+        .map(required_string("lsp.mode"))
+        .transpose()?
+        .map(|mode| match mode.as_str() {
+            "application" => Ok(LspMode::Application),
+            "library" => Ok(LspMode::Library),
+            _ => Err(Diagnostic::new(format!(
+                "project field `lsp.mode` must be `application` or `library`, got `{mode}`"
+            ))),
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let test_target = value
+        .get("test")
+        .and_then(|test| test.get("target"))
+        .map(required_string("test.target"))
+        .transpose()?;
+
     let layout_file = value
         .get("layout")
         .and_then(|layout| layout.get("file"))
@@ -154,6 +184,8 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         input_kind,
         assembler_cpu,
         executable,
+        lsp_mode,
+        test_target,
         layout_file,
         cartridge,
         assets,

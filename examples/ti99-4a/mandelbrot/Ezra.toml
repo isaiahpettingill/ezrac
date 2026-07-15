@@ -1,0 +1,7 @@
+[project]
+name = "ti99-mandelbrot"
+
+[build]
+input = "src/main.ezra"
+target = "ti99-4a-tms9900"
+executable = "ti99-mandelbrot"

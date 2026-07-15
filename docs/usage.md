@@ -78,8 +78,10 @@ ezrac build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--d
 Run generated code in the compiler's target VM test path:
 
 ```sh
-ezrac test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>
+ezrac test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra]
 ```
+
+With no file argument, `test` loads `Ezra.toml` from the current directory, discovers `tests/**/*.ezra` in deterministic path order, builds each artifact, and reports a per-test result plus a CI-friendly summary. Target selection is `--target`, then `[test].target`, then `[build].target`, then the compiler default.
 
 The built-in test runner uses the `ez80` emulator backend for eZ80 ADL, Z80,
 Z80N, Z180, i8080, and i8085 target profiles. eZ80 uses a 24-bit ADL address
@@ -119,7 +121,7 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, and `.8080` are treated as assembly.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `chip8`, `m6800`, `m68k`, or `mos6502` (for example, `cargo run --features avr -- assemble --cpu avr program.asm`).
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `dcpu`, `m6800`, `m68k`, `mos6502`, or `tms9900` (for example, `cargo run --features tms9900 -- assemble --target bare-tms9900 program.asm`). AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800, and M68k have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. TMS9900 syntax and scope are documented in [`tms9900-assembly.md`](tms9900-assembly.md).
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 
@@ -167,8 +169,9 @@ with `%%` are hygienic per invocation.
 %delay 16
 ```
 
-Supported condition forms are `cpu("name")`, `target("triple")`, and
-`defined(NAME)`. Macros expand recursively up to 32 levels. The macro layer
+Supported condition forms are `cpu("name")`, `target("triple")`,
+`feature("name")`, and `defined(NAME)`. `feature` tests the Cargo feature set
+that compiled `ezrac` (for example, `feature("m68k")`). Macros expand recursively up to 32 levels. The macro layer
 does not compile or link `.ezra` SDK functions; reusable assembly APIs should
 be published as vendorable macro sets with explicit target ABI requirements.
 
@@ -267,13 +270,16 @@ Supported fields:
 ```text
 [build].input           default source path when running `ezrac build` without a file
 [build].target          target triple
-[build].output          output format: bin, com, hex, tap, gb, prg, 8xp, 8ek, or 8xk
+[build].output          output format: bin, com, gaem, hex, tap, gb, prg, crt, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
-[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, or 6502
+[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, avr, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
+[lsp].mode              application (default) or library
 ```
+
+`[lsp].mode = "library"` makes the language server type-check the configured source and its SDK imports without requiring `fn main()`. It does not add shared-library output; `build` remains executable-only.
 
 The parser also accepts a `[cartridge]` table with `layout` and optional `manifest`, but cartridge packaging is still evolving.
 
@@ -304,10 +310,12 @@ Supported output format names:
 ```text
 bin                 raw binary bytes
 com                 CP/M .COM image
+gaem                ez180N cartridge image
 hex, ihex, intel-hex Intel HEX text
 tap, zxtap          ZX Spectrum tape image
 gb, gameboy         Game Boy ROM image
 prg, c64            Commodore 64 program image
+crt, commodore64-crt Commodore 64 standard cartridge image
 8xp, ti8xp          TI protected program file
 8ek, ti8ek          TI CE app-style file
 8xk, ti8xk          classic TI app-style file
@@ -316,10 +324,12 @@ prg, c64            Commodore 64 program image
 Target defaults:
 
 ```text
+ez180N Libretro Console       gaem
 CP/M targets                 com
 ZX Spectrum targets          tap
-Game Boy targets             gb
+Game Boy targets             gb (`.gbc` filename for CGB builds)
 Commodore 64 target          prg
+Arduboy AVR targets          hex
 TI calculator targets        8xp
 all other targets            bin
 ```
@@ -386,7 +396,7 @@ ezrac assemble --target cpm-2.2-z80 --map console-output.map examples/cpm-z80/co
 ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
-The assembler accepts the implemented 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and 6502 subsets. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
+The assembler accepts implemented instruction subsets for 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for AVR, M6800, M68k, and TMS9900 when built with their Cargo features. AVR source builds lower the language through the documented register ABI; see [`platforms.md`](platforms.md#avr-and-arduboy). TMS9900 also has the initial scalar source backend and TI-99/4A cartridge profile; see [`tms9900-assembly.md`](tms9900-assembly.md) for syntax and scope. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
 
 ## Custom Layouts
 

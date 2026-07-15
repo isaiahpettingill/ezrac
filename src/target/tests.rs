@@ -98,6 +98,30 @@ fn resolves_generic_bare_6502_target() {
     assert!(!profile.supports_port_io());
 }
 
+#[cfg(feature = "tms9900")]
+#[test]
+fn resolves_ti99_4a_tms9900_target() {
+    let profile = resolve_target_profile(Some("ti99-4a-tms9900")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Tms9900);
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.output_format, OutputFormat::RawBin);
+    assert!(profile.default_sdk_symbols);
+}
+
+#[cfg(feature = "tms9900")]
+#[test]
+fn resolves_bare_tms9900_target() {
+    let profile = resolve_target_profile(Some("bare-tms9900")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Tms9900);
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert_eq!(profile.output_format, OutputFormat::RawBin);
+    assert!(!profile.default_sdk_symbols);
+    assert!(!profile.supports_port_io());
+}
+
 #[cfg(feature = "mos6502")]
 #[test]
 fn commodore64_target_defaults_to_prg_output() {
@@ -144,6 +168,19 @@ fn resolves_generic_bare_m68k_target() {
     assert!(!profile.supports_port_io());
 }
 
+#[cfg(feature = "dcpu")]
+#[test]
+fn resolves_generic_bare_dcpu_target() {
+    let profile = resolve_target_profile(Some("generic-dcpu-bare")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Dcpu);
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert_eq!(profile.output_format, OutputFormat::RawBin);
+    assert!(!profile.default_sdk_symbols);
+    assert!(!profile.supports_port_io());
+}
+
 #[test]
 fn parses_output_formats() {
     assert_eq!(parse_output_format("bin"), Ok(OutputFormat::RawBin));
@@ -182,35 +219,19 @@ fn resolves_game_boy_assembly_targets() {
 
 #[test]
 #[cfg(feature = "avr")]
-fn resolves_arduboy_avr_target_profile() {
-    let profile = super::resolve_target_profile(Some("arduboy-avr")).unwrap();
-    assert_eq!(profile.triple.cpu, super::CpuFamily::Avr);
-    assert_eq!(profile.output_format, super::OutputFormat::ArduinoHex);
-    assert_eq!(profile.memory.pointer_width_bits, 16);
-}
+fn resolves_arduboy_and_bare_avr_target_profiles() {
+    let arduboy = super::resolve_target_profile(Some("arduboy-avr")).unwrap();
+    assert_eq!(arduboy.triple.cpu, super::CpuFamily::Avr);
+    assert_eq!(arduboy.output_format, super::OutputFormat::ArduinoHex);
+    assert_eq!(arduboy.memory.pointer_width_bits, 16);
 
-#[test]
-#[cfg(feature = "chip8")]
-fn resolves_chip8_family_assembly_targets() {
-    for (target, cpu, bits, assembler) in [
-        ("chip8-vm-chip8", CpuFamily::Chip8, 12, AssemblerCpu::Chip8),
-        (
-            "schip-vm-schip",
-            CpuFamily::SuperChip,
-            12,
-            AssemblerCpu::SuperChip,
-        ),
-        (
-            "xochip-vm-xochip",
-            CpuFamily::XoChip,
-            16,
-            AssemblerCpu::XoChip,
-        ),
-    ] {
-        let profile = resolve_target_profile(Some(target)).unwrap();
-        assert_eq!(profile.triple.cpu, cpu);
-        assert_eq!(profile.memory.address_width_bits, bits);
-        assert_eq!(profile.output_format, OutputFormat::RawBin);
-        assert_eq!(AssemblerCpu::from(profile.triple.cpu), assembler);
-    }
+    let bare = super::resolve_target_profile(Some("bare-avr")).unwrap();
+    assert_eq!(bare.triple.cpu, super::CpuFamily::Avr);
+    assert_eq!(bare.output_format, super::OutputFormat::RawBin);
+    assert!(!bare.default_sdk_symbols);
+
+    let arduboy_layout = crate::layout::default_layout_for_target("arduboy-avr");
+    assert_eq!(arduboy_layout.name, "arduboy_atmega32u4");
+    assert_eq!(arduboy_layout.stack.get(), 0x0AFF);
+    assert_eq!(arduboy_layout.regions[0].end.get(), 0x6FFF);
 }

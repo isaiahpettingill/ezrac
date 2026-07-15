@@ -111,7 +111,7 @@ Examples of future classic Z80 targets include `cpm-2.2-z80` and `zxspectrum-z80
 
 ### 2.3 Future CPU Profiles
 
-Non-Z80 targets, such as `sega-genesis-m68k` or `appleii-m68k`, require a target-neutral middle IR and target-specific backends before they are considered supported. Their SDKs and layouts follow the same target-profile model.
+Non-Z80 targets use the target-neutral HIR and target-bound TBIR stages plus target-specific backends. MOS 6502 EZRA source compilation is implemented; AVR has a complete HIR/TBIR-backed register-ABI source backend and instruction-set assembler. Other non-Z80 source backends remain target-specific work. Their SDKs and layouts follow the same target-profile model.
 
 ---
 
@@ -716,7 +716,7 @@ i24:   -8,388,608 to 8,388,607
 
 Unsigned arithmetic wraps modulo the type width.
 
-Signed arithmetic uses two’s-complement representation and wraps on overflow.
+Signed arithmetic uses twoâ€™s-complement representation and wraps on overflow.
 
 EZRA arithmetic is fully defined. It does not have undefined signed overflow.
 
@@ -2166,15 +2166,15 @@ source
   -> AST
   -> typed HIR
   -> target-bound IR (TBIR)
-  -> machine lowering
+  -> target-specific source emitter
   -> EZRA target assembly
-  -> metadata-generated target assembler
-  -> configured binary layout emitter
+  -> target-specific assembler
+  -> configured binary/package emitter
   -> final binary/package
   -> emulator test runner when requested
 ```
 
-The current implementation may lower directly toward eZ80 ADL assembly, but the specification requires explicit HIR and TBIR stages before treating advanced diagnostics, target-aware optimization, or additional CPU families as production quality.
+The current implementation has explicit HIR and TBIR stages before target emission. Source emitters exist for eZ80-family targets, LR35902, MOS 6502, and optional M68k. Advanced diagnostics, target-aware optimization, and additional CPU-family backends remain incomplete.
 
 ### 40.1 HIR and TBIR
 
@@ -2184,7 +2184,7 @@ HIR is the typed, mostly target-independent source representation. It is where E
 
 TBIR is the target-bound checked optimization representation. It is built after selecting a target profile and loading the target memory model, layout, SDK metadata, port map, MMIO map, ABI rules, and optimization profile. TBIR is not primarily a portability layer. It exists to make hardware-aware diagnostics and platform-aware optimizations possible before lowering to assembly.
 
-The complete IR design is maintained in `docs/ir-design.md`. The serialized IR format is not required to be textual. Implementations may generate compact binary IR from Rust structs when useful for caching, debugging tools, or cross-process compiler stages, as long as diagnostics preserve source locations and tools can inspect the IR through a documented dump format.
+The complete IR design is maintained in `docs/ir-design.md`. HIR and TBIR are currently in-memory Rust representations, with inspectable text dumps for debugging and tests; no stable serialized IR format is provided.
 
 HIR responsibilities:
 
@@ -2271,7 +2271,7 @@ Goals:
 
 ```text
 - support Z80, eZ80, 8080, and adjacent 8-bit CPU families as priority targets
-- support m68k as a desired future target
+- continue the experimental M68k source and assembly target
 - model 8-bit, 16-bit, and 24-bit addressing directly
 - allow 32-bit addressing as a future extension without forcing it on smaller targets
 - keep volatile memory, port I/O, inline assembly, and target SDK calls explicit
@@ -2290,7 +2290,7 @@ HIR and TBIR must make target differences explicit:
 - helper/runtime ABI for operations that the CPU cannot lower directly
 ```
 
-Until HIR and TBIR exist, non-eZ80 targets should be treated as design targets, experimental prototypes, or golden-output experiments rather than fully supported backends.
+HIR and TBIR are implemented, but target support must still be evaluated independently. A target should not be considered fully supported until its source emitter (where applicable), assembler, package format, SDK/runtime ABI, and target-appropriate VM or emulator test path are in place.
 
 ### 40.5 Conditional Compilation
 

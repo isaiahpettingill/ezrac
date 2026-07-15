@@ -600,60 +600,6 @@ fn avr_aliases_encode_their_underlying_instructions() {
 }
 
 #[test]
-#[cfg(feature = "chip8")]
-fn chip8_family_assembly_targets_encode_dialect_opcodes() {
-    let root = temp_root("assemble_chip8_family");
-    std::fs::create_dir_all(&root).unwrap();
-
-    let cases = [
-        (
-            "chip8-vm-chip8",
-            "start:\n    cls\n    ld v0, 12h\n    add v0, 1\n    jp start\n",
-            vec![0x00, 0xE0, 0x60, 0x12, 0x70, 0x01, 0x12, 0x00],
-        ),
-        (
-            "schip-vm-schip",
-            "start:\n    high\n    scroll-down 4\n    drw v0, v1, 0\n    exit\n",
-            vec![0x00, 0xFF, 0x00, 0xC4, 0xD0, 0x10, 0x00, 0xFD],
-        ),
-        (
-            "xochip-vm-xochip",
-            "start:\n    long i, sprite\n    plane v1\n    audio\nsprite:\n    db 0AAh\n",
-            vec![0xF0, 0x00, 0x02, 0x08, 0xF1, 0x01, 0xF0, 0x02, 0xAA],
-        ),
-    ];
-
-    for (target, source, expected) in cases {
-        let source_path = root.join(format!("{target}.asm"));
-        let output_path = root.join(format!("{target}.ch8"));
-        std::fs::write(&source_path, source).unwrap();
-        assemble_file(&AssembleOptions {
-            path: source_path.to_string_lossy().into_owned(),
-            output: Some(output_path.to_string_lossy().into_owned()),
-            base_addr: None,
-            assembler_cpu: None,
-            layout_path: None,
-            map_path: None,
-            target: Some(target.to_owned()),
-        })
-        .unwrap();
-        assert_eq!(std::fs::read(output_path).unwrap(), expected, "{target}");
-    }
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-#[cfg(feature = "chip8")]
-fn chip8_rejects_xochip_long_i_instruction() {
-    let error =
-        ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::Chip8, "long i, 0x1234\n", 0x0200)
-            .unwrap_err();
-
-    assert!(error.message.contains("chip8 assembler"), "{error}");
-}
-
-#[test]
 #[cfg(feature = "m6800")]
 fn assemble_file_writes_m6800_raw_binary() {
     let root = temp_root("assemble_m6800_file");
@@ -698,6 +644,43 @@ fn assemble_file_writes_m6800_raw_binary() {
 }
 
 #[test]
+#[cfg(feature = "tms9900")]
+fn assemble_file_writes_tms9900_raw_binary() {
+    let root = temp_root("assemble_tms9900_file");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.asm");
+    let output_path = root.join("main.bin");
+    std::fs::write(
+        &source_path,
+        r#"
+            start:
+                li r1, >1234
+                mov r1, @>8c00
+                jmp start
+        "#,
+    )
+    .unwrap();
+
+    assemble_file(&AssembleOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        output: Some(output_path.to_string_lossy().into_owned()),
+        base_addr: Some(0xa000),
+        assembler_cpu: None,
+        layout_path: None,
+        map_path: None,
+        target: Some("bare-tms9900".to_owned()),
+    })
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        [0x02, 0x01, 0x12, 0x34, 0xc8, 0x01, 0x8c, 0x00, 0x10, 0xfb]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 #[cfg(feature = "m6800")]
 fn m6800_rejects_non_m6800_instruction() {
     let error =
@@ -709,13 +692,13 @@ fn m6800_rejects_non_m6800_instruction() {
 
 #[test]
 #[cfg(feature = "m6800")]
-fn m6800_target_rejects_ezra_source_codegen() {
+fn m6800_target_builds_ezra_source() {
     let root = temp_root("m6800_source_codegen");
     std::fs::create_dir_all(&root).unwrap();
     let source_path = root.join("main.ezra");
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
-    let error = build_source_with_build_options(&BuildCommandOptions {
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
         path: Some(source_path.to_string_lossy().into_owned()),
         debug_comments: false,
         default_sdk_symbols: false,
@@ -724,9 +707,12 @@ fn m6800_target_rejects_ezra_source_codegen() {
         layout_path: None,
         target: Some("bare-m6800".to_owned()),
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("CPU `m6800`"), "{error}");
+    let assembly = std::fs::read_to_string(outputs.asm).unwrap();
+    let binary = std::fs::read(outputs.executable).unwrap();
+    assert!(assembly.contains("target: Motorola M6800"), "{assembly}");
+    assert!(!binary.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }

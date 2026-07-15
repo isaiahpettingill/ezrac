@@ -27,8 +27,16 @@ use ezra::{
     vm::TestRunOptions,
 };
 
+#[cfg(feature = "avr")]
+use ezra::asm::emit_avr_assembly_with_options;
+#[cfg(feature = "dcpu")]
+use ezra::asm::emit_dcpu_assembly_with_options;
 #[cfg(feature = "m68k")]
 use ezra::asm::emit_m68k_assembly_with_options;
+#[cfg(feature = "m6800")]
+use ezra::asm::emit_m6800_assembly_with_options;
+#[cfg(feature = "tms9900")]
+use ezra::asm::emit_tms9900_assembly_with_options;
 
 #[cfg(feature = "lsp")]
 mod lsp_server;
@@ -63,8 +71,13 @@ fn run() -> Result<(), String> {
             emit_ir(&options)
         }
         Some("test") => {
-            let options = CommandOptions::parse(&args[1..])?;
-            test_source_with_command_options(&options)
+            let options = TestCommandOptions::parse(&args[1..])?;
+            match options.path.as_ref() {
+                Some(path) => {
+                    test_source_with_command_options(&options.command_with_path(path.clone()))
+                }
+                None => test_project_with_command_options(&options),
+            }
         }
         Some("assemble") => {
             let options = AssembleOptions::parse(&args[1..])?;
@@ -382,6 +395,53 @@ impl CommandOptions {
             layout_path,
             target,
         })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TestCommandOptions {
+    path: Option<String>,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+    layout_path: Option<String>,
+    target: Option<String>,
+}
+
+impl TestCommandOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut path = None;
+        let mut debug_comments = false;
+        let mut default_sdk_symbols = true;
+        let mut layout_path = None;
+        let mut target = None;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--debug-comments" => debug_comments = true,
+                "--no-default-sdk-symbols" => default_sdk_symbols = false,
+                "--layout" => layout_path = Some(iter.next().ok_or_else(usage)?.clone()),
+                "--target" => target = Some(iter.next().ok_or_else(usage)?.clone()),
+                _ if path.is_none() => path = Some(arg.clone()),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(Self {
+            path,
+            debug_comments,
+            default_sdk_symbols,
+            layout_path,
+            target,
+        })
+    }
+
+    fn command_with_path(&self, path: String) -> CommandOptions {
+        CommandOptions {
+            path,
+            debug_comments: self.debug_comments,
+            default_sdk_symbols: self.default_sdk_symbols,
+            layout_path: self.layout_path.clone(),
+            target: self.target.clone(),
+        }
     }
 }
 
@@ -736,13 +796,31 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::I8080
             | CpuFamily::I8085
             | CpuFamily::Lr35902
+            | CpuFamily::Avr
             | CpuFamily::Mos6502
+            | CpuFamily::Tms9900
     ) {
+        return Ok(());
+    }
+    #[cfg(feature = "m6800")]
+    if settings.target.triple.cpu == CpuFamily::M6800 {
+        return Ok(());
+    }
+    #[cfg(feature = "tms9900")]
+    if settings.target.triple.cpu == CpuFamily::Tms9900 {
+        return Ok(());
+    }
+    #[cfg(feature = "dcpu")]
+    if settings.target.triple.cpu == CpuFamily::Dcpu {
+        return Ok(());
+    }
+    #[cfg(feature = "m68k")]
+    if settings.target.triple.cpu == CpuFamily::M68k {
         return Ok(());
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is not implemented for that CPU; use `assemble` for hand-written assembly or another supported source target",
+        "source codegen is not implemented for target {} CPU {}",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
@@ -774,8 +852,47 @@ fn emit_source_assembly(
     ezra::tbir::diagnostics::validate_program(program, options.cpu)?;
     if options.cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(program, options)
-    } else if options.cpu == CpuFamily::Mos6502 {
+    } else if options.cpu == CpuFamily::Avr {
+        #[cfg(feature = "avr")]
+        {
+            emit_avr_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "avr"))]
+        {
+            unreachable!("AVR targets require the avr Cargo feature")
+        }
+    } else if matches!(
+        options.cpu,
+        CpuFamily::Mos6502 | CpuFamily::Cmos65C02 | CpuFamily::Wdc65C816 | CpuFamily::Ricoh2A03
+    ) {
         emit_mos6502_assembly_with_options(program, options)
+    } else if options.cpu == CpuFamily::Dcpu {
+        #[cfg(feature = "dcpu")]
+        {
+            emit_dcpu_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "dcpu"))]
+        {
+            unreachable!("DCPU-16 targets require the dcpu Cargo feature")
+        }
+    } else if options.cpu == CpuFamily::M6800 {
+        #[cfg(feature = "m6800")]
+        {
+            emit_m6800_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "m6800"))]
+        {
+            unreachable!("M6800 targets require the m6800 Cargo feature")
+        }
+    } else if options.cpu == CpuFamily::Tms9900 {
+        #[cfg(feature = "tms9900")]
+        {
+            emit_tms9900_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "tms9900"))]
+        {
+            unreachable!("TMS9900 targets require the tms9900 Cargo feature")
+        }
     } else if options.cpu == CpuFamily::M68k {
         #[cfg(feature = "m68k")]
         {
@@ -1019,9 +1136,9 @@ fn write_assembly_build_artifacts(
 
 fn write_build_artifacts(
     source_path: &Path,
-    source_location: SourceLocation,
+    _source_location: SourceLocation,
     settings: &BuildSettings,
-    program: &Program,
+    _program: &Program,
     assembly: &str,
 ) -> Result<BuildOutputs, String> {
     let output_base = build_output_base_path(settings, source_path)?;
@@ -1029,19 +1146,30 @@ fn write_build_artifacts(
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(executable_extension(settings));
 
-    let assembled = ezra::vm::assemble_subset_with_options_at(
-        AssemblerCpu::from(settings.target.triple.cpu),
-        assembly,
-        settings.layout.entry.get(),
-        &assembly_source_options(source_path, &settings.layout),
-    )
-    .map_err(|error| error.to_string())?;
-    let map = build_output_map(settings, program, assembled.bytes.len(), &assembled.symbols)
+    let (bytes, map) = if settings.target.triple.cpu == CpuFamily::M68k {
+        let image = build_assembly_image(source_path, assembly, settings)?;
+        (image.bytes, image.map)
+    } else {
+        let assembled = ezra::vm::assemble_subset_with_options_at(
+            AssemblerCpu::from(settings.target.triple.cpu),
+            assembly,
+            settings.layout.entry.get(),
+            &assembly_source_options(source_path, &settings.layout),
+        )
+        .map_err(|error| error.to_string())?;
+        let map = build_output_map(
+            settings,
+            _program,
+            assembled.bytes.len(),
+            &assembled.symbols,
+        )
         .map_err(|error| {
             error
-                .with_location_if_missing(source_location.clone())
+                .with_location_if_missing(_source_location.clone())
                 .to_string()
         })?;
+        (assembled.bytes, map)
+    };
     if let Some(parent) = output_base.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
@@ -1050,7 +1178,7 @@ fn write_build_artifacts(
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let executable = build_executable_bytes(settings, &assembled.bytes, Some(&executable_path))?;
+    let executable = build_executable_bytes(settings, &bytes, Some(&executable_path))?;
     fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
@@ -1118,13 +1246,11 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
         || bare_target_cpu(&settings.target.triple.value).is_some()
         || settings.target.triple.value.starts_with("zxspectrum-z80")
         || settings.target.triple.value.starts_with("gameboy-")
+        || settings.target.triple.value.starts_with("arduboy-")
         || settings.target.triple.value.starts_with("commodore64-6502")
-        || matches!(
-            settings.target.triple.cpu,
-            CpuFamily::Chip8 | CpuFamily::SuperChip | CpuFamily::XoChip
-        )
         || is_ti_ce_target(&settings.target.triple.value)
         || is_ti_z80_target(&settings.target.triple.value)
+        || settings.target.triple.value.starts_with("ti99-4a-tms9900")
 }
 
 fn is_ti_ce_target(target: &str) -> bool {
@@ -1578,6 +1704,12 @@ fn evaluate_assembly_condition(
     {
         return Ok(target == value.trim_matches('"'));
     }
+    if let Some(value) = condition
+        .strip_prefix("feature(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Ok(assembly_feature_enabled(value.trim_matches('"')));
+    }
     if let Some(name) = condition
         .strip_prefix("defined(")
         .and_then(|name| name.strip_suffix(')'))
@@ -1585,6 +1717,22 @@ fn evaluate_assembly_condition(
         return Ok(defines.contains_key(name.trim()));
     }
     Err(format!("unsupported assembly condition `{condition}`"))
+}
+
+fn assembly_feature_enabled(feature: &str) -> bool {
+    match feature {
+        "intel" => cfg!(feature = "intel"),
+        "z80" => cfg!(feature = "z80"),
+        "lr35902" => cfg!(feature = "lr35902"),
+        "avr" => cfg!(feature = "avr"),
+        "m6800" => cfg!(feature = "m6800"),
+        "m68k" => cfg!(feature = "m68k"),
+        "mos6502" => cfg!(feature = "mos6502"),
+        "tms9900" => cfg!(feature = "tms9900"),
+        "dcpu" => cfg!(feature = "dcpu"),
+        "lsp" => cfg!(feature = "lsp"),
+        _ => false,
+    }
 }
 
 fn substitute_assembly_defines(line: &str, defines: &HashMap<String, String>) -> String {
@@ -1605,8 +1753,8 @@ fn expand_assembly_file(
         if let Some(include) = trimmed.strip_prefix("include ") {
             let include = include.trim();
             let Some(include) = include
-                .strip_prefix('"')
-                .and_then(|include| include.strip_suffix('"'))
+                .strip_prefix("\"")
+                .and_then(|include| include.strip_suffix("\""))
             else {
                 return Err(format!(
                     "{}:{}: invalid include syntax; expected include \"path\"",
@@ -2326,6 +2474,96 @@ fn test_source(path: &str) -> Result<(), String> {
         layout_path: None,
         target: None,
     })
+}
+
+fn test_project_with_command_options(options: &TestCommandOptions) -> Result<(), String> {
+    let project_path = env::current_dir()
+        .map_err(|error| format!("failed to determine current directory: {error}"))?
+        .join("Ezra.toml");
+    let project = load_project_config(&project_path).map_err(|error| error.to_string())?;
+    let tests_root = project.root.join("tests");
+    let mut sources = Vec::new();
+    discover_ezra_test_sources(&tests_root, &mut sources)?;
+    sources.sort();
+    if sources.is_empty() {
+        return Err(format!(
+            "no EZRA test sources found under `{}`",
+            tests_root.display()
+        ));
+    }
+
+    let mut failures = Vec::new();
+    for source in &sources {
+        let target = options
+            .target
+            .clone()
+            .or_else(|| project.test_target.clone());
+        let command = CommandOptions {
+            path: source.display().to_string(),
+            debug_comments: options.debug_comments,
+            default_sdk_symbols: options.default_sdk_symbols,
+            layout_path: options.layout_path.clone(),
+            target,
+        };
+        let build_options = BuildCommandOptions {
+            path: Some(command.path.clone()),
+            debug_comments: command.debug_comments,
+            default_sdk_symbols: command.default_sdk_symbols,
+            input_kind: Some(InputKind::Ezra),
+            assembler_cpu: None,
+            layout_path: command.layout_path.clone(),
+            target: command.target.clone(),
+        };
+        let name = source
+            .strip_prefix(&tests_root)
+            .unwrap_or(source)
+            .display()
+            .to_string();
+        match build(&build_options).and_then(|_| run_source_with_command_options(&command)) {
+            Ok(run) if run.halted && run.result_code == 0 => {
+                println!("ok: {name} ({} instructions)", run.instructions);
+            }
+            Ok(run) if !run.halted => {
+                failures.push(format!("{name}: {}", format_test_run_failure(&run)))
+            }
+            Ok(run) => failures.push(format!("{name}: test failed with code {}", run.result_code)),
+            Err(error) => failures.push(format!("{name}: {error}")),
+        }
+    }
+    let passed = sources.len() - failures.len();
+    println!("test result: {passed} passed; {} failed", failures.len());
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("project test failures:\n{}", failures.join("\n")))
+    }
+}
+
+fn discover_ezra_test_sources(root: &Path, sources: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed to read test directory `{}`: {error}",
+                root.display()
+            ));
+        }
+    };
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("failed to read test directory entry: {error}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            discover_ezra_test_sources(&path, sources)?;
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "ezra")
+        {
+            sources.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn test_source_with_command_options(options: &CommandOptions) -> Result<(), String> {
@@ -3181,30 +3419,6 @@ fn print_targets() {
             status: "EZRA source and assembly CGB target",
         },
         TargetRow {
-            triple: "chip8-vm-chip8",
-            cpu: "chip8",
-            address_width_bits: 12,
-            output: "bin",
-            sdk: "none",
-            status: "assembly-only CHIP-8 target",
-        },
-        TargetRow {
-            triple: "schip-vm-schip",
-            cpu: "schip",
-            address_width_bits: 12,
-            output: "bin",
-            sdk: "none",
-            status: "assembly-only SUPER-CHIP target",
-        },
-        TargetRow {
-            triple: "xochip-vm-xochip",
-            cpu: "xochip",
-            address_width_bits: 16,
-            output: "bin",
-            sdk: "none",
-            status: "assembly-only XO-CHIP target",
-        },
-        TargetRow {
             triple: "ti83-z80",
             cpu: "z80",
             address_width_bits: 16,
@@ -3308,6 +3522,51 @@ fn print_targets() {
             sdk: "none",
             status: "bare eZ80 target",
         },
+        #[cfg(feature = "tms9900")]
+        TargetRow {
+            triple: "ti99-4a-tms9900",
+            cpu: "tms9900",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "ti99.*",
+            status: "TI-99/4A cartridge source target",
+        },
+        #[cfg(feature = "tms9900")]
+        TargetRow {
+            triple: "bare-tms9900",
+            cpu: "tms9900",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "bare TMS9900 source/assembly target",
+        },
+        #[cfg(feature = "dcpu")]
+        TargetRow {
+            triple: "generic-dcpu-bare",
+            cpu: "dcpu",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "assembly-only DCPU-16 target",
+        },
+        #[cfg(feature = "avr")]
+        TargetRow {
+            triple: "bare-avr",
+            cpu: "avr",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "register-ABI AVR source/assembly target",
+        },
+        #[cfg(feature = "avr")]
+        TargetRow {
+            triple: "arduboy-avr",
+            cpu: "avr",
+            address_width_bits: 16,
+            output: "hex",
+            sdk: "arduboy.*",
+            status: "ATmega32U4 register-ABI source/assembly target",
+        },
         #[cfg(feature = "m68k")]
         TargetRow {
             triple: "generic-m68k-bare",
@@ -3315,7 +3574,7 @@ fn print_targets() {
             address_width_bits: 24,
             output: "bin",
             sdk: "none",
-            status: "experimental scalar source target",
+            status: "Motorola 68000 source/assembly target",
         },
     ];
 

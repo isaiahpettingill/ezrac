@@ -17,7 +17,7 @@ ezrac check <file.ezra>
 ezrac emit-asm <file.ezra>
 ezrac emit-ir [--stage hir|tbir] <file.ezra>
 ezrac build <file.ezra>
-ezrac test <file.ezra>
+ezrac test [<file.ezra>]
 ezrac assemble [--base <addr>] [--output <file.bin>] <file.asm>
 ezrac init [--name <name>] [--target <triple>] [dir]
 ezrac install-syntax (--all | [--editor] <editor>...)
@@ -34,7 +34,7 @@ cargo run -- check <file.ezra>
 cargo run -- emit-asm <file.ezra>
 cargo run -- emit-ir [--stage hir|tbir] <file.ezra>
 cargo run -- build <file.ezra>
-cargo run -- test <file.ezra>
+cargo run -- test [<file.ezra>]
 cargo run -- assemble [--base <addr>] [--output <file.bin>] <file.asm>
 cargo run -- init [--name <name>] [--target <triple>] [dir]
 cargo run -- install-syntax (--all | [--editor] <editor>...)
@@ -63,18 +63,26 @@ target = "agonlight-mos-ez80"
 output = "bin"
 executable = "my-program"
 
+[test]
+target = "ezra-test-flat-ez80"
+
 [layout]
 file = "layouts/custom.ezralayout"
 
 [sdk]
 paths = ["sdk"]
+
+[lsp]
+mode = "application" # or "library" for an importable SDK/module project
 ```
 
 - `[build].target` selects the target profile. `agonlight-mos-ez80` builds a normal Agon MOS executable.
 - `[build].output` selects the executable format. The current default is raw `bin`; cartridge layouts are explicit configuration.
 - `[build].executable` overrides the artifact basename. Without it, the source file stem is used.
+- `[test].target` selects the target used by project test discovery. `ezrac test` discovers `tests/**/*.ezra` in deterministic path order, builds artifacts under `target/<target>/`, and runs each test. CLI `--target` overrides `[test].target`, which overrides `[build].target`.
 - `[layout].file` points at a custom layout file.
 - `[sdk].paths` adds project SDK source roots in addition to bundled target SDKs.
+- `[lsp].mode = "library"` checks the configured source and imports as a library module without requiring `fn main()`. Library mode supports LSP diagnostics and SDK imports, but `build` still creates executables only.
 
 ## Agon Light MOS
 
@@ -104,12 +112,25 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/real-core-tests.md` explains how to run the opt-in `play96` example suites against real libretro cores.
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
-- `REMAINING_WORK.md` tracks known gaps and follow-up work.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
-- The main source target is Agon Light MOS on eZ80 ADL. Additional eZ80, Z80-family, 8080-family, TI, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
+- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports LR35902, MOS 6502, optional M68k, optional TMS9900, and the complete AVR register-ABI backend. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. AVR and optional TMS9900 also support hand-written assembly through `assemble`. Additional eZ80, Z80-family, 8080-family, TI calculator, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
 - Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.
+
+## Embedding the Compiler
+
+The crate exposes an in-process assembly-generation API for Rust applications. It does not invoke the CLI or write artifacts:
+
+```rust
+use ezra::api::{CompileRequest, compile_source_to_assembly};
+
+let request = CompileRequest::new("memory.ezra", "custom-unknown-ez80");
+let compilation = compile_source_to_assembly("fn main() {}", &request)?;
+println!("{}", compilation.assembly);
+```
+
+`CompileRequest::sdk_paths` adds filesystem SDK roots, while the target selects bundled SDK imports. The API emits executable assembly and therefore requires `fn main()`; it does not create shared-library artifacts. For library/SDK diagnostics without an entry point, configure `[lsp] mode = "library"`.
 
 ## Development
 

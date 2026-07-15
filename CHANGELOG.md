@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.1.27
+
+- Added source lowering and test-runner emulator execution for M6800, TMS9900, and DCPU-16 programs.
+- Added emulator-backed execution coverage for LR35902 Game Boy and M68000 programs.
+- Completed shared Z80-family instruction metadata and eZ80 `LEA IY` operand forms.
+- Expanded M6800 assembly with `JSR` forms and integrated the production M6800 backend.
+- Added 65C02, 65C816, and Ricoh 2A03 MOS 6502 assembler variants alongside prior TI-99/4A, in-process compiler API, and library-mode LSP support.
+
+## 0.1.26
+
+- Added `[lsp] mode = "library"` for SDK and module projects that need language-server diagnostics without an executable `main` function.
+- Added the public `ezra::api` in-process compiler API for compiling source strings to target assembly from Rust applications.
+- Added high-level `ti99.graphics` and `ti99.sprites` helpers plus TMS9918A VDP register, transfer, fill, sprite, and timing primitives.
+- Updated TI-99/4A Mandelbrot and atom examples to use the SDK helpers instead of duplicating VDP setup and sprite descriptor assembly.
+- Declared the package as BSD-3-Clause, matching the repository license.
+
+## 0.1.25
+
+- Added the optional TMS9900 source backend and a `ti99-4a-tms9900` target that emits a bootable TI-99/4A cartridge ROM.
+- Expanded the TMS9900 assembler, corrected dual-operand encodings, and added Libre99 CPU-backed assembler and source-codegen tests.
+- Added bundled `ti99.*` SDK modules plus TI-99/4A Mandelbrot tile-study and atom-sprite-animation examples.
+
+
 ## 0.1.24
 
 - Added a tokenized `10 SYS2061` BASIC autostart loader to Commodore 64 `.prg` output so VICE launches C64 programs automatically.
@@ -22,7 +45,7 @@
 
 ## 0.1.21
 
-- Added standalone assemblers for MOS 6502, M6800, M68000, CHIP-8/SUPER-CHIP/XO-CHIP, and AVR targets.
+- Added standalone assemblers for MOS 6502, M6800, M68000, and AVR targets.
 - Added Game Boy Color palette, input, and scrolling SDK helpers plus an interactive color example.
 - Expanded the CP/M BDOS SDK to cover all CP/M 2.2 system calls.
 - Gated processor families behind Cargo features; Intel, Z80-family, and LR35902 support remain enabled by default.
@@ -38,7 +61,7 @@
 
 ## 0.1.19
 
-- Added separate `gameboy-dmg-lr35902` and `gameboy-color-lr35902` assembly-only targets with valid ROM-only `.gb` packaging and checksums.
+- Initially added separate `gameboy-dmg-lr35902` and `gameboy-color-lr35902` assembly targets with valid ROM-only `.gb` packaging and checksums; these targets now also support EZRA source compilation.
 - Added complete documented LR35902 base and CB opcode assembly coverage without accepting unsupported Z80 instructions.
 - Added a vendorable Game Boy assembly macro SDK for common DMG and CGB hardware programming idioms.
 

@@ -1,0 +1,6 @@
+[project]
+name = "arduboy-blink"
+
+[build]
+target = "arduboy-avr"
+output = "hex"

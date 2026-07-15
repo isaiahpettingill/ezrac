@@ -1,0 +1,5 @@
+import ti99.vdp
+
+fn main() {
+    vdp.write_data(0x41)
+}

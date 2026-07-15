@@ -82,14 +82,10 @@ pub struct Layout {
 }
 
 pub fn default_layout_for_target(target: &str) -> Layout {
-    if target == "generic-6502-bare" {
+    if target == "bare-avr" || target == "bare-atmega32u4" {
+        Layout::bare_avr()
+    } else if target == "generic-6502-bare" {
         Layout::bare_6502()
-    } else if target.starts_with("chip8-") || target == "vm-chip8" {
-        Layout::chip8("chip8")
-    } else if target.starts_with("schip-") || target.starts_with("superchip-") {
-        Layout::chip8("schip")
-    } else if target.starts_with("xochip-") {
-        Layout::chip8("xochip")
     } else if let Some(cpu) = bare_target_cpu(target) {
         match cpu {
             AssemblerCpu::Ez80 => Layout::bare_ez80(),
@@ -103,8 +99,10 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::game_boy_lr35902()
     } else if target.starts_with("commodore64-6502") {
         Layout::commodore64_6502()
+    } else if target.starts_with("ti99-4a-tms9900") {
+        Layout::ti99_4a_tms9900()
     } else if target.starts_with("arduboy-") {
-        Layout::bare_16("arduboy_avr")
+        Layout::arduboy_atmega32u4()
     } else if is_ti_ce_target(target) {
         Layout::ti_ce_ez80(target)
     } else if is_ti_z80_target(target) {
@@ -383,45 +381,149 @@ impl Layout {
         }
     }
 
-    pub fn chip8(dialect: &str) -> Self {
-        let (end, stack) = if dialect == "xochip" {
-            (0xFFFF, 0xFFFF)
-        } else {
-            (0x0FFF, 0x0FFF)
-        };
+    /// AVR has separate flash and SRAM address spaces. The current flat image
+    /// writer emits flash only, so every emitted section is deliberately placed
+    /// in flash. The stack symbol remains the hardware SRAM address used by the
+    /// AVR startup sequence.
+    pub fn bare_avr() -> Self {
+        Self::avr_flash_layout("bare_avr", 0x7FFF)
+    }
+
+    /// Arduboy's ATmega32U4 has 32 KiB of flash. The top 4 KiB is retained for
+    /// the Caterina bootloader, leaving application flash through 0x6FFF.
+    pub fn arduboy_atmega32u4() -> Self {
+        Self::avr_flash_layout("arduboy_atmega32u4", 0x6FFF)
+    }
+
+    fn avr_flash_layout(name: &str, flash_end: u32) -> Self {
         Self {
-            name: format!("{dialect}_layout"),
-            load: Address24::new(0x0200),
-            entry: Address24::new(0x0200),
-            stack: Address24::new(stack),
+            name: name.to_owned(),
+            load: Address24::new(0),
+            entry: Address24::new(0),
+            // ATmega32U4 SRAM is 0x0100..0x0AFF; SPL/SPH are initialized by
+            // the AVR source backend before entering main.
+            stack: Address24::new(0x0AFF),
+            regions: vec![region(
+                "flash",
+                0,
+                flash_end,
+                &[RegionFlags::READ, RegionFlags::EXECUTE],
+            )],
+            sections: avr_flash_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0)),
+                symbol("EZRA_CODE_BASE", Address24::new(0)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x0AFF)),
+            ],
+        }
+    }
+
+    pub fn ti99_4a_tms9900() -> Self {
+        Self {
+            name: "ti99_4a_tms9900".to_owned(),
+            // The image starts at the cartridge ROM base. The generated
+            // cartridge header selects the code label as its menu entry.
+            load: Address24::new(0x6000),
+            entry: Address24::new(0x6000),
+            stack: Address24::new(0xCFFF),
             regions: vec![
                 region(
-                    "interpreter",
+                    "console_rom",
                     0x0000,
-                    0x01FF,
-                    &[RegionFlags::READ, RegionFlags::RESERVED],
+                    0x1FFF,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::EXECUTE,
+                        RegionFlags::RESERVED,
+                    ],
                 ),
                 region(
-                    "program",
-                    0x0200,
-                    end,
+                    "cartridge_rom",
+                    0x6000,
+                    0x7FFF,
                     &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region(
+                    "scratchpad",
+                    0x8300,
+                    0x83FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "sound",
+                    0x8400,
+                    0x8400,
+                    &[
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "vdp_read",
+                    0x8800,
+                    0x8803,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "vdp_write",
+                    0x8C00,
+                    0x8C03,
+                    &[
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                region(
+                    "grom",
+                    0x9800,
+                    0x9C03,
+                    &[
+                        RegionFlags::READ,
+                        RegionFlags::WRITE,
+                        RegionFlags::VOLATILE,
+                        RegionFlags::RESERVED,
+                    ],
+                ),
+                // The target assumes the conventional 32 KiB expansion RAM.
+                region(
+                    "ram",
+                    0xA000,
+                    0xCFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
                 ),
             ],
             sections: vec![
-                section(".header", "program", 2),
-                section(".text", "program", 2),
-                section(".rodata", "program", 2),
-                section(".data", "program", 2),
-                section(".bss", "program", 2),
-                section(".assets", "program", 2),
-                section(".scratch", "program", 2),
+                section(".header", "cartridge_rom", 1),
+                section(".text", "cartridge_rom", 2),
+                section(".rodata", "cartridge_rom", 1),
+                section(".data", "ram", 1),
+                section(".bss", "ram", 1),
+                section(".assets", "cartridge_rom", 1),
+                section(".scratch", "ram", 1),
             ],
             symbols: vec![
-                symbol("EZRA_LOAD_ADDR", Address24::new(0x0200)),
-                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0200)),
-                symbol("EZRA_CODE_BASE", Address24::new(0x0200)),
-                symbol("EZRA_STACK_TOP", Address24::new(stack)),
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x6000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x6000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x6000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xCFFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x6000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x6000)),
+                symbol("TI99_WORKSPACE", Address24::new(0x8300)),
+                symbol("TI99_SOUND", Address24::new(0x8400)),
+                symbol("TI99_VDP_READ", Address24::new(0x8800)),
+                symbol("TI99_VDP_STATUS", Address24::new(0x8802)),
+                symbol("TI99_VDP_WRITE", Address24::new(0x8C00)),
+                symbol("TI99_VDP_CONTROL", Address24::new(0x8C02)),
+                symbol("TI99_GROM_READ", Address24::new(0x9800)),
+                symbol("TI99_GROM_WRITE", Address24::new(0x9C00)),
             ],
         }
     }
@@ -1002,6 +1104,10 @@ impl Layout {
                 symbol("GB_STACK_TOP", Address24::new(0xFFFE)),
                 symbol("GB_SERIAL_DATA", Address24::new(0xFF01)),
                 symbol("GB_SERIAL_CONTROL", Address24::new(0xFF02)),
+                // The source backends keep scalar storage and initialized bytes in Game Boy WRAM.
+                symbol("EZRA_RAM_BASE", Address24::new(0xC000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0xC800)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xD000)),
             ],
         }
     }
@@ -1727,6 +1833,15 @@ fn section(name: &str, region: &str, align: u32) -> Section {
         region: region.to_owned(),
         align,
     }
+}
+
+fn avr_flash_sections() -> Vec<Section> {
+    [
+        ".header", ".text", ".rodata", ".data", ".bss", ".assets", ".scratch",
+    ]
+    .into_iter()
+    .map(|name| section(name, "flash", 2))
+    .collect()
 }
 
 fn bare_sections() -> Vec<Section> {

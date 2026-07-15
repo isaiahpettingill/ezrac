@@ -44,6 +44,7 @@ pub fn lower(
                 CpuFamily::Z80 => "z80".to_owned(),
                 CpuFamily::Z80N => "z80n".to_owned(),
                 CpuFamily::Z180 => "z180".to_owned(),
+                CpuFamily::Avr => "avr".to_owned(),
                 _ => "ez80-adl".to_owned(),
             },
             pointer_width_bits,

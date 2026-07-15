@@ -1,17 +1,20 @@
 [package]
 name = "ezrac"
-version = "0.1.24"
+version = "0.1.27"
 edition = "2024"
 description = "Compiler and tooling prototype for the EZRA language"
-license = "MIT"
+license = "BSD-3-Clause"
 repository = "https://github.com/isaiahpettingill/ezrac"
 
 [lib]
 name = "ezra"
 
 [dependencies]
+dcpu = { version = "0.5.0", default-features = false, features = ["debugger-cli"], optional = true }
 ez80 = "0.5.0"
+mos6502 = { version = "0.10.1", optional = true }
 lsp = { version = "0.1.1", optional = true }
+m6800 = { version = "0.1.0", optional = true }
 m68000 = { version = "0.2.3", optional = true }
 pest = "2.8.7"
 pest_derive = "2.8.7"
@@ -25,12 +28,14 @@ intel = []
 z80 = []
 lr35902 = []
 avr = []
-chip8 = []
-m6800 = []
+m6800 = ["dep:m6800"]
 m68k = ["dep:m68000"]
-mos6502 = []
+mos6502 = ["dep:mos6502"]
+tms9900 = []
+dcpu = ["dep:dcpu"]
 lsp = ["dep:lsp", "dep:serde", "dep:serde_json"]
 
 [dev-dependencies]
-mos6502 = "0.10.1"
 play96 = "0.3.2"
+libre99-core = { git = "https://github.com/joelodom/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
+libre99-asm = { git = "https://github.com/joelodom/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }

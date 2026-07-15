@@ -263,6 +263,51 @@ fn generic_6502_source_build_writes_raw_binary() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "m68k")]
+#[test]
+fn generic_m68k_source_build_writes_raw_binary_with_24_bit_layout() {
+    let root = temp_root("generic_m68k_source_bin");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+            global total: u16 = 1
+
+            fn increment(value: u16) -> u16 { return value + total }
+
+            fn main() {
+                total = increment(2)
+                let label: ptr<u8> = "ok"
+            }
+        "#,
+    )
+    .unwrap();
+
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: false,
+        input_kind: Some(InputKind::Ezra),
+        assembler_cpu: None,
+        layout_path: None,
+        target: Some("generic-m68k-bare".to_owned()),
+    })
+    .unwrap();
+    let assembly = std::fs::read_to_string(outputs.asm).unwrap();
+    let map = std::fs::read_to_string(outputs.map).unwrap();
+    let binary = std::fs::read(outputs.executable).unwrap();
+
+    assert!(assembly.contains("; target: Motorola 68000"), "{assembly}");
+    assert!(assembly.contains("move.l #$FF0000,sp"), "{assembly}");
+    assert!(map.contains(".text        0x000100"), "{map}");
+    assert!(map.contains(".rodata      0x040000"), "{map}");
+    assert!(!binary.starts_with(b"EZRA"), "{binary:02X?}");
+    assert!(!binary.is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn bare_z80n_source_build_accepts_z80n_inline_asm() {
     let root = temp_root("bare_z80n_source_inline_asm");

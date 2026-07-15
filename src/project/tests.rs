@@ -84,6 +84,28 @@ paths = ["sdk", "../shared"]
 }
 
 #[test]
+fn parses_library_lsp_mode() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[lsp]\nmode = \"library\"\n",
+    )
+    .unwrap();
+
+    assert_eq!(config.lsp_mode, LspMode::Library);
+}
+
+#[test]
+fn rejects_unknown_lsp_mode() {
+    let error = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[lsp]\nmode = \"shared\"\n",
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("lsp.mode"), "{error}");
+}
+
+#[test]
 fn cartridge_config_requires_a_layout() {
     let error = parse_project_config(
         Path::new("/project/Ezra.toml"),

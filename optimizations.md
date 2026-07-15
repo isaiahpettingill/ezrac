@@ -49,14 +49,12 @@ Recommended compiler pipeline:
 source
   -> parse
   -> AST
-  -> name resolution
-  -> type checking
-  -> typed IR
-  -> high-level optimizations
-  -> lowered EZRA IR
-  -> low-level optimizations
-  -> register/stack assignment
-  -> eZ80 assembly
+  -> typed HIR
+  -> HIR optimizations
+  -> target-bound IR (TBIR)
+  -> TBIR optimizations
+  -> machine lowering and register/stack assignment
+  -> target assembly
   -> assembly peephole
   -> assemble
   -> emulator test
@@ -79,7 +77,7 @@ Run these before machine lowering:
 
 ### 2.2 Low-level optimization passes
 
-Run after typed IR is lowered toward eZ80:
+Run on TBIR before machine lowering; eZ80-specific passes apply only to eZ80 targets:
 
 ```text
 1. width narrowing
@@ -106,7 +104,7 @@ For each optimization, keep at least two tests:
 
 ## 3. IR Requirements
 
-The optimizer needs typed IR with explicit side effects.
+The optimizer uses typed HIR and target-bound TBIR with explicit side effects. HIR is limited to target-independent transformations; target-aware passes run on TBIR.
 
 Every instruction should carry:
 

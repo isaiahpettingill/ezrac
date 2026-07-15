@@ -1,0 +1,21 @@
+// ATmega32U4 startup helpers for the Arduboy.
+// Functions use the AVR register ABI: byte arguments are passed in r24, r22,
+// r20, and r18, and byte results are returned in r24.
+
+pub fn initialize() {
+    asm volatile(clobber r16, clobber memory) {
+        // Buttons are active-low inputs with internal pull-ups.
+        "cbi 0Dh, 6"
+        "sbi 0Eh, 6"
+        "cbi 0Dh, 2"
+        "sbi 0Eh, 2"
+        "cbi 10h, 7"
+        "sbi 11h, 7"
+        "cbi 10h, 6"
+        "sbi 11h, 6"
+        "cbi 10h, 5"
+        "sbi 11h, 5"
+        "cbi 10h, 4"
+        "sbi 11h, 4"
+    }
+}

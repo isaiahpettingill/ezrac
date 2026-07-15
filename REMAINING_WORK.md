@@ -4,14 +4,14 @@ This is a handoff checklist for continuing toward the full EZRA language goal:
 
 - Implement the complete language specification in `spec.md`.
 - Keep all tests passing.
-- Compile full programs to readable eZ80 ADL 24-bit assembly.
-- Build a real target-neutral IR before treating non-eZ80 backends as supported.
-- Run generated programs on the ez80-backed VM test path.
+- Compile full programs to readable target assembly.
+- Continue maturing the implemented HIR → TBIR → target-emitter pipeline across CPU families.
+- Run generated programs on target-appropriate VM and emulator test paths.
 - Preserve defined behavior: no undefined arithmetic behavior, divide/remainder by zero produce zero, and signed division truncates toward zero.
 
 ## Current State
 
-The project has a working Pest parser, assembly emitter, cartridge/map generation, layout validation, import/module support, inline asm validation, and an ez80-backed VM test runner. Recent work focused on expanding the VM assembler so more real eZ80 inline assembly snippets can be assembled and executed in tests.
+The project has a working Pest parser; HIR and TBIR pipeline; target emitters for eZ80, LR35902, MOS 6502, and optional M68k; cartridge/map generation; layout validation; import/module support; inline asm validation; and VM/emulator-backed test paths. The eZ80 VM assembler remains actively expanded so more real inline assembly snippets can be assembled and executed in tests.
 
 Recent VM assembler coverage includes:
 
@@ -87,23 +87,21 @@ Recent VM assembler coverage includes:
    - feed inline-asm validation and clobber inference from the same metadata where possible
    - keep `ezra assemble` documented and stable as a standalone CLI path
 
-6. Introduce a target-neutral middle IR before adding additional CPU backends.
+6. Mature the implemented HIR/TBIR backend boundary.
 
-   The current implementation effectively lowers the AST and semantic information directly into eZ80-specific assembly. `src/asm.rs` owns eZ80 register choices, stack layout, helper routines, calling convention details, and assembly syntax. That is workable for the current scaffold, but it is not a reusable backend boundary.
+   The compiler now lowers source through HIR and target-bound TBIR before target-specific emitters. MOS 6502 and optional M68k source emitters demonstrate that boundary, but TBIR still retains source-shaped statements and expressions rather than fully lowered basic blocks or machine operations.
 
-   This IR should be retro-oriented and still needs a dedicated spec. Prioritize Z80, eZ80, 8080, and adjacent 8-bit CPU families, while keeping m68k as a desired future target. It should model 8-bit, 16-bit, and 24-bit addressing directly, leave room for 32-bit addressing as a later extension, and make volatile memory, port I/O, inline asm, memory spaces, register classes, flags, calling conventions, and runtime helper ABI explicit.
+   Follow-up work should:
 
-   To make a target such as m68k realistic:
-
-   - lower checked EZRA into typed basic blocks with explicit locals, globals, loads, stores, calls, branches, widths, signedness, and side effects
+   - lower checked TBIR into typed basic blocks with explicit locals, globals, loads, stores, calls, branches, widths, signedness, and side effects
    - model volatile memory, port I/O, inline asm, memory clobbers, and port clobbers as explicit ordering barriers
-   - define target traits for pointer width, endian behavior, integer lowering, register classes, calling convention, stack alignment, section layout, and runtime helper ABI
-   - rebuild the eZ80 emitter on top of that IR first, then use it as the reference for any m68k backend
-   - add target-specific assembler or golden-output tests before claiming support
+   - make target traits for pointer width, endianness, integer lowering, register classes, calling convention, stack alignment, section layout, and runtime helper ABI explicit and consistently consumed by emitters
+   - migrate the eZ80 emitter further onto those target abstractions
+   - add target-specific assembler, golden-output, and emulator tests before raising a target's support level
 
-7. Add a classic Z80 target mode that deliberately excludes eZ80 ADL-only features.
+7. Continue hardening classic Z80 target modes that exclude eZ80 ADL-only features.
 
-   This should be a separate target profile, not a compatibility promise for the current eZ80 backend. Define and enforce the smaller machine model before implementation:
+   Classic Z80 profiles such as `zxspectrum-z80` and `bare-z80` exist. Keep their smaller machine model explicit and independently tested:
 
    - 16-bit address space and 16-bit pointers only
    - no `u24`/`i24` pointer-sized assumptions in the target ABI
@@ -113,9 +111,9 @@ Recent VM assembler coverage includes:
    - diagnostics when code, layouts, inline asm, embeds, or SDK symbols require eZ80/ADL features
    - golden assembly and VM/emulator tests that prove classic Z80 output is independent from the eZ80 path
 
-8. Specify and implement conditional compilation for multi-target shared code.
+8. Expand conditional compilation coverage for multi-target shared code.
 
-   This should allow target SDKs and applications to share modules while selecting declarations, imports, constants, embeds, functions, layouts/startup glue, and inline asm by target triple, CPU family, pointer width, target features, SDK features, and user build features. Disabled code should be excluded before name resolution and type checking, and builds should record the active target/features for reproducibility.
+   Declaration-level `@cfg(...)` is implemented and filters inactive declarations before name resolution and type checking. Extend tests and documentation as conditional support grows to cover target SDKs and applications selecting imports, constants, embeds, functions, layouts/startup glue, and inline asm by target triple, CPU family, pointer width, target features, SDK features, and user build features. Builds should continue to record the active target/features for reproducibility.
 
 ## Medium-Priority Work
 

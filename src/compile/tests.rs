@@ -722,6 +722,25 @@ fn cpm_z80_target_uses_builtin_console_sdk() {
     }));
 }
 
+#[test]
+fn shared_ti99_sdk_dependencies_do_not_duplicate_import_aliases() {
+    let source = "import ti99.graphics\nimport ti99.sprites\nfn main() {}\n";
+    let sdk = SdkResolver {
+        target: Some("ti99-4a-tms9900".to_owned()),
+        sdk_roots: Vec::new(),
+    };
+    let program = parse_and_resolve_imports_with_sdk(Path::new("main.ezra"), source, &sdk).unwrap();
+    let mut names = std::collections::HashSet::new();
+    for declaration in &program.declarations {
+        if let Some(name) = declaration_name(declaration) {
+            assert!(names.insert(name), "duplicate declaration `{name}`");
+        }
+    }
+    assert!(names.contains("graphics.begin"));
+    assert!(names.contains("sprites.place"));
+    assert!(names.contains("vdp.init_graphics"));
+}
+
 #[cfg(feature = "m68k")]
 #[test]
 fn checks_scalar_source_for_generic_m68k_target() {
@@ -1543,4 +1562,40 @@ fn rejects_cyclic_imports() {
     assert!(error.message.starts_with("cyclic import detected:"));
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "avr")]
+#[test]
+fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
+    let source = r#"
+        import arduboy.core
+        import arduboy.input
+        import arduboy.oled
+
+        fn main() {
+            core.initialize()
+            oled.initialize_display()
+            oled.command(0x40)
+            input.read()
+        }
+    "#;
+    let sdk = SdkResolver {
+        target: Some("arduboy-avr".to_owned()),
+        sdk_roots: Vec::new(),
+    };
+
+    assert_eq!(
+        builtin_sdk_modules(Some("arduboy-avr")),
+        vec!["arduboy.core", "arduboy.input", "arduboy.oled"]
+    );
+    check_source_with_sdk(
+        source,
+        &CompileOptions {
+            source: PathBuf::from("arduboy.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        },
+        &sdk,
+    )
+    .unwrap();
 }
