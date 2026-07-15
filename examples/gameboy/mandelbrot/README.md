@@ -1,6 +1,6 @@
 # Game Boy Mandelbrot
 
-A DMG Game Boy background-tile example. It uploads four shade tiles and fills the visible tile map with a four-shade repeating pattern using inline LR35902 assembly, then enables the background.
+A DMG Game Boy background-tile example. It uploads four shade tiles and copies precomputed Mandelbrot escape-time samples into the visible background tile map, then enables the background.
 
 - **Target:** `gameboy-dmg-lr35902`
 - **Output:** 32 KiB DMG ROM (`.gb`), named `gameboy-mandelbrot.gb`

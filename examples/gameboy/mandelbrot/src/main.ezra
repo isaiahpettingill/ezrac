@@ -5,32 +5,50 @@ embed shade1: bytes = bytes [0x55, 0, 0xAA, 0, 0x55, 0, 0xAA, 0, 0x55, 0, 0xAA, 
 embed shade2: bytes = bytes [0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA, 0xAA]
 embed shade3: bytes = bytes [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
 
+// Precomputed 20x18 escape-time samples over -2.2..0.8 by -1.2..1.2.
+// Tile zero is the exterior; tiles one through three increase in density.
+embed mandelbrot_row00: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+embed mandelbrot_row01: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0]
+embed mandelbrot_row02: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0]
+embed mandelbrot_row03: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 3, 2, 1, 1, 0, 0, 0]
+embed mandelbrot_row04: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3, 3, 3, 3, 1, 0, 0, 0]
+embed mandelbrot_row05: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row06: bytes = bytes [0, 0, 0, 0, 0, 1, 2, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row07: bytes = bytes [0, 0, 0, 0, 1, 1, 1, 3, 3, 2, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row08: bytes = bytes [0, 0, 1, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row09: bytes = bytes [0, 0, 1, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row10: bytes = bytes [0, 0, 0, 0, 1, 1, 1, 3, 3, 2, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row11: bytes = bytes [0, 0, 0, 0, 0, 1, 2, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row12: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 3, 3, 3, 3, 3, 3, 1, 0, 0]
+embed mandelbrot_row13: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3, 3, 3, 3, 1, 0, 0, 0]
+embed mandelbrot_row14: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 3, 2, 1, 1, 0, 0, 0]
+embed mandelbrot_row15: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0]
+embed mandelbrot_row16: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0]
+embed mandelbrot_row17: bytes = bytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
 fn main() {
     video.begin_update()
     video.copy_bytes(&shade0, 0x8000, 16)
     video.copy_bytes(&shade1, 0x8010, 16)
     video.copy_bytes(&shade2, 0x8020, 16)
     video.copy_bytes(&shade3, 0x8030, 16)
-    asm volatile(clobber a, clobber b, clobber c, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld hl, 9800h"
-        "ld b, 18"
-        ".gb_mandelbrot_row:"
-        "ld c, 20"
-        ".gb_mandelbrot_cell:"
-        "ld a, b"
-        "add a, c"
-        "and 03h"
-        "ld (hl+), a"
-        "dec c"
-        "jr nz, .gb_mandelbrot_cell"
-        "ld c, 12"
-        "xor a"
-        ".gb_mandelbrot_margin:"
-        "ld (hl+), a"
-        "dec c"
-        "jr nz, .gb_mandelbrot_margin"
-        "dec b"
-        "jr nz, .gb_mandelbrot_row"
-    }
+    video.copy_bytes(&mandelbrot_row00, 0x9800, 20)
+    video.copy_bytes(&mandelbrot_row01, 0x9820, 20)
+    video.copy_bytes(&mandelbrot_row02, 0x9840, 20)
+    video.copy_bytes(&mandelbrot_row03, 0x9860, 20)
+    video.copy_bytes(&mandelbrot_row04, 0x9880, 20)
+    video.copy_bytes(&mandelbrot_row05, 0x98A0, 20)
+    video.copy_bytes(&mandelbrot_row06, 0x98C0, 20)
+    video.copy_bytes(&mandelbrot_row07, 0x98E0, 20)
+    video.copy_bytes(&mandelbrot_row08, 0x9900, 20)
+    video.copy_bytes(&mandelbrot_row09, 0x9920, 20)
+    video.copy_bytes(&mandelbrot_row10, 0x9940, 20)
+    video.copy_bytes(&mandelbrot_row11, 0x9960, 20)
+    video.copy_bytes(&mandelbrot_row12, 0x9980, 20)
+    video.copy_bytes(&mandelbrot_row13, 0x99A0, 20)
+    video.copy_bytes(&mandelbrot_row14, 0x99C0, 20)
+    video.copy_bytes(&mandelbrot_row15, 0x99E0, 20)
+    video.copy_bytes(&mandelbrot_row16, 0x9A00, 20)
+    video.copy_bytes(&mandelbrot_row17, 0x9A20, 20)
     video.enable_background()
 }
