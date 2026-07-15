@@ -15,7 +15,9 @@ use crate::{
     },
 };
 
-const POINTER_ZP: u32 = 0x00F0;
+// Reserve four bytes at the bottom of ATmega SRAM for indirect source and
+// destination pointers. 0x00F0 is USB endpoint register space on ATmega32U4.
+const POINTER_ZP: u32 = 0x0100;
 
 pub fn emit_avr_assembly_with_options(
     program: &Program,
@@ -114,8 +116,24 @@ impl Emitter {
         for declaration in &program.declarations {
             if let Declaration::Function(function) = declaration
                 && emitted_functions.contains(&function.name)
+                // Imported qualified names are semantic aliases of their
+                // short labels. Emitting both duplicates the SDK routine and
+                // can exceed constrained AVR application flash.
+                && !function.name.contains('.')
             {
                 self.emit_function(function)?;
+            }
+        }
+        for declaration in &program.declarations {
+            let Declaration::Function(function) = declaration else {
+                continue;
+            };
+            let Some((_, short_name)) = function.name.rsplit_once('.') else {
+                continue;
+            };
+            if emitted_functions.contains(&function.name) {
+                self.line(&format!("{}:", function_label(&function.name)));
+                self.line(&format!("    jmp {}", function_label(short_name)));
             }
         }
         for section in [".header", ".rodata", ".data", ".bss", ".assets", ".scratch"] {
@@ -1690,17 +1708,17 @@ fn translate_avr_line(line: &str) -> String {
     let direct = |s: &str| hex(s);
     let two = |avr: &str, rhs: &str| format!("    lds r17, {}\n    {avr} r16, r17", direct(rhs));
     match op {
-        "lda" if arg.starts_with('#') => format!("{indent}ldi r16, {}", hex(arg)),
-        "lda" if arg.starts_with('(') => "    lds r30, 00F0h\n    lds r31, 00F1h\n    add r30, r17\n    adc r31, r1\n    ld r16, z".to_owned(),
-        "lda" => format!("{indent}lds r16, {}", direct(arg)),
-        "sta" if arg.starts_with('(') => "    lds r30, 00F0h\n    lds r31, 00F1h\n    add r30, r17\n    adc r31, r1\n    st z, r16".to_owned(),
+        "lda" if arg.starts_with('#') => format!("{indent}ldi r16, {}\n    tst r16", hex(arg)),
+        "lda" if arg.starts_with('(') => "    lds r30, 0100h\n    lds r31, 0101h\n    add r30, r17\n    adc r31, r1\n    ld r16, z\n    tst r16".to_owned(),
+        "lda" => format!("{indent}lds r16, {}\n    tst r16", direct(arg)),
+        "sta" if arg.starts_with('(') => "    lds r30, 0100h\n    lds r31, 0101h\n    add r30, r17\n    adc r31, r1\n    st z, r16".to_owned(),
         "sta" => format!("{indent}sts {}, r16", direct(arg)),
         "ldy" => format!("{indent}ldi r17, {}", hex(arg)),
         "jsr" => format!("{indent}call {arg}"),
         "rts" => format!("{indent}ret"),
         "rti" => format!("{indent}reti"),
         "pha" => format!("{indent}push r16"),
-        "pla" => format!("{indent}pop r16"),
+        "pla" => format!("{indent}pop r16\n    tst r16"),
         "txa" | "tya" | "tax" | "tay" => format!("{indent}nop"),
         "ora" => two("or", arg),
         "and" => two("and", arg),
@@ -1715,11 +1733,14 @@ fn translate_avr_line(line: &str) -> String {
         "inc" | "dec" | "rol" | "ror" | "asl" => format!("    lds r16, {}\n    {} r16\n    sts {}, r16", direct(arg), if op == "asl" { "lsl" } else { op }, direct(arg)),
         "beq" => format!("{indent}breq {arg}"),
         "bne" => format!("{indent}brne {arg}"),
-        "bcc" => format!("{indent}brcc {arg}"),
-        "bcs" => format!("{indent}brcs {arg}"),
+        // 6502 carry is set for no borrow, while AVR carry is set for borrow.
+        // Invert carry branches so lowered comparisons retain their meaning.
+        "bcc" => format!("{indent}brcs {arg}"),
+        "bcs" => format!("{indent}brcc {arg}"),
         "bpl" => format!("{indent}brpl {arg}"),
         "bmi" => format!("{indent}brmi {arg}"),
-        "clc" | "sec" | "cli" | "sei" | "jmp" | "call" | "ret" | "reti" | "nop" => line.to_owned(),
+        "sec" => format!("{indent}clc"),
+        "clc" | "cli" | "sei" | "jmp" | "call" | "ret" | "reti" | "nop" => line.to_owned(),
         _ => line.to_owned(),
     }
 }
@@ -1958,7 +1979,7 @@ mod tests {
             AssemblyOptions {
                 cpu: CpuFamily::Avr,
                 stack_top: Address24::new(0x0aff),
-                ram_base: Address24::new(0x0100),
+                ram_base: Address24::new(0x0104),
                 rodata_base: Address24::new(0x0800),
                 asset_base: Address24::new(0x0900),
                 default_sdk_symbols: false,
@@ -2011,6 +2032,9 @@ mod tests {
         "#,
         );
         assert!(assembly.contains("ld r16, z") || assembly.contains("st z, r16"));
+        assert!(assembly.contains("lds r30, 0100h"));
+        assert!(!assembly.contains("00F0h"));
+        assert!(assembly.contains("ld r16, z\n    tst r16"));
     }
 
     #[test]

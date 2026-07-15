@@ -14,6 +14,7 @@ PowerShell 7 is recommended on Windows, Linux, and macOS:
 
 The script downloads the same current x86-64 core archives used by RetroArch's core updater:
 
+- Arduous for Arduboy
 - mGBA for Game Boy and Game Boy Color
 - Fuse for ZX Spectrum
 - ep128emu for CP/M through its Enterprise IS-DOS mode
@@ -23,6 +24,7 @@ RetroArch does not distribute ez180N. The script downloads the x86-64 core from 
 Run only one platform with `-Suite`:
 
 ```powershell
+./tools/test-real-cores.ps1 -Suite Arduboy
 ./tools/test-real-cores.ps1 -Suite GameBoy
 ./tools/test-real-cores.ps1 -Suite ZxSpectrum
 ./tools/test-real-cores.ps1 -Suite Cpm
@@ -41,6 +43,7 @@ The downloader currently supports x86-64 Windows, Linux, and macOS. Other hosts 
 
 | Test | Examples | Core | Assertions |
 | --- | --- | --- | --- |
+| `arduboy_snake_runs_on_real_core` | `examples/arduboy/snake` | Arduous | Intel HEX loading, 128x64 non-uniform OLED output, directional input, and framebuffer capture |
 | `gameboy_examples_run_on_real_core` | All five projects under `examples/gameboy` | mGBA | ROM-only header, CGB flag, Nintendo logo, and both checksums for every artifact; DMG/CGB video; sprite/background rendering; joypad-driven palette and scrolling changes; audio; and deterministic save states for every example |
 | `zx_spectrum_example_runs_on_real_core` | `examples/zxspectrum-z80/hello` | Fuse | `.tap` loading, keyboard-driven `RANDOMIZE USR` fallback, visible output, the program's blue border, and save-state round trips |
 | `cpm_examples_run_on_real_core` | All source and assembly programs under `examples/cpm-z80` | ep128emu | CP/M builds, IS-DOS boot and program launch, visible output, fixture file access, and deterministic save states |
@@ -65,6 +68,7 @@ cargo test --test libretro_examples gameboy_examples_run_on_real_core -- --ignor
 
 The variables are:
 
+- `PLAY96_ARDUBOY_CORE`
 - `PLAY96_GAMEBOY_CORE`
 - `PLAY96_ZX_SPECTRUM_CORE`
 - `PLAY96_CPM_CORE`

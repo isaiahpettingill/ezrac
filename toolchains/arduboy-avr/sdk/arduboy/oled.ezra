@@ -3,16 +3,21 @@
 
 pub fn initialize_display() {
     asm volatile(clobber r16, clobber memory) {
-        // PB0=CS, PB1=SCK, PB2=MOSI, PB7=RESET; PD4=DC.
+        // PB1=SCK and PB2=MOSI. Arduous models the SSD1306 control lines
+        // on PD6=CS, PD7=RESET, and PD4=DC.
+        // PB0 is the AVR hardware SS pin and must be an output/high to keep
+        // SPI master mode enabled; OLED CS itself is PD6 in Arduous.
         "sbi 04h, 0"
+        "sbi 05h, 0"
         "sbi 04h, 1"
         "sbi 04h, 2"
-        "sbi 04h, 7"
         "sbi 0Ah, 4"
-        "sbi 05h, 0"
-        "sbi 05h, 7"
-        "cbi 05h, 7"
-        "sbi 05h, 7"
+        "sbi 0Ah, 6"
+        "sbi 0Ah, 7"
+        "sbi 0Bh, 6"
+        "sbi 0Bh, 7"
+        "cbi 0Bh, 7"
+        "sbi 0Bh, 7"
         // Enable SPI master mode at f_CPU / 2.
         "ldi r16, 01h"
         "out 2Dh, r16"
@@ -20,8 +25,31 @@ pub fn initialize_display() {
         "out 2Ch, r16"
     }
     command(0xAE)
+    command(0xD5)
+    command(0x80)
+    command(0xA8)
+    command(0x3F)
+    command(0xD3)
+    command(0x00)
+    command(0x40)
+    command(0x8D)
+    command(0x14)
+    command(0x20)
+    command(0x00)
+    command(0xA1)
+    command(0xC8)
+    command(0xDA)
+    command(0x12)
+    command(0x81)
+    command(0x7F)
+    command(0xD9)
+    command(0xF1)
+    command(0xDB)
+    command(0x40)
     command(0xA4)
+    command(0xA6)
     command(0xAF)
+    clear()
 }
 
 pub fn write(value: u8) {
@@ -37,17 +65,53 @@ pub fn write(value: u8) {
 pub fn command(value: u8) {
     asm volatile(clobber memory) {
         "cbi 0Bh, 4"
-        "cbi 05h, 0"
-        "call _oled.write"
-        "sbi 05h, 0"
+        "cbi 0Bh, 6"
+        "call _write"
+        "sbi 0Bh, 6"
     }
 }
 
 pub fn data(value: u8) {
     asm volatile(clobber memory) {
         "sbi 0Bh, 4"
-        "cbi 05h, 0"
-        "call _oled.write"
-        "sbi 05h, 0"
+        "cbi 0Bh, 6"
+        "call _write"
+        "sbi 0Bh, 6"
     }
+}
+
+// Sets the SSD1306 page and the 8-pixel column used by the game examples.
+pub fn set_cell_cursor(column: u8, page: u8) {
+    command(0xB0 | page)
+    command((column * 8) & 0x0F)
+    command(0x10 | ((column * 8) >> 4))
+}
+
+pub fn clear() {
+    let page: u8 = 0
+    while page < 8 {
+        command(0xB0 | page)
+        command(0x00)
+        command(0x10)
+        let column: u8 = 0
+        while column < 128 {
+            data(0)
+            column += 1
+        }
+        page += 1
+    }
+}
+
+// Draws one 8x8 game-grid cell. A one-pixel margin keeps neighboring cells
+// visually distinct while using the Arduboy's native page-oriented display RAM.
+pub fn draw_cell(column: u8, page: u8) {
+    set_cell_cursor(column, page)
+    data(0x00)
+    data(0x7E)
+    data(0x7E)
+    data(0x7E)
+    data(0x7E)
+    data(0x7E)
+    data(0x7E)
+    data(0x00)
 }

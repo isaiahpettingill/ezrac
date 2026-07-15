@@ -1,0 +1,110 @@
+import arduboy.core
+import arduboy.input
+import arduboy.oled
+
+const GRID_WIDTH: u8 = 16
+const GRID_HEIGHT: u8 = 8
+const SNAKE_CAPACITY: u8 = 12
+
+// The snake is stored tail-to-head in a small ring buffer. Keeping the game on
+// the 16x8 OLED page grid makes each board cell exactly 8x8 display pixels.
+global snake_x: [u8; SNAKE_CAPACITY] = [3, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0]
+global snake_y: [u8; SNAKE_CAPACITY] = [4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0]
+global head: u8 = 3
+global length: u8 = 4
+global direction: u8 = input.RIGHT
+global food_x: u8 = 11
+global food_y: u8 = 3
+
+fn next_slot(slot: u8) -> u8 {
+    slot += 1
+    if slot == SNAKE_CAPACITY {
+        slot = 0
+    }
+    return slot
+}
+
+fn previous_slot(slot: u8) -> u8 {
+    if slot == 0 {
+        return SNAKE_CAPACITY - 1
+    }
+    return slot - 1
+}
+
+fn read_direction() {
+    let buttons: u8 = input.read()
+    if (buttons & input.UP) != 0 && direction != input.DOWN { direction = input.UP }
+    if (buttons & input.DOWN) != 0 && direction != input.UP { direction = input.DOWN }
+    if (buttons & input.LEFT) != 0 && direction != input.RIGHT { direction = input.LEFT }
+    if (buttons & input.RIGHT) != 0 && direction != input.LEFT { direction = input.RIGHT }
+}
+
+fn advance_head() {
+    let x: u8 = snake_x[head]
+    let y: u8 = snake_y[head]
+    let next_x: u8 = x
+    let next_y: u8 = y
+
+    if direction == input.UP {
+        if next_y == 0 { next_y = GRID_HEIGHT - 1 } else { next_y -= 1 }
+    }
+    if direction == input.DOWN {
+        next_y += 1
+        if next_y == GRID_HEIGHT { next_y = 0 }
+    }
+    if direction == input.LEFT {
+        if next_x == 0 { next_x = GRID_WIDTH - 1 } else { next_x -= 1 }
+    }
+    if direction == input.RIGHT {
+        next_x += 1
+        if next_x == GRID_WIDTH { next_x = 0 }
+    }
+
+    head = next_slot(head)
+    snake_x[head] = next_x
+    snake_y[head] = next_y
+
+    if next_x == food_x && next_y == food_y {
+        if length < SNAKE_CAPACITY { length += 1 }
+        food_x += 5
+        if food_x >= GRID_WIDTH { food_x -= GRID_WIDTH }
+        food_y += 3
+        if food_y >= GRID_HEIGHT { food_y -= GRID_HEIGHT }
+    }
+}
+
+fn draw() {
+    oled.clear()
+    oled.draw_cell(food_x, food_y)
+
+    let slot: u8 = head
+    let count: u8 = 0
+    while count < length {
+        oled.draw_cell(snake_x[slot], snake_y[slot])
+        slot = previous_slot(slot)
+        count += 1
+    }
+}
+
+fn wait_frame() {
+    // A source-level delay keeps movement visible without relying on a timer ISR.
+    let outer: u8 = 0
+    while outer < 80 {
+        let inner: u8 = 0
+        while inner < 255 {
+            inner += 1
+        }
+        outer += 1
+    }
+}
+
+fn main() {
+    core.initialize()
+    oled.initialize_display()
+    loop {
+        read_direction()
+        advance_head()
+        draw()
+        wait_frame()
+    }
+}

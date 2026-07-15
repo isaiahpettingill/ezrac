@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("All", "GameBoy", "ZxSpectrum", "Cpm", "Ez180N")]
+    [ValidateSet("All", "GameBoy", "ZxSpectrum", "Cpm", "Ez180N", "Arduboy")]
     [string]$Suite = "All",
 
     [string]$Ez180NCore = $env:PLAY96_EZ180N_CORE,
@@ -189,7 +189,7 @@ function Invoke-CoreTest {
     $started = [DateTimeOffset]::UtcNow
     Push-Location $repoRoot
     try {
-        & cargo test --test libretro_examples $Name -- --ignored --exact --nocapture
+        & cargo test --features avr --test libretro_examples $Name -- --ignored --exact --nocapture
         $exitCode = $LASTEXITCODE
     }
     finally {
@@ -210,6 +210,11 @@ function Invoke-CoreTest {
         Write-TestResults
         throw "Real-core integration test failed: $Name"
     }
+}
+
+if ($Suite -eq "All" -or $Suite -eq "Arduboy") {
+    $env:PLAY96_ARDUBOY_CORE = Get-LibretroCore -Name "arduous_libretro"
+    Invoke-CoreTest -SuiteName "Arduboy" -Name "arduboy_snake_runs_on_real_core" -Core $env:PLAY96_ARDUBOY_CORE -Source "RetroArch buildbot latest/Arduous"
 }
 
 if ($Suite -eq "All" -or $Suite -eq "GameBoy") {

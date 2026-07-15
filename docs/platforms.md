@@ -72,7 +72,7 @@ cargo run --features avr -- build --target arduboy-avr src/main.ezra
 
 `bare-avr` produces a raw flash image. `arduboy-avr` produces Intel HEX and reserves the upper 4 KiB of the ATmega32U4's 32 KiB flash for the Caterina bootloader. Both initialize the hardware stack to `0x0AFF`, clear `r1`, and call `main` from the reset entry.
 
-The AVR backend lowers scalar values, pointers, arrays, structs, strings, embedded data, control flow, calls, interrupts, and inline assembly through HIR, TBIR, and the target semantic model. Its register ABI starts byte arguments in `r24`, `r22`, `r20`, and `r18`, uses adjacent registers for wider values, and returns values in `r24` through `r26`. The bundled `arduboy.core`, `arduboy.input`, and `arduboy.oled` modules use this ABI; see `examples/arduboy/blink` for a buildable example.
+The AVR backend lowers scalar values, pointers, arrays, structs, strings, embedded data, control flow, calls, interrupts, and inline assembly through HIR, TBIR, and the target semantic model. Its register ABI starts byte arguments in `r24`, `r22`, `r20`, and `r18`, uses adjacent registers for wider values, and returns values in `r24` through `r26`. The bundled `arduboy.core`, `arduboy.input`, and `arduboy.oled` modules use this ABI; see `examples/arduboy/snake` for a playable example.
 
 The backend allocates source-visible storage in the AVR data address space and emits initialization code for globals, strings, and embedded data. AVR builds are validated through lowering, exhaustive instruction encoding, assembly, and Intel HEX packaging tests.
 

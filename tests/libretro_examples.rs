@@ -12,6 +12,7 @@ const ZX_SPECTRUM_CORE_ENV: &str = "PLAY96_ZX_SPECTRUM_CORE";
 const CPM_CORE_ENV: &str = "PLAY96_CPM_CORE";
 const EZ180N_CORE_ENV: &str = "PLAY96_EZ180N_CORE";
 const C64_CORE_ENV: &str = "PLAY96_C64_CORE";
+const ARDUBOY_CORE_ENV: &str = "PLAY96_ARDUBOY_CORE";
 
 fn lock_real_core_tests() -> MutexGuard<'static, ()> {
     REAL_CORE_TEST_LOCK
@@ -634,6 +635,31 @@ fn gameboy_color_input_runs_on_real_core() {
     );
     assert_deterministic_video_save_state(&mut game, "gameboy-color-input");
     capture(&game, "gameboy-color-input");
+}
+
+#[test]
+#[ignore = "requires PLAY96_ARDUBOY_CORE pointing at the Arduous Arduboy libretro core"]
+fn arduboy_snake_runs_on_real_core() {
+    let _guard = lock_real_core_tests();
+    let core = core_from_env(ARDUBOY_CORE_ENV);
+    let game = build_example(
+        "examples/arduboy/snake/main.ezra",
+        "examples/arduboy/snake/target/arduboy-avr/main.hex",
+    );
+    let hex = fs::read_to_string(&game).unwrap();
+    assert!(hex.starts_with(':'), "Arduboy output is not Intel HEX");
+
+    let mut arduboy = open_session(&core, &game, "Arduboy snake example");
+    arduboy.run_frames(300).unwrap();
+    assert_eq!(
+        (arduboy.framebuffer_width(), arduboy.framebuffer_height()),
+        (128, 64),
+        "Arduboy core used unexpected video geometry"
+    );
+    assert_non_uniform_frame(&arduboy, "Arduboy snake example");
+    pulse_button(&mut arduboy, Button::Down, 2, 8);
+    assert_non_uniform_frame(&arduboy, "Arduboy snake example after input");
+    capture(&arduboy, "arduboy-snake");
 }
 
 #[test]

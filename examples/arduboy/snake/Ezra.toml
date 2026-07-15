@@ -1,5 +1,5 @@
 [project]
-name = "arduboy-blink"
+name = "arduboy-snake"
 
 [build]
 target = "arduboy-avr"

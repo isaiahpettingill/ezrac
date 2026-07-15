@@ -414,6 +414,7 @@ impl Layout {
                 symbol("EZRA_LOAD_ADDR", Address24::new(0)),
                 symbol("EZRA_ENTRY_ADDR", Address24::new(0)),
                 symbol("EZRA_CODE_BASE", Address24::new(0)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x0104)),
                 symbol("EZRA_STACK_TOP", Address24::new(0x0AFF)),
             ],
         }
