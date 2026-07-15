@@ -26,17 +26,27 @@ r1              ; register direct
 @buffer(r4)     ; indexed memory address
 ```
 
-The assembler supports the following instruction families:
+The assembler implements the complete original TI TMS9900 instruction set:
 
 - two-operand word and byte operations: `SZC`, `SZCB`, `S`, `SB`, `C`, `CB`, `A`, `AB`, `MOV`, `MOVB`, `SOC`, and `SOCB`
 - single-operand operations: `BLWP`, `B`, `X`, `CLR`, `NEG`, `INV`, `INC`, `INCT`, `DEC`, `DECT`, `BL`, `SWPB`, `SETO`, and `ABS`
 - immediate and workspace/status operations: `LI`, `AI`, `ANDI`, `ORI`, `CI`, `STWP`, `STST`, `LWPI`, `LIMI`, `IDLE`, `RSET`, `RTWP`, `CKON`, `CKOF`, and `LREX`
+- extended operation: `XOP`
 - shifts: `SRA`, `SRL`, `SLA`, and `SRC`
 - jumps: `JMP`, `JLT`, `JLE`, `JEQ`, `JHE`, `JGT`, `JNE`, `JNC`, `JOC`, `JNO`, `JL`, `JH`, and `JOP`
 - CRU operations: `SBO`, `SBZ`, `TB`, `LDCR`, and `STCR`
 - multiply and divide: `MPY` and `DIV`
+- `NOP`, encoded as `JMP 0`
 
-`NOP` is accepted as the `JMP 0` encoding. Jump targets must be word-aligned and fit the TMS9900 signed 8-bit word displacement range. `SBO`, `SBZ`, and `TB` accept signed CRU offsets from `-128` through `127`.
+## Encodings and validation
+
+General-address operands are accepted in every ISA position that specifies a general address. Their six-bit fields are `00rrrr` (register), `01rrrr` (indirect), `11rrrr` (auto-increment), and `10rrrr` (symbolic/indexed). Symbolic and indexed operands append one address word. For two-operand instructions, extension words are emitted in source-then-destination order.
+
+`LI`, `AI`, `ANDI`, `ORI`, and `CI` take `register, word`; `STWP` and `STST` take one register; `LWPI` takes one word; and `LIMI` takes its architecturally defined 4-bit mask (`0` through `15`) in an extension word. Shift counts are the 4-bit literal field (`0` through `15`; zero selects the count in `R0` on the processor).
+
+`XOP` takes `general-address, vector`, where `vector` is `0` through `15`; its general-address extension, when present, follows the instruction word. `MPY` and `DIV` take `source, register`. `LDCR` and `STCR` take `general-address, count`, with counts `0` through `16`; a count of `16` is encoded as the ISA's zero count field (and an explicit `0` preserves that raw encoding).
+
+Jump operands are absolute byte addresses or labels. The assembler converts them to the signed, 8-bit word displacement from the next instruction; targets must be word-aligned and within `-128` through `127` words. `SBO`, `SBZ`, and `TB` accept signed CRU offsets from `-128` through `127`.
 
 ## Example
 
