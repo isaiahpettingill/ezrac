@@ -1802,13 +1802,18 @@ fn parse_lea_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>
     if dst.trim() != "hl" {
         return Ok(None);
     }
-    let Some(rest) = src.trim().strip_prefix("ix") else {
+    let src = src.trim();
+    let (opcode, rest) = if let Some(rest) = src.strip_prefix("ix") {
+        (0x22, rest)
+    } else if let Some(rest) = src.strip_prefix("iy") {
+        (0x23, rest)
+    } else {
         return Ok(None);
     };
     if !is_index_displacement(rest) {
         return Ok(None);
     }
-    Ok(Some(vec![0xED, 0x22, parse_index_offset(rest)?]))
+    Ok(Some(vec![0xED, opcode, parse_index_offset(rest)?]))
 }
 
 fn encode_intel_8080_instruction(

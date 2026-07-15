@@ -392,6 +392,9 @@ fn generated_instruction_metadata_encodes_ez80_mode_suffixes() {
         ("ld.lis b, a", vec![0x49, 0x47]),
         ("xor.sil 55h", vec![0x52, 0xEE, 0x55]),
         ("out0.lil (0Ch), a", vec![0x5B, 0xED, 0x39, 0x0C]),
+        ("ld.lil b, (ix+2)", vec![0x5B, 0xDD, 0x46, 0x02]),
+        ("res.sil 3, (iy-1)", vec![0x52, 0xFD, 0xCB, 0xFF, 0x9E]),
+        ("in.lis b, (c)", vec![0x49, 0xED, 0x40]),
     ];
 
     for (syntax, bytes) in cases {
@@ -411,6 +414,25 @@ fn generated_instruction_metadata_encodes_ez80_mode_suffixes() {
             None,
             "{syntax}"
         );
+    }
+}
+
+#[test]
+fn generated_instruction_metadata_encodes_both_ez80_lea_index_forms() {
+    let cases = [
+        ("lea hl, ix+2", vec![0xED, 0x22, 0x02]),
+        ("lea hl, iy+2", vec![0xED, 0x23, 0x02]),
+        ("lea hl, iy-128", vec![0xED, 0x23, 0x80]),
+        ("lea hl, iy+127", vec![0xED, 0x23, 0x7F]),
+    ];
+
+    for (syntax, bytes) in cases {
+        assert_eq!(
+            encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap(),
+            Some(bytes.clone()),
+            "{syntax}"
+        );
+        assert_ez80_emulator_decodes(syntax, &bytes);
     }
 }
 
