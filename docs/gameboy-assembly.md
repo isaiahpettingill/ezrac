@@ -94,12 +94,19 @@ hexadecimal notation. Signed SP-relative operands use `+n` or `-n` and must fit
 
 ## EZRA Source Projects
 
-Game Boy targets can compile `.ezra` source directly. The initial LR35902 ABI
-sets `SP` to `FFFEh`, calls `_main` from the cartridge entry code, and enters a
-HALT loop when `main` returns. SDK calls support up to three compile-time
-arguments using the LR35902 register ABI, including embedded-data addresses.
-Unsupported high-level statements and dynamic expressions are rejected with
-target-specific diagnostics rather than being lowered as incompatible Z80 code.
+Game Boy targets compile `.ezra` source through HIR, TBIR, and the shared
+semantic storage model before LR35902 lowering. The runtime sets `SP` to
+`FFFEh`, calls `_main` from the cartridge entry code, and enters a HALT loop
+when `main` returns. The source ABI uses WRAM storage for scalar values,
+arguments, return values, globals, strings, and embedded bytes; generated
+`_name equ` symbols keep globals and embeds available to inline assembly.
+
+The backend supports scalar operators and casts, locals/globals, pointers,
+arrays, structs, strings and embeds, control flow, calls (including recursion),
+inline-assembly operands, and `interrupt`/`naked` functions. It lowers to
+LR35902-only instructions and validates the generated assembly with the
+LR35902 encoder; unsupported target-specific operations, such as separate port
+I/O, produce diagnostics.
 
 `embed` declarations place raw files or literal bytes in cartridge ROM. Project
 `[assets]` rules can override section and alignment per target, so the same

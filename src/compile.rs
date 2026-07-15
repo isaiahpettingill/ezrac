@@ -9,7 +9,10 @@ use std::{
 
 use crate::{
     asm::ez80::emitter::collect_ez80_semantic_diagnostics,
-    asm::{AssemblyOptions, emit_ez80_assembly_with_options, emit_mos6502_assembly_with_options},
+    asm::{
+        AssemblyOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
+        emit_mos6502_assembly_with_options,
+    },
     ast::{
         AccessPath, AccessSegment, CfgPredicate, Declaration, EmbedSource, Expr, Function, Place,
         Program, Stmt, Type,
@@ -289,7 +292,9 @@ fn check_source_with_sdk_and_overrides(
         options.debug_comments,
         options.default_sdk_symbols,
     );
-    let assembly = if cpu == CpuFamily::Avr {
+    let assembly = if cpu == CpuFamily::Lr35902 {
+        emit_lr35902_assembly_with_options(&program, assembly_options)
+    } else if cpu == CpuFamily::Avr {
         #[cfg(feature = "avr")]
         {
             emit_avr_assembly_with_options(&program, assembly_options)

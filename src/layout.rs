@@ -993,6 +993,10 @@ impl Layout {
                 symbol("GB_STACK_TOP", Address24::new(0xFFFE)),
                 symbol("GB_SERIAL_DATA", Address24::new(0xFF01)),
                 symbol("GB_SERIAL_CONTROL", Address24::new(0xFF02)),
+                // The source backends keep scalar storage and initialized bytes in Game Boy WRAM.
+                symbol("EZRA_RAM_BASE", Address24::new(0xC000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0xC800)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xD000)),
             ],
         }
     }
