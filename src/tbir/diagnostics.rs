@@ -5,15 +5,7 @@ use crate::{
 };
 
 pub fn validate_program(program: &crate::ast::Program, cpu: CpuFamily) -> Result<(), Diagnostic> {
-    let supports_port_io = matches!(
-        cpu,
-        CpuFamily::Ez80
-            | CpuFamily::Z80
-            | CpuFamily::Z80N
-            | CpuFamily::Z180
-            | CpuFamily::I8080
-            | CpuFamily::I8085
-    );
+    let supports_port_io = cpu.capabilities().supports_port_io;
     let address_width = memory_model_for_cpu(cpu)
         .map(|memory| memory.address_width_bits)
         .unwrap_or(24);
@@ -36,8 +28,9 @@ pub fn validate_program(program: &crate::ast::Program, cpu: CpuFamily) -> Result
                     && !(0..=0xFF).contains(&value)
                 {
                     return Err(Diagnostic::new(format!(
-                        "port `{}` value 0x{value:X} is outside the eZ80 8-bit port range",
-                        port.name
+                        "port `{}` value 0x{value:X} is outside the 8-bit port range for target CPU `{}`",
+                        port.name,
+                        cpu.as_str()
                     )));
                 }
             }

@@ -19,6 +19,33 @@ fn tbir_binds_ez80_memory_model() {
 }
 
 #[test]
+fn tbir_uses_cpu_capabilities_for_target_metadata() {
+    let program = parse_program(Path::new("test.ezra"), "fn main() {}").unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    for (cpu, name, pointer_width) in [
+        (crate::target::CpuFamily::Ez80, "ez80-adl", 24),
+        (crate::target::CpuFamily::Z80, "z80", 16),
+        (crate::target::CpuFamily::Z80N, "z80n", 16),
+        (crate::target::CpuFamily::Z180, "z180", 16),
+        (crate::target::CpuFamily::I8080, "i8080", 16),
+        (crate::target::CpuFamily::I8085, "i8085", 16),
+    ] {
+        let tbir = TbirProgram::lower(
+            &hir,
+            &program,
+            &AssemblyOptions {
+                cpu,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tbir.target.name, name);
+        assert_eq!(tbir.target.pointer_width_bits, pointer_width);
+        assert_eq!(tbir.target.supports_port_io, true);
+    }
+}
+
+#[test]
 fn tbir_lowers_declaration_kinds() {
     let program = parse_program(
         Path::new("test.ezra"),
@@ -125,7 +152,7 @@ fn tbir_rejects_ez80_port_outside_8_bit_range() {
 
     assert_eq!(
         error.message,
-        "port `BAD` value 0x100 is outside the eZ80 8-bit port range"
+        "port `BAD` value 0x100 is outside the 8-bit port range for target CPU `ez80`"
     );
 }
 

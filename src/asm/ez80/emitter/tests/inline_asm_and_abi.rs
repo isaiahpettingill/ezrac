@@ -865,3 +865,54 @@ fn emits_and_runs_extern_asm_stack_arguments() {
     assert!(run.halted, "{linked}");
     assert_eq!(run.result_code, 0, "{linked}");
 }
+
+#[test]
+fn inline_asm_rejects_ez80_only_forms_for_classic_z80() {
+    let source = r#"
+        fn main() {
+            asm volatile(clobber hl, clobber ix) {
+                "lea hl, ix+2"
+            }
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let error = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Z80,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "test assembler does not support instruction `lea hl, ix+2`"
+    );
+}
+
+#[test]
+fn inline_asm_accepts_classic_z80_forms_and_labels() {
+    let source = r#"
+        fn main() {
+            asm volatile(clobber a) {
+                ".again:"
+                "ld a, 1"
+                "jr .done"
+                ".done:"
+            }
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Z80,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(asm.contains("    ld a, 1"), "{asm}");
+    assert!(asm.contains(".again:"), "{asm}");
+}

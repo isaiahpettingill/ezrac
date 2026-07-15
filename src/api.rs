@@ -18,7 +18,7 @@ use crate::{
     },
     diagnostic::Diagnostic,
     layout::default_layout_for_target,
-    target::{Address24, CpuFamily, DEFAULT_TARGET_TRIPLE, parse_target_triple},
+    target::{Address24, CpuFamily, DEFAULT_TARGET_TRIPLE, resolve_target_profile},
     tbir::diagnostics::validate_program,
 };
 
@@ -92,7 +92,7 @@ pub fn compile_source_to_assembly(
     source: &str,
     request: &CompileRequest,
 ) -> Result<AssemblyCompilation, Diagnostic> {
-    let target = parse_target_triple(&request.target).map_err(Diagnostic::new)?;
+    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
     let sdk = request.sdk_resolver();
     let options = CompileOptions {
         source: request.source_path.clone(),
@@ -103,7 +103,7 @@ pub fn compile_source_to_assembly(
     let program = parse_and_resolve_imports_with_sdk(&request.source_path, source, &sdk)?;
     let assembly_options = assembly_options_for_target(
         &request.target,
-        target.cpu,
+        target.triple.cpu,
         request.debug_comments,
         request.default_sdk_symbols,
     );
@@ -244,6 +244,17 @@ mod tests {
 
         assert!(compilation.report.has_main);
         assert!(compilation.assembly.contains("__ezra_start:"));
+    }
+
+    #[test]
+    fn rejects_incompatible_platform_cpu_combinations() {
+        let request = CompileRequest::new("memory.ezra", "zxspectrum-ez80");
+        let error = compile_source_to_assembly("fn main() {}", &request).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "target `zxspectrum-ez80` requires CPU `z80`, not `ez80`"
+        );
     }
 
     #[test]

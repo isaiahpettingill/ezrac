@@ -196,8 +196,70 @@ impl From<CpuFamily> for AssemblerCpu {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TargetCapabilities {
+    pub name: &'static str,
+    pub memory: TargetMemoryModel,
+    pub native_int_widths: &'static [u8],
+    pub supports_port_io: bool,
+    pub prefer_code_size: bool,
+    pub has_cache: bool,
+}
+
 impl CpuFamily {
-    pub fn as_str(self) -> &'static str {
+    pub const fn capabilities(self) -> TargetCapabilities {
+        let memory16 = TargetMemoryModel {
+            pointer_width_bits: 16,
+            address_width_bits: 16,
+        };
+        let memory24 = TargetMemoryModel {
+            pointer_width_bits: 24,
+            address_width_bits: 24,
+        };
+        match self {
+            Self::Ez80 => TargetCapabilities {
+                name: "ez80-adl",
+                memory: memory24,
+                native_int_widths: &[8, 16, 24],
+                supports_port_io: true,
+                prefer_code_size: true,
+                has_cache: false,
+            },
+            Self::Z80 | Self::Z80N | Self::Z180 | Self::I8080 | Self::I8085 => TargetCapabilities {
+                name: self.as_str(),
+                memory: memory16,
+                native_int_widths: &[8, 16],
+                supports_port_io: true,
+                prefer_code_size: true,
+                has_cache: false,
+            },
+            Self::M68k | Self::Wdc65C816 => TargetCapabilities {
+                name: self.as_str(),
+                memory: memory24,
+                native_int_widths: &[8, 16, 24],
+                supports_port_io: false,
+                prefer_code_size: true,
+                has_cache: false,
+            },
+            Self::Lr35902
+            | Self::M6800
+            | Self::Avr
+            | Self::Mos6502
+            | Self::Cmos65C02
+            | Self::Ricoh2A03
+            | Self::Tms9900
+            | Self::Dcpu => TargetCapabilities {
+                name: self.as_str(),
+                memory: memory16,
+                native_int_widths: &[8, 16],
+                supports_port_io: false,
+                prefer_code_size: true,
+                has_cache: false,
+            },
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ez80 => "ez80",
             Self::Z80 => "z80",
@@ -235,15 +297,7 @@ pub struct TargetProfile {
 
 impl TargetProfile {
     pub const fn supports_port_io(&self) -> bool {
-        matches!(
-            self.triple.cpu,
-            CpuFamily::Ez80
-                | CpuFamily::Z80
-                | CpuFamily::Z80N
-                | CpuFamily::Z180
-                | CpuFamily::I8080
-                | CpuFamily::I8085
-        )
+        self.triple.cpu.capabilities().supports_port_io
     }
 }
 
@@ -292,19 +346,61 @@ pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
 
 pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, String> {
     let triple = parse_target_triple(target.unwrap_or(DEFAULT_TARGET_TRIPLE))?;
-    let Some(memory) = memory_model_for_cpu(triple.cpu) else {
-        return Err(format!(
-            "target `{}` uses CPU `{}`, but no target profile is implemented",
-            triple.value,
-            triple.cpu.as_str()
-        ));
-    };
+    validate_target_cpu_combination(&triple)?;
+    let memory =
+        memory_model_for_cpu(triple.cpu).expect("all parsed CPU families have a memory model");
     Ok(TargetProfile {
         output_format: output_format_for_target(&triple),
         memory,
         default_sdk_symbols: !is_bare_target(&triple),
         triple,
     })
+}
+
+fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> {
+    let target = triple.value.as_str();
+    let expected = if target.split('-').any(|part| part == "cpm") {
+        Some(&[CpuFamily::Z80, CpuFamily::I8080, CpuFamily::I8085][..])
+    } else if target.starts_with("zxspectrum-") {
+        Some(&[CpuFamily::Z80][..])
+    } else if target.starts_with("ti84plusce-") || target.starts_with("ti83premiumce-") {
+        Some(&[CpuFamily::Ez80][..])
+    } else if target.starts_with("ti83-")
+        || target.starts_with("ti83plus-")
+        || target.starts_with("ti84-")
+        || target.starts_with("ti84plus-")
+    {
+        Some(&[CpuFamily::Z80][..])
+    } else if target.starts_with("gameboy-") {
+        Some(&[CpuFamily::Lr35902][..])
+    } else if target.starts_with("agonlight-")
+        || target.starts_with("ez180n-")
+        || target.starts_with("ezra-test-")
+    {
+        Some(&[CpuFamily::Ez80][..])
+    } else if target.starts_with("commodore64-") {
+        Some(&[CpuFamily::Mos6502][..])
+    } else if target.starts_with("arduboy-") {
+        Some(&[CpuFamily::Avr][..])
+    } else if target.starts_with("ti99-4a-") {
+        Some(&[CpuFamily::Tms9900][..])
+    } else {
+        None
+    };
+
+    if expected.is_some_and(|cpus| !cpus.contains(&triple.cpu)) {
+        let expected = expected
+            .expect("checked above")
+            .iter()
+            .map(|cpu| cpu.as_str())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        return Err(format!(
+            "target `{target}` requires CPU `{expected}`, not `{}`",
+            triple.cpu.as_str()
+        ));
+    }
+    Ok(())
 }
 
 fn is_bare_target(triple: &TargetTriple) -> bool {
@@ -345,44 +441,7 @@ fn is_ti_calculator_target(triple: &TargetTriple) -> bool {
 }
 
 pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
-    match cpu {
-        CpuFamily::Ez80 => Some(TargetMemoryModel {
-            pointer_width_bits: 24,
-            address_width_bits: 24,
-        }),
-        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 => Some(TargetMemoryModel {
-            pointer_width_bits: 16,
-            address_width_bits: 16,
-        }),
-        CpuFamily::I8080 | CpuFamily::I8085 => Some(TargetMemoryModel {
-            pointer_width_bits: 16,
-            address_width_bits: 16,
-        }),
-        CpuFamily::Lr35902
-        | CpuFamily::M6800
-        | CpuFamily::Mos6502
-        | CpuFamily::Cmos65C02
-        | CpuFamily::Ricoh2A03
-        | CpuFamily::Tms9900
-        | CpuFamily::Dcpu => Some(TargetMemoryModel {
-            pointer_width_bits: 16,
-            address_width_bits: 16,
-        }),
-        CpuFamily::Wdc65C816 => Some(TargetMemoryModel {
-            pointer_width_bits: 24,
-            address_width_bits: 24,
-        }),
-        CpuFamily::Avr => Some(TargetMemoryModel {
-            pointer_width_bits: 16,
-            address_width_bits: 16,
-        }),
-        // The 68000 has 32-bit registers but the initial generic target uses
-        // its 24-bit external address bus and EZRA's existing u24 pointers.
-        CpuFamily::M68k => Some(TargetMemoryModel {
-            pointer_width_bits: 24,
-            address_width_bits: 24,
-        }),
-    }
+    Some(cpu.capabilities().memory)
 }
 
 pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {

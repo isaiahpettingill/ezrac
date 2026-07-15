@@ -602,6 +602,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         let message = format_layout_errors(layout_path.as_deref(), errors);
         return Err(format!("layout is invalid:\n{message}"));
     }
+    validate_layout_for_target_profile(&target, &layout)?;
     let output_format = target.output_format;
     let assembler_cpu = options
         .assembler_cpu
@@ -626,6 +627,13 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         executable_name: None,
     };
     let image = if let Some(base_addr) = options.base_addr {
+        let max_addr = max_address_for_target(&settings.target);
+        if base_addr > max_addr {
+            return Err(format!(
+                "base address 0x{base_addr:X} is outside the {}-bit address space for target `{}`",
+                settings.target.memory.address_width_bits, settings.target.triple.value
+            ));
+        }
         if settings.output_format == OutputFormat::GameBoyGb && base_addr != 0x0150 {
             return Err("Game Boy assembly must use base address 0x0150".to_owned());
         }
@@ -908,22 +916,33 @@ fn emit_source_assembly(
 }
 
 fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
-    let max_addr = if settings.target.memory.address_width_bits >= 24 {
+    validate_layout_for_target_profile(&settings.target, &settings.layout)
+}
+
+fn max_address_for_target(target: &TargetProfile) -> u32 {
+    if target.memory.address_width_bits >= 24 {
         Address24::MAX
     } else {
-        (1u32 << settings.target.memory.address_width_bits) - 1
-    };
+        (1u32 << target.memory.address_width_bits) - 1
+    }
+}
+
+fn validate_layout_for_target_profile(
+    target: &TargetProfile,
+    layout: &Layout,
+) -> Result<(), String> {
+    let max_addr = max_address_for_target(target);
     let mut violations = Vec::new();
-    if settings.layout.load.get() > max_addr {
-        violations.push(format!("load address {}", settings.layout.load));
+    if layout.load.get() > max_addr {
+        violations.push(format!("load address {}", layout.load));
     }
-    if settings.layout.entry.get() > max_addr {
-        violations.push(format!("entry address {}", settings.layout.entry));
+    if layout.entry.get() > max_addr {
+        violations.push(format!("entry address {}", layout.entry));
     }
-    if settings.layout.stack.get() > max_addr {
-        violations.push(format!("stack address {}", settings.layout.stack));
+    if layout.stack.get() > max_addr {
+        violations.push(format!("stack address {}", layout.stack));
     }
-    for region in &settings.layout.regions {
+    for region in &layout.regions {
         if region.start.get() > max_addr || region.end.get() > max_addr {
             violations.push(format!(
                 "region `{}` range {}..{}",
@@ -931,7 +950,7 @@ fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
             ));
         }
     }
-    for symbol in &settings.layout.symbols {
+    for symbol in &layout.symbols {
         if symbol.value.get() > max_addr {
             violations.push(format!("symbol `{}` value {}", symbol.name, symbol.value));
         }
@@ -943,9 +962,9 @@ fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
 
     Err(format!(
         "layout `{}` requires addresses outside the {}-bit address space for target `{}`: {}",
-        settings.layout.name,
-        settings.target.memory.address_width_bits,
-        settings.target.triple.value,
+        layout.name,
+        target.memory.address_width_bits,
+        target.triple.value,
         violations.join(", ")
     ))
 }

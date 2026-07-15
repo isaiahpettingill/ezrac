@@ -37,6 +37,34 @@ fn assemble_file_writes_raw_binary() {
 }
 
 #[test]
+fn classic_z80_assembly_rejects_a_24_bit_base_address() {
+    let root = temp_root("assemble_z80_24_bit_base");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.asm");
+    std::fs::write(&source_path, "nop\n").unwrap();
+
+    let error = assemble_file(&AssembleOptions {
+        path: source_path.to_string_lossy().into_owned(),
+        output: None,
+        base_addr: Some(0x01_0000),
+        assembler_cpu: None,
+        layout_path: None,
+        map_path: None,
+        target: Some("bare-z80".to_owned()),
+    })
+    .unwrap_err();
+
+    assert!(
+        error.contains(
+            "base address 0x10000 is outside the 16-bit address space for target `bare-z80`"
+        ),
+        "{error}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn assemble_file_writes_cpm_com_for_cpm_z80_target() {
     let root = temp_root("assemble_cpm_file");
     std::fs::create_dir_all(&root).unwrap();

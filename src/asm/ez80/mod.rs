@@ -261,6 +261,41 @@ pub fn analyze_instruction(
     })
 }
 
+/// Returns whether a Z80-family form is recognized for another CPU mode but is
+/// unavailable for the selected mode. This intentionally does not reject every
+/// unknown line: Intel and LR35902 inline assembly is translated later, and a
+/// few generated compatibility lines are removed by the emitter peephole pass.
+pub fn is_unsupported_z80_family_instruction(
+    cpu: AssemblerCpu,
+    text: &str,
+) -> Result<bool, Diagnostic> {
+    // The shared emitter emits this temporary no-op while normalizing pointer
+    // values, then removes it in `peephole_cleanup` after inline validation.
+    if text
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case("ld hl, hl")
+    {
+        return Ok(false);
+    }
+    if !cpu.supports_z80_syntax() || generated_instruction_len(cpu, text)?.is_some() {
+        return Ok(false);
+    }
+    for candidate in [
+        AssemblerCpu::Z80,
+        AssemblerCpu::Z80N,
+        AssemblerCpu::Z180,
+        AssemblerCpu::Ez80,
+    ] {
+        if candidate != cpu && generated_instruction_len(candidate, text)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn instruction_coverage(cpu: AssemblerCpu) -> Result<Vec<InstructionCoverage>, Diagnostic> {
     let mut coverage = Vec::new();
     for instruction in instruction_set(cpu) {

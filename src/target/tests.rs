@@ -49,6 +49,36 @@ fn resolves_z80_and_ez80_target_profiles() {
 }
 
 #[test]
+fn rejects_platform_cpu_combinations_that_would_mix_16_and_24_bit_assumptions() {
+    for (target, expected) in [
+        ("cpm-2.2-ez80", "requires CPU `z80 or i8080 or i8085`"),
+        ("zxspectrum-ez80", "requires CPU `z80`"),
+        ("ti84plusce-z80", "requires CPU `ez80`"),
+    ] {
+        let error = resolve_target_profile(Some(target)).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn cpu_capabilities_are_canonical_for_z80_family_targets() {
+    for (cpu, name, width) in [
+        (CpuFamily::Ez80, "ez80-adl", 24),
+        (CpuFamily::Z80, "z80", 16),
+        (CpuFamily::Z80N, "z80n", 16),
+        (CpuFamily::Z180, "z180", 16),
+        (CpuFamily::I8080, "i8080", 16),
+        (CpuFamily::I8085, "i8085", 16),
+    ] {
+        let capabilities = cpu.capabilities();
+        assert_eq!(capabilities.name, name);
+        assert_eq!(capabilities.memory.pointer_width_bits, width);
+        assert_eq!(capabilities.memory.address_width_bits, width);
+        assert!(capabilities.supports_port_io);
+    }
+}
+
+#[test]
 fn cpm_z80_targets_default_to_com_output() {
     let cpm = resolve_target_profile(Some("cpm-2.2-z80")).unwrap();
 

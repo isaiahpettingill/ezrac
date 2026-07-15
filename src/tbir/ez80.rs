@@ -3,7 +3,7 @@ use crate::{
     ast::{Declaration, Program, Stmt},
     diagnostic::Diagnostic,
     hir::{HirDeclaration, HirProgram},
-    target::{Address24, CpuFamily, memory_model_for_cpu},
+    target::{Address24, memory_model_for_cpu},
 };
 
 use super::{
@@ -18,9 +18,8 @@ pub fn lower(
 ) -> Result<TbirProgram, Diagnostic> {
     diagnostics::validate_program(lowered_program, options.cpu)?;
     let memory = memory_model(options)?;
-    let pointer_width_bits = memory_model_for_cpu(options.cpu)
-        .map(|model| model.pointer_width_bits as u8)
-        .unwrap_or(24);
+    let capabilities = options.cpu.capabilities();
+    let pointer_width_bits = capabilities.memory.pointer_width_bits as u8;
     let (lowered_program, mut optimizations) = optimize::optimize_program(lowered_program);
     let declarations = hir
         .declarations
@@ -40,22 +39,12 @@ pub fn lower(
     Ok(TbirProgram {
         source: hir.source_path.clone(),
         target: TbirTarget {
-            name: match options.cpu {
-                CpuFamily::Z80 => "z80".to_owned(),
-                CpuFamily::Z80N => "z80n".to_owned(),
-                CpuFamily::Z180 => "z180".to_owned(),
-                CpuFamily::Avr => "avr".to_owned(),
-                _ => "ez80-adl".to_owned(),
-            },
+            name: capabilities.name.to_owned(),
             pointer_width_bits,
-            native_int_widths: if pointer_width_bits == 16 {
-                vec![8, 16]
-            } else {
-                vec![8, 16, 24]
-            },
-            prefer_code_size: true,
-            has_cache: false,
-            supports_port_io: supports_port_io(options.cpu),
+            native_int_widths: capabilities.native_int_widths.to_vec(),
+            prefer_code_size: capabilities.prefer_code_size,
+            has_cache: capabilities.has_cache,
+            supports_port_io: capabilities.supports_port_io,
         },
         memory,
         declarations,
@@ -173,18 +162,6 @@ fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic
         address_width_bits: 24,
         regions,
     })
-}
-
-fn supports_port_io(cpu: CpuFamily) -> bool {
-    matches!(
-        cpu,
-        CpuFamily::Ez80
-            | CpuFamily::Z80
-            | CpuFamily::Z80N
-            | CpuFamily::Z180
-            | CpuFamily::I8080
-            | CpuFamily::I8085
-    )
 }
 
 fn region_size(start: Address24, preferred: u32) -> u32 {

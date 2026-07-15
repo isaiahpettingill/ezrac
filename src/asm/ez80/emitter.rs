@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    asm::ez80::analyze_instruction,
+    asm::ez80::{analyze_instruction, is_unsupported_z80_family_instruction},
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -7661,6 +7661,12 @@ fn validate_inline_asm_clobbers(
         ));
     }
     for line in lines {
+        if is_unsupported_z80_family_instruction(cpu, line)? {
+            return Err(Diagnostic::new(format!(
+                "test assembler does not support instruction `{}`",
+                line.trim()
+            )));
+        }
         let effects = analyze_instruction(cpu, line)?.effects;
         for register in effects.referenced_special_registers {
             if !asm_clobbers_include(clobbers, register) {
