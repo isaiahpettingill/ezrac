@@ -1,0 +1,230 @@
+// TI-99/4A TMS9918A VDP access and graphics primitives.
+//
+// The TMS9900 backend passes arguments to naked platform wrappers in R0..R9.
+// Byte values occupy the low byte of each register; the VDP itself uses the
+// high byte of the TMS9900 data bus.
+pub const DATA: u16 = 0x8C00
+pub const STATUS: u16 = 0x8802
+pub const CONTROL: u16 = 0x8C02
+pub const NAME_TABLE: u16 = 0x1800
+pub const COLOR_TABLE: u16 = 0x2000
+pub const PATTERN_TABLE: u16 = 0x0800
+pub const SPRITE_ATTRIBUTES: u16 = 0x1B00
+pub const SPRITE_PATTERNS: u16 = 0x3800
+pub const SCREEN_WIDTH: u8 = 32
+pub const SCREEN_HEIGHT: u8 = 24
+pub const COLOR_TRANSPARENT: u8 = 0
+pub const COLOR_BLACK: u8 = 1
+pub const COLOR_MEDIUM_GREEN: u8 = 2
+pub const COLOR_LIGHT_GREEN: u8 = 3
+pub const COLOR_DARK_BLUE: u8 = 4
+pub const COLOR_LIGHT_BLUE: u8 = 5
+pub const COLOR_DARK_RED: u8 = 6
+pub const COLOR_CYAN: u8 = 7
+pub const COLOR_MEDIUM_RED: u8 = 8
+pub const COLOR_LIGHT_RED: u8 = 9
+pub const COLOR_DARK_YELLOW: u8 = 10
+pub const COLOR_LIGHT_YELLOW: u8 = 11
+pub const COLOR_DARK_GREEN: u8 = 12
+pub const COLOR_MAGENTA: u8 = 13
+pub const COLOR_GRAY: u8 = 14
+pub const COLOR_WHITE: u8 = 15
+
+// Set a TMS9918A register. `index` is 0 through 7.
+naked pub fn set_register(index: u8, value: u8) {
+    asm volatile {
+        "swpb r1"
+        "movb r1, @>8c02"
+        "swpb r0"
+        "ori r0, >8000"
+        "movb r0, @>8c02"
+        "b *r11"
+    }
+}
+
+// Select a VRAM address for subsequent writes.
+naked pub fn set_write_address(address: u16) {
+    asm volatile {
+        "mov r0, r1"
+        "swpb r1"
+        "movb r1, @>8c02"
+        "andi r0, >3f00"
+        "ori r0, >4000"
+        "movb r0, @>8c02"
+        "b *r11"
+    }
+}
+
+// Select a VRAM address for subsequent reads.
+naked pub fn set_read_address(address: u16) {
+    asm volatile {
+        "mov r0, r1"
+        "swpb r1"
+        "movb r1, @>8c02"
+        "andi r0, >3f00"
+        "movb r0, @>8c02"
+        "b *r11"
+    }
+}
+
+// Write one byte to the currently selected VRAM address.
+naked pub fn write_data(value: u8) {
+    asm volatile {
+        "swpb r0"
+        "movb r0, @>8c00"
+        "b *r11"
+    }
+}
+
+// Send one raw control byte. Prefer set_register/set_write_address where possible.
+naked pub fn write_control(value: u8) {
+    asm volatile {
+        "swpb r0"
+        "movb r0, @>8c02"
+        "b *r11"
+    }
+}
+
+// Copy `length` bytes from a ROM/RAM pointer to currently selected VRAM.
+naked pub fn write_bytes(source: ptr<u8>, length: u16) {
+    asm volatile {
+        "ti99_vdp_write_bytes_loop:"
+        "movb *r0+, r2"
+        "movb r2, @>8c00"
+        "dec r1"
+        "jgt ti99_vdp_write_bytes_loop"
+        "b *r11"
+    }
+}
+
+// Fill `length` bytes at the currently selected VRAM address.
+naked pub fn fill(value: u8, length: u16) {
+    asm volatile {
+        "swpb r0"
+        "ti99_vdp_fill_loop:"
+        "movb r0, @>8c00"
+        "dec r1"
+        "jgt ti99_vdp_fill_loop"
+        "b *r11"
+    }
+}
+
+// Initialize the standard Graphics I table layout and turn the display on.
+naked pub fn init_graphics() {
+    asm volatile {
+        "li r0, >0000"
+        "movb r0, @>8c02"
+        "li r0, >8000"
+        "movb r0, @>8c02"
+        "li r0, >e000"
+        "movb r0, @>8c02"
+        "li r0, >8100"
+        "movb r0, @>8c02"
+        "li r0, >0600"
+        "movb r0, @>8c02"
+        "li r0, >8200"
+        "movb r0, @>8c02"
+        "li r0, >8000"
+        "movb r0, @>8c02"
+        "li r0, >8300"
+        "movb r0, @>8c02"
+        "li r0, >0100"
+        "movb r0, @>8c02"
+        "li r0, >8400"
+        "movb r0, @>8c02"
+        "li r0, >f100"
+        "movb r0, @>8c02"
+        "li r0, >8700"
+        "movb r0, @>8c02"
+        "b *r11"
+    }
+}
+
+// Enable 16x16 hardware sprites using the standard TI-99/4A sprite tables.
+naked pub fn init_sprites() {
+    asm volatile {
+        "li r0, >e200"
+        "movb r0, @>8c02"
+        "li r0, >8100"
+        "movb r0, @>8c02"
+        "li r0, >3600"
+        "movb r0, @>8c02"
+        "li r0, >8500"
+        "movb r0, @>8c02"
+        "li r0, >0700"
+        "movb r0, @>8c02"
+        "li r0, >8600"
+        "movb r0, @>8c02"
+        "b *r11"
+    }
+}
+
+// Clear all 768 name-table entries to `tile`.
+naked pub fn clear_name_table(tile: u8) {
+    asm volatile {
+        "li r1, >0000"
+        "movb r1, @>8c02"
+        "li r1, >5800"
+        "movb r1, @>8c02"
+        "swpb r0"
+        "li r1, 768"
+        "ti99_vdp_clear_name_loop:"
+        "movb r0, @>8c00"
+        "dec r1"
+        "jgt ti99_vdp_clear_name_loop"
+        "b *r11"
+    }
+}
+
+// Write one 16x16 sprite descriptor. `index` selects the hardware sprite slot.
+naked pub fn set_sprite(index: u8, y: u8, x: u8, pattern: u8, color: u8) {
+    asm volatile {
+        "sla r0, 2"
+        "ai r0, >1b00"
+        "mov r0, r5"
+        "swpb r5"
+        "movb r5, @>8c02"
+        "andi r0, >3f00"
+        "ori r0, >4000"
+        "movb r0, @>8c02"
+        "swpb r1"
+        "movb r1, @>8c00"
+        "swpb r2"
+        "movb r2, @>8c00"
+        "swpb r3"
+        "movb r3, @>8c00"
+        "swpb r4"
+        "movb r4, @>8c00"
+        "b *r11"
+    }
+}
+
+// Hide all sprites by writing the TMS9918A end-marker at the first entry.
+naked pub fn hide_sprites() {
+    asm volatile {
+        "li r0, >0000"
+        "movb r0, @>8c02"
+        "li r0, >5b00"
+        "movb r0, @>8c02"
+        "li r0, >d000"
+        "movb r0, @>8c00"
+        "b *r11"
+    }
+}
+
+// Busy-wait for `frames` coarse frame intervals. A zero count returns immediately.
+naked pub fn wait_frames(frames: u16) {
+    asm volatile {
+        "ci r0, 0"
+        "jeq ti99_vdp_wait_done"
+        "ti99_vdp_wait_frame:"
+        "li r1, >1800"
+        "ti99_vdp_wait_delay:"
+        "dec r1"
+        "jgt ti99_vdp_wait_delay"
+        "dec r0"
+        "jne ti99_vdp_wait_frame"
+        "ti99_vdp_wait_done:"
+        "b *r11"
+    }
+}

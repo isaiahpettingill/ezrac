@@ -1,12 +1,12 @@
 # Motorola 6800 assembler mode
 
-EZRAC can assemble standalone Motorola 6800 source without running EZRA language code generation:
+EZRAC can assemble standalone Motorola 6800 source:
 
 ```sh
 ezrac assemble --cpu m6800 --target bare-m6800 --base 8000h -o program.bin program.asm
 ```
 
-The `m6800` assembler is intentionally separate from any future EZRA m6800 backend or emulator integration.
+With the optional `m6800` Cargo feature enabled, the `bare-m6800` target also supports EZRA source lowering and test-runner emulator execution.
 
 ## Syntax
 

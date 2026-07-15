@@ -1,0 +1,3 @@
+// Keyboard scanning is exposed by the console ROM KSCAN routine at >000E.
+pub const KSCAN: u16 = 0x000E
+pub const KEY_NONE: u8 = 0

@@ -6,9 +6,9 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, TMS9900, DCPU-16, AVR, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, M68k requires `m68k`, and DCPU-16 requires `dcpu`.
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, M68k requires `m68k`, and DCPU-16 requires `dcpu`.
 
-Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have broad EZRA source code generation; DCPU-16, M6800, and TMS9900 targets are assembly-only through the public CLI. MOS 6502 and optional M68k have target-specific source emitters, and AVR has a complete register-ABI source backend.
+Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have complete EZRA source code generation; optional DCPU-16, M6800, M68k, and TMS9900 targets have target-specific source emitters. MOS 6502 variants also have a source emitter; the initial TMS9900 backend is a documented 8-/16-bit scalar subset. AVR has a complete register-ABI source backend.
 
 ## Support Levels
 
@@ -52,11 +52,12 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
-| `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; assembly-only target |
+| `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
+| `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | none | Optional `dcpu` feature; assembly-only target |
 | `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
 | `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
-| `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; source/assembly target |
+| `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
 
@@ -400,7 +401,7 @@ generic-dcpu-bare
 bare-tms9900
 ```
 
-Bare targets use raw `.bin` output and do not enable default SDK symbols. `generic-dcpu-bare` is available with the optional `dcpu` feature for complete standalone DCPU-16 1.7 handwritten assembly; see [`dcpu-assembly.md`](dcpu-assembly.md). `bare-tms9900` is available with the optional `tms9900` feature and supports handwritten assembly only; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
+Bare targets use raw `.bin` output and do not enable default SDK symbols. `generic-dcpu-bare` is available with the optional `dcpu` feature for complete standalone DCPU-16 1.7 handwritten assembly; see [`dcpu-assembly.md`](dcpu-assembly.md). `bare-tms9900` is available with the optional `tms9900` feature and supports the initial scalar source backend plus handwritten assembly; see [`tms9900-assembly.md`](tms9900-assembly.md). Layouts are generic:
 
 ```text
 bare-ez80   24-bit address space, load 0x000000, stack 0xFFFFFF

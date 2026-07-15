@@ -15,7 +15,7 @@ use ezra::{
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
     layout::parse_layout,
     parser::parse_program,
-    project::load_nearest_project_config,
+    project::{LspMode, load_nearest_project_config},
     target::DEFAULT_TARGET_TRIPLE,
 };
 use lsp::notification::{Notification, TextDocumentPublishDiagnostics};
@@ -395,7 +395,14 @@ impl Server {
                 default_sdk_symbols: true,
             };
             let is_bundled_sdk = bundled_sdk_context(&path).is_some();
-            let path_diagnostics = if is_bundled_sdk {
+            let is_library = match uses_library_lsp_mode(&path) {
+                Ok(is_library) => is_library,
+                Err(error) => {
+                    diagnostics.push((path.clone(), error));
+                    continue;
+                }
+            };
+            let path_diagnostics = if is_bundled_sdk || is_library {
                 check_module_diagnostics_with_sdk_and_overrides(
                     &source,
                     &options,
@@ -418,7 +425,7 @@ impl Server {
                     .unwrap_or_else(|| path.clone());
                 (diagnostic_path, diagnostic)
             }));
-            if !is_bundled_sdk {
+            if !is_bundled_sdk && !is_library {
                 diagnostics.extend(project_layout_diagnostics(&path));
             }
         }
@@ -507,7 +514,9 @@ fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
         debug_comments: false,
         default_sdk_symbols: true,
     };
-    if bundled_sdk_context(&document.path).is_some() {
+    if bundled_sdk_context(&document.path).is_some()
+        || uses_library_lsp_mode(&document.path).unwrap_or(false)
+    {
         check_module_diagnostics_with_sdk_and_overrides(
             &document.text,
             &options,
@@ -522,6 +531,11 @@ fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
             &HashMap::new(),
         )
     }
+}
+
+fn uses_library_lsp_mode(path: &Path) -> Result<bool, Diagnostic> {
+    Ok(load_nearest_project_config(path)?
+        .is_some_and(|project| project.lsp_mode == LspMode::Library))
 }
 
 fn project_source_path(path: &Path) -> Result<PathBuf, Diagnostic> {
@@ -2022,6 +2036,8 @@ const DOCUMENTED_TARGETS: &[&str] = &[
     "bare-i8080",
     "bare-i8085",
     "bare-ez80",
+    #[cfg(feature = "tms9900")]
+    "ti99-4a-tms9900",
     #[cfg(feature = "tms9900")]
     "bare-tms9900",
     #[cfg(feature = "dcpu")]

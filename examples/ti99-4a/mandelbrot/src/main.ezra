@@ -1,0 +1,55 @@
+// A compact fixed-point Mandelbrot-inspired tile renderer. Graphics setup and
+// color selection use the TI-99/4A SDK; only the nonlinear inner renderer and
+// ROM-resident pattern upload remain low-level assembly.
+import ti99.graphics
+
+fn main() {
+    graphics.begin()
+    graphics.set_color_byte(0xF4)
+    asm volatile {
+        // Select pattern-table address >0800 for the ROM upload.
+        "li r0, >0000"
+        "movb r0, @>8c02"
+        "li r0, >4800"
+        "movb r0, @>8c02"
+        // Upload seven density glyphs from ROM to the selected pattern table.
+        "li r1, 56"
+        "li r2, patterns"
+        "mandelbrot_patterns:"
+        "movb *r2+, r0"
+        "movb r0, @>8c00"
+        "dec r1"
+        "jgt mandelbrot_patterns"
+
+        // Render 32 x 24 character cells. R3 is a fixed-point coordinate;
+        // MPY supplies the nonlinear density used as a glyph index.
+        "li r0, >0000"
+        "movb r0, @>8c02"
+        "li r0, >5800"
+        "movb r0, @>8c02"
+        "li r1, 768"
+        "li r3, >0011"
+        "mandelbrot_cells:"
+        "mov r3, r4"
+        "ai r4, >ffc0"
+        "mpy r4, r6"
+        "mov r7, r0"
+        "andi r0, >0700"
+        "ai r0, >0100"
+        "movb r0, @>8c00"
+        "ai r3, 29"
+        "dec r1"
+        "jgt mandelbrot_cells"
+        "mandelbrot_hold:"
+        "jmp mandelbrot_hold"
+
+        "patterns:"
+        "db >00, >00, >00, >00, >00, >00, >00, >00"
+        "db >00, >00, >18, >00, >00, >18, >00, >00"
+        "db >00, >24, >00, >42, >00, >24, >00, >42"
+        "db >18, >24, >42, >00, >42, >24, >18, >00"
+        "db >3c, >42, >81, >00, >81, >42, >3c, >00"
+        "db >7e, >81, >00, >81, >00, >81, >7e, >00"
+        "db >ff, >81, >bd, >a5, >a5, >bd, >81, >ff"
+    }
+}

@@ -1,0 +1,37 @@
+// TMS9918A hardware-sprite animation. The SDK owns graphics setup, sprite
+// descriptors, and timing; the only inline assembly is the ROM pattern upload.
+import ti99.sprites
+
+fn main() {
+    sprites.enable_graphics()
+    asm volatile {
+        // Select sprite-pattern address >3800 for the ROM upload.
+        "li r0, >0000"
+        "movb r0, @>8c02"
+        "li r0, >7800"
+        "movb r0, @>8c02"
+        "li r1, 64"
+        "li r2, sprite_patterns"
+        "atom_patterns:"
+        "movb *r2+, r0"
+        "movb r0, @>8c00"
+        "dec r1"
+        "jgt atom_patterns"
+        "jmp atom_patterns_done"
+        "sprite_patterns:"
+        "db >00, >00, >00, >18, >3c, >3c, >18, >00, >00, >00, >00, >00, >00, >00, >00, >00"
+        "db >00, >00, >3c, >7e, >ff, >ff, >7e, >3c, >3c, >7e, >ff, >ff, >7e, >3c, >00, >00"
+        "db >00, >00, >00, >18, >3c, >3c, >18, >00, >00, >00, >00, >00, >00, >00, >00, >00"
+        "db >00, >00, >3c, >7e, >ff, >ff, >7e, >3c, >3c, >7e, >ff, >ff, >7e, >3c, >00, >00"
+        "atom_patterns_done:"
+    }
+
+    let y: u8 = 48
+    loop {
+        sprites.place(0, y, 136, 0, 15)
+        sprites.place(1, 88, 120, 1, 9)
+        sprites.wait(1)
+        y = y + 1
+        if y == 176 { y = 48 }
+    }
+}

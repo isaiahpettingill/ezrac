@@ -29,8 +29,14 @@ use ezra::{
 
 #[cfg(feature = "avr")]
 use ezra::asm::emit_avr_assembly_with_options;
+#[cfg(feature = "dcpu")]
+use ezra::asm::emit_dcpu_assembly_with_options;
 #[cfg(feature = "m68k")]
 use ezra::asm::emit_m68k_assembly_with_options;
+#[cfg(feature = "m6800")]
+use ezra::asm::emit_m6800_assembly_with_options;
+#[cfg(feature = "tms9900")]
+use ezra::asm::emit_tms9900_assembly_with_options;
 
 #[cfg(feature = "lsp")]
 mod lsp_server;
@@ -792,6 +798,7 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::Lr35902
             | CpuFamily::Avr
             | CpuFamily::Mos6502
+            | CpuFamily::Tms9900
     ) {
         return Ok(());
     }
@@ -854,8 +861,38 @@ fn emit_source_assembly(
         {
             unreachable!("AVR targets require the avr Cargo feature")
         }
-    } else if options.cpu == CpuFamily::Mos6502 {
+    } else if matches!(
+        options.cpu,
+        CpuFamily::Mos6502 | CpuFamily::Cmos65C02 | CpuFamily::Wdc65C816 | CpuFamily::Ricoh2A03
+    ) {
         emit_mos6502_assembly_with_options(program, options)
+    } else if options.cpu == CpuFamily::Dcpu {
+        #[cfg(feature = "dcpu")]
+        {
+            emit_dcpu_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "dcpu"))]
+        {
+            unreachable!("DCPU-16 targets require the dcpu Cargo feature")
+        }
+    } else if options.cpu == CpuFamily::M6800 {
+        #[cfg(feature = "m6800")]
+        {
+            emit_m6800_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "m6800"))]
+        {
+            unreachable!("M6800 targets require the m6800 Cargo feature")
+        }
+    } else if options.cpu == CpuFamily::Tms9900 {
+        #[cfg(feature = "tms9900")]
+        {
+            emit_tms9900_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "tms9900"))]
+        {
+            unreachable!("TMS9900 targets require the tms9900 Cargo feature")
+        }
     } else if options.cpu == CpuFamily::M68k {
         #[cfg(feature = "m68k")]
         {
@@ -1213,6 +1250,7 @@ fn uses_flat_output_map(settings: &BuildSettings) -> bool {
         || settings.target.triple.value.starts_with("commodore64-6502")
         || is_ti_ce_target(&settings.target.triple.value)
         || is_ti_z80_target(&settings.target.triple.value)
+        || settings.target.triple.value.starts_with("ti99-4a-tms9900")
 }
 
 fn is_ti_ce_target(target: &str) -> bool {
@@ -3486,12 +3524,21 @@ fn print_targets() {
         },
         #[cfg(feature = "tms9900")]
         TargetRow {
+            triple: "ti99-4a-tms9900",
+            cpu: "tms9900",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "ti99.*",
+            status: "TI-99/4A cartridge source target",
+        },
+        #[cfg(feature = "tms9900")]
+        TargetRow {
             triple: "bare-tms9900",
             cpu: "tms9900",
             address_width_bits: 16,
             output: "bin",
             sdk: "none",
-            status: "assembly-only TMS9900 target",
+            status: "bare TMS9900 source/assembly target",
         },
         #[cfg(feature = "dcpu")]
         TargetRow {

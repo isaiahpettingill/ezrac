@@ -1,0 +1,8 @@
+// Console ROM service entry points. Calls use the TI console workspace ABI.
+pub const XML: u16 = 0x0000
+pub const KSCAN: u16 = 0x000E
+pub const VSBW: u16 = 0x0038
+pub const VMBW: u16 = 0x003C
+
+// These symbols are provided for assembly wrappers and documentation. The
+// initial source SDK keeps hardware transactions explicit through ti99.vdp.

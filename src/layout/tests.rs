@@ -41,6 +41,22 @@ fn z80_default_layout_validates_and_stays_in_16_bit_address_space() {
 }
 
 #[test]
+fn ti99_4a_layout_reserves_console_io_and_uses_cartridge_rom() {
+    let layout = Layout::ti99_4a_tms9900();
+
+    layout.validate().unwrap();
+    assert_eq!(layout.load.get(), 0x6000);
+    assert_eq!(layout.entry.get(), 0x6000);
+    assert_eq!(layout_symbol_value(&layout, "TI99_WORKSPACE"), Some(0x8300));
+    assert!(
+        layout
+            .regions
+            .iter()
+            .any(|region| region.name == "vdp_write")
+    );
+}
+
+#[test]
 fn bare_6502_layout_reserves_zero_page_and_hardware_stack() {
     let layout = Layout::bare_6502();
     layout.validate().unwrap();

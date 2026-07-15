@@ -99,6 +99,31 @@ fn bundled_sdk_documents_use_target_context_and_do_not_require_main() {
 }
 
 #[test]
+fn library_lsp_mode_checks_sdk_imports_without_requiring_main() {
+    let root = std::env::temp_dir().join(format!("ezrac-lsp-library-{}", std::process::id()));
+    let sdk_root = root.join("sdk");
+    let source_path = root.join("src/lib.ezra");
+    fs::create_dir_all(&sdk_root).unwrap();
+    fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    fs::write(
+        root.join("Ezra.toml"),
+        "[build]\ntarget = \"custom-unknown-ez80\"\n\n[lsp]\nmode = \"library\"\n\n[sdk]\npaths = [\"sdk\"]\n",
+    )
+    .unwrap();
+    fs::write(sdk_root.join("math.ezra"), "pub const VALUE: u8 = 42\n").unwrap();
+    let document = OpenDocument {
+        path: source_path,
+        text: "import math\npub fn answer() -> u8 { return math.VALUE }\n".to_owned(),
+        version: None,
+    };
+
+    let diagnostics = check_document_diagnostics(&document);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn cpm_examples_resolve_the_built_in_sdk_from_their_project_target() {
     let path = repository_path("examples/cpm-z80/console-output.ezra");
     let document = OpenDocument {

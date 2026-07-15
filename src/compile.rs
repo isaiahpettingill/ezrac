@@ -137,7 +137,18 @@ fn check_diagnostics_with_sdk_and_overrides(
         .and_then(|target| parse_target_triple(target).ok())
         .map(|target| target.cpu)
         .unwrap_or(CpuFamily::Ez80);
-    if cpu != CpuFamily::M68k {
+    if matches!(
+        cpu,
+        CpuFamily::Ez80
+            | CpuFamily::Z80
+            | CpuFamily::Z80N
+            | CpuFamily::Z180
+            | CpuFamily::I8080
+            | CpuFamily::I8085
+            | CpuFamily::Lr35902
+            | CpuFamily::Avr
+            | CpuFamily::M6800
+    ) {
         for diagnostic in collect_ez80_semantic_diagnostics(
             &resolved,
             diagnostic_assembly_options(
@@ -309,7 +320,10 @@ fn check_source_with_sdk_and_overrides(
         {
             unreachable!("AVR targets require the avr Cargo feature")
         }
-    } else if cpu == CpuFamily::Mos6502 {
+    } else if matches!(
+        cpu,
+        CpuFamily::Mos6502 | CpuFamily::Cmos65C02 | CpuFamily::Wdc65C816 | CpuFamily::Ricoh2A03
+    ) {
         emit_mos6502_assembly_with_options(&program, assembly_options)
     } else if cpu == CpuFamily::Dcpu {
         #[cfg(feature = "dcpu")]
@@ -812,6 +826,13 @@ fn resolve_program_imports(
             continue;
         };
         let (import_path, source) = read_import_source(&program.source_path, import, sdk)?;
+        // A module reached through an earlier import already contributed its
+        // declarations and aliases. Skipping it here prevents shared SDK
+        // dependencies from creating duplicate qualified aliases.
+        let normalized_import_path = normalize_path(&import_path);
+        if seen.contains(&normalized_import_path) && !stack.contains(&normalized_import_path) {
+            continue;
+        }
         let source = source_override(source_overrides, &import_path).unwrap_or(source);
         let mut imported = parse_program(&import_path, &source)?;
         imported.declarations = active_declarations(imported.declarations, sdk)?;
@@ -1183,6 +1204,38 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(|target| target.starts_with("ti99-4a-tms9900")) {
+        match import {
+            "ti99.console" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/console.ezra"),
+                "ti99.console",
+            )),
+            "ti99.graphics" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/graphics.ezra"),
+                "ti99.graphics",
+            )),
+            "ti99.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/input.ezra"),
+                "ti99.input",
+            )),
+            "ti99.sprites" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/sprites.ezra"),
+                "ti99.sprites",
+            )),
+            "ti99.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/memory.ezra"),
+                "ti99.memory",
+            )),
+            "ti99.sound" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/sound.ezra"),
+                "ti99.sound",
+            )),
+            "ti99.vdp" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/vdp.ezra"),
+                "ti99.vdp",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(is_ti_z80_target) {
         match import {
             "ti.os" => Some(builtin_sdk_utf8(
@@ -1330,6 +1383,13 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "tice.lcd",
         "ti.os",
         "ti.lcd",
+        "ti99.console",
+        "ti99.graphics",
+        "ti99.input",
+        "ti99.sprites",
+        "ti99.memory",
+        "ti99.sound",
+        "ti99.vdp",
         "zx.rom",
         "zx.screen",
         "zx.io",

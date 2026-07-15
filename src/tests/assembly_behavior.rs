@@ -674,7 +674,7 @@ fn assemble_file_writes_tms9900_raw_binary() {
 
     assert_eq!(
         std::fs::read(&output_path).unwrap(),
-        [0x02, 0x01, 0x12, 0x34, 0xc0, 0x60, 0x8c, 0x00, 0x10, 0xfb]
+        [0x02, 0x01, 0x12, 0x34, 0xc8, 0x01, 0x8c, 0x00, 0x10, 0xfb]
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -692,13 +692,13 @@ fn m6800_rejects_non_m6800_instruction() {
 
 #[test]
 #[cfg(feature = "m6800")]
-fn m6800_target_rejects_ezra_source_codegen() {
+fn m6800_target_builds_ezra_source() {
     let root = temp_root("m6800_source_codegen");
     std::fs::create_dir_all(&root).unwrap();
     let source_path = root.join("main.ezra");
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
-    let error = build_source_with_build_options(&BuildCommandOptions {
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
         path: Some(source_path.to_string_lossy().into_owned()),
         debug_comments: false,
         default_sdk_symbols: false,
@@ -707,9 +707,12 @@ fn m6800_target_rejects_ezra_source_codegen() {
         layout_path: None,
         target: Some("bare-m6800".to_owned()),
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.contains("CPU `m6800`"), "{error}");
+    let assembly = std::fs::read_to_string(outputs.asm).unwrap();
+    let binary = std::fs::read(outputs.executable).unwrap();
+    assert!(assembly.contains("target: Motorola M6800"), "{assembly}");
+    assert!(!binary.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }

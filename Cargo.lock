@@ -120,7 +120,8 @@ dependencies = [
 [[package]]
 name = "dcpu"
 version = "0.5.0"
-source = "git+https://github.com/Yamakaky/dcpu.git?rev=0a2e26f9867a3bd0509eddfb2aaec3fba153e3ce#0a2e26f9867a3bd0509eddfb2aaec3fba153e3ce"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0d956a6a2c15e0fa4f39c2cdca7dac749e0f6e47c93000a52d0339787d2e2fa"
 dependencies = [
  "clap",
  "colored",
@@ -129,8 +130,6 @@ dependencies = [
  "log 0.3.9",
  "nom",
  "rustyline",
- "serde 0.9.15",
- "serde_derive 0.9.15",
  "time",
 ]
 
@@ -172,10 +171,12 @@ checksum = "6a31c7fd56bc3b5cc0cc372be064c43d698ff31baec6e2e8dfbb0de2e4d970b2"
 
 [[package]]
 name = "ezrac"
-version = "0.1.24"
+version = "0.1.27"
 dependencies = [
  "dcpu",
  "ez80",
+ "libre99-asm",
+ "libre99-core",
  "lsp",
  "m6800",
  "m68000",
@@ -183,7 +184,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "play96",
- "serde 1.0.228",
+ "serde",
  "serde_json",
  "toml",
 ]
@@ -294,6 +295,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "libre99-asm"
+version = "0.1.0"
+source = "git+https://github.com/joelodom/libre99.git?rev=6c86f10bae65f4cc3bdc13289e14bb20af03ab61#6c86f10bae65f4cc3bdc13289e14bb20af03ab61"
+dependencies = [
+ "libre99-core",
+]
+
+[[package]]
+name = "libre99-core"
+version = "0.1.0"
+source = "git+https://github.com/joelodom/libre99.git?rev=6c86f10bae65f4cc3bdc13289e14bb20af03ab61#6c86f10bae65f4cc3bdc13289e14bb20af03ab61"
+
+[[package]]
 name = "log"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -315,14 +329,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc7d55a90fa5c2702e99c10c4cfbd75f9a574e659bff4d3dd88d50d8af33e532"
 dependencies = [
  "percent-encoding",
- "serde 1.0.228",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "m6800"
 version = "0.1.0"
-source = "git+https://github.com/isaiahpettingill/m6800-rs.git?rev=7c6054b65d31074a8738c7adf6b47acee2a62e5a#7c6054b65d31074a8738c7adf6b47acee2a62e5a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c356adc9ac7552cde3b0a80d578a523eb34824a799c51a5a9871bd0698b60a2b"
 
 [[package]]
 name = "m68000"
@@ -434,8 +449,8 @@ dependencies = [
  "pest",
  "pest_meta",
  "proc-macro2",
- "quote 1.0.46",
- "syn 2.0.118",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -481,12 +496,6 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "0.3.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a6e920b65c65f10b2ae65c831a81a073a89edd28c7cce89475bff467ab4167a"
-
-[[package]]
-name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
@@ -516,27 +525,12 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "0.9.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34b623917345a631dc9608d5194cc206b3fe6c3554cd1c75b937e55e285254af"
-
-[[package]]
-name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
- "serde_derive 1.0.228",
-]
-
-[[package]]
-name = "serde_codegen_internals"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc888bd283bd2420b16ad0d860e35ad8acb21941180a83a189bb2046f9d00400"
-dependencies = [
- "syn 0.11.11",
+ "serde_derive",
 ]
 
 [[package]]
@@ -545,18 +539,7 @@ version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
 dependencies = [
- "serde_derive 1.0.228",
-]
-
-[[package]]
-name = "serde_derive"
-version = "0.9.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978fd866f4d4872084a81ccc35e275158351d3b9fe620074e7d7504b816b74ba"
-dependencies = [
- "quote 0.3.15",
- "serde_codegen_internals",
- "syn 0.11.11",
+ "serde_derive",
 ]
 
 [[package]]
@@ -566,8 +549,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
- "quote 1.0.46",
- "syn 2.0.118",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -578,7 +561,7 @@ checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "itoa",
  "memchr",
- "serde 1.0.228",
+ "serde",
  "serde_core",
  "zmij",
 ]
@@ -606,33 +589,13 @@ checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
 
 [[package]]
 name = "syn"
-version = "0.11.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3b891b9015c88c576343b9b3e41c2c11a51c219ef067b264bd9c8aa9b441dad"
-dependencies = [
- "quote 0.3.15",
- "synom",
- "unicode-xid",
-]
-
-[[package]]
-name = "syn"
 version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
- "quote 1.0.46",
+ "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "synom"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a393066ed9010ebaed60b9eafa373d4b1baac186dd7e008555b0f702b51945b6"
-dependencies = [
- "unicode-xid",
 ]
 
 [[package]]
@@ -711,12 +674,6 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
-
-[[package]]
-name = "unicode-xid"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c1f860d7d29cf02cb2f3f359fd35991af3d30bac52c57d265a3c461074cb4dc"
 
 [[package]]
 name = "vec_map"

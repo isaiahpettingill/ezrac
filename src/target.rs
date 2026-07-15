@@ -30,6 +30,9 @@ pub enum CpuFamily {
     Lr35902,
     Avr,
     Mos6502,
+    Cmos65C02,
+    Wdc65C816,
+    Ricoh2A03,
     Tms9900,
     Dcpu,
 }
@@ -47,6 +50,9 @@ pub enum AssemblerCpu {
     M6800,
     M68k,
     Mos6502,
+    Cmos65C02,
+    Wdc65C816,
+    Ricoh2A03,
     Tms9900,
     Dcpu,
 }
@@ -65,11 +71,14 @@ impl AssemblerCpu {
             "m6800" | "6800" => Self::M6800,
             "m68k" | "68000" | "m68000" => Self::M68k,
             "6502" | "mos6502" | "m6502" => Self::Mos6502,
+            "65c02" | "cmos65c02" => Self::Cmos65C02,
+            "65c816" | "wdc65c816" | "65816" => Self::Wdc65C816,
+            "2a03" | "ricoh2a03" | "nes" => Self::Ricoh2A03,
             "tms9900" | "9900" => Self::Tms9900,
             "dcpu" | "dcpu16" | "dcpu-16" => Self::Dcpu,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, tms9900, dcpu, m6800, m68k, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m68k, or avr"
                 ));
             }
         };
@@ -92,7 +101,9 @@ impl AssemblerCpu {
             Self::Avr => cfg!(feature = "avr"),
             Self::M6800 => cfg!(feature = "m6800"),
             Self::M68k => cfg!(feature = "m68k"),
-            Self::Mos6502 => cfg!(feature = "mos6502"),
+            Self::Mos6502 | Self::Cmos65C02 | Self::Wdc65C816 | Self::Ricoh2A03 => {
+                cfg!(feature = "mos6502")
+            }
             Self::Tms9900 => cfg!(feature = "tms9900"),
             Self::Dcpu => cfg!(feature = "dcpu"),
         }
@@ -106,7 +117,7 @@ impl AssemblerCpu {
             Self::Avr => "avr",
             Self::M6800 => "m6800",
             Self::M68k => "m68k",
-            Self::Mos6502 => "mos6502",
+            Self::Mos6502 | Self::Cmos65C02 | Self::Wdc65C816 | Self::Ricoh2A03 => "mos6502",
             Self::Tms9900 => "tms9900",
             Self::Dcpu => "dcpu",
         }
@@ -125,6 +136,9 @@ impl AssemblerCpu {
             Self::M6800 => "m6800",
             Self::M68k => "m68k",
             Self::Mos6502 => "6502",
+            Self::Cmos65C02 => "65c02",
+            Self::Wdc65C816 => "65c816",
+            Self::Ricoh2A03 => "2a03",
             Self::Tms9900 => "tms9900",
             Self::Dcpu => "dcpu",
         }
@@ -141,6 +155,9 @@ impl AssemblerCpu {
             | Self::M6800
             | Self::M68k
             | Self::Mos6502
+            | Self::Cmos65C02
+            | Self::Wdc65C816
+            | Self::Ricoh2A03
             | Self::Tms9900
             | Self::Dcpu => None,
             Self::Avr => None,
@@ -170,6 +187,9 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::Avr => Self::Avr,
             CpuFamily::M6800 => Self::M6800,
             CpuFamily::Mos6502 => Self::Mos6502,
+            CpuFamily::Cmos65C02 => Self::Cmos65C02,
+            CpuFamily::Wdc65C816 => Self::Wdc65C816,
+            CpuFamily::Ricoh2A03 => Self::Ricoh2A03,
             CpuFamily::Tms9900 => Self::Tms9900,
             CpuFamily::Dcpu => Self::Dcpu,
         }
@@ -190,6 +210,9 @@ impl CpuFamily {
             Self::Avr => "avr",
             Self::M6800 => "m6800",
             Self::Mos6502 => "6502",
+            Self::Cmos65C02 => "65c02",
+            Self::Wdc65C816 => "65c816",
+            Self::Ricoh2A03 => "2a03",
             Self::Tms9900 => "tms9900",
             Self::Dcpu => "dcpu",
         }
@@ -338,12 +361,17 @@ pub fn memory_model_for_cpu(cpu: CpuFamily) -> Option<TargetMemoryModel> {
         CpuFamily::Lr35902
         | CpuFamily::M6800
         | CpuFamily::Mos6502
+        | CpuFamily::Cmos65C02
+        | CpuFamily::Ricoh2A03
         | CpuFamily::Tms9900
         | CpuFamily::Dcpu => Some(TargetMemoryModel {
             pointer_width_bits: 16,
             address_width_bits: 16,
         }),
-
+        CpuFamily::Wdc65C816 => Some(TargetMemoryModel {
+            pointer_width_bits: 24,
+            address_width_bits: 24,
+        }),
         CpuFamily::Avr => Some(TargetMemoryModel {
             pointer_width_bits: 16,
             address_width_bits: 16,
@@ -399,6 +427,9 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "avr" | "atmega32u4" => Some(CpuFamily::Avr),
             "m6800" | "6800" => Some(CpuFamily::M6800),
             "6502" | "mos6502" | "m6502" => Some(CpuFamily::Mos6502),
+            "65c02" | "cmos65c02" => Some(CpuFamily::Cmos65C02),
+            "65c816" | "wdc65c816" | "65816" => Some(CpuFamily::Wdc65C816),
+            "2a03" | "ricoh2a03" | "nes" => Some(CpuFamily::Ricoh2A03),
             "tms9900" | "9900" => Some(CpuFamily::Tms9900),
             "dcpu" | "dcpu16" => Some(CpuFamily::Dcpu),
             _ => None,
