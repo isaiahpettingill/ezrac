@@ -4,9 +4,10 @@ pub const RECORD_SIZE: u16 = 128
 const DMA_SET_DMA_ADDRESS: u8 = 26
 
 fn dma_call_de(function: u8, value: u16) {
-    asm volatile(in function: u8 as reg8, in value: u16 as reg16, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
-        "ld c, {function}"
-        "ex de, {value}"
+    asm volatile(in function: u8 as mem, in value: u16 as mem, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld a, {function}"
+        "ld c, a"
+        "ld de, {value}"
         "call 0005h"
     }
 }

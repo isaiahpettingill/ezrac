@@ -51,17 +51,20 @@ pub fn call(function: u8) {
 }
 
 pub fn call_e(function: u8, value: u8) {
-    asm volatile(in function: u8 as reg8, in value: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
-        "ld c, {function}"
-        "ld e, {value}"
+    asm volatile(in function: u8 as mem, in value: u8 as mem, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld a, {function}"
+        "ld c, a"
+        "ld a, {value}"
+        "ld e, a"
         "call 0005h"
     }
 }
 
 pub fn call_de(function: u8, value: u16) {
-    asm volatile(in function: u8 as reg8, in value: u16 as reg16, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
-        "ld c, {function}"
-        "ex de, {value}"
+    asm volatile(in function: u8 as mem, in value: u16 as mem, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld a, {function}"
+        "ld c, a"
+        "ld de, {value}"
         "call 0005h"
     }
 }
@@ -78,9 +81,10 @@ pub fn call_a(function: u8) -> u8 {
 
 pub fn call_de_a(function: u8, value: u16) -> u8 {
     let result: u8 = 0
-    asm volatile(in function: u8 as reg8, in value: u16 as reg16, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
-        "ld c, {function}"
-        "ex de, {value}"
+    asm volatile(in function: u8 as mem, in value: u16 as mem, out result: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld a, {function}"
+        "ld c, a"
+        "ld de, {value}"
         "call 0005h"
         "ld {result}, a"
     }

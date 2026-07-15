@@ -44,18 +44,18 @@ The downloader currently supports x86-64 Windows, Linux, and macOS. Other hosts 
 | Test | Examples | Core | Assertions |
 | --- | --- | --- | --- |
 | `arduboy_snake_runs_on_real_core` | `examples/arduboy/snake` | Arduous | Intel HEX loading, 128x64 non-uniform OLED output, directional input, and framebuffer capture |
-| `gameboy_examples_run_on_real_core` | All five projects under `examples/gameboy` | mGBA | ROM-only header, CGB flag, Nintendo logo, and both checksums for every artifact; DMG/CGB video; sprite/background rendering; joypad-driven palette and scrolling changes; audio; and deterministic save states for every example |
-| `zx_spectrum_example_runs_on_real_core` | `examples/zxspectrum-z80/hello` | Fuse | `.tap` loading, keyboard-driven `RANDOMIZE USR` fallback, visible output, the program's blue border, and save-state round trips |
-| `cpm_examples_run_on_real_core` | All source and assembly programs under `examples/cpm-z80` | ep128emu | CP/M builds, IS-DOS boot and program launch, visible output, fixture file access, and deterministic save states |
-| `ez180n_examples_run_on_real_core` | All three projects under `examples/ez180n` | ez180N | Character video, joypad movement/jumping, and sound output |
+| `gameboy_examples_run_on_real_core` | All six projects under `examples/gameboy` | mGBA | ROM-only header, CGB flag, Nintendo logo, and both checksums for every artifact; DMG/CGB video; sprite/background rendering; joypad-driven palette and scrolling changes; audio; and deterministic save states for every example |
+| `zx_spectrum_examples_run_on_real_core` | Both projects under `examples/zxspectrum-z80` | Fuse | `.tap` loading, keyboard-driven `RUN` fallback, visible hello and full-screen bitmap output, blue-border behavior, and save-state round trips |
+| `cpm_examples_run_on_real_core` | All source and assembly programs under `examples/cpm-z80` | ep128emu | CP/M builds, IS-DOS boot and lowercase program launch, visible output, fixture file access, and deterministic save states |
+| `ez180n_examples_run_on_real_core` | All four projects under `examples/ez180n` | ez180N | Character video, Mandelbrot rendering, joypad movement/jumping, and sound output |
 
 The CP/M suite creates a 720 KiB FAT12 disk for each generated `.com`, adds a `README.TXT` fixture for file-reading examples, and writes an adjacent ep128emu configuration selecting `EP128_DISK_ISDOS`. These generated files remain under `target/play96-cpm`.
 
-Agon MOS and TI examples are not included yet because the repository does not currently emit content that a configured `play96`-compatible libretro core can boot directly for those systems.
+Agon MOS and TI-99/4A examples are build-validated but are not runtime-tested here because the repository does not emit content that an available Play96-compatible core can boot directly. Both C64 projects have a manual `c64_examples_run_on_real_core` test, but C64 is excluded from the downloader matrix on Windows: Frodo's framebuffer is corrupt through Play96 0.3.2, while current VICE x64/x64sc cores crash during session startup.
 
 Each successful test writes its final framebuffer to `target/play96-captures`. These PNGs are useful for reviewing a core's rendering when an assertion changes. The runner also writes shareable Markdown and JSON reports to `target/play96-results` with suite status, runtime, core source, and SHA-256 identity.
 
-The latest reviewed four-suite run is published in [`docs/real-core-test-results.md`](real-core-test-results.md). Partial `-Suite` reports contain only the selected platform and should not replace that complete snapshot.
+The latest reviewed five-suite run is published in [`docs/real-core-test-results.md`](real-core-test-results.md). Partial `-Suite` reports contain only the selected platform and should not replace that complete snapshot.
 
 ## Direct test commands
 
@@ -78,7 +78,7 @@ POSIX shell example:
 
 ```sh
 PLAY96_ZX_SPECTRUM_CORE=/path/to/fuse_libretro.so \
-  cargo test --test libretro_examples zx_spectrum_example_runs_on_real_core -- --ignored --exact --nocapture
+  cargo test --all-features --test libretro_examples zx_spectrum_examples_run_on_real_core -- --ignored --exact --nocapture
 ```
 
 To run every manually configured platform:

@@ -1,5 +1,4 @@
 // Normalized active-high Game Boy controls.
-// read() leaves the state byte in A:
 // bit 0 Right, 1 Left, 2 Up, 3 Down, 4 A, 5 B, 6 Select, 7 Start.
 
 pub const RIGHT: u8 = 0x01
@@ -11,7 +10,7 @@ pub const B: u8 = 0x20
 pub const SELECT: u8 = 0x40
 pub const START: u8 = 0x80
 
-pub fn read() {
+fn read() {
     asm volatile(clobber a, clobber b, clobber flags, clobber memory) {
         "ld a, 20h"
         "ldh (00h), a"
@@ -35,45 +34,82 @@ pub fn read() {
     }
 }
 
-// Waits until any active-high button bit in mask is held.
-pub fn wait(mask: u8) {
-    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld c, l"
-        ".gb_input_wait_mask:"
+pub fn wait_for_a() {
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 10h"
+        ".gb_input_wait_a:"
         "call _read"
         "and c"
-        "jr z, .gb_input_wait_mask"
+        "jr z, .gb_input_wait_a"
     }
 }
 
-pub fn wait_for_a() {
-    wait(0x10)
-}
-
 pub fn wait_for_start() {
-    wait(0x80)
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 80h"
+        ".gb_input_wait_start:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_start"
+    }
 }
 
 pub fn wait_for_b() {
-    wait(0x20)
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 20h"
+        ".gb_input_wait_b:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_b"
+    }
 }
 
 pub fn wait_for_select() {
-    wait(0x40)
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 40h"
+        ".gb_input_wait_select:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_select"
+    }
 }
 
 pub fn wait_for_right() {
-    wait(0x01)
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 01h"
+        ".gb_input_wait_right:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_right"
+    }
 }
 
 pub fn wait_for_left() {
-    wait(0x02)
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 02h"
+        ".gb_input_wait_left:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_left"
+    }
 }
 
 pub fn wait_for_up() {
-    wait(0x04)
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 04h"
+        ".gb_input_wait_up:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_up"
+    }
 }
 
 pub fn wait_for_down() {
-    wait(0x08)
+    asm volatile(clobber a, clobber b, clobber c, clobber de, clobber hl, clobber flags, clobber memory) {
+        "ld c, 08h"
+        ".gb_input_wait_down:"
+        "call _read"
+        "and c"
+        "jr z, .gb_input_wait_down"
+    }
 }

@@ -1,54 +1,46 @@
 # Published real-core test results
 
-This page records the latest reviewed run of EZRA's opt-in `play96` integration suite. Core binaries are not committed; the hashes identify the exact third-party binaries used for this result.
+This page records the latest visually reviewed run of EZRA's opt-in `play96` integration suite. Core binaries are not committed; the hashes identify the exact third-party binaries used for this result.
 
-- **Published:** 2026-07-13
-- **Run generated:** `2026-07-13T22:00:40.7577832+00:00`
+- **Published:** 2026-07-15
+- **Run generated:** `2026-07-15T23:43:34.9717684+00:00`
 - **Host:** Windows x86-64
 - **Frontend:** `play96 0.3.2`
-- **Runner:** `tools/test-real-cores.ps1`
-- **Result:** all 16 example executions passed
+- **Runner:** `tools/test-real-cores.ps1 -Suite All`
+- **Result:** all 20 example executions passed across five suites
 
 ## Results
 
 | Platform | Test | Examples | Core source | Result | Runtime |
 | --- | --- | ---: | --- | --- | ---: |
-| Game Boy / Game Boy Color | `gameboy_examples_run_on_real_core` | 5 | RetroArch buildbot mGBA | Passed | 5.94 s |
-| ZX Spectrum | `zx_spectrum_example_runs_on_real_core` | 1 | RetroArch buildbot Fuse | Passed | 3.61 s |
-| CP/M 2.2 Z80 | `cpm_examples_run_on_real_core` | 7 | RetroArch buildbot ep128emu | Passed | 133.49 s |
-| ez180N | `ez180n_examples_run_on_real_core` | 3 | Codeberg `nightly` release | Passed | 8.87 s |
-
-The complete four-suite publisher passed on this host and generated the timings above in one run. Fuse reported version 1.6.0 during the published run.
+| Arduboy | `arduboy_snake_runs_on_real_core` | 1 | RetroArch buildbot Arduous | Passed | 5.25 s |
+| Game Boy / Game Boy Color | `gameboy_examples_run_on_real_core` | 6 | RetroArch buildbot mGBA | Passed | 9.59 s |
+| ZX Spectrum | `zx_spectrum_examples_run_on_real_core` | 2 | RetroArch buildbot Fuse | Passed | 11.04 s |
+| CP/M 2.2 Z80 | `cpm_examples_run_on_real_core` | 7 | RetroArch buildbot ep128emu | Passed | 172.39 s |
+| ez180N | `ez180n_examples_run_on_real_core` | 4 | Codeberg `nightly` release | Passed | 16.45 s |
 
 ## Core identities
 
 | Core binary | SHA-256 |
 | --- | --- |
-| `mgba_libretro.dll` | `7cefa328150bf9eb7b82da25339460b3057b12faf159f58d8ca026cf29497425` |
-| `fuse_libretro.dll` | `c12fc5385649c4f07a2d85b003a15bf86310c8f95b3d784a95ec8dbe585feacd` |
-| `ep128emu_core_libretro.dll` | `09c4836615d3ab31f4f525653a52799e5a518f9b9b3633d03ba658d2f32dc9c7` |
+| `arduous_libretro.dll` | `b8ab90d589e47d0daef10fd37fa1be51ddc84f87d0de5aa6e9dd3a9b7e10ffcf` |
+| `mgba_libretro.dll` | `7fa6c6e0a5ffa86affeb4c21987896c95e63945a66facb64c86eee4b1771c38f` |
+| `fuse_libretro.dll` | `30db2a703d18760a6ff20a8ca9e0037f0dad19c2ccdd4465c17f5a42b0a10ea0` |
+| `ep128emu_core_libretro.dll` | `b1e434a8e7da3e945910e04510ae3bc79195c60da12f048d168c79ce537fdf16` |
 | `ez180n_windows_x64.dll` | `4a70d02437ce0ac991dbf4cf1e7d60a79893608923b89d3a64ffc18a73cd9a20` |
 
-## Behavioral evidence
+## Visual review
 
-- **mGBA:** DMG/CGB video geometry and rendering, sprite/background output, joypad-driven palette and scroll changes, audio, and deterministic save states.
-- **Fuse:** `.tap` loading, keyboard-driven start fallback, visible output, blue border behavior, and save-state round trip.
-- **ep128emu:** all source and assembly programs built, booted from generated FAT12 IS-DOS disks, produced distinct visible output, accessed fixture files, and restored a deterministic save state.
-- **ez180N:** character video, joypad movement and jumping, and sound output.
+- **Arduous:** Snake board, snake, food, score, and controls render clearly at 128×64.
+- **mGBA:** checkerboard backgrounds, sprite, CGB palette grid, Mandelbrot silhouette, audio/input screen, and serial boot diagnostic were reviewed.
+- **Fuse:** hello output and blue border render correctly; Mandelbrot's generated orbit pattern fills the complete 256×192 bitmap.
+- **ep128emu:** source and assembly programs launch from generated IS-DOS disks; `Hi`, `Hello from EZRA on CP/M`, `Type:`, and the fixture byte `E` are visible as expected.
+- **ez180N:** hello, jumping, Mandelbrot, and Meteor Run screens render correctly; input and audio assertions pass.
 
-Successful runs also produced framebuffer captures under `target/play96-captures`. Those generated images and all third-party binaries remain untracked.
+Agon MOS and TI-99/4A examples were separately build-validated because no available Play96-compatible core can directly boot their emitted artifacts. C64 hello and Mandelbrot were tested with current Windows cores, but are not published as successful runtime results: Frodo returned corrupt framebuffers and VICE x64/x64sc crashed during session startup.
 
-## Reproducing and publishing a new result
-
-Run:
+Generated screenshots remain under the ignored `target/play96-captures` directory. Reproduce the complete report with:
 
 ```powershell
-./tools/test-real-cores.ps1 -Refresh
+./tools/test-real-cores.ps1 -Suite All -Refresh
 ```
-
-Each run writes shareable reports to:
-
-- `target/play96-results/real-core-results.md`
-- `target/play96-results/real-core-results.json`
-
-Review those reports and captures before updating this published snapshot. A partial `-Suite` run reports only the selected suite and should not replace a complete four-suite publication.

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.28
+
+- Added the playable Arduboy Snake example and real-core Arduous validation, with AVR pointer, carry/borrow, load-flag, and SDK import fixes.
+- Added TMS9900 multiplication and embedded-asset lowering so TI-99/4A examples remain Ezra source, and build-validated both TI examples.
+- Fixed Game Boy SDK argument handling, palette upload, input, video copying, and background-map layout; all six Game Boy examples now run on mGBA.
+- Fixed CP/M BDOS/DMA multi-argument calls and deterministic lowercase IS-DOS launching; all source and assembly examples now execute visibly under ep128emu.
+- Added complete real-core coverage for both ZX Spectrum and all four ez180N examples, including SDK bitmap-address correction and Mandelbrot captures.
+- Added C64 hello and Mandelbrot runtime coverage for compatible libretro cores; current Windows Play96 combinations remain blocked by corrupt Frodo video and VICE native crashes.
+
 ## 0.1.27
 
 - Added source lowering and test-runner emulator execution for M6800, TMS9900, and DCPU-16 programs.

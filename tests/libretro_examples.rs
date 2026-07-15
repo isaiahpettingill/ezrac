@@ -230,7 +230,7 @@ fn write_cpm_disk(label: &str, program: &[u8], extra_files: &[(&str, &[u8])]) ->
 
     let mut fat = vec![0u8; SECTORS_PER_FAT * SECTOR_SIZE];
     fat[0..3].copy_from_slice(&[0xf9, 0xff, 0xff]);
-    let files = std::iter::once(("PROGRAM.COM", program))
+    let files = std::iter::once(("EZRA.COM", program))
         .chain(extra_files.iter().copied())
         .collect::<Vec<_>>();
     assert!(files.len() <= ROOT_ENTRIES);
@@ -279,7 +279,7 @@ fn write_cpm_disk(label: &str, program: &[u8], extra_files: &[(&str, &[u8])]) ->
     fs::write(&path, disk).unwrap();
     fs::write(
         path.with_extension("ep128cfg"),
-        "machineDetailedType \"EP128_DISK_ISDOS\"\ncontentfilename \"PROGRAM.COM\"\n",
+        "machineDetailedType \"EP128_DISK_ISDOS\"\n",
     )
     .unwrap();
     path
@@ -323,33 +323,16 @@ fn capture(session: &Session, name: &str) {
 
 fn tap_key(session: &mut Session, keycode: u32) {
     session.set_key(keycode, true);
-    session.run_frames(2).unwrap();
+    session.run_frames(4).unwrap();
     session.set_key(keycode, false);
-    session.run_frames(2).unwrap();
-}
-
-fn tap_key_chord(session: &mut Session, keycodes: &[u32]) {
-    for keycode in keycodes {
-        session.set_key(*keycode, true);
-    }
-    session.run_frames(2).unwrap();
-    for keycode in keycodes {
-        session.set_key(*keycode, false);
-    }
-    session.run_frames(2).unwrap();
+    session.run_frames(6).unwrap();
 }
 
 fn start_zx_loaded_code(session: &mut Session) {
-    // Fuse fast-loads the CODE block and leaves a clean ZX BASIC prompt. Enter
-    // RANDOMIZE with T, switch to extended mode, then enter USR with L.
-    tap_key(session, key::T);
-    tap_key(session, key::SPACE);
-    tap_key_chord(session, &[key::LEFT_SHIFT, key::LEFT_CTRL]);
-    tap_key(session, key::L);
-    tap_key(session, key::SPACE);
-    for digit in "32768".bytes() {
-        tap_key(session, u32::from(digit));
-    }
+    // Fuse fast-loads the tape blocks but may leave the loaded BASIC program at
+    // a prompt without honoring its auto-start line. In keyword mode, R enters
+    // the RUN token and executes the existing loader without fragile text entry.
+    tap_key(session, key::R);
     tap_key(session, key::RETURN);
 }
 
@@ -464,6 +447,10 @@ fn gameboy_examples_run_on_real_core() {
         "examples/gameboy/input-audio/src/main.ezra",
         "examples/gameboy/input-audio/target/gameboy-dmg-lr35902/src/main.gb",
     );
+    let mandelbrot = build_example(
+        "examples/gameboy/mandelbrot/src/main.ezra",
+        "examples/gameboy/mandelbrot/target/gameboy-dmg-lr35902/src/gameboy-mandelbrot.gb",
+    );
     let serial_hello = build_example(
         "examples/gameboy/serial-hello/src/main.ezra",
         "examples/gameboy/serial-hello/target/gameboy-dmg-lr35902/src/main.gb",
@@ -477,6 +464,7 @@ fn gameboy_examples_run_on_real_core() {
         (&background, false),
         (&color_input, true),
         (&input_audio, false),
+        (&mandelbrot, false),
         (&serial_hello, false),
         (&sprite, false),
     ] {
@@ -491,9 +479,17 @@ fn gameboy_examples_run_on_real_core() {
             (160, 144),
             "Game Boy background example used unexpected video geometry"
         );
-        assert_non_uniform_frame(&game, "Game Boy background example");
-        assert_deterministic_save_state(&mut game, "gameboy-background");
         capture(&game, "gameboy-background");
+        assert_non_uniform_frame(&game, "Game Boy background example");
+        assert_deterministic_video_save_state(&mut game, "gameboy-background");
+    }
+
+    {
+        let mut game = open_session(&core, &mandelbrot, "Game Boy Mandelbrot example");
+        game.run_frames(1_200).unwrap();
+        capture(&game, "gameboy-mandelbrot");
+        assert_non_uniform_frame(&game, "Game Boy Mandelbrot example");
+        assert_deterministic_video_save_state(&mut game, "gameboy-mandelbrot");
     }
 
     {
@@ -505,7 +501,7 @@ fn gameboy_examples_run_on_real_core() {
             game.framebuffer().iter().any(|pixel| *pixel != corner),
             "Game Boy sprite was not visible against its background"
         );
-        assert_deterministic_save_state(&mut game, "gameboy-sprite");
+        assert_deterministic_video_save_state(&mut game, "gameboy-sprite");
         capture(&game, "gameboy-sprite");
     }
 
@@ -664,12 +660,16 @@ fn arduboy_snake_runs_on_real_core() {
 
 #[test]
 #[ignore = "requires PLAY96_C64_CORE pointing at a compatible Commodore 64 libretro core"]
-fn c64_example_runs_on_real_core() {
+fn c64_examples_run_on_real_core() {
     let _guard = lock_real_core_tests();
     let core = core_from_env(C64_CORE_ENV);
     let program = build_example(
         "examples/commodore64/hello/src/main.ezra",
         "examples/commodore64/hello/target/commodore64-6502/src/c64-hello.prg",
+    );
+    let mandelbrot = build_example(
+        "examples/commodore64/mandelbrot/src/main.ezra",
+        "examples/commodore64/mandelbrot/target/commodore64-6502/src/c64-mandelbrot.prg",
     );
     let image = fs::read(&program).unwrap();
     assert!(image.len() > 2, "C64 PRG has no program payload");
@@ -687,16 +687,27 @@ fn c64_example_runs_on_real_core() {
     // Frodo and several VICE builds do not expose a libretro save state.
     // Rendering validation remains portable across C64 cores.
     capture(&c64, "commodore64-hello");
+    drop(c64);
+
+    let mut c64 = open_session(&core, &mandelbrot, "Commodore 64 Mandelbrot example");
+    c64.run_frames(1_200).unwrap();
+    assert_non_uniform_frame(&c64, "Commodore 64 Mandelbrot example");
+    capture(&c64, "commodore64-mandelbrot");
 }
 
 #[test]
 #[ignore = "requires PLAY96_ZX_SPECTRUM_CORE pointing at the Fuse libretro core"]
-fn zx_spectrum_example_runs_on_real_core() {
+fn zx_spectrum_examples_run_on_real_core() {
     let _guard = lock_real_core_tests();
     let core = core_from_env(ZX_SPECTRUM_CORE_ENV);
     let cartridge = build_example(
         "examples/zxspectrum-z80/hello/src/main.ezra",
         "examples/zxspectrum-z80/hello/target/zxspectrum-z80/src/zx-hello.tap",
+    );
+
+    let mandelbrot = build_example(
+        "examples/zxspectrum-z80/mandelbrot/src/main.ezra",
+        "examples/zxspectrum-z80/mandelbrot/target/zxspectrum-z80/src/zx-mandelbrot.tap",
     );
 
     let mut game = open_session(&core, &cartridge, "ZX Spectrum hello example");
@@ -723,6 +734,14 @@ fn zx_spectrum_example_runs_on_real_core() {
         restored_border,
         "ZX Spectrum state restore did not redraw the program's blue border within 60 frames"
     );
+    drop(game);
+
+    let mut game = open_session(&core, &mandelbrot, "ZX Spectrum Mandelbrot example");
+    game.run_frames(1_500).unwrap();
+    start_zx_loaded_code(&mut game);
+    game.run_frames(1_500).unwrap();
+    assert_non_uniform_frame(&game, "ZX Spectrum Mandelbrot example");
+    capture(&game, "zx-spectrum-mandelbrot");
 }
 
 #[test]
@@ -801,7 +820,12 @@ fn cpm_examples_run_on_real_core() {
         eprintln!("loading CP/M {label} from {}", disk.display());
         let mut machine = open_session(&core, &disk, &format!("CP/M {label} example"));
         eprintln!("running CP/M {label}");
-        machine.run_frames(1_500).unwrap();
+        machine.run_frames(1_800).unwrap();
+        for character in "ezra".bytes() {
+            tap_key(&mut machine, u32::from(character));
+        }
+        tap_key(&mut machine, key::RETURN);
+        machine.run_frames(300).unwrap();
         capture(&machine, &format!("cpm-{label}"));
         assert_non_uniform_frame(&machine, &format!("CP/M {label} example"));
         if label == "console-output-source" {
@@ -838,6 +862,10 @@ fn ez180n_examples_run_on_real_core() {
     let jumping = build_example(
         "examples/ez180n/jumping/src/main.ezra",
         "examples/ez180n/jumping/target/ez180n-ez80/src/ezra-game.gaem",
+    );
+    let mandelbrot = build_example(
+        "examples/ez180n/mandelbrot/src/main.ezra",
+        "examples/ez180n/mandelbrot/target/ez180n-ez80/src/ez180n-mandelbrot.gaem",
     );
     let meteor_runner = build_example(
         "examples/ez180n/meteor-runner/src/main.ezra",
@@ -883,6 +911,13 @@ fn ez180n_examples_run_on_real_core() {
             "A input did not make the ez180N jumping player jump"
         );
         capture(&game, "ez180n-jumping");
+    }
+
+    {
+        let mut game = open_session(&core, &mandelbrot, "ez180N Mandelbrot example");
+        game.run_frames(300).unwrap();
+        assert_non_uniform_frame(&game, "ez180N Mandelbrot example");
+        capture(&game, "ez180n-mandelbrot");
     }
 
     {

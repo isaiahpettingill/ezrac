@@ -25,8 +25,8 @@ pub fn attr(ink: u8, paper: u8, flags: u8) -> u8 {
     return (ink & 7) | ((paper & 7) << 3) | (flags & (BRIGHT | FLASH))
 }
 
-pub fn bitmap_address(x: u8, y: u8) -> u16 {
-    return SCREEN_BASE | ((cast<u16>(y) & 0xC0) << 5) | ((cast<u16>(y) & 0x07) << 8) | ((cast<u16>(y) & 0x38) << 2) | (cast<u16>(x) >> 3)
+pub fn bitmap_address(byte_x: u8, y: u8) -> u16 {
+    return SCREEN_BASE | ((cast<u16>(y) & 0xC0) << 5) | ((cast<u16>(y) & 0x07) << 8) | ((cast<u16>(y) & 0x38) << 2) | (cast<u16>(byte_x) & 31)
 }
 
 pub fn attr_address(cell_x: u8, cell_y: u8) -> u16 {

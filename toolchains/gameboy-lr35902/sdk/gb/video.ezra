@@ -31,15 +31,12 @@ pub fn clear_background() {
     }
 }
 
-// HL = source, DE = VRAM destination, B = byte count.
 pub fn copy_bytes(source: ptr<u8>, destination: u16, count: u8) {
-    asm volatile(clobber a, clobber b, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
-        ".gb_video_copy:"
-        "ld a, (hl+)"
-        "ld (de), a"
-        "inc de"
-        "dec b"
-        "jr nz, .gb_video_copy"
+    let target: ptr<u8> = cast<ptr<u8>>(cast<u24>(destination))
+    let index: u8 = 0
+    while index < count {
+        *(target + cast<u16>(index)) = *(source + cast<u16>(index))
+        index += 1
     }
 }
 
@@ -83,6 +80,27 @@ pub fn initialize_palettes() {
     }
 }
 
+pub fn fill_background_123() {
+    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber h, clobber l, clobber flags, clobber memory) {
+        "ld hl, 9800h"
+        "ld bc, 0400h"
+        "ld d, 1"
+        ".gb_video_fill_123:"
+        "ld a, d"
+        "ld (hl+), a"
+        "inc d"
+        "ld a, d"
+        "cp 4"
+        "jr c, .gb_video_fill_123_next"
+        "ld d, 1"
+        ".gb_video_fill_123_next:"
+        "dec bc"
+        "ld a, b"
+        "or c"
+        "jr nz, .gb_video_fill_123"
+    }
+}
+
 pub fn enable_background() {
     initialize_palettes()
     asm volatile(clobber a, clobber memory) {
@@ -106,18 +124,12 @@ pub fn enable_background_and_sprites() {
 
 // Adds amount to the background X scroll register (SCX).
 pub fn scroll_x_forward(amount: u8) {
-    asm volatile(clobber a, clobber flags, clobber memory) {
-        "ldh a, (43h)"
-        "add a, l"
-        "ldh (43h), a"
-    }
+    let scroll: ptr<u8> = cast<ptr<u8>>(cast<u24>(0xFF43))
+    *scroll = *scroll + amount
 }
 
 // Subtracts amount from the background X scroll register (SCX).
 pub fn scroll_x_backward(amount: u8) {
-    asm volatile(clobber a, clobber flags, clobber memory) {
-        "ldh a, (43h)"
-        "sub l"
-        "ldh (43h), a"
-    }
+    let scroll: ptr<u8> = cast<ptr<u8>>(cast<u24>(0xFF43))
+    *scroll = *scroll - amount
 }

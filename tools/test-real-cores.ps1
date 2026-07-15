@@ -189,7 +189,7 @@ function Invoke-CoreTest {
     $started = [DateTimeOffset]::UtcNow
     Push-Location $repoRoot
     try {
-        & cargo test --features avr --test libretro_examples $Name -- --ignored --exact --nocapture
+        & cargo test --all-features --test libretro_examples $Name -- --ignored --exact --nocapture
         $exitCode = $LASTEXITCODE
     }
     finally {
@@ -224,7 +224,7 @@ if ($Suite -eq "All" -or $Suite -eq "GameBoy") {
 
 if ($Suite -eq "All" -or $Suite -eq "ZxSpectrum") {
     $env:PLAY96_ZX_SPECTRUM_CORE = Get-LibretroCore -Name "fuse_libretro"
-    Invoke-CoreTest -SuiteName "ZX Spectrum" -Name "zx_spectrum_example_runs_on_real_core" -Core $env:PLAY96_ZX_SPECTRUM_CORE -Source "RetroArch buildbot latest/Fuse"
+    Invoke-CoreTest -SuiteName "ZX Spectrum" -Name "zx_spectrum_examples_run_on_real_core" -Core $env:PLAY96_ZX_SPECTRUM_CORE -Source "RetroArch buildbot latest/Fuse"
 }
 
 if ($Suite -eq "All" -or $Suite -eq "Cpm") {
@@ -236,5 +236,6 @@ if ($Suite -eq "All" -or $Suite -eq "Ez180N") {
     $env:PLAY96_EZ180N_CORE = Get-Ez180NCore
     Invoke-CoreTest -SuiteName "ez180N" -Name "ez180n_examples_run_on_real_core" -Core $env:PLAY96_EZ180N_CORE -Source "Codeberg nightly release"
 }
+
 
 Write-TestResults

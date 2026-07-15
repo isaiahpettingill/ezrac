@@ -15,10 +15,9 @@ embed color_tiles: bytes = bytes [
     0xA5, 0xA5, 0xBD, 0xBD, 0x81, 0x81, 0xFF, 0xFF
 ]
 
-embed map_row: bytes = bytes [
-    1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1,
-    2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2
-]
+
+
+
 
 // CGB RGB555 palettes (4 colors, little-endian).
 embed warm_palette: bytes = bytes [
@@ -30,38 +29,7 @@ embed cool_palette: bytes = bytes [
 ]
 
 fn fill_demo_map() {
-    video.copy_bytes(&map_row, 0x9800, 32)
-    video.copy_bytes(&map_row, 0x9820, 32)
-    video.copy_bytes(&map_row, 0x9840, 32)
-    video.copy_bytes(&map_row, 0x9860, 32)
-    video.copy_bytes(&map_row, 0x9880, 32)
-    video.copy_bytes(&map_row, 0x98A0, 32)
-    video.copy_bytes(&map_row, 0x98C0, 32)
-    video.copy_bytes(&map_row, 0x98E0, 32)
-    video.copy_bytes(&map_row, 0x9900, 32)
-    video.copy_bytes(&map_row, 0x9920, 32)
-    video.copy_bytes(&map_row, 0x9940, 32)
-    video.copy_bytes(&map_row, 0x9960, 32)
-    video.copy_bytes(&map_row, 0x9980, 32)
-    video.copy_bytes(&map_row, 0x99A0, 32)
-    video.copy_bytes(&map_row, 0x99C0, 32)
-    video.copy_bytes(&map_row, 0x99E0, 32)
-    video.copy_bytes(&map_row, 0x9A00, 32)
-    video.copy_bytes(&map_row, 0x9A20, 32)
-    video.copy_bytes(&map_row, 0x9A40, 32)
-    video.copy_bytes(&map_row, 0x9A60, 32)
-    video.copy_bytes(&map_row, 0x9A80, 32)
-    video.copy_bytes(&map_row, 0x9AA0, 32)
-    video.copy_bytes(&map_row, 0x9AC0, 32)
-    video.copy_bytes(&map_row, 0x9AE0, 32)
-    video.copy_bytes(&map_row, 0x9B00, 32)
-    video.copy_bytes(&map_row, 0x9B20, 32)
-    video.copy_bytes(&map_row, 0x9B40, 32)
-    video.copy_bytes(&map_row, 0x9B60, 32)
-    video.copy_bytes(&map_row, 0x9B80, 32)
-    video.copy_bytes(&map_row, 0x9BA0, 32)
-    video.copy_bytes(&map_row, 0x9BC0, 32)
-    video.copy_bytes(&map_row, 0x9BE0, 32)
+    video.fill_background_123()
 }
 
 fn main() {

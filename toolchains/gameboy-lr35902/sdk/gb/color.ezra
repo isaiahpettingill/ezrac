@@ -1,15 +1,12 @@
 // Game Boy Color palette helpers. Palette data uses native little-endian CGB
 // RGB555 entries: two bytes per color, four colors per palette.
 
-// Writes eight bytes from HL to the selected CGB palette data register.
-fn write_palette_bytes() {
-    asm volatile(clobber a, clobber b, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld b, 8"
-        ".gb_color_write_palette_bytes:"
-        "ld a, (hl+)"
-        "ldh (c), a"
-        "dec b"
-        "jr nz, .gb_color_write_palette_bytes"
+fn write_palette_bytes(source: ptr<u8>, destination: u16) {
+    let output: ptr<u8> = cast<ptr<u8>>(cast<u24>(destination))
+    let index: u8 = 0
+    while index < 8 {
+        *output = *(source + cast<u16>(index))
+        index += 1
     }
 }
 
@@ -17,20 +14,12 @@ fn write_palette_bytes() {
 // Passing an embedded 8-byte asset is the usual pattern:
 // color.set_background_palette0(&palette)
 pub fn set_background_palette0(source: ptr<u8>) {
-    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld a, 80h"
-        "ldh (68h), a"
-        "ld c, 69h"
-        "call _write_palette_bytes"
-    }
+    *(cast<ptr<u8>>(cast<u24>(0xFF68))) = 0x80
+    write_palette_bytes(source, 0xFF69)
 }
 
 // Copies four RGB555 colors into CGB object/sprite palette zero.
 pub fn set_sprite_palette0(source: ptr<u8>) {
-    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld a, 80h"
-        "ldh (6Ah), a"
-        "ld c, 6Bh"
-        "call _write_palette_bytes"
-    }
+    *(cast<ptr<u8>>(cast<u24>(0xFF6A))) = 0x80
+    write_palette_bytes(source, 0xFF6B)
 }
