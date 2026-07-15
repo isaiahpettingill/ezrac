@@ -109,6 +109,16 @@ impl Emitter {
     }
 
     fn emit_static_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
+        let embeds = self.model.embeds.values().cloned().collect::<Vec<_>>();
+        for embed in embeds {
+            for (offset, byte) in embed.bytes.iter().copied().enumerate() {
+                self.load_immediate(i64::from(byte))?;
+                self.store_r0_address(
+                    embed.storage.address + offset as u32,
+                    &Type::Named("u8".to_owned()),
+                )?;
+            }
+        }
         for declaration in &program.declarations {
             let Declaration::Global(global) = declaration else {
                 continue;
@@ -306,11 +316,17 @@ impl Emitter {
             Expr::Char(value) => self.load_immediate(i64::from(*value))?,
             Expr::Ident(name) => self.load_ident(name, ty)?,
             Expr::AddressOf(name) => {
-                let storage = self.model.globals.get(name).ok_or_else(|| {
-                    Diagnostic::new(format!(
-                        "TMS9900 backend can only take the address of a global, not `{name}`"
-                    ))
-                })?;
+                let storage = self
+                    .model
+                    .globals
+                    .get(name)
+                    .copied()
+                    .or_else(|| self.model.embeds.get(name).map(|embed| embed.storage))
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "TMS9900 backend can only take the address of a global or embed, not `{name}`"
+                        ))
+                    })?;
                 self.line(&format!("    li r0, >{:04X}", storage.address));
             }
             Expr::Deref(pointer) => {
@@ -468,9 +484,10 @@ impl Emitter {
                 self.load_immediate(i64::from(op == BinaryOp::Or))?;
                 self.line(&format!("{done}:"));
             }
-            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+            BinaryOp::Mul => self.multiply(type_is_signed(ty)),
+            BinaryOp::Div | BinaryOp::Mod => {
                 return Err(Diagnostic::new(
-                    "multiply, divide, and remainder are not implemented by the initial TMS9900 source backend",
+                    "divide and remainder are not implemented by the initial TMS9900 source backend",
                 ));
             }
         }
@@ -478,6 +495,41 @@ impl Emitter {
             self.line("    andi r0, >00FF");
         }
         Ok(())
+    }
+
+    fn multiply(&mut self, signed: bool) {
+        // MPY source, destination stores the high word in destination and the
+        // low word in destination + 1. The source expression is in R1 and the
+        // right expression is in R0, so R1:R2 receives the product.
+        if signed {
+            let left_nonnegative = self.next_label("mul_left_nonnegative");
+            let right_nonnegative = self.next_label("mul_right_nonnegative");
+            let product_nonnegative = self.next_label("mul_product_nonnegative");
+            let done = self.next_label("mul_done");
+            self.line("    clr r3");
+            self.line("    ci r1, 0");
+            self.line(&format!("    jhe {left_nonnegative}"));
+            self.line("    neg r1");
+            self.line("    ai r3, 1");
+            self.line(&format!("{left_nonnegative}:"));
+            self.line("    ci r0, 0");
+            self.line(&format!("    jhe {right_nonnegative}"));
+            self.line("    neg r0");
+            self.line("    ai r3, 1");
+            self.line(&format!("{right_nonnegative}:"));
+            self.line("    mpy r0, r1");
+            self.line("    andi r3, 1");
+            self.line("    ci r3, 0");
+            self.line(&format!("    jeq {product_nonnegative}"));
+            self.line("    neg r2");
+            self.line(&format!("    b @{done}"));
+            self.line(&format!("{product_nonnegative}:"));
+            self.line(&format!("{done}:"));
+            self.line("    mov r2, r0");
+        } else {
+            self.line("    mpy r0, r1");
+            self.line("    mov r2, r0");
+        }
     }
 
     fn emit_boolean_from_jump(&mut self, jump: &str) {
@@ -705,6 +757,10 @@ fn scalar_width(model: &SemanticModel, ty: &Type) -> Result<u8, Diagnostic> {
     }
 }
 
+fn type_is_signed(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name) if name == "i8" || name == "i16")
+}
+
 fn assign_binary(op: AssignOp) -> BinaryOp {
     match op {
         AssignOp::Set => unreachable!("set assignments bypass binary lowering"),
@@ -771,6 +827,60 @@ mod tests {
 
         // The function's static link is at >A000 and its first local follows.
         assert_eq!(ram.read_word(0xA002), 42);
+    }
+
+    #[test]
+    fn emits_and_executes_unsigned_multiply_on_libre99() {
+        let assembly = emit(
+            "fn main() { let product: u16 = 123 * 456 }",
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..14 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0xA002), 123 * 456);
+    }
+
+    #[test]
+    fn emits_and_executes_signed_multiply_on_libre99() {
+        let assembly = emit(
+            "fn main() { let product: i16 = -123 * 456 }",
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..28 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0xA002), (123u16 * 456).wrapping_neg());
     }
 
     #[test]

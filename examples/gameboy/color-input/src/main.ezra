@@ -1,6 +1,6 @@
-import gb.video
-
 import gb.color
+import gb.input
+import gb.video
 
 // Four tiny 2bpp tiles. Tile 0 is blank; tiles 1-3 use color IDs 1-3 so
 // palette changes are immediately visible on Game Boy Color hardware.
@@ -15,6 +15,11 @@ embed color_tiles: bytes = bytes [
     0xA5, 0xA5, 0xBD, 0xBD, 0x81, 0x81, 0xFF, 0xFF
 ]
 
+embed map_row: bytes = bytes [
+    1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1,
+    2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2
+]
+
 // CGB RGB555 palettes (4 colors, little-endian).
 embed warm_palette: bytes = bytes [
     0xFF, 0x7F, 0x1F, 0x00, 0xE0, 0x03, 0xFF, 0x03
@@ -25,145 +30,53 @@ embed cool_palette: bytes = bytes [
 ]
 
 fn fill_demo_map() {
-    asm volatile(clobber a, clobber b, clobber c, clobber d, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld hl, 9800h"
-        "ld bc, 0400h"
-        "ld d, 1"
-        ".gbc_color_input_map:"
-        "ld a, d"
-        "ld (hl+), a"
-        "inc d"
-        "ld a, d"
-        "cp 4"
-        "jr c, .gbc_color_input_next"
-        "ld d, 1"
-        ".gbc_color_input_next:"
-        "dec bc"
-        "ld a, b"
-        "or c"
-        "jr nz, .gbc_color_input_map"
-    }
-}
-
-fn upload_tiles() {
-    asm volatile(clobber a, clobber b, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld hl, _color_tiles"
-        "ld de, 8000h"
-        "ld b, 64"
-        ".gbc_color_input_upload:"
-        "ld a, (hl+)"
-        "ld (de), a"
-        "inc de"
-        "dec b"
-        "jr nz, .gbc_color_input_upload"
-    }
-}
-
-fn set_warm_palette() {
-    asm volatile(clobber a, clobber b, clobber c, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld hl, _warm_palette"
-        "ld a, 80h"
-        "ldh (68h), a"
-        "ld c, 69h"
-        "call _write_palette_bytes"
-    }
-}
-
-fn set_cool_palette() {
-    asm volatile(clobber a, clobber b, clobber c, clobber h, clobber l, clobber flags, clobber memory) {
-        "ld hl, _cool_palette"
-        "ld a, 80h"
-        "ldh (68h), a"
-        "ld c, 69h"
-        "call _write_palette_bytes"
-    }
-}
-
-fn read() {
-    asm volatile(clobber a, clobber b, clobber flags, clobber memory) {
-        "ld a, 20h"
-        "ldh (00h), a"
-        "ldh a, (00h)"
-        "ldh a, (00h)"
-        "cpl"
-        "and 0Fh"
-        "ld b, a"
-        "ld a, 10h"
-        "ldh (00h), a"
-        "ldh a, (00h)"
-        "ldh a, (00h)"
-        "cpl"
-        "and 0Fh"
-        "swap a"
-        "or b"
-        "ld b, a"
-        "ld a, 30h"
-        "ldh (00h), a"
-        "ld a, b"
-    }
-}
-
-fn wait_for_a() {
-    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
-        "ld c, 10h"
-        ".gbc_wait_a:"
-        "call _read"
-        "and c"
-        "jr z, .gbc_wait_a"
-    }
-}
-
-fn wait_for_right() {
-    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
-        "ld c, 01h"
-        ".gbc_wait_right:"
-        "call _read"
-        "and c"
-        "jr z, .gbc_wait_right"
-    }
-}
-
-fn wait_for_left() {
-    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
-        "ld c, 02h"
-        ".gbc_wait_left:"
-        "call _read"
-        "and c"
-        "jr z, .gbc_wait_left"
-    }
-}
-
-fn wait_for_b() {
-    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
-        "ld c, 20h"
-        ".gbc_wait_b:"
-        "call _read"
-        "and c"
-        "jr z, .gbc_wait_b"
-    }
+    video.copy_bytes(&map_row, 0x9800, 32)
+    video.copy_bytes(&map_row, 0x9820, 32)
+    video.copy_bytes(&map_row, 0x9840, 32)
+    video.copy_bytes(&map_row, 0x9860, 32)
+    video.copy_bytes(&map_row, 0x9880, 32)
+    video.copy_bytes(&map_row, 0x98A0, 32)
+    video.copy_bytes(&map_row, 0x98C0, 32)
+    video.copy_bytes(&map_row, 0x98E0, 32)
+    video.copy_bytes(&map_row, 0x9900, 32)
+    video.copy_bytes(&map_row, 0x9920, 32)
+    video.copy_bytes(&map_row, 0x9940, 32)
+    video.copy_bytes(&map_row, 0x9960, 32)
+    video.copy_bytes(&map_row, 0x9980, 32)
+    video.copy_bytes(&map_row, 0x99A0, 32)
+    video.copy_bytes(&map_row, 0x99C0, 32)
+    video.copy_bytes(&map_row, 0x99E0, 32)
+    video.copy_bytes(&map_row, 0x9A00, 32)
+    video.copy_bytes(&map_row, 0x9A20, 32)
+    video.copy_bytes(&map_row, 0x9A40, 32)
+    video.copy_bytes(&map_row, 0x9A60, 32)
+    video.copy_bytes(&map_row, 0x9A80, 32)
+    video.copy_bytes(&map_row, 0x9AA0, 32)
+    video.copy_bytes(&map_row, 0x9AC0, 32)
+    video.copy_bytes(&map_row, 0x9AE0, 32)
+    video.copy_bytes(&map_row, 0x9B00, 32)
+    video.copy_bytes(&map_row, 0x9B20, 32)
+    video.copy_bytes(&map_row, 0x9B40, 32)
+    video.copy_bytes(&map_row, 0x9B60, 32)
+    video.copy_bytes(&map_row, 0x9B80, 32)
+    video.copy_bytes(&map_row, 0x9BA0, 32)
+    video.copy_bytes(&map_row, 0x9BC0, 32)
+    video.copy_bytes(&map_row, 0x9BE0, 32)
 }
 
 fn main() {
     video.begin_update()
-    upload_tiles()
+    video.copy_bytes(&color_tiles, 0x8000, 64)
     fill_demo_map()
     video.enable_background()
-    set_warm_palette()
+    color.set_background_palette0(&warm_palette)
 
-    wait_for_a()
-    set_cool_palette()
-    wait_for_right()
-    asm volatile(clobber a, clobber flags, clobber memory) {
-        "ldh a, (43h)"
-        "add a, 8"
-        "ldh (43h), a"
-    }
-    wait_for_left()
-    asm volatile(clobber a, clobber flags, clobber memory) {
-        "ldh a, (43h)"
-        "sub 8"
-        "ldh (43h), a"
-    }
-    wait_for_b()
-    set_warm_palette()
+    input.wait_for_a()
+    color.set_background_palette0(&cool_palette)
+    input.wait_for_right()
+    video.scroll_x_forward(8)
+    input.wait_for_left()
+    video.scroll_x_backward(8)
+    input.wait_for_b()
+    color.set_background_palette0(&warm_palette)
 }

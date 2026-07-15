@@ -305,9 +305,6 @@ fn delay_frame() {
     while outer < 28 {
         let inner: u16 = 0
         while inner < 700 {
-            asm volatile {
-                "nop"
-            }
             inner += 1
         }
         outer += 1

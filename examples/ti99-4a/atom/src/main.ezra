@@ -1,30 +1,16 @@
-// TMS9918A hardware-sprite animation. The SDK owns graphics setup, sprite
-// descriptors, and timing; the only inline assembly is the ROM pattern upload.
+// TMS9918A hardware-sprite animation using the TI-99/4A EZRA SDK.
 import ti99.sprites
+
+embed sprite_patterns: bytes = bytes [
+    0x00, 0x00, 0x00, 0x18, 0x3C, 0x3C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x18, 0x3C, 0x3C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x00, 0x00
+]
 
 fn main() {
     sprites.enable_graphics()
-    asm volatile {
-        // Select sprite-pattern address >3800 for the ROM upload.
-        "li r0, >0000"
-        "movb r0, @>8c02"
-        "li r0, >7800"
-        "movb r0, @>8c02"
-        "li r1, 64"
-        "li r2, sprite_patterns"
-        "atom_patterns:"
-        "movb *r2+, r0"
-        "movb r0, @>8c00"
-        "dec r1"
-        "jgt atom_patterns"
-        "jmp atom_patterns_done"
-        "sprite_patterns:"
-        "db >00, >00, >00, >18, >3c, >3c, >18, >00, >00, >00, >00, >00, >00, >00, >00, >00"
-        "db >00, >00, >3c, >7e, >ff, >ff, >7e, >3c, >3c, >7e, >ff, >ff, >7e, >3c, >00, >00"
-        "db >00, >00, >00, >18, >3c, >3c, >18, >00, >00, >00, >00, >00, >00, >00, >00, >00"
-        "db >00, >00, >3c, >7e, >ff, >ff, >7e, >3c, >3c, >7e, >ff, >ff, >7e, >3c, >00, >00"
-        "atom_patterns_done:"
-    }
+    sprites.upload_sprite_patterns(&sprite_patterns, 64)
 
     let y: u8 = 48
     loop {

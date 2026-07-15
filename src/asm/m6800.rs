@@ -775,6 +775,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "m6800")]
     fn resolves_case_insensitive_labels_equates_and_expressions() {
         let program = assemble_subset_with_symbols_at(
             AssemblerCpu::M6800,
