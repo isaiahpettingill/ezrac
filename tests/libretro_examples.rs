@@ -571,6 +571,59 @@ fn gameboy_examples_run_on_real_core() {
 }
 
 #[test]
+#[ignore = "requires PLAY96_GAMEBOY_CORE pointing at a third-party Game Boy libretro core"]
+fn gameboy_color_input_runs_on_real_core() {
+    let _guard = lock_real_core_tests();
+    let core = core_from_env(GAMEBOY_CORE_ENV);
+    let color_input = build_example(
+        "examples/gameboy/color-input/src/main.ezra",
+        "examples/gameboy/color-input/target/gameboy-color-lr35902/src/main.gbc",
+    );
+    assert_valid_game_boy_rom(&color_input, true);
+
+    let mut game = open_session(&core, &color_input, "Game Boy Color input example");
+    game.run_frames(300).unwrap();
+    assert_non_uniform_frame(&game, "Game Boy Color input example");
+    let warm_palette = game.frame_hash();
+    let warm_pixel = game.pixel_xrgb(0, 0).unwrap();
+
+    pulse_button(&mut game, Button::A, 2, 3);
+    let cool_palette = game.frame_hash();
+    let cool_pixel = game.pixel_xrgb(0, 0).unwrap();
+    assert_ne!(
+        cool_palette, warm_palette,
+        "A input did not switch the Game Boy Color background palette"
+    );
+    assert_ne!(
+        cool_pixel, warm_pixel,
+        "A input did not change the sampled Game Boy Color palette entry"
+    );
+
+    pulse_button(&mut game, Button::Right, 2, 3);
+    let scrolled = game.frame_hash();
+    assert_ne!(
+        scrolled, cool_palette,
+        "Right input did not scroll the Game Boy Color background"
+    );
+
+    pulse_button(&mut game, Button::Left, 2, 3);
+    let unscrolled = game.frame_hash();
+    assert_ne!(
+        unscrolled, scrolled,
+        "Left input did not reverse the Game Boy Color scroll"
+    );
+
+    pulse_button(&mut game, Button::B, 2, 3);
+    assert_ne!(
+        game.pixel_xrgb(0, 0).unwrap(),
+        cool_pixel,
+        "B input did not restore the warm Game Boy Color palette"
+    );
+    assert_deterministic_video_save_state(&mut game, "gameboy-color-input");
+    capture(&game, "gameboy-color-input");
+}
+
+#[test]
 #[ignore = "requires PLAY96_C64_CORE pointing at a compatible Commodore 64 libretro core"]
 fn c64_example_runs_on_real_core() {
     let _guard = lock_real_core_tests();
