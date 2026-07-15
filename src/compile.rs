@@ -1,5 +1,11 @@
 #[cfg(feature = "avr")]
 use crate::asm::emit_avr_assembly_with_options;
+#[cfg(feature = "dcpu")]
+use crate::asm::emit_dcpu_assembly_with_options;
+#[cfg(feature = "m6800")]
+use crate::asm::emit_m6800_assembly_with_options;
+#[cfg(feature = "tms9900")]
+use crate::asm::emit_tms9900_assembly_with_options;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -305,6 +311,26 @@ fn check_source_with_sdk_and_overrides(
         }
     } else if cpu == CpuFamily::Mos6502 {
         emit_mos6502_assembly_with_options(&program, assembly_options)
+    } else if cpu == CpuFamily::Dcpu {
+        #[cfg(feature = "dcpu")]
+        {
+            emit_dcpu_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "dcpu"))]
+        {
+            Err(Diagnostic::new(
+                "DCPU-16 targets require the dcpu Cargo feature",
+            ))
+        }
+    } else if cpu == CpuFamily::M6800 {
+        #[cfg(feature = "m6800")]
+        {
+            emit_m6800_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "m6800"))]
+        {
+            unreachable!("M6800 targets require the m6800 Cargo feature")
+        }
     } else if cpu == CpuFamily::M68k {
         #[cfg(feature = "m68k")]
         {
@@ -313,6 +339,15 @@ fn check_source_with_sdk_and_overrides(
         #[cfg(not(feature = "m68k"))]
         {
             unreachable!("m68k targets require the m68k Cargo feature")
+        }
+    } else if cpu == CpuFamily::Tms9900 {
+        #[cfg(feature = "tms9900")]
+        {
+            emit_tms9900_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "tms9900"))]
+        {
+            unreachable!("TMS9900 targets require the tms9900 Cargo feature")
         }
     } else {
         emit_ez80_assembly_with_options(&program, assembly_options)

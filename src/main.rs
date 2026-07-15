@@ -795,13 +795,25 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
     ) {
         return Ok(());
     }
+    #[cfg(feature = "m6800")]
+    if settings.target.triple.cpu == CpuFamily::M6800 {
+        return Ok(());
+    }
+    #[cfg(feature = "tms9900")]
+    if settings.target.triple.cpu == CpuFamily::Tms9900 {
+        return Ok(());
+    }
+    #[cfg(feature = "dcpu")]
+    if settings.target.triple.cpu == CpuFamily::Dcpu {
+        return Ok(());
+    }
     #[cfg(feature = "m68k")]
     if settings.target.triple.cpu == CpuFamily::M68k {
         return Ok(());
     }
 
     Err(format!(
-        "target `{}` uses CPU `{}`, but EZRA source codegen is not implemented for that CPU; use `assemble` for hand-written assembly or another supported source target",
+        "source codegen is not implemented for target {} CPU {}",
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
