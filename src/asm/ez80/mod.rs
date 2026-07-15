@@ -47,6 +47,8 @@ const GENERATED_COVERAGE_SEEDS: &[&str] = &[
     "mvi a, 7Fh",
     "lxi h, 1234h",
     "jmp 1234h",
+    "in 34h",
+    "out 56h",
     "rim",
     "sim",
     "ld b, a",
@@ -188,6 +190,12 @@ fn generated_coverage_forms() -> Vec<String> {
             forms.push(format!("{mnemonic} {condition}, 040000h"));
         }
     }
+    for mnemonic in ["jmp", "jnz", "jz", "jnc", "jc", "jpo", "jpe", "jp", "jm"] {
+        forms.push(format!("{mnemonic} 1234h"));
+    }
+    for mnemonic in ["call", "cnz", "cz", "cnc", "cc", "cpo", "cpe", "cp", "cm"] {
+        forms.push(format!("{mnemonic} 1234h"));
+    }
     for address in (0..=0x38).step_by(8) {
         forms.push(format!("rst {address:02X}h"));
     }
@@ -196,6 +204,11 @@ fn generated_coverage_forms() -> Vec<String> {
         "ld ixh, 12h",
         "bit 3, (iy-1)",
         "out0 (0Ch), a",
+        "in b, (c)",
+        "out (c), h",
+        "ld b, (ix+2)",
+        "ld (iy-2), a",
+        "set 7, (ix-1)",
         "lea hl, ix-1",
         "ld ix, 040000h",
         "ld iy, (040000h)",
@@ -305,18 +318,31 @@ fn coverage_bytes(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diag
         push24(&mut bytes, value);
         return Ok(Some(bytes));
     }
-    if let Some(branch) = branch_instruction(cpu, text)
-        && matches!(branch.width, BranchWidth::Absolute24)
-    {
+    if let Some(branch) = branch_instruction(cpu, text) {
         let value = parse_number(branch.target)?;
-        if value > 0xFF_FFFF {
-            return Err(Diagnostic::new(format!(
-                "value {} is outside u24 range",
-                branch.target
-            )));
-        }
         let mut bytes = vec![branch.opcode];
-        push24(&mut bytes, value);
+        match branch.width {
+            BranchWidth::Absolute16 => {
+                if value > 0xFFFF {
+                    return Err(Diagnostic::new(format!(
+                        "value {} is outside u16 range",
+                        branch.target
+                    )));
+                }
+                bytes.push(value as u8);
+                bytes.push((value >> 8) as u8);
+            }
+            BranchWidth::Absolute24 => {
+                if value > 0xFF_FFFF {
+                    return Err(Diagnostic::new(format!(
+                        "value {} is outside u24 range",
+                        branch.target
+                    )));
+                }
+                push24(&mut bytes, value);
+            }
+            BranchWidth::Relative8 => return Ok(None),
+        }
         return Ok(Some(bytes));
     }
     Ok(None)

@@ -450,6 +450,94 @@ fn branch_metadata_describes_control_flow_widths() {
 }
 
 #[test]
+fn intel_8080_8085_metadata_covers_io_branches_and_rim_sim_gating() {
+    let intel_io = [("in 34h", vec![0xDB, 0x34]), ("out 56h", vec![0xD3, 0x56])];
+    for cpu in [AssemblerCpu::I8080, AssemblerCpu::I8085] {
+        for (syntax, bytes) in &intel_io {
+            assert_eq!(
+                encode_generated_instruction(cpu, syntax).unwrap(),
+                Some(bytes.clone()),
+                "{cpu:?}: {syntax}"
+            );
+            assert!(instruction_effects(syntax).uses_ports, "{syntax}");
+        }
+    }
+
+    let branches = [
+        ("jmp 1234h", 0xC3),
+        ("jnz 1234h", 0xC2),
+        ("jz 1234h", 0xCA),
+        ("jnc 1234h", 0xD2),
+        ("jc 1234h", 0xDA),
+        ("jpo 1234h", 0xE2),
+        ("jpe 1234h", 0xEA),
+        ("jp 1234h", 0xF2),
+        ("jm 1234h", 0xFA),
+        ("call 1234h", 0xCD),
+        ("cnz 1234h", 0xC4),
+        ("cz 1234h", 0xCC),
+        ("cnc 1234h", 0xD4),
+        ("cc 1234h", 0xDC),
+        ("cpo 1234h", 0xE4),
+        ("cpe 1234h", 0xEC),
+        ("cp 1234h", 0xF4),
+        ("cm 1234h", 0xFC),
+    ];
+    for cpu in [AssemblerCpu::I8080, AssemblerCpu::I8085] {
+        for (syntax, opcode) in branches {
+            let branch = branch_instruction(cpu, syntax).unwrap();
+            assert_eq!(branch.opcode, opcode, "{cpu:?}: {syntax}");
+            assert_eq!(branch.width, BranchWidth::Absolute16, "{cpu:?}: {syntax}");
+            assert_eq!(branch.encoded_len(), 3, "{cpu:?}: {syntax}");
+            assert_eq!(
+                coverage_bytes(cpu, syntax).unwrap(),
+                Some(vec![opcode, 0x34, 0x12]),
+                "{cpu:?}: {syntax}"
+            );
+        }
+    }
+
+    assert_eq!(
+        encode_generated_instruction(AssemblerCpu::I8080, "rim").unwrap(),
+        None
+    );
+    assert_eq!(
+        encode_generated_instruction(AssemblerCpu::I8080, "sim").unwrap(),
+        None
+    );
+    assert_eq!(
+        encode_generated_instruction(AssemblerCpu::I8085, "rim").unwrap(),
+        Some(vec![0x20])
+    );
+    assert_eq!(
+        encode_generated_instruction(AssemblerCpu::I8085, "sim").unwrap(),
+        Some(vec![0x30])
+    );
+}
+
+#[test]
+fn ez80_coverage_includes_suffixed_indexed_and_io_forms() {
+    let coverage = instruction_coverage(AssemblerCpu::Ez80).unwrap();
+    let expected = [
+        ("in.sis b, (c)", vec![0x40, 0xED, 0x40]),
+        ("out.lis (c), h", vec![0x49, 0xED, 0x61]),
+        ("ld.lil b, (ix+2)", vec![0x5B, 0xDD, 0x46, 0x02]),
+        ("ld.sil (iy-2), a", vec![0x52, 0xFD, 0x77, 0xFE]),
+        ("set.lil 7, (ix-1)", vec![0x5B, 0xDD, 0xCB, 0xFF, 0xFE]),
+    ];
+
+    for (syntax, bytes) in expected {
+        let row = coverage
+            .iter()
+            .find(|row| row.syntax == syntax)
+            .unwrap_or_else(|| panic!("missing coverage for `{syntax}`"));
+        assert_eq!(row.bytes, bytes, "{syntax}");
+        assert!(row.vm_sizing_supported, "{syntax}");
+        assert_ez80_emulator_decodes(syntax, &row.bytes);
+    }
+}
+
+#[test]
 fn instruction_analysis_unifies_encoding_and_codegen_effects() {
     let out = analyze_instruction(AssemblerCpu::Ez80, "out0 (0Ch), a").unwrap();
     assert_eq!(out.encoded_len, Some(3));
@@ -502,8 +590,10 @@ fn machine_readable_coverage_agrees_with_encoding_and_vm_sizing() {
 }
 
 #[test]
-fn every_documented_z80_family_form_assembles_through_the_standalone_path() {
+fn every_documented_cpu_family_form_assembles_through_the_standalone_path() {
     for cpu in [
+        AssemblerCpu::I8080,
+        AssemblerCpu::I8085,
         AssemblerCpu::Z80,
         AssemblerCpu::Z80N,
         AssemblerCpu::Z180,
