@@ -1,5 +1,5 @@
 import gb.video
-import gb.input
+
 import gb.color
 
 // Four tiny 2bpp tiles. Tile 0 is blank; tiles 1-3 use color IDs 1-3 so
@@ -45,19 +45,125 @@ fn fill_demo_map() {
     }
 }
 
+fn upload_tiles() {
+    asm volatile(clobber a, clobber b, clobber d, clobber e, clobber h, clobber l, clobber flags, clobber memory) {
+        "ld hl, _color_tiles"
+        "ld de, 8000h"
+        "ld b, 64"
+        ".gbc_color_input_upload:"
+        "ld a, (hl+)"
+        "ld (de), a"
+        "inc de"
+        "dec b"
+        "jr nz, .gbc_color_input_upload"
+    }
+}
+
+fn set_warm_palette() {
+    asm volatile(clobber a, clobber b, clobber c, clobber h, clobber l, clobber flags, clobber memory) {
+        "ld hl, _warm_palette"
+        "ld a, 80h"
+        "ldh (68h), a"
+        "ld c, 69h"
+        "call _write_palette_bytes"
+    }
+}
+
+fn set_cool_palette() {
+    asm volatile(clobber a, clobber b, clobber c, clobber h, clobber l, clobber flags, clobber memory) {
+        "ld hl, _cool_palette"
+        "ld a, 80h"
+        "ldh (68h), a"
+        "ld c, 69h"
+        "call _write_palette_bytes"
+    }
+}
+
+fn read() {
+    asm volatile(clobber a, clobber b, clobber flags, clobber memory) {
+        "ld a, 20h"
+        "ldh (00h), a"
+        "ldh a, (00h)"
+        "ldh a, (00h)"
+        "cpl"
+        "and 0Fh"
+        "ld b, a"
+        "ld a, 10h"
+        "ldh (00h), a"
+        "ldh a, (00h)"
+        "ldh a, (00h)"
+        "cpl"
+        "and 0Fh"
+        "swap a"
+        "or b"
+        "ld b, a"
+        "ld a, 30h"
+        "ldh (00h), a"
+        "ld a, b"
+    }
+}
+
+fn wait_for_a() {
+    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
+        "ld c, 10h"
+        ".gbc_wait_a:"
+        "call _read"
+        "and c"
+        "jr z, .gbc_wait_a"
+    }
+}
+
+fn wait_for_right() {
+    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
+        "ld c, 01h"
+        ".gbc_wait_right:"
+        "call _read"
+        "and c"
+        "jr z, .gbc_wait_right"
+    }
+}
+
+fn wait_for_left() {
+    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
+        "ld c, 02h"
+        ".gbc_wait_left:"
+        "call _read"
+        "and c"
+        "jr z, .gbc_wait_left"
+    }
+}
+
+fn wait_for_b() {
+    asm volatile(clobber a, clobber b, clobber c, clobber flags, clobber memory) {
+        "ld c, 20h"
+        ".gbc_wait_b:"
+        "call _read"
+        "and c"
+        "jr z, .gbc_wait_b"
+    }
+}
+
 fn main() {
     video.begin_update()
-    video.copy_bytes(&color_tiles, 0x8000, 64)
+    upload_tiles()
     fill_demo_map()
     video.enable_background()
-    color.set_background_palette0(&warm_palette)
+    set_warm_palette()
 
-    input.wait_for_a()
-    color.set_background_palette0(&cool_palette)
-    input.wait_for_right()
-    video.scroll_x_forward(8)
-    input.wait_for_left()
-    video.scroll_x_backward(8)
-    input.wait_for_b()
-    color.set_background_palette0(&warm_palette)
+    wait_for_a()
+    set_cool_palette()
+    wait_for_right()
+    asm volatile(clobber a, clobber flags, clobber memory) {
+        "ldh a, (43h)"
+        "add a, 8"
+        "ldh (43h), a"
+    }
+    wait_for_left()
+    asm volatile(clobber a, clobber flags, clobber memory) {
+        "ldh a, (43h)"
+        "sub 8"
+        "ldh (43h), a"
+    }
+    wait_for_b()
+    set_warm_palette()
 }
