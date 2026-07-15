@@ -96,8 +96,6 @@ impl Emitter {
                 self.emit_function(function)?;
             }
         }
-        self.line("section .header");
-        self.line("section .rodata");
         let mut strings = self
             .model
             .strings
@@ -105,18 +103,20 @@ impl Emitter {
             .map(|(value, storage)| (storage.address, value.clone()))
             .collect::<Vec<_>>();
         strings.sort_by_key(|(address, _)| *address);
-        for (_, value) in strings {
-            self.emit_data_bytes(value.bytes().chain(std::iter::once(0)).collect());
+        if !strings.is_empty() {
+            self.line("section .rodata");
+            for (_, value) in strings {
+                self.emit_data_bytes(value.bytes().chain(std::iter::once(0)).collect());
+            }
         }
-        self.line("section .data");
-        self.line("section .bss");
-        self.line("section .assets");
         let mut embeds = self.model.embeds.values().cloned().collect::<Vec<_>>();
         embeds.sort_by_key(|embed| embed.storage.address);
-        for embed in embeds {
-            self.emit_data_bytes(embed.bytes);
+        if !embeds.is_empty() {
+            self.line("section .assets");
+            for embed in embeds {
+                self.emit_data_bytes(embed.bytes);
+            }
         }
-        self.line("section .scratch");
         Ok(self.out)
     }
 

@@ -56,7 +56,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | none | Optional `dcpu` feature; assembly-only target |
 | `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
 | `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
-| `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
+| `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; source/assembly target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
 
@@ -89,7 +89,7 @@ Build EZRA source with the optional backend enabled:
 cargo run --features m68k -- build --target generic-m68k-bare src/main.ezra
 ```
 
-The generic target emits a raw big-endian 68000 image in a 24-bit address space, initializes `SP` from the target layout, calls `main`, then loops. EZRA scalar values and returns use `D0`; `D1` and `D2` are compiler scratch registers. Calls pass arguments through compiler-owned static slots, so recursive calls are not supported yet. There is no platform SDK or Sega Genesis packaging.
+The generic target emits a raw big-endian 68000 image in a 24-bit address space, initializes `SP` from the target layout, calls `main`, then loops. EZRA scalar values and returns use `D0`; `D1` and `D2` are compiler scratch registers. Calls pass arguments through compiler-owned static slots, so recursive calls are not supported yet. There is no platform SDK, Sega Genesis packaging, or published runtime validation.
 
 ## Agon Light MOS
 

@@ -795,6 +795,10 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
     ) {
         return Ok(());
     }
+    #[cfg(feature = "m68k")]
+    if settings.target.triple.cpu == CpuFamily::M68k {
+        return Ok(());
+    }
 
     Err(format!(
         "target `{}` uses CPU `{}`, but EZRA source codegen is not implemented for that CPU; use `assemble` for hand-written assembly or another supported source target",
@@ -3511,7 +3515,7 @@ fn print_targets() {
             address_width_bits: 24,
             output: "bin",
             sdk: "none",
-            status: "experimental scalar source target",
+            status: "Motorola 68000 source/assembly target",
         },
     ];
 
