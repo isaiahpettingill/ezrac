@@ -214,7 +214,7 @@ fn ti_ce_targets_use_tice_layout_and_sdk() {
         assert!(!asm.contains("    di\n"), "{asm}");
         assert!(!asm.contains("    ld sp,"), "{asm}");
         assert!(asm.contains("__ezra_exit:\n    ret"), "{asm}");
-        assert!(asm.contains("ld (0D40000h), a"), "{asm}");
+        assert!(asm.contains("D40000h"), "{asm}");
         assert!(map.contains(".text        0xD1A881"), "{map}");
         assert_eq!(
             outputs.executable.extension().and_then(|ext| ext.to_str()),

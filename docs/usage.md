@@ -317,8 +317,8 @@ gb, gameboy         Game Boy ROM image
 prg, c64            Commodore 64 program image
 crt, commodore64-crt Commodore 64 standard cartridge image
 8xp, ti8xp          TI protected program file
-8ek, ti8ek          TI CE app-style file
-8xk, ti8xk          classic TI app-style file
+8ek, ti8ek          reserved; rejected until TI CE flash app packaging is implemented
+8xk, ti8xk          reserved; rejected until classic TI flash app packaging is implemented
 ```
 
 Target defaults:

@@ -1,10 +1,49 @@
 pub const WIDTH: u16 = 320
-pub const HEIGHT: u8 = 240
+pub const HEIGHT: u16 = 240
 pub const VRAM_BASE: u24 = 0xD40000
+pub const PIXEL_COUNT: u24 = 76800
 
-pub fn set_first_pixel(color: u8) {
-    asm volatile(in color: u8 as reg8, clobber a, clobber memory) {
-        "ld a, {color}"
-        "ld (0D40000h), a"
+pub const BLACK: u16 = 0x0000
+pub const WHITE: u16 = 0xFFFF
+pub const RED: u16 = 0xF800
+pub const GREEN: u16 = 0x07E0
+pub const BLUE: u16 = 0x001F
+pub const YELLOW: u16 = 0xFFE0
+pub const CYAN: u16 = 0x07FF
+pub const MAGENTA: u16 = 0xF81F
+
+pub fn rgb(red: u8, green: u8, blue: u8) -> u16 {
+    return (cast<u16>(red & 0xF8) << 8) | (cast<u16>(green & 0xFC) << 3) | (cast<u16>(blue) >> 3)
+}
+
+pub fn set_first_pixel(color: u16) {
+    *(cast<ptr<u16>>(VRAM_BASE)) = color
+}
+
+pub fn set_pixel(x: u16, y: u16, color: u16) {
+    if x < WIDTH && y < HEIGHT {
+        let offset: u24 = cast<u24>(y) * cast<u24>(WIDTH) + cast<u24>(x)
+        *(cast<ptr<u16>>(VRAM_BASE) + offset) = color
+    }
+}
+
+pub fn fill(color: u16) {
+    let framebuffer: ptr<u16> = cast<ptr<u16>>(VRAM_BASE)
+    let offset: u24 = 0
+    while offset < PIXEL_COUNT {
+        *(framebuffer + offset) = color
+        offset += 1
+    }
+}
+
+pub fn fill_rect(x: u16, y: u16, width: u16, height: u16, color: u16) {
+    let row: u16 = 0
+    while row < height && y + row < HEIGHT {
+        let column: u16 = 0
+        while column < width && x + column < WIDTH {
+            set_pixel(x + column, y + row, color)
+            column += 1
+        }
+        row += 1
     }
 }

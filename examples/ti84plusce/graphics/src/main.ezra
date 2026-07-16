@@ -1,0 +1,11 @@
+import tice.lcd
+import tice.os
+
+fn main() {
+    lcd.fill(lcd.BLACK)
+    lcd.fill_rect(0, 0, 160, 120, lcd.RED)
+    lcd.fill_rect(160, 0, 160, 120, lcd.GREEN)
+    lcd.fill_rect(0, 120, 160, 120, lcd.BLUE)
+    lcd.fill_rect(160, 120, 160, 120, lcd.WHITE)
+    let key: u8 = os.wait_key()
+}

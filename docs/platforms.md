@@ -32,8 +32,8 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `ez180n-ez80` | 1 | eZ80 ADL | 24 | `.gaem` | `ez180n.*` | Three examples verified on ez180N nightly |
 | `ezra-test-flat-ez80` | 2 | eZ80 ADL | 24 | `.bin` | `harness.*` | Automated test harness target |
 | `ezra-test-split-ez80` | 2 | eZ80 ADL | 24 | `.bin` | `harness.*` | Automated test harness target |
-| `ti84plusce-ez80` | 3 | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
-| `ti83premiumce-ez80` | 3 | eZ80 ADL | 24 | `.8xp` | `tice.*` | Experimental TI CE target |
+| `ti84plusce-ez80` | 2 | eZ80 ADL | 24 | `.8xp` | `tice.*` | Protected programs and 16-bit graphics verified on CEmu |
+| `ti83premiumce-ez80` | 3 | eZ80 ADL | 24 | `.8xp` | `tice.*` | Shares the CEmu-verified CE runtime; model-specific validation pending |
 | `zxspectrum-z80` | 1 | Z80 | 16 | `.tap` | `zx.*` | Hello example verified on Fuse |
 | `gameboy-dmg-lr35902` | 1 | LR35902 | 16 | `.gb` | `gb.*` | Four DMG examples verified on mGBA |
 | `gameboy-color-lr35902` | 1 | LR35902 | 16 | `.gbc` | `gb.*` | CGB input example verified on mGBA |
@@ -227,7 +227,7 @@ ti84plusce-ez80
 ti83premiumce-ez80
 ```
 
-Default output is `.8xp`. You can request app-style `.8ek` output with `[build].output = "8ek"` when appropriate.
+Default output is `.8xp`. Flash application `.8ek` output is not implemented; selecting it produces an explicit error rather than an invalid app file.
 
 Built-in SDK modules:
 
@@ -240,7 +240,7 @@ Default layout starts code at `0xD1A881`, uses RAM/rodata/assets in the `0xD3xxx
 
 Coding guidance:
 
-Use `tice.os` and `tice.lcd` wrappers for OS and LCD access. Keep names for TI outputs ASCII alphanumeric or `_`; `.8xp` variable names are uppercased and truncated to 8 bytes.
+Use `tice.os` and `tice.lcd` wrappers for OS and LCD access. The LCD SDK addresses the native 320×240 16-bit framebuffer and provides RGB565 colors, bounded pixels, fills, and rectangles. Keep names for TI outputs ASCII alphanumeric or `_`; `.8xp` variable names are uppercased and truncated to 8 bytes. See `examples/ti84plusce/graphics` for a CEmu-verified example.
 
 ## Classic TI Z80 Calculators
 
@@ -253,7 +253,7 @@ ti84-z80
 ti84plus-z80
 ```
 
-Default output is `.8xp`. You can request `.8xk` app-style output for classic TI targets.
+Default output is `.8xp`. Flash application `.8xk` output is not implemented; selecting it produces an explicit error rather than an invalid app file.
 
 Built-in SDK modules:
 
@@ -459,7 +459,7 @@ target = "ti84plusce-ez80"
 output = "8xp"
 ```
 
-Valid output formats are `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output and Commodore 64 `.prg`/`.crt` output are target-checked, as are TI app formats: `.8ek` is for TI CE targets, and `.8xk` is for classic TI Z80 targets.
+Recognized output formats are `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output and Commodore 64 `.prg`/`.crt` output are target-checked. TI `.8xp` protected programs are implemented; `.8ek` and `.8xk` are reserved but currently rejected because flash application packaging is not implemented.
 
 ## Adding A New Platform
 

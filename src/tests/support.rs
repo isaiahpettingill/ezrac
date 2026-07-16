@@ -56,23 +56,6 @@ pub(super) fn assert_ti8xp(bytes: &[u8], name: &[u8; 8], program_prefix: &[u8]) 
     assert_eq!(actual, expected);
 }
 
-pub(super) fn assert_ti_app(
-    bytes: &[u8],
-    kind: u8,
-    name: &[u8; 8],
-    entry: u32,
-    payload_prefix: &[u8],
-) {
-    assert!(bytes.starts_with(b"**TIFL**\x1A\x0A\x00"), "{bytes:02X?}");
-    assert_eq!(bytes[11], kind);
-    assert_eq!(&bytes[12..20], name);
-    assert_eq!(
-        u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
-        entry
-    );
-    assert!(bytes[64..].starts_with(payload_prefix), "{bytes:02X?}");
-}
-
 pub(super) fn copy_fixture(root: &Path, name: &str) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")

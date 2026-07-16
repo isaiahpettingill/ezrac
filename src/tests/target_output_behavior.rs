@@ -430,7 +430,7 @@ fn ti_ce_target_can_override_output_to_raw_bin() {
 }
 
 #[test]
-fn ti_ce_target_can_emit_8ek_app_output() {
+fn ti_ce_target_rejects_unimplemented_8ek_app_output() {
     let root = temp_root("ti_ce_8ek_output");
     std::fs::create_dir_all(&root).unwrap();
     let source_path = root.join("game.ezra");
@@ -445,14 +445,11 @@ fn ti_ce_target_can_emit_8ek_app_output() {
     .unwrap();
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
-    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
-    let app = std::fs::read(&outputs.executable).unwrap();
-
-    assert_eq!(
-        outputs.executable.extension().and_then(|ext| ext.to_str()),
-        Some("8ek")
+    let error = build_source(source_path.to_str().unwrap()).unwrap_err();
+    assert!(
+        error.contains("TI flash application output `.8ek` is not implemented"),
+        "{error}"
     );
-    assert_ti_app(&app, b'E', b"GAME\0\0\0\0", 0xD1_A881, &[0xCD]);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -486,7 +483,7 @@ fn ti_z80_target_can_override_output_to_raw_bin() {
 }
 
 #[test]
-fn ti_z80_target_can_emit_8xk_app_output() {
+fn ti_z80_target_rejects_unimplemented_8xk_app_output() {
     let root = temp_root("ti_z80_8xk_output");
     std::fs::create_dir_all(&root).unwrap();
     let source_path = root.join("game.ezra");
@@ -501,14 +498,11 @@ fn ti_z80_target_can_emit_8xk_app_output() {
     .unwrap();
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
-    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
-    let app = std::fs::read(&outputs.executable).unwrap();
-
-    assert_eq!(
-        outputs.executable.extension().and_then(|ext| ext.to_str()),
-        Some("8xk")
+    let error = build_source(source_path.to_str().unwrap()).unwrap_err();
+    assert!(
+        error.contains("TI flash application output `.8xk` is not implemented"),
+        "{error}"
     );
-    assert_ti_app(&app, b'X', b"GAME\0\0\0\0", 0x00009D95, &[0xCD]);
 
     let _ = std::fs::remove_dir_all(root);
 }

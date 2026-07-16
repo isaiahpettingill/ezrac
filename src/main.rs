@@ -2320,47 +2320,17 @@ fn push_zx_tap_block(out: &mut Vec<u8>, flag: u8, data: &[u8]) -> Result<(), Str
 
 fn ti_app_bytes(
     settings: &BuildSettings,
-    output_path: Option<&Path>,
-    code: &[u8],
+    _output_path: Option<&Path>,
+    _code: &[u8],
 ) -> Result<Vec<u8>, String> {
-    match settings.output_format {
-        OutputFormat::Ti8ek if !is_ti_ce_target(&settings.target.triple.value) => {
-            return Err(format!(
-                "target `{}` does not support TI CE .8ek app output",
-                settings.target.triple.value
-            ));
-        }
-        OutputFormat::Ti8xk if !is_ti_z80_target(&settings.target.triple.value) => {
-            return Err(format!(
-                "target `{}` does not support classic TI .8xk app output",
-                settings.target.triple.value
-            ));
-        }
-        OutputFormat::Ti8ek | OutputFormat::Ti8xk => {}
+    let format = match settings.output_format {
+        OutputFormat::Ti8ek => ".8ek",
+        OutputFormat::Ti8xk => ".8xk",
         _ => unreachable!("non-app output format"),
-    }
-
-    let name = ti8xp_variable_name(settings, output_path)?;
-    let payload_len = u32::try_from(code.len())
-        .map_err(|_| "TI app payload exceeds 32-bit length range".to_owned())?;
-    let checksum = code
-        .iter()
-        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
-
-    let mut out = Vec::with_capacity(64 + code.len());
-    out.extend_from_slice(b"**TIFL**\x1A\x0A\x00");
-    out.push(match settings.output_format {
-        OutputFormat::Ti8ek => b'E',
-        OutputFormat::Ti8xk => b'X',
-        _ => unreachable!(),
-    });
-    out.extend_from_slice(&name);
-    out.extend_from_slice(&settings.layout.entry.get().to_le_bytes());
-    out.extend_from_slice(&payload_len.to_le_bytes());
-    push16_le(&mut out, checksum);
-    out.resize(64, 0);
-    out.extend_from_slice(code);
-    Ok(out)
+    };
+    Err(format!(
+        "TI flash application output `{format}` is not implemented; use `.8xp` protected-program output"
+    ))
 }
 
 fn ti8xp_payload_prefix(settings: &BuildSettings) -> Result<&'static [u8], String> {
