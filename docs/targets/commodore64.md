@@ -27,7 +27,7 @@ Import these bundled modules:
 
 | Module | Coverage |
 | --- | --- |
-| `c64.vic` | VIC-II screen/color RAM, raster, display controls, IRQ registers, and sprites |
+| `c64.vic` | VIC-II text and high-resolution bitmap graphics, color RAM, raster, display controls, IRQ registers, and sprites |
 | `c64.sid` | SID voices, frequency, pulse width, ADSR, waveforms, and master volume |
 | `c64.cia` | CIA keyboard matrix, joystick ports, timers, and interrupt control |
 | `c64.memory` | 6510 `$0001` banking for ROM, I/O, character ROM, and all-RAM modes |
@@ -37,6 +37,8 @@ The standard C64 I/O configuration is `memory.map_roms_and_io()`. Call it before
 Use `cia.key_pressed(cia.KEY_Q)` to poll keys. The CIA SDK provides named constants for letters, digits, Space, Return, and Run/Stop; `key_pressed` performs the C64 keyboard-matrix scan.
 
 `vic.clear(character, color)` fills the default `$0400` screen and `$D800` color RAM. Screen codes are PETSCII screen codes, not ASCII.
+
+For pixel graphics, call `vic.enable_hires_bitmap(foreground, background)`. It selects VIC bank 1 and configures the native 320×200 high-resolution bitmap at `$6000`, with its 8×8-cell color pairs in `$4400`; this avoids overwriting code loaded from `$080D`. Draw individual pixels with `vic.set_pixel(x, y, lit)` or use `vic.set_block8(x, y, lit)` for an 8×8 logical block. Bitmap programs should remain active (for example, with an event loop) rather than returning to BASIC, which restores text mode.
 
 ## Test integration
 

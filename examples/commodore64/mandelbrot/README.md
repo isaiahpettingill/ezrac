@@ -1,6 +1,6 @@
 # Commodore 64 Mandelbrot
 
-A low-resolution Mandelbrot escape-palette display written directly to the C64 VIC-II screen and colour RAM, with a 6502 inline-assembly inner loop.
+A Mandelbrot escape display rendered through the C64 VIC-II high-resolution bitmap API. It draws a precomputed 40×25 escape map as native 8×8 bitmap blocks, filling the full 320×200 display without using text characters. The source also retains the Q4 fixed-point escape calculation as a reference; it is not used at runtime because the current generic C64 signed 16-bit inner-loop codegen is not reliable.
 
 Build from the repository root:
 

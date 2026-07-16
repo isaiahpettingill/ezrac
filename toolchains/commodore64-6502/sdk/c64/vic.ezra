@@ -17,6 +17,11 @@ pub const SPRITE_Y: u16 = 0xD001
 pub const SPRITE_ENABLE: u16 = 0xD015
 pub const SPRITE_X_MSB: u16 = 0xD010
 pub const SPRITE_COLOR0: u16 = 0xD027
+pub const VIC_BANK_SELECT: u16 = 0xDD00
+pub const BITMAP_RAM: u16 = 0x6000
+pub const BITMAP_SCREEN_RAM: u16 = 0x4400
+pub const BITMAP_WIDTH: u16 = 320
+pub const BITMAP_HEIGHT: u8 = 200
 
 pub const BLACK: u8 = 0
 pub const WHITE: u8 = 1
@@ -51,3 +56,136 @@ pub fn sprite_pointer(sprite: u8, pointer: u8) { if sprite < 8 { *(cast<ptr<u8>>
 pub fn sprite_position(sprite: u8, x: u16, y: u8) { let offset: u16 = cast<u16>(sprite) << 1; *(cast<ptr<u8>>(cast<u24>(SPRITE_X + offset))) = cast<u8>(x); *(cast<ptr<u8>>(cast<u24>(SPRITE_Y + offset))) = y; let mask: u8 = 1 << sprite; let high: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))); if x > 255 { *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))) = high | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))) = high & ~mask } }
 pub fn sprite_enable(sprite: u8, enabled: u8) { let mask: u8 = 1 << sprite; let value: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))); if enabled != 0 { *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))) = value | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))) = value & ~mask } }
 pub fn sprite_color(sprite: u8, color: u8) { *(cast<ptr<u8>>(cast<u24>(SPRITE_COLOR0 + cast<u16>(sprite)))) = color & 15 }
+
+// Configure the VIC-II's native 320x200 high-resolution bitmap mode. The
+// bitmap occupies $6000-$7FFF in VIC bank 1 and uses screen RAM at $4400 for
+// its per-8x8-cell foreground/background colour pairs. This keeps bitmap
+// writes away from the default PRG code range beginning at $080D.
+pub fn enable_hires_bitmap(foreground: u8, background: u8) {
+    *(cast<ptr<u8>>(cast<u24>(VIC_BANK_SELECT))) = (*(cast<ptr<u8>>(cast<u24>(VIC_BANK_SELECT))) & 0xFC) | 2
+    *(cast<ptr<u8>>(cast<u24>(MEMORY_POINTERS))) = 0x18
+    *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = *(cast<ptr<u8>>(cast<u24>(CONTROL1))) | 0x20
+    let cell: u16 = 0
+    let colors: u8 = ((foreground & 15) << 4) | (background & 15)
+    while cell < 1000 {
+        *(cast<ptr<u8>>(cast<u24>(BITMAP_SCREEN_RAM + cell))) = colors
+        cell += 1
+    }
+    clear_bitmap()
+}
+
+pub fn disable_bitmap() { *(cast<ptr<u8>>(cast<u24>(CONTROL1))) = *(cast<ptr<u8>>(cast<u24>(CONTROL1))) & 0xDF }
+
+pub fn clear_bitmap() {
+    // Clearing every page in one indexed 6502 loop is vastly faster than
+    // performing 8,000 generic pointer writes through the language runtime.
+    asm volatile(clobber a, clobber flags) {
+        "lda #$00"
+        "ldx #$00"
+        "c64_vic_clear_bitmap:"
+        "sta $6000,x"
+        "sta $6100,x"
+        "sta $6200,x"
+        "sta $6300,x"
+        "sta $6400,x"
+        "sta $6500,x"
+        "sta $6600,x"
+        "sta $6700,x"
+        "sta $6800,x"
+        "sta $6900,x"
+        "sta $6A00,x"
+        "sta $6B00,x"
+        "sta $6C00,x"
+        "sta $6D00,x"
+        "sta $6E00,x"
+        "sta $6F00,x"
+        "sta $7000,x"
+        "sta $7100,x"
+        "sta $7200,x"
+        "sta $7300,x"
+        "sta $7400,x"
+        "sta $7500,x"
+        "sta $7600,x"
+        "sta $7700,x"
+        "sta $7800,x"
+        "sta $7900,x"
+        "sta $7A00,x"
+        "sta $7B00,x"
+        "sta $7C00,x"
+        "sta $7D00,x"
+        "sta $7E00,x"
+        "sta $7F00,x"
+        "inx"
+        "bne c64_vic_clear_bitmap"
+    }
+}
+
+// Plot one bitmap pixel. `lit` selects the foreground (non-zero) or
+// background (zero) colour configured by enable_hires_bitmap.
+pub fn set_pixel(x: u16, y: u8, lit: u8) {
+    if x < BITMAP_WIDTH && y < BITMAP_HEIGHT {
+        let address: u16 = BITMAP_RAM + (cast<u16>(y) >> 3) * 320 + (x >> 3) * 8 + cast<u16>(y & 7)
+        let mask: u8 = 0x80 >> cast<u8>(x & 7)
+        let value: u8 = *(cast<ptr<u8>>(cast<u24>(address)))
+        if lit != 0 {
+            *(cast<ptr<u8>>(cast<u24>(address))) = value | mask
+        } else {
+            *(cast<ptr<u8>>(cast<u24>(address))) = value & ~mask
+        }
+    }
+}
+
+// Draw one 8x8 logical-pixel block. C64 bitmap memory is character-cell
+// interleaved: a cell begins at $6000 + y * 320 + x * 8, and its eight pixel
+// rows occupy eight consecutive bytes. Keep this calculation in 6502 code to
+// avoid the generic wide multiply in this performance-critical primitive.
+pub fn set_block8(x: u8, y: u8, lit: u8) {
+    asm volatile(in x: u8 as mem, in y: u8 as mem, in lit: u8 as mem, clobber a, clobber flags) {
+        "tya"
+        "pha"
+        "lda {y}"
+        "sta $FB"
+        "lsr a"
+        "lsr a"
+        "clc"
+        "adc $FB"
+        "adc #$60"
+        "sta $FC"
+        "lda $FB"
+        "and #$03"
+        "asl a"
+        "asl a"
+        "asl a"
+        "asl a"
+        "asl a"
+        "asl a"
+        "sta $FB"
+        "lda {x}"
+        "asl a"
+        "asl a"
+        "asl a"
+        "clc"
+        "adc $FB"
+        "sta $FB"
+        "bcc c64_vic_block_address"
+        "inc $FC"
+        "c64_vic_block_address:"
+        "lda {lit}"
+        "beq c64_vic_block_clear"
+        "lda #$FF"
+        "bne c64_vic_block_value"
+        "c64_vic_block_clear:"
+        "lda #$00"
+        "c64_vic_block_value:"
+        "sta $FD"
+        "ldy #$00"
+        "c64_vic_block_row:"
+        "lda $FD"
+        "sta ($FB),y"
+        "iny"
+        "cpy #$08"
+        "bne c64_vic_block_row"
+        "pla"
+        "tay"
+    }
+}
