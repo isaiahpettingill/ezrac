@@ -473,37 +473,58 @@ fn parses_extern_asm_function_declarations() {
 }
 
 #[test]
-fn parses_public_function_attributes_in_either_order() {
+fn parses_inline_attribute_spellings_with_public_in_either_order() {
     let program = parse_program(
         Path::new("game.ezra"),
         r#"
-            pub inline fn exported_add(value: u8) -> u8 {
-                return value + 1
-            }
-
-            interrupt pub fn exported_irq() {
-                return
-            }
-
+            pub @inline fn explicit_after_pub() {}
+            @inline pub fn explicit_before_pub() {}
+            pub inline fn legacy() {}
+            interrupt pub fn exported_irq() {}
             fn main() {}
             "#,
     )
     .unwrap();
 
+    for (index, name) in ["explicit_after_pub", "explicit_before_pub", "legacy"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(matches!(
+            &program.declarations[index],
+            Declaration::Function(function)
+                if function.public
+                    && function.attrs == ["inline"]
+                    && function.name == name
+        ));
+    }
     assert!(matches!(
-        &program.declarations[0],
-        Declaration::Function(function)
-            if function.public
-                && function.attrs == ["inline"]
-                && function.name == "exported_add"
-    ));
-    assert!(matches!(
-        &program.declarations[1],
+        &program.declarations[3],
         Declaration::Function(function)
             if function.public
                 && function.attrs == ["interrupt"]
                 && function.name == "exported_irq"
     ));
+}
+
+#[test]
+fn normalizes_mixed_inline_spellings_as_duplicate_attributes() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            inline @inline fn legacy_first() {}
+            @inline inline fn explicit_first() {}
+            fn main() {}
+            "#,
+    )
+    .unwrap();
+
+    for declaration in &program.declarations[..2] {
+        assert!(matches!(
+            declaration,
+            Declaration::Function(function) if function.attrs == ["inline", "inline"]
+        ));
+    }
 }
 
 #[test]

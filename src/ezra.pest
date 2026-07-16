@@ -27,7 +27,8 @@ layout_symbol = { "symbol" ~ ident ~ "=" ~ expr ~ semi? }
 visibility = { "pub" }
 volatile_kw = { "volatile" }
 attr = { "inline" | "naked" | "interrupt" }
-fn_modifier = _{ attr | visibility }
+inline_attr = { "@inline" }
+fn_modifier = _{ inline_attr | attr | visibility }
 import_decl = { "import" ~ path ~ semi? }
 const_decl = { visibility? ~ "const" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 alias_decl = { visibility? ~ "alias" ~ ident ~ "=" ~ ty ~ semi? }

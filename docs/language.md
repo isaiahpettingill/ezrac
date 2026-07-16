@@ -280,15 +280,18 @@ fn clear() {
 }
 ```
 
-Function modifiers may appear before `fn`:
+Function modifiers and attributes may appear in either order before `fn`:
 
 ```ezra
-pub inline fn helper() -> u8 { return 1 }
+pub @inline fn helper() -> u8 { return 1 }
+@inline pub fn exported_helper() -> u8 { return 2 }
 naked fn interrupt_entry() {}
 interrupt fn timer_isr() {}
 ```
 
-Supported modifiers are `pub`, `inline`, `naked`, and `interrupt`. Backend support for ABI-sensitive modifiers is target-dependent and still evolving.
+`@inline` records the `inline` function attribute. The legacy `inline fn` spelling remains supported and normalizes to the same attribute, so the two spellings should not be combined on one function. The attribute requests inlining when the target backend can safely expand the function. Backends may also inline automatically when their target cost model determines that the function body is cheaper than the call, prologue, return, and associated state preservation. Recursive calls and unsupported body shapes fall back to ordinary calls.
+
+Supported modifiers and attributes are `pub`, `@inline` (or legacy `inline`), `naked`, and `interrupt`. Backend support for ABI-sensitive modifiers is target-dependent and still evolving.
 
 External assembly functions declare routines implemented by emitted or linked assembly.
 

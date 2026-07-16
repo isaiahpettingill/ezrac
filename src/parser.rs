@@ -463,6 +463,7 @@ fn build_fn(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Function, Diagnos
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::attr => attrs.push(inner.as_str().to_owned()),
+            Rule::inline_attr => attrs.push("inline".to_owned()),
             Rule::visibility => {
                 if public {
                     return Err(Diagnostic::new("duplicate visibility `pub` on function"));

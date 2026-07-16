@@ -1,6 +1,6 @@
 // TI-99/4A TMS9918A VDP access and graphics primitives.
 //
-// The TMS9900 backend passes arguments to naked platform wrappers in R0..R9.
+// The TMS9900 backend passes arguments to naked platform wrappers in R0..R8.
 // Byte values occupy the low byte of each register; the VDP itself uses the
 // high byte of the TMS9900 data bus.
 pub const DATA: u16 = 0x8C00

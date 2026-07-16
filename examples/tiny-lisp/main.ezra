@@ -146,70 +146,32 @@ fn lisp_newline() {
     platform_write(LISP_LF)
 }
 
+fn write_text(text: ptr<u8>) {
+    let ch: u8 = *text
+    while ch != 0 {
+        platform_write(ch)
+        text += 1
+        ch = *text
+    }
+}
+
 fn write_banner() {
-    platform_write('T')
-    platform_write('i')
-    platform_write('n')
-    platform_write('y')
-    platform_write('L')
-    platform_write('i')
-    platform_write('s')
-    platform_write('p')
-    platform_write(' ')
-    platform_write('-')
-    platform_write(' ')
-    platform_write('(')
-    platform_write('+')
-    platform_write(' ')
-    platform_write('1')
-    platform_write(' ')
-    platform_write('2')
-    platform_write(')')
-    platform_write(',')
-    platform_write(' ')
-    platform_write('(')
-    platform_write('*')
-    platform_write(' ')
-    platform_write('(')
-    platform_write('+')
-    platform_write(' ')
-    platform_write('2')
-    platform_write(' ')
-    platform_write('3')
-    platform_write(')')
-    platform_write(' ')
-    platform_write('4')
-    platform_write(')')
+    write_text("TinyLisp - (+ 1 2), (* (+ 2 3) 4)")
     lisp_newline()
-    platform_write('Q')
-    platform_write(' ')
-    platform_write('t')
-    platform_write('o')
-    platform_write(' ')
-    platform_write('q')
-    platform_write('u')
-    platform_write('i')
-    platform_write('t')
-    platform_write('.')
+    write_text("Q to quit.")
     lisp_newline()
 }
 
-fn write_prompt() {
-    platform_write('>')
-    platform_write(LISP_SPACE)
+@inline fn write_prompt() {
+    write_text("> ")
 }
 
-fn write_result_prefix() {
-    platform_write('=')
-    platform_write(LISP_SPACE)
+@inline fn write_result_prefix() {
+    write_text("= ")
 }
 
-fn write_error() {
-    platform_write('e')
-    platform_write('r')
-    platform_write('r')
-    platform_write('o')
-    platform_write('r')
+@inline fn write_error() {
+    write_text("error")
     lisp_newline()
 }
 
