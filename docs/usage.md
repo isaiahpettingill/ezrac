@@ -175,6 +175,41 @@ that compiled `ezrac` (for example, `feature("m68k")`). Macros expand recursivel
 does not compile or link `.ezra` SDK functions; reusable assembly APIs should
 be published as vendorable macro sets with explicit target ABI requirements.
 
+The same Pest-based frontend is available to library callers. Filesystem,
+caller-provided, and alloc-only virtual-workspace include resolvers all produce
+the same semantic `AssemblyProgram`, preserving include and macro invocation
+locations for diagnostics:
+
+```rust
+use ezra::{
+    asm::{AssemblyPreprocessOptions, preprocess_assembly_workspace},
+    target::AssemblerCpu,
+    vm::assemble_program_at,
+    workspace::{Workspace, WorkspaceFile},
+};
+
+let files = [
+    WorkspaceFile::text("src/main.asm", "include \"macros.inc\"\n%return 42h\n"),
+    WorkspaceFile::text(
+        "src/macros.inc",
+        "%macro return(value)\nld a, $value\nret\n%endmacro\n",
+    ),
+];
+let workspace = Workspace::new(&files);
+let parsed = preprocess_assembly_workspace(
+    &workspace,
+    "src/main.asm",
+    AssemblyPreprocessOptions::for_compiled_features("bare-z80", "z80"),
+)?;
+let image = assemble_program_at(AssemblerCpu::Z80, &parsed.program, 0x0100)?;
+# Ok::<(), ezra::diagnostic::Diagnostic>(())
+```
+
+Use `preprocess_assembly_file` for host files, `preprocess_assembly_source` when
+includes are forbidden, or implement `AssemblyIncludeResolver` for another
+storage system. `parse_assembly_syntax` and `lower_parsed_assembly` expose the
+parse and semantic-lowering stages separately for tooling.
+
 ## ZX Spectrum Output
 
 `zxspectrum-z80` builds produce a `.tap` containing a standard CODE header and data block. The code loads and starts at `0x8000`, so common Spectrum emulators can load the tape directly. If the emulator does not auto-start CODE blocks, use `LOAD "" CODE` followed by `RANDOMIZE USR 32768`.

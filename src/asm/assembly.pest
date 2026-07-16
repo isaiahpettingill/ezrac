@@ -1,0 +1,88 @@
+// Assembly parsing is deliberately line-aware. Do not add a global WHITESPACE
+// rule here: Pest would otherwise consume newlines and destroy source origins.
+assembly = { SOI ~ blank_line* ~ (syntax_item ~ blank_line*)* ~ trailing ~ EOI }
+
+syntax_item = _{ macro_definition | conditional_block | statement_line }
+
+macro_definition = {
+    macro_header ~ line_end ~ blank_line* ~
+    (syntax_item ~ blank_line*)* ~
+    macro_end ~ line_end
+}
+macro_header = { hspace ~ ^"%macro" ~ hspace1 ~ statement }
+macro_end = _{ hspace ~ ^"%endmacro" ~ hspace }
+
+conditional_block = {
+    if_header ~ line_end ~ blank_line* ~
+    (syntax_item ~ blank_line*)* ~
+    else_clause? ~
+    endif_line ~ line_end
+}
+if_header = { hspace ~ ^"%if" ~ hspace1 ~ statement }
+else_clause = {
+    else_line ~ line_end ~ blank_line* ~
+    (syntax_item ~ blank_line*)*
+}
+else_line = _{ hspace ~ ^"%else" ~ hspace }
+endif_line = _{ hspace ~ ^"%endif" ~ hspace }
+
+statement_line = {
+    !(hspace ~ reserved_closer ~ line_tail) ~
+    hspace ~ statement ~ line_end
+}
+reserved_closer = _{ ^"%endmacro" | ^"%else" | ^"%endif" }
+
+// Atomic statement capture keeps syntax-tree fields independent of raw lines,
+// while fragment recursion makes all delimiters and strings balanced.
+statement = @{ fragment+ }
+fragment = _{ double_string | single_string | parens | brackets | braces | plain_char }
+parens = { "(" ~ fragment* ~ ")" }
+brackets = { "[" ~ fragment* ~ "]" }
+braces = { "{" ~ fragment* ~ "}" }
+double_string = { "\"" ~ double_string_char* ~ "\"" }
+single_string = { "'" ~ single_string_char* ~ "'" }
+double_string_char = _{ escape | !("\"" | NEWLINE) ~ ANY }
+single_string_char = _{ escape | !("'" | NEWLINE) ~ ANY }
+escape = { "\\" ~ !NEWLINE ~ ANY }
+plain_char = { !(";" | NEWLINE | "\"" | "'" | "(" | ")" | "[" | "]" | "{" | "}") ~ ANY }
+
+blank_line = _{ hspace ~ comment? ~ NEWLINE }
+trailing = _{ hspace ~ comment? }
+line_end = _{ hspace ~ comment? ~ (NEWLINE | &EOI) }
+line_tail = _{ hspace ~ comment? ~ (NEWLINE | &EOI) }
+comment = _{ ";" ~ (!NEWLINE ~ ANY)* }
+hspace = _{ (" " | "\t")* }
+hspace1 = _{ (" " | "\t")+ }
+NEWLINE = _{ "\r\n" | "\n" | "\r" }
+
+// Semantic expressions are parsed separately by the same generated parser.
+expression = { SOI ~ expr_ws ~ bit_or ~ expr_ws ~ EOI }
+bit_or = { bit_xor ~ (expr_ws ~ or_op ~ expr_ws ~ bit_xor)* }
+bit_xor = { bit_and ~ (expr_ws ~ xor_op ~ expr_ws ~ bit_and)* }
+bit_and = { additive ~ (expr_ws ~ and_op ~ expr_ws ~ additive)* }
+additive = { multiplicative ~ (expr_ws ~ add_op ~ expr_ws ~ multiplicative)* }
+multiplicative = { unary ~ (expr_ws ~ multiply_op ~ expr_ws ~ unary)* }
+unary = { unary_op* ~ expr_ws ~ primary }
+primary = { number | current | symbol | "(" ~ expr_ws ~ bit_or ~ expr_ws ~ ")" }
+
+or_op = { "|" }
+xor_op = { "^" }
+and_op = { "&" }
+add_op = { "+" | "-" }
+multiply_op = { "*" }
+unary_op = { "+" | "-" }
+
+number = @{ hex_prefix | hex_dollar | hex_greater | hex_suffix | binary_prefix | binary_percent | octal_prefix | decimal }
+hex_prefix = { (^"0x") ~ ASCII_HEX_DIGIT+ }
+hex_dollar = { "$" ~ ASCII_HEX_DIGIT+ }
+hex_greater = { ">" ~ ASCII_HEX_DIGIT+ ~ ("h" | "H")? }
+hex_suffix = { ASCII_HEX_DIGIT+ ~ ("h" | "H") }
+binary_prefix = { (^"0b") ~ ("0" | "1")+ }
+binary_percent = { "%" ~ ("0" | "1")+ }
+octal_prefix = { (^"0o") ~ ASCII_OCT_DIGIT+ }
+decimal = { ASCII_DIGIT+ }
+current = { "$" ~ !ASCII_HEX_DIGIT }
+symbol = @{ symbol_start ~ symbol_continue* }
+symbol_start = { ASCII_ALPHA | "_" | "." | "@" | "?" | "%" }
+symbol_continue = { ASCII_ALPHANUMERIC | "_" | "." | "@" | "?" | "%" }
+expr_ws = _{ (" " | "\t")* }

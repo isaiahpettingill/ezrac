@@ -6,6 +6,12 @@ use ezra::{
     api::{CompileRequest, Workspace, WorkspaceFile, build_workspace},
     ast::{Declaration, EmbedSource, Expr, Program},
 };
+#[cfg(feature = "z80")]
+use ezra::{
+    asm::{AssemblyPreprocessOptions, preprocess_assembly_workspace},
+    target::AssemblerCpu,
+    vm::assemble_program_at,
+};
 
 fn materialized_embed_bytes(program: &Program, name: &str) -> Vec<u8> {
     let embed = program
@@ -50,6 +56,38 @@ fn builds_imported_z80_workspace_without_host_io() {
     assert!(!build.machine_code.is_empty());
     assert_eq!(build.executable, build.machine_code);
     assert_eq!(build.executable_extension, "com");
+}
+
+#[cfg(feature = "z80")]
+#[test]
+fn preprocesses_and_assembles_virtual_assembly_workspace() {
+    let files = [
+        WorkspaceFile::text(
+            "src/main.asm",
+            "include \"macros.inc\"\n%if cpu(\"z80\")\n%return 42h\n%endif\n",
+        ),
+        WorkspaceFile::text(
+            "src/macros.inc",
+            "%macro return(value)\n%%entry: ld a, $value\nret\n%endmacro\n",
+        ),
+    ];
+    let workspace = Workspace::new(&files);
+    let preprocessed = preprocess_assembly_workspace(
+        &workspace,
+        "src/main.asm",
+        AssemblyPreprocessOptions::for_compiled_features("bare-z80", "z80"),
+    )
+    .expect("virtual assembly workspace should preprocess without host I/O");
+    let assembled = assemble_program_at(AssemblerCpu::Z80, &preprocessed.program, 0x0100)
+        .expect("preprocessed virtual assembly should assemble");
+
+    assert_eq!(assembled.bytes, [0x3E, 0x42, 0xC9]);
+    assert!(
+        assembled
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name.starts_with("__ezra_macro_") && symbol.addr == 0x0100)
+    );
 }
 
 #[cfg(feature = "z80")]

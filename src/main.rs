@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -7,8 +7,9 @@ use std::{
 
 use ezra::{
     asm::{
-        AssemblyOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
-        emit_mos6502_assembly_with_options,
+        AssemblyItem, AssemblyOptions, AssemblyPreprocessOptions, AssemblyProgram,
+        emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
+        emit_mos6502_assembly_with_options, preprocess_assembly_file, preprocess_assembly_source,
     },
     ast::Program,
     cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
@@ -593,8 +594,6 @@ fn parse_cli_u24(text: &str) -> Result<u32, String> {
 
 fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
     let source_path = PathBuf::from(&options.path);
-    let source = fs::read_to_string(&source_path)
-        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let target = resolve_target_profile(options.target.as_deref())?;
     let layout_path = options.layout_path.as_ref().map(PathBuf::from);
     let layout = load_layout(layout_path.as_deref(), &target.triple.value)?;
@@ -637,19 +636,19 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         if settings.output_format == OutputFormat::GameBoyGb && base_addr != 0x0150 {
             return Err("Game Boy assembly must use base address 0x0150".to_owned());
         }
-        let assembly = preprocess_assembly(
+        let preprocessed = preprocess_assembly_file(
             &source_path,
-            &source,
-            &settings.target.triple.value,
+            AssemblyPreprocessOptions::for_compiled_features(
+                &settings.target.triple.value,
+                settings.assembler_cpu.as_str(),
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let assembled = ezra::vm::assemble_program_with_options_at(
             settings.assembler_cpu,
-        )?;
-        let mut source_options = assembly_source_options(&source_path, &settings.layout);
-        source_options.line_origins = assembly.line_origins;
-        let assembled = ezra::vm::assemble_subset_with_options_at(
-            settings.assembler_cpu,
-            &assembly.text,
+            &preprocessed.program,
             base_addr,
-            &source_options,
+            &assembly_source_options(&source_path, &settings.layout),
         )
         .map_err(|error| error.to_string())?;
         AssemblyBuildImage {
@@ -658,7 +657,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
             symbols: assembled.symbols,
         }
     } else {
-        build_assembly_image(&source_path, &source, &settings)?
+        build_assembly_image(&source_path, &settings)?
     };
     let output_path = options
         .output
@@ -1123,7 +1122,7 @@ fn write_assembly_build_artifacts(
     let asm_path = output_base.with_extension("asm");
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(executable_extension(settings));
-    let image = build_assembly_image(source_path, assembly, settings)?;
+    let image = build_assembly_image(source_path, settings)?;
 
     if let Some(parent) = output_base.parent() {
         fs::create_dir_all(parent)
@@ -1166,7 +1165,7 @@ fn write_build_artifacts(
     let executable_path = output_base.with_extension(executable_extension(settings));
 
     let (bytes, map) = if settings.target.triple.cpu == CpuFamily::M68k {
-        let image = build_assembly_image(source_path, assembly, settings)?;
+        let image = build_generated_assembly_image(source_path, assembly, settings)?;
         (image.bytes, image.map)
     } else {
         let assembled = ezra::vm::assemble_subset_with_options_at(
@@ -1293,19 +1292,7 @@ struct AssemblyBuildImage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AssemblySectionSource {
     name: String,
-    source: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ExpandedAssembly {
-    text: String,
-    line_origins: Vec<SourceLocation>,
-}
-
-#[derive(Clone, Debug)]
-struct AssemblyMacro {
-    parameters: Vec<String>,
-    body: Vec<(String, SourceLocation)>,
+    program: AssemblyProgram,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1317,20 +1304,44 @@ struct PlacedAssemblySection {
 
 fn build_assembly_image(
     source_path: &Path,
+    settings: &BuildSettings,
+) -> Result<AssemblyBuildImage, String> {
+    let preprocessed = preprocess_assembly_file(
+        source_path,
+        AssemblyPreprocessOptions::for_compiled_features(
+            &settings.target.triple.value,
+            settings.assembler_cpu.as_str(),
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    build_assembly_program_image(source_path, &preprocessed.program, settings)
+}
+
+fn build_generated_assembly_image(
+    source_path: &Path,
     assembly: &str,
     settings: &BuildSettings,
 ) -> Result<AssemblyBuildImage, String> {
-    let assembly = preprocess_assembly(
-        source_path,
+    let preprocessed = preprocess_assembly_source(
+        &source_path.to_string_lossy(),
         assembly,
-        &settings.target.triple.value,
-        settings.assembler_cpu,
-    )?;
-    let sections = split_assembly_sections(&assembly.text);
-    let section_bases =
-        placed_assembly_section_bases(source_path, settings, &sections, &assembly.line_origins)?;
+        AssemblyPreprocessOptions::for_compiled_features(
+            &settings.target.triple.value,
+            settings.assembler_cpu.as_str(),
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    build_assembly_program_image(source_path, &preprocessed.program, settings)
+}
+
+fn build_assembly_program_image(
+    source_path: &Path,
+    program: &AssemblyProgram,
+    settings: &BuildSettings,
+) -> Result<AssemblyBuildImage, String> {
+    let sections = split_assembly_sections(program);
+    let section_bases = placed_assembly_section_bases(source_path, settings, &sections)?;
     let mut options = assembly_source_options(source_path, &settings.layout);
-    options.line_origins = assembly.line_origins;
     options.section_bases = section_bases
         .iter()
         .map(|(name, start, _)| ezra::vm::AssemblySymbol {
@@ -1338,9 +1349,9 @@ fn build_assembly_image(
             addr: *start,
         })
         .collect();
-    let assembled = ezra::vm::assemble_subset_with_options_at(
+    let assembled = ezra::vm::assemble_program_with_options_at(
         settings.assembler_cpu,
-        &assembly.text,
+        program,
         settings.layout.load.get(),
         &options,
     )
@@ -1378,16 +1389,14 @@ fn placed_assembly_section_bases(
     source_path: &Path,
     settings: &BuildSettings,
     sections: &[AssemblySectionSource],
-    line_origins: &[SourceLocation],
 ) -> Result<Vec<(String, u32, usize)>, String> {
     let mut lengths = BTreeMap::new();
     for section in sections {
-        let len = ezra::vm::measure_assembly_with_options(
+        let len = ezra::vm::measure_assembly_program_with_options(
             settings.assembler_cpu,
-            &section.source,
+            &section.program,
             &ezra::vm::AssemblerSourceOptions {
                 source_path: Some(source_path.to_path_buf()),
-                line_origins: line_origins.to_vec(),
                 ..ezra::vm::AssemblerSourceOptions::default()
             },
         )
@@ -1443,438 +1452,28 @@ fn placed_assembly_section_bases(
     Ok(placed)
 }
 
-fn split_assembly_sections(assembly: &str) -> Vec<AssemblySectionSource> {
-    let mut sections = BTreeMap::<String, Vec<String>>::new();
+fn split_assembly_sections(program: &AssemblyProgram) -> Vec<AssemblySectionSource> {
+    let mut sections = BTreeMap::<String, AssemblyProgram>::new();
     let mut current = ".text".to_owned();
-    sections.entry(current.clone()).or_default();
-    for (line_index, line) in assembly.lines().enumerate() {
-        let trimmed = line.split(';').next().unwrap_or("").trim();
-        if let Some(section) = trimmed.strip_prefix("section ") {
-            current = section.trim().to_owned();
-            let lines = sections.entry(current.clone()).or_default();
-            lines.resize(line_index, String::new());
-            lines.push(String::new());
+    sections.insert(current.clone(), AssemblyProgram { items: Vec::new() });
+    for item in &program.items {
+        if let AssemblyItem::Section(name) = &item.kind {
+            current = name.clone();
+            sections
+                .entry(current.clone())
+                .or_insert_with(|| AssemblyProgram { items: Vec::new() });
         } else {
-            let lines = sections.entry(current.clone()).or_default();
-            lines.resize(line_index, String::new());
-            lines.push(line.to_owned());
+            sections
+                .entry(current.clone())
+                .or_insert_with(|| AssemblyProgram { items: Vec::new() })
+                .items
+                .push(item.clone());
         }
     }
     sections
         .into_iter()
-        .map(|(name, lines)| AssemblySectionSource {
-            name,
-            source: lines.join("\n"),
-        })
+        .map(|(name, program)| AssemblySectionSource { name, program })
         .collect()
-}
-
-fn expand_assembly_includes(
-    source_path: &Path,
-    assembly: &str,
-) -> Result<ExpandedAssembly, String> {
-    let mut expanded = ExpandedAssembly {
-        text: String::new(),
-        line_origins: Vec::new(),
-    };
-    let root = normalize_include_path(source_path);
-    expand_assembly_file(&root, assembly, &mut vec![root.clone()], &mut expanded)?;
-    Ok(expanded)
-}
-
-/// Expand EZRA assembly directives after recursive includes and before any
-/// CPU-specific parsing. Macro sets are ordinary vendored include files.
-fn preprocess_assembly(
-    source_path: &Path,
-    assembly: &str,
-    target: &str,
-    cpu: AssemblerCpu,
-) -> Result<ExpandedAssembly, String> {
-    let included = expand_assembly_includes(source_path, assembly)?;
-    let lines = included
-        .text
-        .lines()
-        .zip(included.line_origins)
-        .map(|(line, origin)| (line.to_owned(), origin))
-        .collect::<Vec<_>>();
-    let expanded = expand_assembly_macros(
-        lines,
-        target,
-        cpu,
-        &mut HashMap::new(),
-        &mut HashMap::new(),
-        0,
-    )?;
-    normalize_agon_ez80asm_directives(expanded)
-}
-
-/// Normalize the AgDev directive spelling used by AgonPlatform/agon-ez80asm
-/// before sending the source to the shared eZ80 assembler.
-fn normalize_agon_ez80asm_directives(
-    assembly: ExpandedAssembly,
-) -> Result<ExpandedAssembly, String> {
-    let mut normalized = ExpandedAssembly {
-        text: String::new(),
-        line_origins: Vec::new(),
-    };
-
-    for (line, origin) in assembly.text.lines().zip(assembly.line_origins) {
-        let code = line.split(';').next().unwrap_or_default().trim();
-        let directive = code.strip_prefix('.').unwrap_or(code);
-        let (name, rest) = directive
-            .split_once(char::is_whitespace)
-            .map_or((directive, ""), |(name, rest)| (name, rest.trim()));
-
-        match name.to_ascii_lowercase().as_str() {
-            "assume" => {
-                let assumption = rest.replace(char::is_whitespace, "").to_ascii_lowercase();
-                if assumption == "adl=1" {
-                    continue;
-                }
-                if assumption == "adl=0" {
-                    return Err(format!(
-                        "{}:{}: `.assume adl=0` is not supported; ezrac assembly currently emits eZ80 ADL code only",
-                        origin.file.display(),
-                        origin.line
-                    ));
-                }
-                return Err(format!(
-                    "{}:{}: unsupported `.assume` directive `{rest}`",
-                    origin.file.display(),
-                    origin.line
-                ));
-            }
-            // The flat assembler does not need linker visibility declarations.
-            "global" | "globl" => continue,
-            "section" | "org" | "db" | "defb" | "byte" | "dw" | "defw" | "word" => {
-                normalized.text.push_str(name);
-                if !rest.is_empty() {
-                    normalized.text.push(' ');
-                    normalized.text.push_str(rest);
-                }
-            }
-            _ => normalized.text.push_str(line),
-        }
-        normalized.text.push('\n');
-        normalized.line_origins.push(origin);
-    }
-    Ok(normalized)
-}
-
-fn expand_assembly_macros(
-    lines: Vec<(String, SourceLocation)>,
-    target: &str,
-    cpu: AssemblerCpu,
-    defines: &mut HashMap<String, String>,
-    macros: &mut HashMap<String, AssemblyMacro>,
-    depth: usize,
-) -> Result<ExpandedAssembly, String> {
-    if depth > 32 {
-        return Err("assembly macro expansion exceeded 32 nested invocations".to_owned());
-    }
-    let mut output = ExpandedAssembly {
-        text: String::new(),
-        line_origins: Vec::new(),
-    };
-    let mut conditions = Vec::<bool>::new();
-    let mut active = true;
-    let mut index = 0;
-    while index < lines.len() {
-        let (line, origin) = &lines[index];
-        let trimmed = line.split(';').next().unwrap_or_default().trim();
-        if let Some(condition) = trimmed.strip_prefix("%if ") {
-            let value = evaluate_assembly_condition(condition.trim(), target, cpu, defines)?;
-            conditions.push(active);
-            active &= value;
-            index += 1;
-            continue;
-        }
-        if trimmed == "%else" {
-            let Some(parent_active) = conditions.last().copied() else {
-                return Err(format!(
-                    "{}:{}: `%else` without `%if`",
-                    origin.file.display(),
-                    origin.line
-                ));
-            };
-            active = parent_active && !active;
-            index += 1;
-            continue;
-        }
-        if trimmed == "%endif" {
-            active = conditions.pop().ok_or_else(|| {
-                format!(
-                    "{}:{}: `%endif` without `%if`",
-                    origin.file.display(),
-                    origin.line
-                )
-            })?;
-            index += 1;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("%macro ") {
-            let (name, parameters) = parse_assembly_macro_signature(rest, origin)?;
-            let mut body = Vec::new();
-            index += 1;
-            while index < lines.len()
-                && lines[index].0.split(';').next().unwrap_or_default().trim() != "%endmacro"
-            {
-                body.push(lines[index].clone());
-                index += 1;
-            }
-            if index == lines.len() {
-                return Err(format!(
-                    "{}:{}: unterminated macro `{name}`",
-                    origin.file.display(),
-                    origin.line
-                ));
-            }
-            if active {
-                macros.insert(name, AssemblyMacro { parameters, body });
-            }
-            index += 1;
-            continue;
-        }
-        if !active {
-            index += 1;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("%define ") {
-            let (name, value) = rest.split_once(char::is_whitespace).ok_or_else(|| {
-                format!(
-                    "{}:{}: expected `%define NAME value`",
-                    origin.file.display(),
-                    origin.line
-                )
-            })?;
-            defines.insert(name.to_owned(), value.trim().to_owned());
-            index += 1;
-            continue;
-        }
-        if let Some(name) = trimmed
-            .strip_prefix('%')
-            .and_then(|rest| rest.split_whitespace().next())
-            && let Some(definition) = macros.get(name).cloned()
-        {
-            let args = trimmed[name.len() + 1..].trim();
-            let args = if args.is_empty() {
-                Vec::new()
-            } else {
-                args.split(',').map(|arg| arg.trim().to_owned()).collect()
-            };
-            if args.len() != definition.parameters.len() {
-                return Err(format!(
-                    "{}:{}: macro `{name}` expects {} arguments, got {}",
-                    origin.file.display(),
-                    origin.line,
-                    definition.parameters.len(),
-                    args.len()
-                ));
-            }
-            let expansion_id = output.line_origins.len();
-            let expanded = definition
-                .body
-                .into_iter()
-                .map(|(body, _)| {
-                    let mut body = substitute_assembly_defines(&body, defines);
-                    for (parameter, value) in definition.parameters.iter().zip(&args) {
-                        body = body.replace(&format!("${parameter}"), value);
-                    }
-                    (
-                        body.replace("%%", &format!("__ezra_macro_{expansion_id}_")),
-                        origin.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let expanded =
-                expand_assembly_macros(expanded, target, cpu, defines, macros, depth + 1)?;
-            output.text.push_str(&expanded.text);
-            output.line_origins.extend(expanded.line_origins);
-            index += 1;
-            continue;
-        }
-        output
-            .text
-            .push_str(&substitute_assembly_defines(line, defines));
-        output.text.push('\n');
-        output.line_origins.push(origin.clone());
-        index += 1;
-    }
-    if !conditions.is_empty() {
-        return Err("unterminated `%if` in assembly source".to_owned());
-    }
-    Ok(output)
-}
-
-fn parse_assembly_macro_signature(
-    text: &str,
-    origin: &SourceLocation,
-) -> Result<(String, Vec<String>), String> {
-    let text = text.trim();
-    let (name, parameters) = if let Some((name, parameters)) = text.split_once('(') {
-        let parameters = parameters.strip_suffix(')').ok_or_else(|| {
-            format!(
-                "{}:{}: macro parameter list is missing `)`",
-                origin.file.display(),
-                origin.line
-            )
-        })?;
-        (name.trim().to_owned(), parameters.trim().to_owned())
-    } else {
-        let mut parts = text.split_whitespace();
-        let name = parts.next().ok_or_else(|| {
-            format!(
-                "{}:{}: missing macro name",
-                origin.file.display(),
-                origin.line
-            )
-        })?;
-        let parameters = parts.collect::<Vec<_>>().join(" ");
-        (
-            name.to_owned(),
-            parameters
-                .trim()
-                .trim_start_matches('(')
-                .trim_end_matches(')')
-                .to_owned(),
-        )
-    };
-    if name.is_empty() {
-        return Err(format!(
-            "{}:{}: missing macro name",
-            origin.file.display(),
-            origin.line
-        ));
-    }
-    Ok((
-        name,
-        if parameters.is_empty() {
-            Vec::new()
-        } else {
-            parameters
-                .split(',')
-                .map(|parameter| parameter.trim().to_owned())
-                .collect()
-        },
-    ))
-}
-
-fn evaluate_assembly_condition(
-    condition: &str,
-    target: &str,
-    cpu: AssemblerCpu,
-    defines: &HashMap<String, String>,
-) -> Result<bool, String> {
-    if let Some(value) = condition
-        .strip_prefix("cpu(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return Ok(cpu.as_str() == value.trim_matches('"'));
-    }
-    if let Some(value) = condition
-        .strip_prefix("target(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return Ok(target == value.trim_matches('"'));
-    }
-    if let Some(value) = condition
-        .strip_prefix("feature(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return Ok(assembly_feature_enabled(value.trim_matches('"')));
-    }
-    if let Some(name) = condition
-        .strip_prefix("defined(")
-        .and_then(|name| name.strip_suffix(')'))
-    {
-        return Ok(defines.contains_key(name.trim()));
-    }
-    Err(format!("unsupported assembly condition `{condition}`"))
-}
-
-fn assembly_feature_enabled(feature: &str) -> bool {
-    match feature {
-        "intel" => cfg!(feature = "intel"),
-        "z80" => cfg!(feature = "z80"),
-        "lr35902" => cfg!(feature = "lr35902"),
-        "avr" => cfg!(feature = "avr"),
-        "m6800" => cfg!(feature = "m6800"),
-        "m68k" => cfg!(feature = "m68k"),
-        "mos6502" => cfg!(feature = "mos6502"),
-        "tms9900" => cfg!(feature = "tms9900"),
-        "dcpu" => cfg!(feature = "dcpu"),
-        "lsp" => cfg!(feature = "lsp"),
-        _ => false,
-    }
-}
-
-fn substitute_assembly_defines(line: &str, defines: &HashMap<String, String>) -> String {
-    defines.iter().fold(line.to_owned(), |line, (name, value)| {
-        line.replace(&format!("${{{name}}}"), value)
-    })
-}
-
-fn expand_assembly_file(
-    source_path: &Path,
-    assembly: &str,
-    stack: &mut Vec<PathBuf>,
-    expanded: &mut ExpandedAssembly,
-) -> Result<(), String> {
-    let base = source_path.parent().unwrap_or_else(|| Path::new("."));
-    for (line_index, line) in assembly.lines().enumerate() {
-        let trimmed = line.split(';').next().unwrap_or("").trim();
-        if let Some(include) = trimmed.strip_prefix("include ") {
-            let include = include.trim();
-            let Some(include) = include
-                .strip_prefix("\"")
-                .and_then(|include| include.strip_suffix("\""))
-            else {
-                return Err(format!(
-                    "{}:{}: invalid include syntax; expected include \"path\"",
-                    source_path.display(),
-                    line_index + 1
-                ));
-            };
-            let include_path = normalize_include_path(&base.join(include));
-            if let Some(cycle_start) = stack.iter().position(|path| path == &include_path) {
-                let mut cycle = stack[cycle_start..]
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>();
-                cycle.push(include_path.display().to_string());
-                return Err(format!(
-                    "{}:{}: assembly include cycle: {}",
-                    source_path.display(),
-                    line_index + 1,
-                    cycle.join(" -> ")
-                ));
-            }
-            let included = fs::read_to_string(&include_path).map_err(|error| {
-                format!(
-                    "{}:{}: failed to read include {}: {error}",
-                    source_path.display(),
-                    line_index + 1,
-                    include_path.display()
-                )
-            })?;
-            stack.push(include_path.clone());
-            expand_assembly_file(&include_path, &included, stack, expanded)?;
-            stack.pop();
-        } else {
-            expanded.text.push_str(line);
-            expanded.text.push('\n');
-            expanded.line_origins.push(SourceLocation {
-                file: source_path.to_path_buf(),
-                line: line_index + 1,
-                column: 1,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn normalize_include_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn validate_assembled_section_fit(
@@ -2006,8 +1605,7 @@ fn assembly_source_options(
                 addr: symbol.value.get(),
             })
             .collect(),
-        section_bases: Vec::new(),
-        line_origins: Vec::new(),
+        ..ezra::vm::AssemblerSourceOptions::default()
     }
 }
 

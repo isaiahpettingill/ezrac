@@ -1,4 +1,4 @@
-use crate::compat::{SourcePathBuf, prelude::*};
+use crate::compat::{SourcePathBuf, prelude::*, source_path_text};
 #[cfg(feature = "test-runner")]
 use std::{
     cell::Cell,
@@ -21,6 +21,12 @@ use mos6502::{cpu::CPU, memory::Bus as _, registers::StackPointer};
 #[cfg(any(feature = "std", feature = "avr"))]
 use crate::asm::avr;
 use crate::asm::ez80 as asm_meta;
+use crate::asm::frontend::{
+    AssemblyBinaryOperator, AssemblyDataValue, AssemblyExpression, AssemblyInstruction,
+    AssemblyItem, AssemblyProgram, AssemblyUnaryOperator, DataWidth, LocatedAssemblyItem,
+    LocatedParsedAssemblyItem, ParsedAssembly, ParsedAssemblyItem, lower_parsed_assembly,
+    parse_assembly_expression, parse_assembly_syntax,
+};
 #[cfg(feature = "m68k")]
 use crate::asm::m68k as asm_m68k;
 #[cfg(any(feature = "std", feature = "m6800"))]
@@ -1096,6 +1102,24 @@ pub fn assemble_subset_with_options_at(
     base_addr: u32,
     options: &AssemblerSourceOptions,
 ) -> Result<AssembledProgram, Diagnostic> {
+    let program = parse_assembly_program(cpu, assembly, options)?;
+    assemble_program_with_options_at(cpu, &program, base_addr, options)
+}
+
+pub fn assemble_program_at(
+    cpu: AssemblerCpu,
+    program: &AssemblyProgram,
+    base_addr: u32,
+) -> Result<AssembledProgram, Diagnostic> {
+    assemble_program_with_options_at(cpu, program, base_addr, &AssemblerSourceOptions::default())
+}
+
+pub fn assemble_program_with_options_at(
+    cpu: AssemblerCpu,
+    program: &AssemblyProgram,
+    base_addr: u32,
+    options: &AssemblerSourceOptions,
+) -> Result<AssembledProgram, Diagnostic> {
     if !cpu.is_enabled() {
         return Err(Diagnostic::new(format!(
             "assembler CPU `{}` requires the `{}` Cargo feature",
@@ -1108,11 +1132,7 @@ pub fn assemble_subset_with_options_at(
             "assembly base address 0x{base_addr:X} is outside the 24-bit address space"
         )));
     }
-    let instructions = assembly
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| parse_line(index + 1, line))
-        .collect::<Vec<_>>();
+
     let mut labels = BTreeMap::new();
     let mut declared_names = HashSet::new();
     for symbol in &options.symbols {
@@ -1120,9 +1140,10 @@ pub fn assemble_subset_with_options_at(
         declared_names.insert(symbol.name.clone());
     }
     let mut pending_equates = Vec::new();
-    let begins_with_section = instructions
+    let begins_with_section = program
+        .items
         .first()
-        .is_some_and(|line| matches!(line.kind, AsmLine::Section(_)));
+        .is_some_and(|item| matches!(&item.kind, AssemblyItem::Section(_)));
     let default_pc = if begins_with_section {
         base_addr
     } else {
@@ -1130,59 +1151,53 @@ pub fn assemble_subset_with_options_at(
     } & 0xFF_FFFF;
     let mut pc = default_pc;
 
-    for instruction in &instructions {
-        match &instruction.kind {
-            AsmLine::Label(name) => {
+    for item in &program.items {
+        match &item.kind {
+            AssemblyItem::Label(name) => {
                 if pc > Address24::MAX {
-                    return Err(line_diagnostic(
-                        instruction,
-                        options,
+                    return Err(item_diagnostic(
+                        item,
                         format!(
                             "assembly label `{name}` address 0x{pc:X} is outside the 24-bit address space"
                         ),
                     ));
                 }
                 if !declared_names.insert(name.clone()) {
-                    return Err(line_diagnostic(
-                        instruction,
-                        options,
+                    return Err(item_diagnostic(
+                        item,
                         format!("duplicate assembly label `{name}`"),
                     ));
                 }
                 labels.insert(name.clone(), pc);
             }
-            AsmLine::Equ { name, expr } => {
+            AssemblyItem::Equ { name, value } => {
                 if !declared_names.insert(name.clone()) {
-                    return Err(line_diagnostic(
-                        instruction,
-                        options,
+                    return Err(item_diagnostic(
+                        item,
                         format!("duplicate assembly symbol `{name}`"),
                     ));
                 }
-                pending_equates.push((instruction.clone(), name.clone(), expr.clone(), pc));
+                pending_equates.push((item.clone(), name.clone(), value.clone(), pc));
             }
-            AsmLine::Section(name) => {
+            AssemblyItem::Section(name) => {
                 if let Some(base) = section_base(options, name) {
                     pc = base;
                 }
             }
-            AsmLine::Org(expr) => {
-                pc = eval_expr(expr, &labels.clone().into_iter().collect(), pc).map_err(
-                    |error| error.with_location_if_missing(line_location(instruction, options)),
-                )?;
+            AssemblyItem::Org(expression) => {
+                let known = labels.clone().into_iter().collect::<HashMap<_, _>>();
+                pc = eval_assembly_expression(expression, &known, pc)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
-            AsmLine::Data(values) => {
-                pc = checked_assembly_pc_advance(pc, data_len(values) as u32).map_err(|error| {
-                    error.with_location_if_missing(line_location(instruction, options))
-                })?;
+            AssemblyItem::Data { width, values } => {
+                pc = checked_assembly_pc_advance(pc, data_len(*width, values) as u32)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
-            AsmLine::Instruction(text) => {
-                let len = instruction_len(cpu, text).map_err(|error| {
-                    error.with_location_if_missing(line_location(instruction, options))
-                })?;
-                pc = checked_assembly_pc_advance(pc, len as u32).map_err(|error| {
-                    error.with_location_if_missing(line_location(instruction, options))
-                })?;
+            AssemblyItem::Instruction(instruction) => {
+                let len = instruction_len(cpu, instruction)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                pc = checked_assembly_pc_advance(pc, len as u32)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
         }
     }
@@ -1191,20 +1206,20 @@ pub fn assemble_subset_with_options_at(
         let known = labels.clone().into_iter().collect::<HashMap<_, _>>();
         let mut unresolved = Vec::new();
         let mut progress = false;
-        for (instruction, name, expr, equ_pc) in pending_equates {
-            match eval_expr(&expr, &known, equ_pc) {
+        for (item, name, expression, equ_pc) in pending_equates {
+            match eval_assembly_expression(&expression, &known, equ_pc) {
                 Ok(value) => {
                     labels.insert(name, value);
                     progress = true;
                 }
-                Err(_) => unresolved.push((instruction, name, expr, equ_pc)),
+                Err(_) => unresolved.push((item, name, expression, equ_pc)),
             }
         }
         if !progress {
-            let (instruction, _, expr, equ_pc) = &unresolved[0];
-            return Err(eval_expr(expr, &known, *equ_pc)
+            let (item, _, expression, equ_pc) = &unresolved[0];
+            return Err(eval_assembly_expression(expression, &known, *equ_pc)
                 .unwrap_err()
-                .with_location_if_missing(line_location(instruction, options)));
+                .with_location_if_missing(item.location.clone()));
         }
         pending_equates = unresolved;
     }
@@ -1223,48 +1238,173 @@ pub fn assemble_subset_with_options_at(
         append_org_padding(&mut bytes, pc, default_pc)?;
         pc = default_pc;
     }
-    for instruction in instructions {
-        match &instruction.kind {
-            AsmLine::Label(_) | AsmLine::Equ { .. } => {}
-            AsmLine::Section(name) => {
+    for item in &program.items {
+        match &item.kind {
+            AssemblyItem::Label(_) | AssemblyItem::Equ { .. } => {}
+            AssemblyItem::Section(name) => {
                 if let Some(base) = section_base(options, name) {
-                    append_org_padding(&mut bytes, pc, base).map_err(|error| {
-                        error.with_location_if_missing(line_location(&instruction, options))
-                    })?;
+                    append_org_padding(&mut bytes, pc, base)
+                        .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                     pc = base;
                 }
             }
-            AsmLine::Org(expr) => {
-                let new_pc = eval_expr(expr, &labels, pc).map_err(|error| {
-                    error.with_location_if_missing(line_location(&instruction, options))
-                })?;
-                append_org_padding(&mut bytes, pc, new_pc).map_err(|error| {
-                    error.with_location_if_missing(line_location(&instruction, options))
-                })?;
+            AssemblyItem::Org(expression) => {
+                let new_pc = eval_assembly_expression(expression, &labels, pc)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                append_org_padding(&mut bytes, pc, new_pc)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 pc = new_pc;
             }
-            AsmLine::Data(values) => {
-                emit_data(cpu, values, &labels, pc, &mut bytes).map_err(|error| {
-                    error.with_location_if_missing(line_location(&instruction, options))
-                })?;
-                pc = checked_assembly_pc_advance(pc, data_len(values) as u32).map_err(|error| {
-                    error.with_location_if_missing(line_location(&instruction, options))
-                })?;
+            AssemblyItem::Data { width, values } => {
+                emit_data(cpu, *width, values, &labels, pc, &mut bytes)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                pc = checked_assembly_pc_advance(pc, data_len(*width, values) as u32)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
-            AsmLine::Instruction(text) => {
-                emit_instruction(cpu, text, &labels, pc, &mut bytes).map_err(|error| {
-                    error.with_location_if_missing(line_location(&instruction, options))
-                })?;
-                let len = instruction_len(cpu, text).map_err(|error| {
-                    error.with_location_if_missing(line_location(&instruction, options))
-                })?;
-                pc = checked_assembly_pc_advance(pc, len as u32).map_err(|error| {
-                    error.with_location_if_missing(line_location(&instruction, options))
-                })?;
+            AssemblyItem::Instruction(instruction) => {
+                emit_instruction(cpu, instruction, &labels, pc, &mut bytes)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                let len = instruction_len(cpu, instruction)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                pc = checked_assembly_pc_advance(pc, len as u32)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
         }
     }
     Ok(AssembledProgram { bytes, symbols })
+}
+
+fn parse_assembly_program(
+    cpu: AssemblerCpu,
+    assembly: &str,
+    options: &AssemblerSourceOptions,
+) -> Result<AssemblyProgram, Diagnostic> {
+    let source_name = options
+        .source_path
+        .as_ref()
+        .map(|path| source_path_text(path))
+        .unwrap_or_else(|| "<assembly>".to_owned());
+    let (mut parsed, restore_z80_alt_af) = match parse_assembly_syntax(&source_name, assembly) {
+        Ok(parsed) => (parsed, false),
+        Err(original_error) if cpu.supports_z80_syntax() => {
+            let Some(normalized) = normalize_z80_alt_af(assembly) else {
+                return Err(original_error);
+            };
+            (parse_assembly_syntax(&source_name, &normalized)?, true)
+        }
+        Err(error) => return Err(error),
+    };
+    if !options.line_origins.is_empty() {
+        remap_parsed_locations(&mut parsed, &options.line_origins);
+    }
+    let mut program = lower_parsed_assembly(parsed)?;
+    if restore_z80_alt_af {
+        restore_z80_alt_af_operands(&mut program);
+    }
+    Ok(program)
+}
+
+fn normalize_z80_alt_af(source: &str) -> Option<String> {
+    let mut normalized = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut changed = false;
+
+    while index < source.len() {
+        let remaining = &source[index..];
+        let ch = remaining.chars().next()?;
+        if let Some(delimiter) = quote {
+            normalized.push(ch);
+            index += ch.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            normalized.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        let is_alt_af = remaining
+            .get(..3)
+            .is_some_and(|token| token.eq_ignore_ascii_case("af'"));
+        let previous = source[..index].chars().next_back();
+        let next = source.get(index + 3..).and_then(|tail| tail.chars().next());
+        if is_alt_af
+            && previous.is_none_or(|ch| !is_assembly_symbol_char(ch))
+            && next.is_none_or(|ch| !is_assembly_symbol_char(ch))
+        {
+            normalized.push_str("af?");
+            index += 3;
+            changed = true;
+            continue;
+        }
+
+        normalized.push(ch);
+        index += ch.len_utf8();
+    }
+
+    changed.then_some(normalized)
+}
+
+fn is_assembly_symbol_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '@' | '?' | '%')
+}
+
+fn restore_z80_alt_af_operands(program: &mut AssemblyProgram) {
+    for item in &mut program.items {
+        let AssemblyItem::Instruction(instruction) = &mut item.kind else {
+            continue;
+        };
+        for operand in &mut instruction.operands {
+            if operand.eq_ignore_ascii_case("af?") {
+                *operand = "af'".to_owned();
+            }
+        }
+    }
+}
+
+fn remap_parsed_locations(parsed: &mut ParsedAssembly, origins: &[SourceLocation]) {
+    fn remap_items(items: &mut [LocatedParsedAssemblyItem], origins: &[SourceLocation]) {
+        for item in items {
+            let parsed_location = item.location.clone();
+            if let Some(origin) = origins.get(parsed_location.line.saturating_sub(1)) {
+                item.location = SourceLocation {
+                    file: origin.file.clone(),
+                    line: origin.line,
+                    column: origin
+                        .column
+                        .saturating_add(parsed_location.column.saturating_sub(1)),
+                };
+            }
+            match &mut item.kind {
+                ParsedAssemblyItem::MacroDefinition { body, .. } => remap_items(body, origins),
+                ParsedAssemblyItem::Conditional {
+                    then_items,
+                    else_items,
+                    ..
+                } => {
+                    remap_items(then_items, origins);
+                    remap_items(else_items, origins);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    remap_items(&mut parsed.items, origins);
+}
+
+fn item_diagnostic(item: &LocatedAssemblyItem, message: impl Into<String>) -> Diagnostic {
+    Diagnostic::at(item.location.clone(), message)
 }
 
 fn section_base(options: &AssemblerSourceOptions, name: &str) -> Option<u32> {
@@ -1284,18 +1424,32 @@ pub fn measure_assembly_with_options(
     assembly: &str,
     options: &AssemblerSourceOptions,
 ) -> Result<usize, Diagnostic> {
+    let program = parse_assembly_program(cpu, assembly, options)?;
+    measure_assembly_program_with_options(cpu, &program, options)
+}
+
+pub fn measure_assembly_program(
+    cpu: AssemblerCpu,
+    program: &AssemblyProgram,
+) -> Result<usize, Diagnostic> {
+    measure_assembly_program_with_options(cpu, program, &AssemblerSourceOptions::default())
+}
+
+pub fn measure_assembly_program_with_options(
+    cpu: AssemblerCpu,
+    program: &AssemblyProgram,
+    _options: &AssemblerSourceOptions,
+) -> Result<usize, Diagnostic> {
     let mut len = 0usize;
-    for instruction in assembly
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| parse_line(index + 1, line))
-    {
-        let item_len = match instruction.kind {
-            AsmLine::Data(ref values) => data_len(values),
-            AsmLine::Instruction(ref text) => instruction_len(cpu, text).map_err(|error| {
-                error.with_location_if_missing(line_location(&instruction, options))
-            })?,
-            AsmLine::Label(_) | AsmLine::Equ { .. } | AsmLine::Section(_) | AsmLine::Org(_) => 0,
+    for item in &program.items {
+        let item_len = match &item.kind {
+            AssemblyItem::Data { width, values } => data_len(*width, values),
+            AssemblyItem::Instruction(instruction) => instruction_len(cpu, instruction)
+                .map_err(|error| error.with_location_if_missing(item.location.clone()))?,
+            AssemblyItem::Label(_)
+            | AssemblyItem::Equ { .. }
+            | AssemblyItem::Section(_)
+            | AssemblyItem::Org(_) => 0,
         };
         len = len
             .checked_add(item_len)
@@ -1331,200 +1485,50 @@ fn checked_code_end(base_addr: u32, len: usize) -> Result<u32, Diagnostic> {
     Ok(end)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum AsmLine {
-    Label(String),
-    Equ { name: String, expr: String },
-    Section(String),
-    Org(String),
-    Data(Vec<DataValue>),
-    Instruction(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum DataValue {
-    Byte(String),
-    Word(String),
-    Bytes(Vec<u8>),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LocatedAsmLine {
-    line: usize,
-    column: usize,
-    kind: AsmLine,
-}
-
-fn parse_line(line_number: usize, line: &str) -> Option<LocatedAsmLine> {
-    let line = line.split(';').next().unwrap_or("");
-    let column = line
-        .chars()
-        .position(|ch| !ch.is_whitespace())
-        .map(|index| index + 1)
-        .unwrap_or(1);
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-    let kind = if let Some(section) = line.strip_prefix("section ") {
-        AsmLine::Section(section.trim().to_owned())
-    } else if let Some(expr) = line.strip_prefix("org ") {
-        AsmLine::Org(expr.trim().to_owned())
-    } else if let Some(values) = line
-        .strip_prefix("db ")
-        .or_else(|| line.strip_prefix("byte "))
-    {
-        AsmLine::Data(parse_data_values(values, DataWidth::Byte))
-    } else if let Some(values) = line
-        .strip_prefix("dw ")
-        .or_else(|| line.strip_prefix("word "))
-    {
-        AsmLine::Data(parse_data_values(values, DataWidth::Word))
-    } else if let Some((name, expr)) = parse_equate(line) {
-        AsmLine::Equ { name, expr }
-    } else if let Some(label) = line.strip_suffix(':') {
-        AsmLine::Label(label.to_owned())
-    } else {
-        AsmLine::Instruction(line.to_owned())
-    };
-    Some(LocatedAsmLine {
-        line: line_number,
-        column,
-        kind,
-    })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DataWidth {
-    Byte,
-    Word,
-}
-
-fn parse_equate(line: &str) -> Option<(String, String)> {
-    if let Some(rest) = line.strip_prefix(".equ ") {
-        let (name, expr) = rest.split_once(',')?;
-        return Some((name.trim().to_owned(), expr.trim().to_owned()));
-    }
-    if let Some((name, expr)) = line.split_once(" equ ") {
-        return Some((name.trim().to_owned(), expr.trim().to_owned()));
-    }
-    if let Some((name, expr)) = line.split_once('=') {
-        let name = name.trim();
-        if looks_like_label_ref(name) {
-            return Some((name.to_owned(), expr.trim().to_owned()));
-        }
-    }
-    None
-}
-
-fn parse_data_values(values: &str, width: DataWidth) -> Vec<DataValue> {
-    split_data_values(values)
-        .into_iter()
-        .map(|value| {
-            let value = value.trim();
-            if let Some(bytes) = parse_quoted_bytes(value) {
-                DataValue::Bytes(bytes)
-            } else {
-                match width {
-                    DataWidth::Byte => DataValue::Byte(value.to_owned()),
-                    DataWidth::Word => DataValue::Word(value.to_owned()),
-                }
-            }
-        })
-        .collect()
-}
-
-fn split_data_values(values: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    for ch in values.chars() {
-        match ch {
-            '"' => {
-                quoted = !quoted;
-                current.push(ch);
-            }
-            ',' if !quoted => {
-                out.push(current.trim().to_owned());
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        out.push(current.trim().to_owned());
-    }
-    out
-}
-
-fn parse_quoted_bytes(value: &str) -> Option<Vec<u8>> {
-    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
-    Some(inner.as_bytes().to_vec())
-}
-
-fn line_location(instruction: &LocatedAsmLine, options: &AssemblerSourceOptions) -> SourceLocation {
-    if let Some(origin) = options.line_origins.get(instruction.line.saturating_sub(1)) {
-        return SourceLocation {
-            file: origin.file.clone(),
-            line: origin.line,
-            column: origin
-                .column
-                .saturating_add(instruction.column.saturating_sub(1)),
-        };
-    }
-    SourceLocation {
-        file: options
-            .source_path
-            .clone()
-            .unwrap_or_else(|| SourcePathBuf::from("<assembly>")),
-        line: instruction.line,
-        column: instruction.column,
-    }
-}
-
-fn line_diagnostic(
-    instruction: &LocatedAsmLine,
-    options: &AssemblerSourceOptions,
-    message: impl Into<String>,
-) -> Diagnostic {
-    Diagnostic::at(line_location(instruction, options), message)
-}
-
-fn data_len(values: &[DataValue]) -> usize {
+fn data_len(width: DataWidth, values: &[AssemblyDataValue]) -> usize {
     values
         .iter()
         .map(|value| match value {
-            DataValue::Byte(_) => 1,
-            DataValue::Word(_) => 2,
-            DataValue::Bytes(bytes) => bytes.len(),
+            AssemblyDataValue::Expression(_) => width.bytes(),
+            AssemblyDataValue::Bytes(bytes) => bytes.len(),
         })
         .sum()
 }
 
 fn emit_data(
     cpu: AssemblerCpu,
-    values: &[DataValue],
+    width: DataWidth,
+    values: &[AssemblyDataValue],
     labels: &HashMap<String, u32>,
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
     for value in values {
         match value {
-            DataValue::Byte(expr) => bytes.push(eval_u8(expr, labels, pc)?),
-            DataValue::Word(expr) => {
-                let value = eval_expr(expr, labels, pc)?;
-                if cpu == AssemblerCpu::Tms9900 {
-                    let value = u16::try_from(value).map_err(|_| {
-                        Diagnostic::new(format!(
-                            "TMS9900 word value 0x{value:X} is outside the 16-bit address space"
-                        ))
-                    })?;
-                    bytes.extend(value.to_be_bytes());
-                } else {
-                    push16(bytes, value)?;
+            AssemblyDataValue::Bytes(raw) => bytes.extend(raw),
+            AssemblyDataValue::Expression(expression) => {
+                let value = eval_assembly_expression(expression, labels, pc)?;
+                match width {
+                    DataWidth::Byte => {
+                        let value = u8::try_from(value).map_err(|_| {
+                            Diagnostic::new(format!(
+                                "value {} is outside u8 range",
+                                expression_text(expression)
+                            ))
+                        })?;
+                        bytes.push(value);
+                    }
+                    DataWidth::Word if cpu == AssemblerCpu::Tms9900 => {
+                        let value = u16::try_from(value).map_err(|_| {
+                            Diagnostic::new(format!(
+                                "TMS9900 word value 0x{value:X} is outside the 16-bit address space"
+                            ))
+                        })?;
+                        bytes.extend(value.to_be_bytes());
+                    }
+                    DataWidth::Word => push16(bytes, value)?,
                 }
             }
-            DataValue::Bytes(raw) => bytes.extend(raw),
         }
     }
     Ok(())
@@ -1542,68 +1546,166 @@ fn append_org_padding(bytes: &mut Vec<u8>, pc: u32, new_pc: u32) -> Result<(), D
     Ok(())
 }
 
-fn eval_u8(expr: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u8, Diagnostic> {
-    let value = eval_expr(expr, labels, pc)?;
-    if value > 0xFF {
-        return Err(Diagnostic::new(format!("value {expr} is outside u8 range")));
-    }
-    Ok(value as u8)
+fn eval_instruction_expression(
+    text: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+) -> Result<u32, Diagnostic> {
+    let expression = match parse_assembly_expression(text) {
+        Ok(expression) => expression,
+        Err(error) => {
+            let text = text.trim();
+            if looks_like_label_ref(text)
+                && let Some(value) = labels.get(text).copied().or_else(|| {
+                    labels
+                        .iter()
+                        .find_map(|(name, value)| name.eq_ignore_ascii_case(text).then_some(*value))
+                })
+            {
+                return Ok(value);
+            }
+            if text.starts_with(|ch: char| ch.is_ascii_digit())
+                && let Err(error) = parse_number(text)
+            {
+                return Err(error);
+            }
+            return Err(error);
+        }
+    };
+    eval_assembly_expression(&expression, labels, pc)
 }
 
-fn eval_expr(expr: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, Diagnostic> {
-    let mut parts = expr.split_whitespace();
-    let Some(first) = parts.next() else {
-        return Err(Diagnostic::new("empty assembly expression"));
-    };
-    let mut value = eval_atom(first, labels, pc)? as i64;
-    while let Some(op) = parts.next() {
-        let rhs = parts
-            .next()
-            .ok_or_else(|| Diagnostic::new(format!("missing operand after `{op}`")))?;
-        let rhs = eval_atom(rhs, labels, pc)? as i64;
-        match op {
-            "+" => value += rhs,
-            "-" => value -= rhs,
-            "*" => value *= rhs,
-            "&" => value &= rhs,
-            "|" => value |= rhs,
-            "^" => value ^= rhs,
-            _ => {
-                return Err(Diagnostic::new(format!(
-                    "unsupported assembly operator `{op}`"
-                )));
-            }
-        }
-    }
-    if !(0..=Address24::MAX as i64).contains(&value) {
+fn eval_assembly_expression(
+    expression: &AssemblyExpression,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+) -> Result<u32, Diagnostic> {
+    let value = eval_expression_value(expression, labels, pc)?;
+    if !(0..=i128::from(Address24::MAX)).contains(&value) {
         return Err(Diagnostic::new(format!(
-            "assembly expression `{expr}` is outside the 24-bit address space"
+            "assembly expression `{}` is outside the 24-bit address space",
+            expression_text(expression)
         )));
     }
     Ok(value as u32)
 }
 
-fn eval_atom(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, Diagnostic> {
-    let text = text.trim().trim_end_matches(',');
-    if text == "$" {
-        return Ok(pc & 0xFF_FFFF);
+fn eval_expression_value(
+    expression: &AssemblyExpression,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+) -> Result<i128, Diagnostic> {
+    match expression {
+        AssemblyExpression::Symbol(name) => labels
+            .get(name)
+            .copied()
+            .or_else(|| {
+                labels
+                    .iter()
+                    .find_map(|(known, value)| known.eq_ignore_ascii_case(name).then_some(*value))
+            })
+            .map(i128::from)
+            .ok_or_else(|| Diagnostic::new(format!("unknown assembly symbol `{name}`"))),
+        AssemblyExpression::Current => Ok(i128::from(pc & 0xFF_FFFF)),
+        AssemblyExpression::Number(value) => Ok(i128::from(*value)),
+        AssemblyExpression::Unary {
+            operator,
+            expression,
+        } => {
+            let value = eval_expression_value(expression, labels, pc)?;
+            match operator {
+                AssemblyUnaryOperator::Plus => Ok(value),
+                AssemblyUnaryOperator::Negate => value
+                    .checked_neg()
+                    .ok_or_else(|| expression_range_diagnostic(expression)),
+            }
+        }
+        AssemblyExpression::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let left_value = eval_expression_value(left, labels, pc)?;
+            let right_value = eval_expression_value(right, labels, pc)?;
+            let value = match operator {
+                AssemblyBinaryOperator::Add => left_value.checked_add(right_value),
+                AssemblyBinaryOperator::Subtract => left_value.checked_sub(right_value),
+                AssemblyBinaryOperator::Multiply => left_value.checked_mul(right_value),
+                AssemblyBinaryOperator::BitAnd => Some(left_value & right_value),
+                AssemblyBinaryOperator::BitOr => Some(left_value | right_value),
+                AssemblyBinaryOperator::BitXor => Some(left_value ^ right_value),
+            };
+            value.ok_or_else(|| expression_range_diagnostic(expression))
+        }
     }
-    if let Some(value) = labels.get(text).copied() {
-        return Ok(value);
-    }
-    if let Some(value) = labels
-        .iter()
-        .find_map(|(name, value)| name.eq_ignore_ascii_case(text).then_some(*value))
-    {
-        return Ok(value);
-    }
-    parse_number(text)
 }
 
-fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
-    if cpu == AssemblerCpu::Lr35902 {
-        return Ok(encode_lr35902(text, &HashMap::new(), 0, false)?.len());
+fn expression_range_diagnostic(expression: &AssemblyExpression) -> Diagnostic {
+    Diagnostic::new(format!(
+        "assembly expression `{}` is outside the 24-bit address space",
+        expression_text(expression)
+    ))
+}
+
+fn expression_text(expression: &AssemblyExpression) -> String {
+    match expression {
+        AssemblyExpression::Symbol(name) => name.clone(),
+        AssemblyExpression::Current => "$".to_owned(),
+        AssemblyExpression::Number(value) => value.to_string(),
+        AssemblyExpression::Unary {
+            operator,
+            expression,
+        } => format!(
+            "{}{}",
+            match operator {
+                AssemblyUnaryOperator::Plus => "+",
+                AssemblyUnaryOperator::Negate => "-",
+            },
+            expression_text(expression)
+        ),
+        AssemblyExpression::Binary {
+            operator,
+            left,
+            right,
+        } => format!(
+            "{} {} {}",
+            expression_text(left),
+            match operator {
+                AssemblyBinaryOperator::Add => "+",
+                AssemblyBinaryOperator::Subtract => "-",
+                AssemblyBinaryOperator::Multiply => "*",
+                AssemblyBinaryOperator::BitAnd => "&",
+                AssemblyBinaryOperator::BitOr => "|",
+                AssemblyBinaryOperator::BitXor => "^",
+            },
+            expression_text(right)
+        ),
     }
+}
+
+fn instruction_text_for_cpu(cpu: AssemblerCpu, instruction: &AssemblyInstruction) -> String {
+    if matches!(
+        cpu,
+        AssemblerCpu::Mos6502
+            | AssemblerCpu::Cmos65C02
+            | AssemblerCpu::Wdc65C816
+            | AssemblerCpu::Ricoh2A03
+    ) {
+        instruction.to_encoder_text()
+    } else {
+        instruction.to_text()
+    }
+}
+
+fn instruction_len(
+    cpu: AssemblerCpu,
+    instruction: &AssemblyInstruction,
+) -> Result<usize, Diagnostic> {
+    if cpu == AssemblerCpu::Lr35902 {
+        return Ok(encode_lr35902(instruction, &HashMap::new(), 0, false)?.len());
+    }
+    let source_text = instruction_text_for_cpu(cpu, instruction);
+    let text = source_text.as_str();
     #[cfg(any(feature = "std", feature = "avr"))]
     if cpu == AssemblerCpu::Avr {
         return avr::instruction_len(text);
@@ -1634,7 +1736,7 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     }
     let normalized = asm_meta::normalize_z80_instruction_text(text);
     let text = normalized.as_str();
-    if let Some((opcode, _)) = z80_imm16_load(cpu, text) {
+    if let Some((opcode, _)) = z80_imm16_load(cpu, instruction) {
         let prefix_len = usize::from(opcode == 0xDD || opcode == 0xFD);
         return Ok(prefix_len + 3);
     }
@@ -1647,15 +1749,17 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
 
 fn emit_instruction(
     cpu: AssemblerCpu,
-    text: &str,
+    instruction: &AssemblyInstruction,
     labels: &HashMap<String, u32>,
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
     if cpu == AssemblerCpu::Lr35902 {
-        bytes.extend(encode_lr35902(text, labels, pc, true)?);
+        bytes.extend(encode_lr35902(instruction, labels, pc, true)?);
         return Ok(());
     }
+    let source_text = instruction_text_for_cpu(cpu, instruction);
+    let text = source_text.as_str();
     #[cfg(any(feature = "std", feature = "avr"))]
     if cpu == AssemblerCpu::Avr {
         bytes.extend(avr::encode_instruction(text, labels, pc)?);
@@ -1695,7 +1799,7 @@ fn emit_instruction(
     }
     let normalized = asm_meta::normalize_z80_instruction_text(text);
     let text = normalized.as_str();
-    if let Some((opcode, value)) = z80_imm16_load(cpu, text) {
+    if let Some((opcode, value)) = z80_imm16_load(cpu, instruction) {
         if opcode == 0xDD || opcode == 0xFD {
             bytes.push(opcode);
             bytes.push(0x21);
@@ -1703,7 +1807,14 @@ fn emit_instruction(
             bytes.push(opcode);
         }
         push16(bytes, parse_addr(value, labels, pc)?)?;
-    } else if let Some((prefix, base)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
+    } else if let Some((prefix, _)) = asm_meta::ez80_mode_suffixed_instruction(cpu, text) {
+        let (mnemonic, _) = instruction.mnemonic.rsplit_once('.').ok_or_else(|| {
+            Diagnostic::new(format!("invalid eZ80 mode-suffixed instruction `{text}`"))
+        })?;
+        let base = AssemblyInstruction {
+            mnemonic: mnemonic.to_owned(),
+            operands: instruction.operands.clone(),
+        };
         bytes.push(prefix);
         emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
     } else if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
@@ -1734,27 +1845,36 @@ fn emit_instruction(
     Ok(())
 }
 
-fn z80_imm16_load(cpu: AssemblerCpu, text: &str) -> Option<(u8, &str)> {
+fn z80_imm16_load(cpu: AssemblerCpu, instruction: &AssemblyInstruction) -> Option<(u8, &str)> {
     if !matches!(
         cpu,
         AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180
-    ) {
+    ) || !instruction.mnemonic.eq_ignore_ascii_case("ld")
+        || instruction.operands.len() != 2
+    {
         return None;
     }
-    let (destination, value) = text.strip_prefix("ld ")?.split_once(',')?;
-    let opcode = match destination.trim() {
-        "bc" => 0x01,
-        "de" => 0x11,
-        "hl" => 0x21,
-        "sp" => 0x31,
-        "ix" => 0xDD,
-        "iy" => 0xFD,
-        _ => return None,
+    let destination = instruction.operands[0].trim();
+    let opcode = if destination.eq_ignore_ascii_case("bc") {
+        0x01
+    } else if destination.eq_ignore_ascii_case("de") {
+        0x11
+    } else if destination.eq_ignore_ascii_case("hl") {
+        0x21
+    } else if destination.eq_ignore_ascii_case("sp") {
+        0x31
+    } else if destination.eq_ignore_ascii_case("ix") {
+        0xDD
+    } else if destination.eq_ignore_ascii_case("iy") {
+        0xFD
+    } else {
+        return None;
     };
-    let value = value.trim();
+    let value = instruction.operands[1].trim();
+    let normalized_value = value.to_ascii_lowercase();
     if value.starts_with('(')
         || matches!(
-            value,
+            normalized_value.as_str(),
             "a" | "b" | "c" | "d" | "e" | "h" | "l" | "bc" | "de" | "hl" | "sp" | "ix" | "iy"
         )
     {
@@ -1774,13 +1894,22 @@ fn mos6502_variant(cpu: AssemblerCpu) -> Option<Mos6502Variant> {
     }
 }
 fn encode_lr35902(
-    text: &str,
+    instruction: &AssemblyInstruction,
     labels: &HashMap<String, u32>,
     pc: u32,
     resolve: bool,
 ) -> Result<Vec<u8>, Diagnostic> {
-    let text = text.trim().to_ascii_lowercase();
+    let text = instruction.to_text().trim().to_ascii_lowercase();
+    let operation = instruction.mnemonic.trim().to_ascii_lowercase();
+    let operand = instruction
+        .operands
+        .iter()
+        .map(|operand| operand.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ");
     let text = text.as_str();
+    let operation = operation.as_str();
+    let operand = operand.as_str();
     let fixed: Option<&[u8]> = match text {
         "nop" => Some(&[0x00][..]),
         "rlca" => Some(&[0x07]),
@@ -1805,7 +1934,7 @@ fn encode_lr35902(
         return Ok(bytes.to_vec());
     }
 
-    if let Some((operation, operand)) = split_mnemonic(text) {
+    if !operand.is_empty() {
         if let Some(code) = lr_cb_operation(operation, operand)? {
             return Ok(vec![0xCB, code]);
         }
@@ -1868,11 +1997,6 @@ fn encode_lr35902(
     Err(Diagnostic::new(format!(
         "assembler does not support LR35902 instruction `{text}`"
     )))
-}
-
-fn split_mnemonic(text: &str) -> Option<(&str, &str)> {
-    text.split_once(char::is_whitespace)
-        .map(|(op, rest)| (op, rest.trim()))
 }
 
 fn lr_r8(value: &str) -> Option<u8> {
@@ -1974,7 +2098,7 @@ fn lr_value(
     resolve: bool,
 ) -> Result<u32, Diagnostic> {
     if resolve {
-        eval_expr(expr.trim(), labels, pc)
+        eval_instruction_expression(expr.trim(), labels, pc)
     } else {
         Ok(0)
     }
@@ -2163,13 +2287,8 @@ fn encode_lr_control(
 
 fn parse_lr_signed(text: &str) -> Result<i8, Diagnostic> {
     let text = text.trim();
-    let value = if let Some(rest) = text.strip_prefix('-') {
-        -(parse_number(rest)? as i32)
-    } else if let Some(rest) = text.strip_prefix('+') {
-        parse_number(rest)? as i32
-    } else {
-        parse_number(text)? as i32
-    };
+    let expression = parse_assembly_expression(text)?;
+    let value = eval_expression_value(&expression, &HashMap::new(), 0)?;
     i8::try_from(value)
         .map_err(|_| Diagnostic::new(format!("signed byte `{text}` is outside -128..127")))
 }
@@ -2197,7 +2316,7 @@ pub(crate) fn relative_offset(pc: u32, target: u32) -> Result<u8, Diagnostic> {
 }
 
 fn parse_addr(text: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, Diagnostic> {
-    match eval_expr(text, labels, pc) {
+    match eval_instruction_expression(text, labels, pc) {
         Ok(value) if value <= Address24::MAX => Ok(value),
         Ok(_) => Err(Diagnostic::new(format!(
             "address operand `{text}` is outside the 24-bit address space"

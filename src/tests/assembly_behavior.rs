@@ -159,14 +159,19 @@ fn game_boy_vendored_sdk_macros_preprocess_and_assemble() {
             %GBC_BG_COLOR_LOW 80h, 1Fh
             halt
         "#;
-    let expanded = preprocess_assembly(
-        &source_path,
+    let expanded = ezra::asm::preprocess_assembly_with_resolver(
+        &source_path.to_string_lossy(),
         source,
-        "gameboy-color-lr35902",
-        AssemblerCpu::Lr35902,
+        &ezra::asm::FilesystemAssemblyResolver,
+        ezra::asm::AssemblyPreprocessOptions::for_compiled_features(
+            "gameboy-color-lr35902",
+            AssemblerCpu::Lr35902.as_str(),
+        ),
     )
     .unwrap();
-    let bytes = ezra::vm::assemble_subset_at(CpuFamily::Lr35902, &expanded.text, 0x0150).unwrap();
+    let bytes = ezra::vm::assemble_program_at(AssemblerCpu::Lr35902, &expanded.program, 0x0150)
+        .unwrap()
+        .bytes;
     assert!(!bytes.is_empty());
     assert_eq!(bytes.last(), Some(&0x76));
 }
@@ -329,25 +334,30 @@ fn assembly_includes_expand_recursively_with_origins_and_cycles() {
     std::fs::write(&outer_path, "include \"inner.inc\"\n").unwrap();
     std::fs::write(&inner_path, "section .text\nret\n").unwrap();
 
-    let source = std::fs::read_to_string(&source_path).unwrap();
-    let expanded = expand_assembly_includes(&source_path, &source).unwrap();
-    assert_eq!(expanded.text, "section .text\nret\n");
+    let options = || {
+        ezra::asm::AssemblyPreprocessOptions::for_compiled_features(
+            "bare-z80",
+            AssemblerCpu::Z80.as_str(),
+        )
+    };
+    let expanded = ezra::asm::preprocess_assembly_file(&source_path, options()).unwrap();
+    assert_eq!(expanded.program.items.len(), 2);
     assert_eq!(
-        expanded.line_origins[1].file,
+        expanded.program.items[1].location.file,
         inner_path.canonicalize().unwrap()
     );
-    assert_eq!(expanded.line_origins[1].line, 2);
+    assert_eq!(expanded.program.items[1].location.line, 2);
 
     std::fs::write(&inner_path, "include \"outer.inc\"\n").unwrap();
-    let error = expand_assembly_includes(&source_path, &source).unwrap_err();
-    assert!(error.contains("assembly include cycle"), "{error}");
-    assert!(error.contains("outer.inc"), "{error}");
-    assert!(error.contains("inner.inc"), "{error}");
+    let error = ezra::asm::preprocess_assembly_file(&source_path, options()).unwrap_err();
+    assert!(error.message.contains("assembly include cycle"), "{error}");
+    assert!(error.message.contains("outer.inc"), "{error}");
+    assert!(error.message.contains("inner.inc"), "{error}");
 
     std::fs::write(&outer_path, "include \"missing.inc\"\n").unwrap();
-    let error = expand_assembly_includes(&source_path, &source).unwrap_err();
-    assert!(error.contains("outer.inc:1"), "{error}");
-    assert!(error.contains("missing.inc"), "{error}");
+    let error = ezra::asm::preprocess_assembly_file(&source_path, options()).unwrap_err();
+    assert!(error.to_string().contains("outer.inc:1"), "{error}");
+    assert!(error.message.contains("missing.inc"), "{error}");
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -384,15 +394,33 @@ fn assembly_preprocessor_expands_vendored_macros_and_target_conditionals() {
         "#;
     std::fs::write(&source_path, source).unwrap();
 
-    let expanded =
-        preprocess_assembly(&source_path, source, "bare-i8080", AssemblerCpu::I8080).unwrap();
-    assert!(expanded.text.contains("mvi a, 1"), "{}", expanded.text);
-    assert!(expanded.text.contains("out 0Eh"), "{}", expanded.text);
-    assert!(!expanded.text.contains("db 0"), "{}", expanded.text);
-    assert!(expanded.text.contains("__ezra_macro_"), "{}", expanded.text);
+    let expanded = ezra::asm::preprocess_assembly_file(
+        &source_path,
+        ezra::asm::AssemblyPreprocessOptions::for_compiled_features(
+            "bare-i8080",
+            AssemblerCpu::I8080.as_str(),
+        ),
+    )
+    .unwrap();
+    let instructions = expanded
+        .program
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ezra::asm::AssemblyItem::Instruction(instruction) => Some(instruction.to_text()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(instructions.iter().any(|text| text == "mvi a, 1"));
+    assert!(instructions.iter().any(|text| text == "out 0Eh"));
+    assert!(!instructions.iter().any(|text| text == "db 0"));
+    assert!(expanded.program.items.iter().any(|item| matches!(
+        &item.kind,
+        ezra::asm::AssemblyItem::Label(name) if name.starts_with("__ezra_macro_")
+    )));
     assert_eq!(
-        expanded.line_origins[0].file,
-        normalize_include_path(&source_path)
+        expanded.program.items[0].location.file,
+        source_path.canonicalize().unwrap()
     );
 
     let base_source = root.join("base.asm");
