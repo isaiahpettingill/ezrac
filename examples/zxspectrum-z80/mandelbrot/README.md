@@ -1,6 +1,6 @@
 # ZX Spectrum Mandelbrot
 
-This example renders a compact Mandelbrot-inspired pattern into the ZX Spectrum bitmap and sets a bright cyan-on-blue attribute layer.
+This example renders a 32×24 Mandelbrot escape map into the ZX Spectrum bitmap, expanding each sample to an 8×8 pixel cell and setting a bright cyan-on-blue attribute layer. The source retains the Q4 fixed-point escape calculation as a reference; the displayed map is precomputed so it renders immediately on a stock Spectrum.
 
 Build from the repository root:
 

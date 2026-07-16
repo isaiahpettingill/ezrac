@@ -41,6 +41,15 @@ fn z80_default_layout_validates_and_stays_in_16_bit_address_space() {
 }
 
 #[test]
+fn zx_spectrum_layout_uses_a_stack_outside_screen_and_system_memory() {
+    let layout = Layout::zx_spectrum_z80();
+
+    assert_eq!(layout.validate(), Ok(()));
+    assert_eq!(layout.stack.get(), 0xF000);
+    assert_eq!(layout_symbol_value(&layout, "EZRA_STACK_TOP"), Some(0xF000));
+}
+
+#[test]
 fn ti99_4a_layout_reserves_console_io_and_uses_cartridge_rom() {
     let layout = Layout::ti99_4a_tms9900();
 

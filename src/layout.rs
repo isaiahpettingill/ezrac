@@ -1118,7 +1118,10 @@ impl Layout {
             name: "zx_spectrum_z80".to_owned(),
             load: Address24::new(0x8000),
             entry: Address24::new(0x8000),
-            stack: Address24::new(0x5B00),
+            // $5B00 is the Spectrum ROM's system-variable area and $5AFE/$5AFF
+            // are display attributes. Keep call frames in the dedicated RAM
+            // stack region so screen updates cannot overwrite return addresses.
+            stack: Address24::new(0xF000),
             regions: vec![
                 region(
                     "rom",
@@ -1178,7 +1181,7 @@ impl Layout {
                 symbol("EZRA_LOAD_ADDR", Address24::new(0x8000)),
                 symbol("EZRA_ENTRY_ADDR", Address24::new(0x8000)),
                 symbol("EZRA_CODE_BASE", Address24::new(0x8000)),
-                symbol("EZRA_STACK_TOP", Address24::new(0x5B00)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xF000)),
                 symbol("EZRA_RAM_BASE", Address24::new(0xD000)),
                 symbol("EZRA_RODATA_BASE", Address24::new(0xC000)),
                 symbol("EZRA_ASSET_BASE", Address24::new(0xE000)),

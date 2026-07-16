@@ -328,11 +328,24 @@ fn tap_key(session: &mut Session, keycode: u32) {
     session.run_frames(6).unwrap();
 }
 
+fn tap_key_chord(session: &mut Session, first: u32, second: u32) {
+    session.set_key(first, true);
+    session.set_key(second, true);
+    session.run_frames(4).unwrap();
+    session.set_key(second, false);
+    session.set_key(first, false);
+    session.run_frames(6).unwrap();
+}
+
 fn start_zx_loaded_code(session: &mut Session) {
-    // Fuse fast-loads the tape blocks but may leave the loaded BASIC program at
-    // a prompt without honoring its auto-start line. In keyword mode, R enters
-    // the RUN token and executes the existing loader without fragile text entry.
-    tap_key(session, key::R);
+    // Fuse fast-loads both tape blocks but can leave BASIC at a prompt. In the
+    // Spectrum keyword layout, T is RANDOMIZE and extended-mode L is USR.
+    tap_key(session, key::T);
+    tap_key_chord(session, key::LEFT_SHIFT, key::RIGHT_CTRL);
+    tap_key(session, key::L);
+    for digit in [key::NUM_3, key::NUM_2, key::NUM_7, key::NUM_6, key::NUM_8] {
+        tap_key(session, digit);
+    }
     tap_key(session, key::RETURN);
 }
 
@@ -341,6 +354,13 @@ fn is_blue(pixel: u32) -> bool {
     let green = (pixel >> 8) & 0xff;
     let blue = pixel & 0xff;
     blue > red && blue > green
+}
+
+fn is_cyan(pixel: u32) -> bool {
+    let red = (pixel >> 16) & 0xff;
+    let green = (pixel >> 8) & 0xff;
+    let blue = pixel & 0xff;
+    green > red && blue > red
 }
 
 fn pulse_button(session: &mut Session, button: Button, held_frames: usize, settle_frames: usize) {
@@ -737,10 +757,22 @@ fn zx_spectrum_examples_run_on_real_core() {
     drop(game);
 
     let mut game = open_session(&core, &mandelbrot, "ZX Spectrum Mandelbrot example");
-    game.run_frames(1_500).unwrap();
+    game.run_frames(6_000).unwrap();
     start_zx_loaded_code(&mut game);
     game.run_frames(1_500).unwrap();
     assert_non_uniform_frame(&game, "ZX Spectrum Mandelbrot example");
+    assert!(
+        is_blue(game.pixel_xrgb(2, 2).unwrap()),
+        "ZX Spectrum Mandelbrot did not preserve its blue border"
+    );
+    assert!(
+        is_cyan(game.pixel_xrgb(50, 50).unwrap()),
+        "ZX Spectrum Mandelbrot did not render its cyan exterior"
+    );
+    assert!(
+        is_blue(game.pixel_xrgb(160, 120).unwrap()),
+        "ZX Spectrum Mandelbrot did not render its blue interior"
+    );
     capture(&game, "zx-spectrum-mandelbrot");
 }
 
