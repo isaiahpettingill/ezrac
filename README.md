@@ -141,7 +141,14 @@ assert_eq!(build.executable_extension, "com");
 // are all caller-owned in-memory artifacts.
 ```
 
-`build_workspace` resolves supplied files before any std filesystem fallback and returns target-native Agon MOS, CP/M, C64, raw, and Intel HEX packages. The compiler library is checked for `wasm32-unknown-unknown` with `--no-default-features --features std,z80`; no `wasm-bindgen` dependency is required. The `no-std` feature currently exposes the alloc-only workspace, target, and packaging layers, while source parsing/code generation remain part of the `std` compiler feature.
+`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. The same API performs source parsing, import resolution, code generation, assembly, and packaging under `no_std + alloc` for eZ80/Z80-family and MOS 6502 targets:
+
+```sh
+cargo check --lib --no-default-features --features no-std,z80
+cargo check --lib --no-default-features --features no-std,mos6502
+```
+
+No-std builds never access host paths: all imported SDK source must be included in `Workspace`, and filesystem-backed `embed file(...)` is rejected; inline byte, text, C-string, and repeat embeds remain available. The library is also checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
 
 ## Development
 

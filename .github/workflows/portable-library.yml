@@ -11,6 +11,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --lib --no-default-features --features no-std,z80
+      - run: cargo test --test no_std_workspace --no-default-features --features no-std,z80
+      - run: cargo check --lib --no-default-features --features no-std,mos6502
+      - run: cargo test --test no_std_workspace --no-default-features --features no-std,mos6502
 
   wasm:
     runs-on: ubuntu-latest
@@ -19,4 +22,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - run: cargo check --target wasm32-unknown-unknown --lib --no-default-features --features no-std,z80
+      - run: cargo check --target wasm32-unknown-unknown --lib --no-default-features --features no-std,mos6502
       - run: cargo check --target wasm32-unknown-unknown --lib --no-default-features --features std,z80
