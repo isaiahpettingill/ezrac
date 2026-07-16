@@ -8004,7 +8004,7 @@ fn embed_file_candidates(path: &Path, source_path: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-#[cfg(feature = "no-std")]
+#[cfg(all(feature = "no-std", not(feature = "std")))]
 fn read_embed_file(path: &str, _source_path: &SourcePath) -> Result<Vec<u8>, Diagnostic> {
     Err(Diagnostic::new(format!(
         "embedded file `{path}` is unavailable without a host filesystem"

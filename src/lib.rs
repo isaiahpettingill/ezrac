@@ -1,7 +1,7 @@
-#![cfg_attr(feature = "no-std", no_std)]
+#![cfg_attr(all(feature = "no-std", not(feature = "std")), no_std)]
 
-#[cfg(all(feature = "std", feature = "no-std"))]
-compile_error!("features `std` and `no-std` are mutually exclusive");
+// `std` intentionally takes precedence when both features are selected so
+// conventional `--all-features` checks continue to exercise every backend.
 #[cfg(not(any(feature = "std", feature = "no-std")))]
 compile_error!("enable either the `std` or `no-std` feature");
 
@@ -11,7 +11,7 @@ mod compat;
 
 #[cfg(feature = "std")]
 pub mod api;
-#[cfg(feature = "no-std")]
+#[cfg(all(feature = "no-std", not(feature = "std")))]
 #[path = "api_no_std.rs"]
 pub mod api;
 pub mod asm;

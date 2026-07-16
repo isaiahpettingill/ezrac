@@ -5,6 +5,13 @@ on:
   pull_request:
 
 jobs:
+  all-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --all-features --all-targets
+
   no-std:
     runs-on: ubuntu-latest
     steps:
