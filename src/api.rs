@@ -4,7 +4,10 @@
 //! invoking the `ezrac` CLI or writing build artifacts. It produces target
 //! assembly; executable packaging remains a CLI concern.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     asm::{
@@ -13,8 +16,8 @@ use crate::{
     },
     ast::Program,
     compile::{
-        CompileOptions, CompileReport, SdkResolver, check_source_with_sdk,
-        parse_and_resolve_imports_with_sdk,
+        CompileOptions, CompileReport, SdkResolver, check_source_with_sdk_and_overrides,
+        parse_and_resolve_imports_with_sdk_and_overrides,
     },
     diagnostic::Diagnostic,
     layout::default_layout_for_target,
@@ -71,6 +74,60 @@ impl CompileRequest {
     }
 }
 
+/// A caller-owned file in a virtual Ezra workspace.
+///
+/// Paths use the same relative, slash-separated spelling as Ezra imports and
+/// project files. The compiler never writes into this workspace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceFile<'a> {
+    pub path: &'a str,
+    pub contents: &'a [u8],
+}
+
+impl<'a> WorkspaceFile<'a> {
+    pub const fn new(path: &'a str, contents: &'a [u8]) -> Self {
+        Self { path, contents }
+    }
+
+    pub const fn text(path: &'a str, contents: &'a str) -> Self {
+        Self::new(path, contents.as_bytes())
+    }
+}
+
+/// An in-memory project tree used for imports and embedded assets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Workspace<'a> {
+    pub files: &'a [WorkspaceFile<'a>],
+}
+
+impl<'a> Workspace<'a> {
+    pub const fn new(files: &'a [WorkspaceFile<'a>]) -> Self {
+        Self { files }
+    }
+
+    pub fn file(&self, path: &str) -> Option<&'a [u8]> {
+        self.files
+            .iter()
+            .find(|file| file.path == path)
+            .map(|file| file.contents)
+    }
+
+    fn text_overrides(&self) -> Result<HashMap<PathBuf, String>, Diagnostic> {
+        let mut overrides = HashMap::new();
+        for file in self.files {
+            let text = core::str::from_utf8(file.contents).map_err(|_| {
+                Diagnostic::new(format!("workspace source `{}` is not UTF-8", file.path))
+            })?;
+            overrides.insert(PathBuf::from(file.path), text.to_owned());
+            // Virtual workspaces always expose portable slash-separated paths,
+            // while std::path joins with the host separator during resolution.
+            let host_path = file.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            overrides.insert(PathBuf::from(host_path), text.to_owned());
+        }
+        Ok(overrides)
+    }
+}
+
 /// Successful in-process compilation output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssemblyCompilation {
@@ -92,6 +149,35 @@ pub fn compile_source_to_assembly(
     source: &str,
     request: &CompileRequest,
 ) -> Result<AssemblyCompilation, Diagnostic> {
+    compile_source_to_assembly_with_overrides(source, request, &HashMap::new())
+}
+
+/// Compile an Ezra source file using a caller-owned virtual workspace.
+///
+/// Imports resolve from `workspace` before host filesystem SDK roots. This
+/// makes compilation deterministic for embedders and is the std-mode precursor
+/// to the alloc-only workspace API.
+pub fn compile_workspace_to_assembly(
+    workspace: &Workspace<'_>,
+    root: &str,
+    request: &CompileRequest,
+) -> Result<AssemblyCompilation, Diagnostic> {
+    let source = workspace.file(root).ok_or_else(|| {
+        Diagnostic::new(format!("workspace does not contain root source `{root}`"))
+    })?;
+    let source = core::str::from_utf8(source)
+        .map_err(|_| Diagnostic::new(format!("workspace source `{root}` is not UTF-8")))?;
+    let mut request = request.clone();
+    request.source_path = PathBuf::from(root);
+    let overrides = workspace.text_overrides()?;
+    compile_source_to_assembly_with_overrides(source, &request, &overrides)
+}
+
+fn compile_source_to_assembly_with_overrides(
+    source: &str,
+    request: &CompileRequest,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Result<AssemblyCompilation, Diagnostic> {
     let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
     let sdk = request.sdk_resolver();
     let options = CompileOptions {
@@ -99,8 +185,13 @@ pub fn compile_source_to_assembly(
         debug_comments: request.debug_comments,
         default_sdk_symbols: request.default_sdk_symbols,
     };
-    let report = check_source_with_sdk(source, &options, &sdk)?;
-    let program = parse_and_resolve_imports_with_sdk(&request.source_path, source, &sdk)?;
+    let report = check_source_with_sdk_and_overrides(source, &options, &sdk, source_overrides)?;
+    let program = parse_and_resolve_imports_with_sdk_and_overrides(
+        &request.source_path,
+        source,
+        &sdk,
+        source_overrides,
+    )?;
     let assembly_options = assembly_options_for_target(
         &request.target,
         target.triple.cpu,
@@ -250,6 +341,24 @@ mod tests {
 
         assert!(compilation.report.has_main);
         assert!(compilation.assembly.contains("__ezra_start:"));
+    }
+
+    #[test]
+    fn compiles_imports_from_a_virtual_workspace() {
+        let files = [
+            WorkspaceFile::text(
+                "src/main.ezra",
+                "import math\nfn main() { let value: u8 = math.VALUE }\n",
+            ),
+            WorkspaceFile::text("src/math.ezra", "pub const VALUE: u8 = 42\n"),
+        ];
+        let request = CompileRequest::new("ignored.ezra", "custom-unknown-ez80");
+        let compilation =
+            compile_workspace_to_assembly(&Workspace::new(&files), "src/main.ezra", &request)
+                .unwrap();
+
+        assert!(compilation.report.has_main);
+        assert!(compilation.assembly.contains("_main:"));
     }
 
     #[test]

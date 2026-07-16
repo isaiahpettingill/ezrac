@@ -269,7 +269,7 @@ pub fn check_source_with_sdk(
     check_source_with_sdk_and_overrides(source, options, sdk, &HashMap::new())
 }
 
-fn check_source_with_sdk_and_overrides(
+pub fn check_source_with_sdk_and_overrides(
     source: &str,
     options: &CompileOptions,
     sdk: &SdkResolver,
@@ -777,10 +777,22 @@ pub fn parse_and_resolve_imports_with_sdk(
     source: &str,
     sdk: &SdkResolver,
 ) -> Result<Program, Diagnostic> {
+    parse_and_resolve_imports_with_sdk_and_overrides(path, source, sdk, &HashMap::new())
+}
+
+/// Resolve imports using caller-provided source files before falling back to the host filesystem.
+///
+/// This is the import-resolution primitive used by the virtual-workspace API.
+pub fn parse_and_resolve_imports_with_sdk_and_overrides(
+    path: &Path,
+    source: &str,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Result<Program, Diagnostic> {
     let root = parse_program(path, source)?;
     let mut stack = Vec::new();
     let mut seen = HashSet::new();
-    resolve_program_imports(root, sdk, &mut stack, &mut seen, &HashMap::new())
+    resolve_program_imports(root, sdk, &mut stack, &mut seen, source_overrides)
 }
 
 pub fn resolve_import_source(
@@ -821,7 +833,7 @@ fn resolve_program_imports(
 
     program.declarations = active_declarations(program.declarations, sdk)?;
 
-    validate_private_import_access(&program, sdk)?;
+    validate_private_import_access(&program, sdk, source_overrides)?;
 
     let short_module_counts = direct_import_short_module_counts(&program);
     stack.push(path);
@@ -831,7 +843,8 @@ fn resolve_program_imports(
         let Declaration::Import(import) = declaration else {
             continue;
         };
-        let (import_path, source) = read_import_source(&program.source_path, import, sdk)?;
+        let (import_path, source) =
+            read_import_source_with_overrides(&program.source_path, import, sdk, source_overrides)?;
         // A module reached through an earlier import already contributed its
         // declarations and aliases. Skipping it here prevents shared SDK
         // dependencies from creating duplicate qualified aliases.
@@ -889,6 +902,13 @@ fn source_override(source_overrides: &HashMap<PathBuf, String>, path: &Path) -> 
         .get(path)
         .or_else(|| source_overrides.get(&normalize_path(path)))
         .cloned()
+        .or_else(|| {
+            let portable = path.to_string_lossy().replace('\\', "/");
+            source_overrides
+                .iter()
+                .find(|(candidate, _)| candidate.to_string_lossy().replace('\\', "/") == portable)
+                .map(|(_, source)| source.clone())
+        })
 }
 
 fn reject_import_declaration_collisions(
@@ -1052,12 +1072,24 @@ fn read_import_source(
     import: &str,
     sdk: &SdkResolver,
 ) -> Result<(PathBuf, String), Diagnostic> {
+    read_import_source_with_overrides(source_path, import, sdk, &HashMap::new())
+}
+
+fn read_import_source_with_overrides(
+    source_path: &Path,
+    import: &str,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Result<(PathBuf, String), Diagnostic> {
     let candidates = import_file_candidates(source_path, import, sdk);
     let missing_path = candidates
         .first()
         .cloned()
         .unwrap_or_else(|| PathBuf::from(import.replace('.', "/")).with_extension("ezra"));
     for candidate in candidates {
+        if let Some(source) = source_override(source_overrides, &candidate) {
+            return Ok((candidate, source));
+        }
         match fs::read_to_string(&candidate) {
             Ok(source) => return Ok((candidate, source)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1546,7 +1578,11 @@ fn alias_declaration(declaration: &Declaration, prefix: &str) -> Option<Declarat
     }
 }
 
-fn validate_private_import_access(program: &Program, sdk: &SdkResolver) -> Result<(), Diagnostic> {
+fn validate_private_import_access(
+    program: &Program,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Result<(), Diagnostic> {
     let mut private_imports = HashMap::new();
     let mut seen_imports = HashSet::new();
     for declaration in &program.declarations {
@@ -1557,6 +1593,7 @@ fn validate_private_import_access(program: &Program, sdk: &SdkResolver) -> Resul
             &program.source_path,
             import,
             sdk,
+            source_overrides,
             &mut private_imports,
             &mut seen_imports,
         )?;
@@ -1576,10 +1613,12 @@ fn collect_private_imports(
     source_path: &Path,
     import: &str,
     sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
     private_imports: &mut HashMap<String, String>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<(), Diagnostic> {
-    let (import_path, source) = read_import_source(source_path, import, sdk)?;
+    let (import_path, source) =
+        read_import_source_with_overrides(source_path, import, sdk, source_overrides)?;
     let normalized = normalize_path(&import_path);
     if !seen.insert(normalized) {
         return Ok(());
@@ -1602,7 +1641,14 @@ fn collect_private_imports(
         let Declaration::Import(nested) = declaration else {
             continue;
         };
-        collect_private_imports(&import_path, nested, sdk, private_imports, seen)?;
+        collect_private_imports(
+            &import_path,
+            nested,
+            sdk,
+            source_overrides,
+            private_imports,
+            seen,
+        )?;
     }
 
     Ok(())
