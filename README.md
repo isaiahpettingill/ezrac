@@ -120,17 +120,28 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 
 ## Embedding the Compiler
 
-The crate exposes an in-process assembly-generation API for Rust applications. It does not invoke the CLI or write artifacts:
+The crate exposes filesystem-free compile and build APIs for Rust applications. A virtual workspace can be compiled, assembled, and packaged without invoking the CLI or writing artifacts:
 
 ```rust
-use ezra::api::{CompileRequest, compile_source_to_assembly};
+use ezra::api::{BuildCompilation, CompileRequest, Workspace, WorkspaceFile, build_workspace};
 
-let request = CompileRequest::new("memory.ezra", "custom-unknown-ez80");
-let compilation = compile_source_to_assembly("fn main() {}", &request)?;
-println!("{}", compilation.assembly);
+let files = [
+    WorkspaceFile::text(
+        "src/main.ezra",
+        "import math\nfn main() { let answer: u8 = math.ANSWER }",
+    ),
+    WorkspaceFile::text("src/math.ezra", "pub const ANSWER: u8 = 42"),
+];
+let request = CompileRequest::new("src/main.ezra", "cpm-2.2-z80");
+let build: BuildCompilation =
+    build_workspace(&Workspace::new(&files), "src/main.ezra", &request)?;
+
+assert_eq!(build.executable_extension, "com");
+// build.assembly, build.machine_code, build.symbols, and build.executable
+// are all caller-owned in-memory artifacts.
 ```
 
-`CompileRequest::sdk_paths` adds filesystem SDK roots, while the target selects bundled SDK imports. The API emits executable assembly and therefore requires `fn main()`; it does not create shared-library artifacts. For library/SDK diagnostics without an entry point, configure `[lsp] mode = "library"`.
+`build_workspace` resolves supplied files before any std filesystem fallback and returns target-native Agon MOS, CP/M, C64, raw, and Intel HEX packages. The compiler library is checked for `wasm32-unknown-unknown` with `--no-default-features --features std,z80`; no `wasm-bindgen` dependency is required. The `no-std` feature currently exposes the alloc-only workspace, target, and packaging layers, while source parsing/code generation remain part of the `std` compiler feature.
 
 ## Development
 
