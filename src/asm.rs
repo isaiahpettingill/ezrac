@@ -1,6 +1,7 @@
 pub mod avr;
 #[cfg(feature = "avr")]
 pub mod avr_emitter;
+mod comments;
 
 #[cfg(feature = "dcpu")]
 pub mod dcpu;

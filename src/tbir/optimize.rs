@@ -282,13 +282,50 @@ fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
             | BinaryOp::BitXor
             | BinaryOp::Shl
             | BinaryOp::Shr,
-            Expr::Int(0),
-        ) => Some(value.clone()),
-        (value, BinaryOp::Mul | BinaryOp::Div, Expr::Int(1)) => Some(value.clone()),
-        (Expr::Int(0), BinaryOp::Add | BinaryOp::BitOr | BinaryOp::BitXor, value) => {
+            value_expr,
+        ) if int_value(value_expr) == Some(0) => Some(value.clone()),
+        (value, BinaryOp::Mul | BinaryOp::Div, value_expr) if int_value(value_expr) == Some(1) => {
+            Some(value.clone())
+        }
+        (_, BinaryOp::Div | BinaryOp::Mod, value_expr) if int_value(value_expr) == Some(0) => {
+            Some(Expr::Int(0))
+        }
+        (value_expr, BinaryOp::Mul, value) if power_of_two_shift(value_expr).is_some() => {
+            power_of_two_shift(value_expr)
+                .map(|shift| shift_expr(value.clone(), BinaryOp::Shl, shift))
+        }
+        (value, BinaryOp::Mul, value_expr) => power_of_two_shift(value_expr)
+            .map(|shift| shift_expr(value.clone(), BinaryOp::Shl, shift)),
+        (value_expr, BinaryOp::Add | BinaryOp::BitOr | BinaryOp::BitXor, value)
+            if int_value(value_expr) == Some(0) =>
+        {
             Some(value.clone())
         }
         _ => None,
+    }
+}
+
+fn int_value(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(value) | Expr::TypedInt(value, _) => Some(*value),
+        _ => None,
+    }
+}
+
+fn power_of_two_shift(expr: &Expr) -> Option<u32> {
+    let value = int_value(expr)?;
+    if value > 1 && (value as u64).is_power_of_two() {
+        Some((value as u64).trailing_zeros())
+    } else {
+        None
+    }
+}
+
+fn shift_expr(value: Expr, op: BinaryOp, shift: u32) -> Expr {
+    Expr::Binary {
+        left: Box::new(value),
+        op,
+        right: Box::new(Expr::Int(i64::from(shift))),
     }
 }
 

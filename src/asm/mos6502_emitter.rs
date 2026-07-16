@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    asm::AssemblyOptions,
+    asm::{AssemblyOptions, comments::with_readability_comments},
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -29,7 +29,9 @@ pub fn emit_mos6502_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    Emitter::new(model, options).emit(&tbir.lowered_program)
+    Emitter::new(model, options.clone())
+        .emit(&tbir.lowered_program)
+        .map(|asm| with_readability_comments(asm, program, &options, "mos6502"))
 }
 
 #[derive(Clone)]

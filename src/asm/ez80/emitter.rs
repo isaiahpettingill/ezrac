@@ -23,6 +23,7 @@ use crate::{
 mod intel8080;
 mod symbols;
 
+use crate::asm::comments::with_readability_comments;
 use intel8080::{is_intel_8080_family, translate_assembly_for_cpu};
 use symbols::{FunctionSig, StructLayout, Symbols, ValueWidth, Variable};
 
@@ -214,7 +215,7 @@ impl CheckedEz80Program {
 }
 
 pub fn emit_ez80_assembly_from_checked(
-    _program: &Program,
+    original_program: &Program,
     checked: &CheckedEz80Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
@@ -236,7 +237,7 @@ pub fn emit_ez80_assembly_from_checked(
     let emitted_functions = reachable_function_names(program, &symbols);
     let cpu = options.cpu;
 
-    let mut emitter = Emitter::new(symbols, options, recursive_call_edges);
+    let mut emitter = Emitter::new(symbols, options.clone(), recursive_call_edges);
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
     emitter.emit_string_literal_initializers();
@@ -253,6 +254,7 @@ pub fn emit_ez80_assembly_from_checked(
     }
     emitter.emit_required_sections();
     translate_assembly_for_cpu(cpu, &peephole_cleanup(&emitter.out))
+        .map(|asm| with_readability_comments(asm, original_program, &options, "ez80"))
 }
 
 fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
@@ -6351,7 +6353,7 @@ fn validate_all_function_bodies(
     options: AssemblyOptions,
     recursive_call_edges: HashSet<(String, String)>,
 ) -> Result<(), Diagnostic> {
-    let mut emitter = Emitter::new(symbols, options, recursive_call_edges);
+    let mut emitter = Emitter::new(symbols, options.clone(), recursive_call_edges);
     emitter.disable_dead_code_elimination();
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;
