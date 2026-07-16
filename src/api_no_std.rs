@@ -19,7 +19,7 @@ use crate::{
         memory_model_for_cpu, resolve_target_profile,
     },
     vm::{AssemblySymbol, assemble_subset_with_symbols_at},
-    workspace::normalize_virtual_path,
+    workspace::{materialize_workspace_embeds, normalize_virtual_path},
 };
 
 /// Options for compiling virtual Ezra source without host services.
@@ -118,7 +118,8 @@ pub fn compile_workspace_to_assembly(
 
     let root = normalize_virtual_path(root);
     let source = workspace_text(workspace, &root)?;
-    let root_program = parse_program(&root, source)?;
+    let mut root_program = parse_program(&root, source)?;
+    materialize_workspace_embeds(&mut root_program, workspace)?;
     let imports = root_program
         .declarations
         .iter()
@@ -267,6 +268,7 @@ fn resolve_program(
         }
         let source = workspace_text(workspace, &import_path)?;
         let mut imported = parse_program(&import_path, source)?;
+        materialize_workspace_embeds(&mut imported, workspace)?;
         imported.declarations = active_declarations(imported.declarations, request)?;
         let short = import.rsplit('.').next().unwrap_or(import);
         let aliases = module_alias_declarations(

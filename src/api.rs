@@ -16,14 +16,16 @@ use crate::{
         AssemblyOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
         emit_mos6502_assembly_with_options,
     },
-    ast::Program,
+    ast::{Declaration, Program},
     compile::{
         CompileOptions, CompileReport, SdkResolver, check_source_with_sdk_and_overrides,
         parse_and_resolve_imports_with_sdk_and_overrides,
+        parse_and_resolve_imports_with_sdk_and_workspace,
     },
     diagnostic::Diagnostic,
     layout::default_layout_for_target,
     package::{PackageRequest, package_executable},
+    parser::parse_program,
     target::{
         Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, OutputFormat,
         resolve_target_profile,
@@ -86,10 +88,13 @@ impl Workspace<'_> {
     fn text_overrides(&self) -> Result<HashMap<PathBuf, String>, Diagnostic> {
         let mut overrides = HashMap::new();
         for file in self.files {
+            let virtual_path = normalize_virtual_path(file.path);
+            if !virtual_path.ends_with(".ezra") {
+                continue;
+            }
             let text = core::str::from_utf8(file.contents).map_err(|_| {
                 Diagnostic::new(format!("workspace source `{}` is not UTF-8", file.path))
             })?;
-            let virtual_path = normalize_virtual_path(file.path);
             overrides.insert(PathBuf::from(&virtual_path), text.to_owned());
             let host_path = virtual_path.replace('/', std::path::MAIN_SEPARATOR_STR);
             overrides.insert(PathBuf::from(host_path), text.to_owned());
@@ -145,15 +150,58 @@ pub fn compile_workspace_to_assembly(
     root: &str,
     request: &CompileRequest,
 ) -> Result<AssemblyCompilation, Diagnostic> {
-    let source = workspace.file(root).ok_or_else(|| {
+    let root = normalize_virtual_path(root);
+    let source = workspace.file(&root).ok_or_else(|| {
         Diagnostic::new(format!("workspace does not contain root source `{root}`"))
     })?;
     let source = core::str::from_utf8(source)
         .map_err(|_| Diagnostic::new(format!("workspace source `{root}` is not UTF-8")))?;
     let mut request = request.clone();
-    request.source_path = PathBuf::from(root);
+    request.source_path = PathBuf::from(&root);
+    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    let sdk = request.sdk_resolver();
     let overrides = workspace.text_overrides()?;
-    compile_source_to_assembly_with_overrides(source, &request, &overrides)
+    let root_program = parse_program(&request.source_path, source)?;
+    let imports = root_program
+        .declarations
+        .iter()
+        .filter(|declaration| matches!(declaration, Declaration::Import(_)))
+        .count();
+    let program = parse_and_resolve_imports_with_sdk_and_workspace(
+        &request.source_path,
+        source,
+        &sdk,
+        &overrides,
+        workspace,
+    )?;
+    let has_main = program.main_function().is_some();
+    if !has_main {
+        return Err(Diagnostic::new("missing required `fn main()`"));
+    }
+    let main = program.main_function().expect("main presence checked");
+    if !main.params.is_empty() {
+        return Err(Diagnostic::new("main function cannot take parameters"));
+    }
+    if main.return_type.is_some() {
+        return Err(Diagnostic::new("main function cannot return a value"));
+    }
+    let report = CompileReport {
+        imports,
+        declarations: program.declarations.len(),
+        has_main,
+    };
+    let options = assembly_options_for_target(
+        &request.target,
+        target.triple.cpu,
+        request.debug_comments,
+        request.default_sdk_symbols,
+    );
+    let assembly = emit_source_assembly(&program, options)?;
+    Ok(AssemblyCompilation {
+        report,
+        program,
+        assembly,
+    })
 }
 
 /// Compile, assemble, and package a virtual workspace entirely in memory.
@@ -360,6 +408,28 @@ pub fn source_path(root: impl AsRef<Path>, relative: impl AsRef<Path>) -> PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{EmbedSource, Expr};
+
+    fn materialized_embed_bytes(program: &Program, name: &str) -> Vec<u8> {
+        let embed = program
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Embed(embed) if embed.name == name => Some(embed),
+                _ => None,
+            })
+            .expect("materialized embed declaration");
+        let EmbedSource::Bytes(values) = &embed.source else {
+            panic!("workspace file embed was not materialized");
+        };
+        values
+            .iter()
+            .map(|value| match value {
+                Expr::Int(value) => *value as u8,
+                _ => panic!("materialized workspace byte is not an integer"),
+            })
+            .collect()
+    }
 
     #[test]
     fn compiles_in_memory_source_to_ez80_assembly() {
@@ -386,6 +456,71 @@ mod tests {
 
         assert!(compilation.report.has_main);
         assert!(compilation.assembly.contains("_main:"));
+    }
+
+    #[test]
+    fn materializes_root_relative_workspace_assets() {
+        let files = [
+            WorkspaceFile::text(
+                "src/main.ezra",
+                "embed blob: bytes = file(\"assets/blob.bin\")\nfn main() {}\n",
+            ),
+            WorkspaceFile::new("src/assets/blob.bin", &[0xA5, 0x00, 0xFF]),
+        ];
+        let compilation = compile_workspace_to_assembly(
+            &Workspace::new(&files),
+            "src/main.ezra",
+            &CompileRequest::new("ignored.ezra", "cpm-2.2-z80"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            materialized_embed_bytes(&compilation.program, "blob"),
+            [0xA5, 0x00, 0xFF]
+        );
+    }
+
+    #[test]
+    fn materializes_imported_module_relative_workspace_assets() {
+        let files = [
+            WorkspaceFile::text("src/main.ezra", "import lib.media\nfn main() {}\n"),
+            WorkspaceFile::text(
+                "src/lib/media.ezra",
+                "pub embed sprite: bytes = file(\"assets/sprite.bin\")\n",
+            ),
+            WorkspaceFile::new("src/lib/assets/sprite.bin", &[0xDE, 0xAD]),
+        ];
+        let build = build_workspace(
+            &Workspace::new(&files),
+            "src/main.ezra",
+            &CompileRequest::new("ignored.ezra", "cpm-2.2-z80"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            materialized_embed_bytes(&build.program, "sprite"),
+            [0xDE, 0xAD]
+        );
+        assert!(!build.machine_code.is_empty());
+    }
+
+    #[test]
+    fn reports_missing_virtual_workspace_assets() {
+        let files = [WorkspaceFile::text(
+            "src/main.ezra",
+            "embed blob: bytes = file(\"assets/missing.bin\")\nfn main() {}\n",
+        )];
+        let error = compile_workspace_to_assembly(
+            &Workspace::new(&files),
+            "src/main.ezra",
+            &CompileRequest::new("ignored.ezra", "cpm-2.2-z80"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "virtual workspace asset `assets/missing.bin` referenced from `src/main.ezra` was not found (resolved as `src/assets/missing.bin`)"
+        );
     }
 
     #[test]

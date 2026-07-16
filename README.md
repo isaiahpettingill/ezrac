@@ -148,7 +148,7 @@ cargo check --lib --no-default-features --features no-std,z80
 cargo check --lib --no-default-features --features no-std,mos6502
 ```
 
-No-std builds never access host paths: all imported SDK source must be included in `Workspace`, and filesystem-backed `embed file(...)` is rejected; inline byte, text, C-string, and repeat embeds remain available. The library is also checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
+No-std builds never access host paths: all imported SDK source and binary assets must be included in `Workspace`. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
 
 ## Development
 

@@ -29,6 +29,7 @@ use crate::{
     target::{
         Address24, CpuFamily, DEFAULT_TARGET_TRIPLE, memory_model_for_cpu, parse_target_triple,
     },
+    workspace::{Workspace, materialize_workspace_embeds},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +114,7 @@ fn check_diagnostics_with_sdk_and_overrides(
         &mut Vec::new(),
         &mut HashSet::new(),
         source_overrides,
+        None,
     ) {
         Ok(program) => program,
         Err(error) => return vec![locate_source_diagnostic(error, source, &options.source)],
@@ -288,6 +290,7 @@ pub fn check_source_with_sdk_and_overrides(
         &mut Vec::new(),
         &mut HashSet::new(),
         source_overrides,
+        None,
     )
     .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
     let declarations = program.declarations.len();
@@ -792,7 +795,27 @@ pub fn parse_and_resolve_imports_with_sdk_and_overrides(
     let root = parse_program(path, source)?;
     let mut stack = Vec::new();
     let mut seen = HashSet::new();
-    resolve_program_imports(root, sdk, &mut stack, &mut seen, source_overrides)
+    resolve_program_imports(root, sdk, &mut stack, &mut seen, source_overrides, None)
+}
+
+pub fn parse_and_resolve_imports_with_sdk_and_workspace(
+    path: &Path,
+    source: &str,
+    sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
+    workspace: &Workspace<'_>,
+) -> Result<Program, Diagnostic> {
+    let root = parse_program(path, source)?;
+    let mut stack = Vec::new();
+    let mut seen = HashSet::new();
+    resolve_program_imports(
+        root,
+        sdk,
+        &mut stack,
+        &mut seen,
+        source_overrides,
+        Some(workspace),
+    )
 }
 
 pub fn resolve_import_source(
@@ -809,7 +832,11 @@ fn resolve_program_imports(
     stack: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
     source_overrides: &HashMap<PathBuf, String>,
+    workspace: Option<&Workspace<'_>>,
 ) -> Result<Program, Diagnostic> {
+    if let Some(workspace) = workspace {
+        materialize_workspace_embeds(&mut program, workspace)?;
+    }
     let path = normalize_path(&program.source_path);
     if stack.contains(&path) {
         let mut cycle = stack
@@ -854,6 +881,9 @@ fn resolve_program_imports(
         }
         let source = source_override(source_overrides, &import_path).unwrap_or(source);
         let mut imported = parse_program(&import_path, &source)?;
+        if let Some(workspace) = workspace {
+            materialize_workspace_embeds(&mut imported, workspace)?;
+        }
         imported.declarations = active_declarations(imported.declarations, sdk)?;
         let short_module = import.rsplit('.').next().unwrap_or(import);
         let include_short_aliases = short_module_counts
@@ -863,7 +893,8 @@ fn resolve_program_imports(
             <= 1;
         let module_aliases =
             module_alias_declarations(import, &imported.declarations, include_short_aliases);
-        let imported = resolve_program_imports(imported, sdk, stack, seen, source_overrides)?;
+        let imported =
+            resolve_program_imports(imported, sdk, stack, seen, source_overrides, workspace)?;
         source_units.extend(imported.source_units.iter().cloned());
         let imported_declarations = imported
             .declarations
