@@ -1,0 +1,10 @@
+// AVR operand/addressing grammar, including pre-decrement and post-increment.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { avr_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ avr_operand)* }
+avr_operand = { avr_element ~ (architecture_ws ~ avr_element)* }
+// Pointer addressing is expressed by atoms/operators (`-X`, `Y+q`, `Z+`),
+// while parentheses are available for grouped constant expressions.
+avr_element = _{ avr_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+avr_nested_element = _{ avr_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+avr_parenthesized = { architecture_lparen ~ architecture_ws ~ avr_nested_element ~ (architecture_ws ~ avr_nested_element)* ~ architecture_ws ~ architecture_rparen }

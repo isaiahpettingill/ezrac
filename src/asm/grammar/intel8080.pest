@@ -1,0 +1,10 @@
+// Intel 8080 and 8085 operand/addressing grammar.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { intel8080_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ intel8080_operand)* }
+intel8080_operand = { intel8080_element ~ (architecture_ws ~ intel8080_element)* }
+// Parentheses are retained for grouped expressions accepted by compatible
+// assemblers; square/curly memory delimiters are not 8080 addressing forms.
+intel8080_element = _{ intel8080_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+intel8080_nested_element = _{ intel8080_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+intel8080_parenthesized = { architecture_lparen ~ architecture_ws ~ intel8080_nested_element ~ (architecture_ws ~ intel8080_nested_element)* ~ architecture_ws ~ architecture_rparen }

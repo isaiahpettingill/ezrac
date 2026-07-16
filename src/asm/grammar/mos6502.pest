@@ -1,0 +1,11 @@
+// MOS 6502/65C02/65C816/2A03 operand/addressing grammar.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { mos6502_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ mos6502_operand)* }
+mos6502_operand = { mos6502_element ~ (architecture_ws ~ mos6502_element)* }
+mos6502_element = _{ mos6502_parenthesized | mos6502_bracketed | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+mos6502_nested_element = _{ mos6502_parenthesized | mos6502_bracketed | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+// Both classic indirect `(...)` and 65C816 long-indirect `[...]` addressing
+// retain internal commas as part of one balanced addressing expression.
+mos6502_parenthesized = { architecture_lparen ~ architecture_ws ~ mos6502_nested_element ~ (architecture_ws ~ mos6502_nested_element)* ~ architecture_ws ~ architecture_rparen }
+mos6502_bracketed = { architecture_lbracket ~ architecture_ws ~ mos6502_nested_element ~ (architecture_ws ~ mos6502_nested_element)* ~ architecture_ws ~ architecture_rbracket }

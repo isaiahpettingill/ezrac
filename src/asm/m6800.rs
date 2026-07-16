@@ -373,6 +373,9 @@ fn analyze(text: &str) -> Result<Option<(Opcode, String)>, Diagnostic> {
 }
 
 fn prefer_direct(_mnemonic: &str, operand: &str) -> bool {
+    if operand.starts_with("$+") || operand.starts_with("$-") {
+        return false;
+    }
     parse_number(operand).is_ok_and(|value| value <= 0xFF)
 }
 fn operand_len(op: Opcode) -> usize {
@@ -449,29 +452,47 @@ fn rel8(pc: u32, target: u32) -> Result<u8, Diagnostic> {
     Ok((off as i8) as u8)
 }
 fn eval(expr: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, Diagnostic> {
-    let mut parts = expr.split_whitespace();
-    let Some(first) = parts.next() else {
+    let expr = expr.trim();
+    if expr.is_empty() {
         return Err(Diagnostic::new("empty M6800 expression"));
-    };
-    let mut value = atom(first, labels, pc)? as i64;
-    while let Some(op) = parts.next() {
-        let rhs = atom(
-            parts
-                .next()
-                .ok_or_else(|| Diagnostic::new(format!("missing operand after `{op}`")))?,
-            labels,
-            pc,
-        )? as i64;
-        match op {
-            "+" => value += rhs,
-            "-" => value -= rhs,
-            _ => {
-                return Err(Diagnostic::new(format!(
-                    "unsupported M6800 operator `{op}`"
-                )));
-            }
-        }
     }
+
+    let mut value = None;
+    let mut operator = None;
+    let mut term_start = 0;
+    for (index, ch) in expr.char_indices() {
+        if !matches!(ch, '+' | '-') {
+            continue;
+        }
+        let term = expr[term_start..index].trim();
+        if term.is_empty() {
+            return Err(Diagnostic::new(format!("missing operand before `{ch}`")));
+        }
+        let rhs = atom(term, labels, pc)? as i64;
+        value = Some(match (value, operator) {
+            (None, None) => rhs,
+            (Some(lhs), Some('+')) => lhs + rhs,
+            (Some(lhs), Some('-')) => lhs - rhs,
+            _ => unreachable!("M6800 expression operators are tracked with their left operand"),
+        });
+        operator = Some(ch);
+        term_start = index + ch.len_utf8();
+    }
+
+    let term = expr[term_start..].trim();
+    if term.is_empty() {
+        let operator = operator.expect("a missing final term follows an operator");
+        return Err(Diagnostic::new(format!(
+            "missing operand after `{operator}`"
+        )));
+    }
+    let rhs = atom(term, labels, pc)? as i64;
+    let value = match (value, operator) {
+        (None, None) => rhs,
+        (Some(lhs), Some('+')) => lhs + rhs,
+        (Some(lhs), Some('-')) => lhs - rhs,
+        _ => unreachable!("M6800 expression operators are tracked with their left operand"),
+    };
     if !(0..=Address24::MAX as i64).contains(&value) {
         return Err(Diagnostic::new(format!(
             "M6800 expression `{expr}` is outside the address space"
@@ -792,6 +813,10 @@ mod tests {
         );
         assert_eq!(
             emit_instruction("ldaa $ + 2", &labels, 0x1000).unwrap(),
+            Some(vec![0xB6, 0x10, 0x02])
+        );
+        assert_eq!(
+            emit_instruction("ldaa $+2", &labels, 0x1000).unwrap(),
             Some(vec![0xB6, 0x10, 0x02])
         );
     }

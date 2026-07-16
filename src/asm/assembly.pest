@@ -86,3 +86,21 @@ symbol = @{ symbol_start ~ symbol_continue* }
 symbol_start = { ASCII_ALPHA | "_" | "." | "@" | "?" | "%" }
 symbol_continue = { ASCII_ALPHANUMERIC | "_" | "." | "@" | "?" | "%" }
 expr_ws = _{ (" " | "\t")* }
+
+// Lexical primitives shared by architecture-family grammars. Deliberately do
+// not define an architecture instruction or operand here: each family grammar
+// owns those productions and extends this file on its derived parser.
+architecture_atom = @{ (!(architecture_ws_char | NEWLINE | "," | "(" | ")" | "[" | "]" | "{" | "}" | "+" | "-" | "*" | "/" | "#" | "<" | ">" | "=" | "&" | "|" | "^" | "~" | ":" | "!" | "\"") ~ ANY)+ }
+architecture_double_quoted = @{ "\"" ~ ("\\" ~ !NEWLINE ~ ANY | !("\"" | NEWLINE) ~ ANY)* ~ "\"" }
+architecture_single_quoted = @{ "'" ~ ("\\" ~ !NEWLINE ~ ANY | !("'" | NEWLINE) ~ ANY)* ~ "'" }
+architecture_operator = @{ "+" | "-" | "*" | "/" | "#" | "<" | ">" | "=" | "&" | "|" | "^" | "~" | ":" | "!" }
+architecture_comma = { "," }
+architecture_lparen = { "(" }
+architecture_rparen = { ")" }
+architecture_lbracket = { "[" }
+architecture_rbracket = { "]" }
+architecture_lbrace = { "{" }
+architecture_rbrace = { "}" }
+architecture_ws = _{ architecture_ws_char* }
+architecture_ws1 = _{ architecture_ws_char+ }
+architecture_ws_char = _{ " " | "\t" }

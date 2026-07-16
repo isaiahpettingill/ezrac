@@ -1,0 +1,11 @@
+// TMS9900 operand/addressing grammar, including symbolic/indexed `@addr(rN)`
+// and indirect/autoincrement `*rN+` forms.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { tms9900_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ tms9900_operand)* }
+tms9900_operand = { tms9900_element ~ (architecture_ws ~ tms9900_element)* }
+// Parentheses belong to symbolic indexed addressing (`@addr(rN)`); TMS9900
+// indirect/autoincrement forms use `*rN`/`*rN+`, never square brackets.
+tms9900_element = _{ tms9900_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+tms9900_nested_element = _{ tms9900_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+tms9900_parenthesized = { architecture_lparen ~ architecture_ws ~ tms9900_nested_element ~ (architecture_ws ~ tms9900_nested_element)* ~ architecture_ws ~ architecture_rparen }

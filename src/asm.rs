@@ -4,6 +4,7 @@ pub mod avr;
 pub mod avr_emitter;
 mod comments;
 pub mod frontend;
+pub(crate) mod grammar;
 pub mod preprocess;
 
 #[cfg(feature = "dcpu")]

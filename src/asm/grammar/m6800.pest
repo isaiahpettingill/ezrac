@@ -1,0 +1,10 @@
+// Motorola 6800 operand/addressing grammar.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { m6800_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ m6800_operand)* }
+m6800_operand = { m6800_element ~ (architecture_ws ~ m6800_element)* }
+// Indexed M6800 syntax (`offset,x`) is represented by top-level operands;
+// parentheses are only balanced expression groups, not memory delimiters.
+m6800_element = _{ m6800_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+m6800_nested_element = _{ m6800_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+m6800_parenthesized = { architecture_lparen ~ architecture_ws ~ m6800_nested_element ~ (architecture_ws ~ m6800_nested_element)* ~ architecture_ws ~ architecture_rparen }

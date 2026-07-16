@@ -27,6 +27,7 @@ use crate::asm::frontend::{
     LocatedParsedAssemblyItem, ParsedAssembly, ParsedAssemblyItem, lower_parsed_assembly,
     parse_assembly_expression, parse_assembly_syntax,
 };
+use crate::asm::grammar::{ArchitectureInstruction, parse_instruction};
 #[cfg(feature = "m68k")]
 use crate::asm::m68k as asm_m68k;
 #[cfg(any(feature = "std", feature = "m6800"))]
@@ -1133,6 +1134,8 @@ pub fn assemble_program_with_options_at(
         )));
     }
 
+    let architecture_instructions = parse_program_instructions(cpu, program)?;
+    let mut instruction_lengths = vec![None; program.items.len()];
     let mut labels = BTreeMap::new();
     let mut declared_names = HashSet::new();
     for symbol in &options.symbols {
@@ -1151,7 +1154,7 @@ pub fn assemble_program_with_options_at(
     } & 0xFF_FFFF;
     let mut pc = default_pc;
 
-    for item in &program.items {
+    for (item_index, item) in program.items.iter().enumerate() {
         match &item.kind {
             AssemblyItem::Label(name) => {
                 if pc > Address24::MAX {
@@ -1194,8 +1197,12 @@ pub fn assemble_program_with_options_at(
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Instruction(instruction) => {
-                let len = instruction_len(cpu, instruction)
+                let architecture = architecture_instructions[item_index]
+                    .as_ref()
+                    .expect("architecture parsing follows program items");
+                let len = instruction_len(cpu, architecture, &instruction.to_text())
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                instruction_lengths[item_index] = Some(len);
                 pc = checked_assembly_pc_advance(pc, len as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
@@ -1238,7 +1245,7 @@ pub fn assemble_program_with_options_at(
         append_org_padding(&mut bytes, pc, default_pc)?;
         pc = default_pc;
     }
-    for item in &program.items {
+    for (item_index, item) in program.items.iter().enumerate() {
         match &item.kind {
             AssemblyItem::Label(_) | AssemblyItem::Equ { .. } => {}
             AssemblyItem::Section(name) => {
@@ -1262,10 +1269,20 @@ pub fn assemble_program_with_options_at(
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Instruction(instruction) => {
-                emit_instruction(cpu, instruction, &labels, pc, &mut bytes)
-                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
-                let len = instruction_len(cpu, instruction)
-                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                let architecture = architecture_instructions[item_index]
+                    .as_ref()
+                    .expect("architecture parsing follows program items");
+                emit_instruction(
+                    cpu,
+                    architecture,
+                    &instruction.to_text(),
+                    &labels,
+                    pc,
+                    &mut bytes,
+                )
+                .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                let len = instruction_lengths[item_index]
+                    .expect("instruction length was computed during the first pass");
                 pc = checked_assembly_pc_advance(pc, len as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
@@ -1407,6 +1424,22 @@ fn item_diagnostic(item: &LocatedAssemblyItem, message: impl Into<String>) -> Di
     Diagnostic::at(item.location.clone(), message)
 }
 
+fn parse_program_instructions(
+    cpu: AssemblerCpu,
+    program: &AssemblyProgram,
+) -> Result<Vec<Option<ArchitectureInstruction>>, Diagnostic> {
+    program
+        .items
+        .iter()
+        .map(|item| match &item.kind {
+            AssemblyItem::Instruction(instruction) => parse_instruction(cpu, instruction)
+                .map(Some)
+                .map_err(|error| error.with_location_if_missing(item.location.clone())),
+            _ => Ok(None),
+        })
+        .collect()
+}
+
 fn section_base(options: &AssemblerSourceOptions, name: &str) -> Option<u32> {
     options
         .section_bases
@@ -1444,8 +1477,12 @@ pub fn measure_assembly_program_with_options(
     for item in &program.items {
         let item_len = match &item.kind {
             AssemblyItem::Data { width, values } => data_len(*width, values),
-            AssemblyItem::Instruction(instruction) => instruction_len(cpu, instruction)
-                .map_err(|error| error.with_location_if_missing(item.location.clone()))?,
+            AssemblyItem::Instruction(instruction) => {
+                let architecture = parse_instruction(cpu, instruction)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                instruction_len(cpu, &architecture, &instruction.to_text())
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?
+            }
             AssemblyItem::Label(_)
             | AssemblyItem::Equ { .. }
             | AssemblyItem::Section(_)
@@ -1683,29 +1720,16 @@ fn expression_text(expression: &AssemblyExpression) -> String {
     }
 }
 
-fn instruction_text_for_cpu(cpu: AssemblerCpu, instruction: &AssemblyInstruction) -> String {
-    if matches!(
-        cpu,
-        AssemblerCpu::Mos6502
-            | AssemblerCpu::Cmos65C02
-            | AssemblerCpu::Wdc65C816
-            | AssemblerCpu::Ricoh2A03
-    ) {
-        instruction.to_encoder_text()
-    } else {
-        instruction.to_text()
-    }
-}
-
 fn instruction_len(
     cpu: AssemblerCpu,
-    instruction: &AssemblyInstruction,
+    architecture: &ArchitectureInstruction,
+    diagnostic_text: &str,
 ) -> Result<usize, Diagnostic> {
+    let instruction = architecture.instruction();
     if cpu == AssemblerCpu::Lr35902 {
         return Ok(encode_lr35902(instruction, &HashMap::new(), 0, false)?.len());
     }
-    let source_text = instruction_text_for_cpu(cpu, instruction);
-    let text = source_text.as_str();
+    let text = architecture.encoder_text();
     #[cfg(any(feature = "std", feature = "avr"))]
     if cpu == AssemblerCpu::Avr {
         return avr::instruction_len(text);
@@ -1714,7 +1738,7 @@ fn instruction_len(
     if cpu == AssemblerCpu::M6800 {
         return m6800::instruction_len(text)?.ok_or_else(|| {
             Diagnostic::new(format!(
-                "assembler does not support M6800 instruction `{text}`"
+                "assembler does not support M6800 instruction `{diagnostic_text}`"
             ))
         });
     }
@@ -1742,24 +1766,25 @@ fn instruction_len(
     }
     asm_meta::generated_instruction_len(cpu, text)?.ok_or_else(|| {
         Diagnostic::new(format!(
-            "test assembler does not support instruction `{text}`"
+            "test assembler does not support instruction `{diagnostic_text}`"
         ))
     })
 }
 
 fn emit_instruction(
     cpu: AssemblerCpu,
-    instruction: &AssemblyInstruction,
+    architecture: &ArchitectureInstruction,
+    diagnostic_text: &str,
     labels: &HashMap<String, u32>,
     pc: u32,
     bytes: &mut Vec<u8>,
 ) -> Result<(), Diagnostic> {
+    let instruction = architecture.instruction();
     if cpu == AssemblerCpu::Lr35902 {
         bytes.extend(encode_lr35902(instruction, labels, pc, true)?);
         return Ok(());
     }
-    let source_text = instruction_text_for_cpu(cpu, instruction);
-    let text = source_text.as_str();
+    let text = architecture.encoder_text();
     #[cfg(any(feature = "std", feature = "avr"))]
     if cpu == AssemblerCpu::Avr {
         bytes.extend(avr::encode_instruction(text, labels, pc)?);
@@ -1769,7 +1794,7 @@ fn emit_instruction(
     if cpu == AssemblerCpu::M6800 {
         let Some(encoded) = m6800::emit_instruction(text, labels, pc)? else {
             return Err(Diagnostic::new(format!(
-                "assembler does not support M6800 instruction `{text}`"
+                "assembler does not support M6800 instruction `{diagnostic_text}`"
             )));
         };
         bytes.extend(encoded);
@@ -1811,12 +1836,9 @@ fn emit_instruction(
         let (mnemonic, _) = instruction.mnemonic.rsplit_once('.').ok_or_else(|| {
             Diagnostic::new(format!("invalid eZ80 mode-suffixed instruction `{text}`"))
         })?;
-        let base = AssemblyInstruction {
-            mnemonic: mnemonic.to_owned(),
-            operands: instruction.operands.clone(),
-        };
+        let base = architecture.with_mnemonic(mnemonic);
         bytes.push(prefix);
-        emit_instruction(cpu, &base, labels, pc + 1, bytes)?;
+        emit_instruction(cpu, &base, diagnostic_text, labels, pc + 1, bytes)?;
     } else if let Some(generated) = asm_meta::encode_generated_instruction(cpu, text)? {
         bytes.extend(generated);
     } else if let Some(branch) = asm_meta::branch_instruction(cpu, text) {
@@ -1829,7 +1851,7 @@ fn emit_instruction(
         }
     } else if !cpu.supports_z80_syntax() {
         return Err(Diagnostic::new(format!(
-            "test assembler does not support instruction `{text}`"
+            "test assembler does not support instruction `{diagnostic_text}`"
         )));
     } else if let Some(direct) = asm_meta::direct24_instruction(cpu, text) {
         bytes.extend_from_slice(direct.prefix);
@@ -1839,7 +1861,7 @@ fn emit_instruction(
         push24(bytes, parse_addr(load.value, labels, pc)?);
     } else {
         return Err(Diagnostic::new(format!(
-            "test assembler does not support instruction `{text}`"
+            "test assembler does not support instruction `{diagnostic_text}`"
         )));
     }
     Ok(())
@@ -2439,6 +2461,110 @@ impl Machine for TestMachine {
         if port == 0x0E && value == 1 {
             self.halted = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod architecture_operand_tests {
+    use super::*;
+
+    fn assert_spacing_assembles(cpu: AssemblerCpu, compact: &str, spaced: &str, base_addr: u32) {
+        let compact_bytes = assemble_subset_with_symbols_at(cpu, compact, base_addr)
+            .unwrap_or_else(|error| panic!("compact `{compact}` failed: {error}"))
+            .bytes;
+        let spaced_bytes = assemble_subset_with_symbols_at(cpu, spaced, base_addr)
+            .unwrap_or_else(|error| panic!("spaced `{spaced}` failed: {error}"))
+            .bytes;
+        assert_eq!(compact_bytes, spaced_bytes, "{} emission", cpu.as_str());
+        assert_eq!(
+            measure_assembly(cpu, compact).unwrap(),
+            measure_assembly(cpu, spaced).unwrap(),
+            "{} sizing",
+            cpu.as_str()
+        );
+    }
+
+    #[cfg(feature = "z80")]
+    #[test]
+    fn z80_ez80_spacing_variants_assemble_equivalently() {
+        for cpu in [AssemblerCpu::Z80, AssemblerCpu::Ez80] {
+            assert_spacing_assembles(cpu, "rlc (ix+1)", "rlc ( ix    + 1 )", 0x100);
+        }
+    }
+
+    #[cfg(feature = "intel")]
+    #[test]
+    fn intel_spacing_variants_assemble_equivalently() {
+        for cpu in [AssemblerCpu::I8080, AssemblerCpu::I8085] {
+            assert_spacing_assembles(cpu, "lxi h,1234h", "lxi h    ,    1234h", 0x100);
+        }
+    }
+
+    #[cfg(feature = "lr35902")]
+    #[test]
+    fn lr35902_spacing_variants_assemble_equivalently() {
+        assert_spacing_assembles(
+            AssemblerCpu::Lr35902,
+            "ld hl,sp+1",
+            "ld hl , sp    + 1",
+            0x150,
+        );
+    }
+
+    #[cfg(feature = "avr")]
+    #[test]
+    fn avr_spacing_variants_assemble_equivalently() {
+        assert_spacing_assembles(AssemblerCpu::Avr, "ldd r1,y+1", "ldd r1 , y    + 1", 0);
+    }
+
+    #[cfg(feature = "dcpu")]
+    #[test]
+    fn dcpu_spacing_variants_assemble_equivalently() {
+        assert_spacing_assembles(
+            AssemblerCpu::Dcpu,
+            "set a,[sp+1]\nset b,pick 1",
+            "set a , [ sp    + 1 ]\nset b , pick    1",
+            0,
+        );
+    }
+
+    #[cfg(feature = "m6800")]
+    #[test]
+    fn m6800_spacing_variants_assemble_equivalently() {
+        assert_spacing_assembles(AssemblerCpu::M6800, "ldaa $+2", "ldaa $    + 2", 0x1000);
+    }
+
+    #[cfg(feature = "m68k")]
+    #[test]
+    fn m68k_nested_comma_spacing_variants_assemble_equivalently() {
+        assert_spacing_assembles(
+            AssemblerCpu::M68k,
+            "move.w (4,a0,d0.w),d1",
+            "move.w ( 4 , a0 , d0.w ) , d1",
+            0x1000,
+        );
+    }
+
+    #[cfg(feature = "mos6502")]
+    #[test]
+    fn mos6502_spacing_variants_assemble_equivalently() {
+        assert_spacing_assembles(
+            AssemblerCpu::Mos6502,
+            "lda ($20),y",
+            "lda ( $20 ) , y",
+            0xc000,
+        );
+    }
+
+    #[cfg(feature = "tms9900")]
+    #[test]
+    fn tms9900_spacing_variants_assemble_equivalently() {
+        assert_spacing_assembles(
+            AssemblerCpu::Tms9900,
+            "a @>8300(r4),r5",
+            "a @>8300 ( r4 ) , r5",
+            0x1000,
+        );
     }
 }
 

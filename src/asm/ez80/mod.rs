@@ -2177,23 +2177,24 @@ fn word_bytes(opcode: u8, value: u16) -> Vec<u8> {
 }
 
 fn parse_io_instruction(cpu: AssemblerCpu, text: &str) -> Result<Option<Vec<u8>>, Diagnostic> {
-    if let Some(port) = text
-        .strip_prefix("in a, (")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        if port.trim() == "c" {
-            return Ok(Some(vec![0xED, 0x78]));
-        }
-        return Ok(Some(vec![0xDB, parse_u8(port.trim())?]));
-    }
     if let Some(rest) = text.strip_prefix("in ") {
         let Some((register, port)) = rest.split_once(',') else {
             return Err(Diagnostic::new(format!("invalid in syntax `{text}`")));
         };
-        let Some(register) = reg8_code(register.trim()) else {
+        let register = register.trim();
+        let port = port.trim();
+        if register == "a"
+            && let Some(immediate) = port
+                .strip_prefix('(')
+                .and_then(|rest| rest.strip_suffix(')'))
+            && immediate != "c"
+        {
+            return Ok(Some(vec![0xDB, parse_u8(immediate)?]));
+        }
+        let Some(register) = reg8_code(register) else {
             return Ok(None);
         };
-        if port.trim() != "(c)" {
+        if port != "(c)" {
             return Ok(None);
         }
         return Ok(Some(vec![0xED, 0x40 + register * 8]));

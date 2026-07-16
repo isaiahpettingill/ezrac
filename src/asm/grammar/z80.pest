@@ -1,0 +1,10 @@
+// eZ80, Z80N, Z180, and Z80 operand/addressing grammar.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { z80_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ z80_operand)* }
+z80_operand = { z80_element ~ (architecture_ws ~ z80_element)* }
+z80_element = _{ z80_parenthesized | z80_bracketed | z80_braced | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+z80_nested_element = _{ z80_parenthesized | z80_bracketed | z80_braced | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+z80_parenthesized = { architecture_lparen ~ architecture_ws ~ z80_nested_element ~ (architecture_ws ~ z80_nested_element)* ~ architecture_ws ~ architecture_rparen }
+z80_bracketed = { architecture_lbracket ~ architecture_ws ~ z80_nested_element ~ (architecture_ws ~ z80_nested_element)* ~ architecture_ws ~ architecture_rbracket }
+z80_braced = { architecture_lbrace ~ architecture_ws ~ z80_nested_element ~ (architecture_ws ~ z80_nested_element)* ~ architecture_ws ~ architecture_rbrace }
