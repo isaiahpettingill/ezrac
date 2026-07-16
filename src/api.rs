@@ -23,8 +23,13 @@ use crate::{
     },
     diagnostic::Diagnostic,
     layout::default_layout_for_target,
-    target::{Address24, CpuFamily, DEFAULT_TARGET_TRIPLE, resolve_target_profile},
+    package::{PackageRequest, package_executable},
+    target::{
+        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, OutputFormat,
+        resolve_target_profile,
+    },
     tbir::diagnostics::validate_program,
+    vm::{AssemblySymbol, assemble_subset_with_symbols_at},
     workspace::normalize_virtual_path,
 };
 
@@ -104,6 +109,19 @@ pub struct AssemblyCompilation {
     pub assembly: String,
 }
 
+/// Complete filesystem-free build output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildCompilation {
+    pub report: CompileReport,
+    pub program: Program,
+    pub assembly: String,
+    pub machine_code: Vec<u8>,
+    pub symbols: Vec<AssemblySymbol>,
+    pub executable: Vec<u8>,
+    pub output_format: OutputFormat,
+    pub executable_extension: &'static str,
+}
+
 /// Compile in-memory EZRA source to target assembly.
 ///
 /// The source must define `fn main()` because this API emits executable source
@@ -136,6 +154,50 @@ pub fn compile_workspace_to_assembly(
     request.source_path = PathBuf::from(root);
     let overrides = workspace.text_overrides()?;
     compile_source_to_assembly_with_overrides(source, &request, &overrides)
+}
+
+/// Compile, assemble, and package a virtual workspace entirely in memory.
+pub fn build_workspace(
+    workspace: &Workspace<'_>,
+    root: &str,
+    request: &CompileRequest,
+) -> Result<BuildCompilation, Diagnostic> {
+    let compilation = compile_workspace_to_assembly(workspace, root, request)?;
+    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    let layout = default_layout_for_target(&request.target);
+    let assembled = assemble_subset_with_symbols_at(
+        AssemblerCpu::from(target.triple.cpu),
+        &compilation.assembly,
+        layout.entry.get(),
+    )?;
+    let package_request = PackageRequest {
+        target: request.target.clone(),
+        output_format: target.output_format,
+        load_addr: layout.load.get(),
+        entry_addr: layout.entry.get(),
+        executable_name: root
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.split('.').next())
+            .map(str::to_owned),
+    };
+    let executable = package_executable(&package_request, &assembled.bytes)
+        .map_err(|error| Diagnostic::new(error.message))?;
+
+    Ok(BuildCompilation {
+        report: compilation.report,
+        program: compilation.program,
+        assembly: compilation.assembly,
+        machine_code: assembled.bytes,
+        symbols: assembled.symbols,
+        executable,
+        output_format: target.output_format,
+        executable_extension: if request.target.starts_with("gameboy-color-") {
+            "gbc"
+        } else {
+            target.output_format.extension()
+        },
+    })
 }
 
 fn compile_source_to_assembly_with_overrides(
@@ -324,6 +386,50 @@ mod tests {
 
         assert!(compilation.report.has_main);
         assert!(compilation.assembly.contains("_main:"));
+    }
+
+    #[test]
+    fn builds_and_packages_virtual_workspace_for_agon() {
+        let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+        let build = build_workspace(
+            &Workspace::new(&files),
+            "main.ezra",
+            &CompileRequest::new("main.ezra", "agonlight-mos-ez80"),
+        )
+        .unwrap();
+
+        assert_eq!(build.executable_extension, "bin");
+        assert_eq!(&build.executable[64..69], b"MOS\0\x01");
+        assert!(!build.machine_code.is_empty());
+    }
+
+    #[test]
+    fn builds_and_packages_virtual_workspace_for_cpm() {
+        let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+        let build = build_workspace(
+            &Workspace::new(&files),
+            "main.ezra",
+            &CompileRequest::new("main.ezra", "cpm-2.2-z80"),
+        )
+        .unwrap();
+
+        assert_eq!(build.executable_extension, "com");
+        assert_eq!(build.executable, build.machine_code);
+    }
+
+    #[cfg(feature = "mos6502")]
+    #[test]
+    fn builds_and_packages_virtual_workspace_for_c64() {
+        let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+        let build = build_workspace(
+            &Workspace::new(&files),
+            "main.ezra",
+            &CompileRequest::new("main.ezra", "commodore64-6502"),
+        )
+        .unwrap();
+
+        assert_eq!(build.executable_extension, "prg");
+        assert_eq!(&build.executable[..2], &[0x01, 0x08]);
     }
 
     #[test]
