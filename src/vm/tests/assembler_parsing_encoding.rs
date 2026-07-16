@@ -1335,6 +1335,26 @@ fn mos6502_assembler_encodes_common_addressing_modes() {
 
 #[test]
 #[cfg(feature = "mos6502")]
+fn mos6502_assembler_encodes_reference_c64_screen_clear_loop() {
+    // Adapted from digitsensitive/c64's printString and drawACharacterAtScreenLocation examples.
+    let bytes = assemble_subset_with_symbols_at(
+        AssemblerCpu::Mos6502,
+        "clear:\nldx #$00\nlda #$20\nsta $0400,x\nsta $0500,x\nsta $0600,x\nsta $06e8,x\ninx\nbne clear\n",
+        0xC000,
+    )
+    .unwrap();
+
+    assert_eq!(
+        bytes.bytes,
+        [
+            0xA2, 0x00, 0xA9, 0x20, 0x9D, 0x00, 0x04, 0x9D, 0x00, 0x05, 0x9D, 0x00, 0x06, 0x9D,
+            0xE8, 0x06, 0xE8, 0xD0, 0xED,
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "mos6502")]
 fn mos6502_assembler_sizes_decimal_immediates() {
     let bytes = assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, "lda #1\n", 0xC000).unwrap();
 

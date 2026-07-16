@@ -1272,6 +1272,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/commodore64-6502/sdk/c64/memory.ezra"),
                 "c64.memory",
             )),
+            "c64.kernal" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/commodore64-6502/sdk/c64/kernal.ezra"),
+                "c64.kernal",
+            )),
             "c64.text" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/commodore64-6502/sdk/c64/text.ezra"),
                 "c64.text",
@@ -1408,6 +1412,7 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "c64.sid",
         "c64.cia",
         "c64.memory",
+        "c64.kernal",
         "c64.text",
         "harness.io",
         "harness.layout",

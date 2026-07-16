@@ -16,6 +16,12 @@ pub const SPRITE_X: u16 = 0xD000
 pub const SPRITE_Y: u16 = 0xD001
 pub const SPRITE_ENABLE: u16 = 0xD015
 pub const SPRITE_X_MSB: u16 = 0xD010
+pub const SPRITE_PRIORITY: u16 = 0xD01B
+pub const SPRITE_MULTICOLOR: u16 = 0xD01C
+pub const SPRITE_EXPAND_X: u16 = 0xD01D
+pub const SPRITE_EXPAND_Y: u16 = 0xD017
+pub const SPRITE_MULTICOLOR0: u16 = 0xD025
+pub const SPRITE_MULTICOLOR1: u16 = 0xD026
 pub const SPRITE_COLOR0: u16 = 0xD027
 pub const VIC_BANK_SELECT: u16 = 0xDD00
 pub const BITMAP_RAM: u16 = 0x6000
@@ -55,7 +61,12 @@ pub fn set_memory_pointers(screen_offset: u8, character_offset: u8) { *(cast<ptr
 pub fn sprite_pointer(sprite: u8, pointer: u8) { if sprite < 8 { *(cast<ptr<u8>>(cast<u24>(SCREEN_RAM + 0x03F8 + cast<u16>(sprite)))) = pointer } }
 pub fn sprite_position(sprite: u8, x: u16, y: u8) { let offset: u16 = cast<u16>(sprite) << 1; *(cast<ptr<u8>>(cast<u24>(SPRITE_X + offset))) = cast<u8>(x); *(cast<ptr<u8>>(cast<u24>(SPRITE_Y + offset))) = y; let mask: u8 = 1 << sprite; let high: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))); if x > 255 { *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))) = high | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_X_MSB))) = high & ~mask } }
 pub fn sprite_enable(sprite: u8, enabled: u8) { let mask: u8 = 1 << sprite; let value: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))); if enabled != 0 { *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))) = value | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_ENABLE))) = value & ~mask } }
-pub fn sprite_color(sprite: u8, color: u8) { *(cast<ptr<u8>>(cast<u24>(SPRITE_COLOR0 + cast<u16>(sprite)))) = color & 15 }
+pub fn sprite_priority(sprite: u8, behind_background: u8) { let mask: u8 = 1 << sprite; let value: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_PRIORITY))); if behind_background != 0 { *(cast<ptr<u8>>(cast<u24>(SPRITE_PRIORITY))) = value | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_PRIORITY))) = value & ~mask } }
+pub fn sprite_multicolor(sprite: u8, enabled: u8) { let mask: u8 = 1 << sprite; let value: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_MULTICOLOR))); if enabled != 0 { *(cast<ptr<u8>>(cast<u24>(SPRITE_MULTICOLOR))) = value | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_MULTICOLOR))) = value & ~mask } }
+pub fn sprite_expand_x(sprite: u8, enabled: u8) { let mask: u8 = 1 << sprite; let value: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_EXPAND_X))); if enabled != 0 { *(cast<ptr<u8>>(cast<u24>(SPRITE_EXPAND_X))) = value | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_EXPAND_X))) = value & ~mask } }
+pub fn sprite_expand_y(sprite: u8, enabled: u8) { let mask: u8 = 1 << sprite; let value: u8 = *(cast<ptr<u8>>(cast<u24>(SPRITE_EXPAND_Y))); if enabled != 0 { *(cast<ptr<u8>>(cast<u24>(SPRITE_EXPAND_Y))) = value | mask } else { *(cast<ptr<u8>>(cast<u24>(SPRITE_EXPAND_Y))) = value & ~mask } }
+pub fn sprite_multicolor_shared(color0: u8, color1: u8) { *(cast<ptr<u8>>(cast<u24>(SPRITE_MULTICOLOR0))) = color0 & 15; *(cast<ptr<u8>>(cast<u24>(SPRITE_MULTICOLOR1))) = color1 & 15 }
+pub fn sprite_color(sprite: u8, color: u8) { if sprite < 8 { *(cast<ptr<u8>>(cast<u24>(SPRITE_COLOR0 + cast<u16>(sprite)))) = color & 15 } }
 
 // Configure the VIC-II's native 320x200 high-resolution bitmap mode. The
 // bitmap occupies $6000-$7FFF in VIC bank 1 and uses screen RAM at $4400 for

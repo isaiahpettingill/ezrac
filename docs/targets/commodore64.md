@@ -31,10 +31,11 @@ Import these bundled modules:
 | `c64.sid` | SID voices, frequency, pulse width, ADSR, waveforms, and master volume |
 | `c64.cia` | CIA keyboard matrix, joystick ports, timers, and interrupt control |
 | `c64.memory` | 6510 `$0001` banking for ROM, I/O, character ROM, and all-RAM modes |
+| `c64.kernal` | KERNAL PETSCII output, screen clear, and keyboard-buffer services |
 
 The standard C64 I/O configuration is `memory.map_roms_and_io()`. Call it before VIC-II, SID, or CIA access if code previously changed banking. SDK helpers use volatile-style MMIO accesses through EZRA pointers; do not use `map_all_ram()` while accessing `$D000-$DFFF` hardware registers.
 
-Use `cia.key_pressed(cia.KEY_Q)` to poll keys. The CIA SDK provides named constants for letters, digits, Space, Return, and Run/Stop; `key_pressed` performs the C64 keyboard-matrix scan.
+Use `cia.key_pressed(cia.KEY_Q)` to poll keys. The CIA SDK provides named constants for letters, digits, Space, Return, and Run/Stop; `key_pressed` performs the C64 keyboard-matrix scan. For KERNAL keyboard-buffer input, call `kernal.scan_keyboard()` then `kernal.get_key()`; use `kernal.putc()` for PETSCII output and `kernal.clear_screen()` to clear through the KERNAL editor. These routines require KERNAL ROM visibility (the default `memory.map_roms_and_io()` configuration).
 
 `vic.clear(character, color)` fills the default `$0400` screen and `$D800` color RAM. Screen codes are PETSCII screen codes, not ASCII.
 

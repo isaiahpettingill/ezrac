@@ -858,15 +858,22 @@ fn commodore64_target_uses_builtin_c64_sdk_and_6502_codegen() {
         import c64.sid
         import c64.cia
         import c64.memory
+        import c64.kernal
         import c64.text
 
         fn main() {
             memory.map_roms_and_io()
             vic.border(vic.BLUE)
             vic.put_char(0, 0, text.CHAR_A)
+            vic.sprite_multicolor(0, 1)
+            vic.sprite_expand_x(0, 1)
+            vic.sprite_expand_y(0, 1)
+            vic.sprite_priority(0, 0)
+            vic.sprite_multicolor_shared(vic.RED, vic.BLUE)
             text.put_ascii(1, 0, "HELLO")
             sid.frequency(0, 0x1120)
             cia.timer_a(cia.CIA1, 1000, cia.TIMER_START)
+            kernal.putc(text.PETSCII_RETURN)
         }
     "#;
     let sdk = SdkResolver {
@@ -878,9 +885,11 @@ fn commodore64_target_uses_builtin_c64_sdk_and_6502_codegen() {
     for name in [
         "vic.border",
         "vic.sprite_position",
+        "vic.sprite_multicolor_shared",
         "sid.frequency",
         "cia.timer_a",
         "memory.map_roms_and_io",
+        "kernal.get_key",
     ] {
         assert!(
             program.declarations.iter().any(|decl| {

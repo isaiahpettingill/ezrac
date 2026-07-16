@@ -1,0 +1,57 @@
+// C64 KERNAL jump-table services. These require KERNAL ROM visibility.
+pub const CHROUT: u16 = 0xFFD2
+pub const SCNKEY: u16 = 0xFF9F
+pub const GETIN: u16 = 0xFFE4
+pub const CLEAR: u8 = 0x93
+
+// Write one PETSCII character to the active KERNAL output device, normally the screen.
+pub fn putc(ch: u8) {
+    asm volatile(in ch: u8 as mem, clobber a, clobber flags, clobber memory) {
+        "txa"
+        "pha"
+        "tya"
+        "pha"
+        "lda {ch}"
+        "jsr $FFD2"
+        "pla"
+        "tay"
+        "pla"
+        "tax"
+    }
+}
+
+// Clear the active screen through the KERNAL editor.
+pub fn clear_screen() { putc(CLEAR) }
+
+// Update the KERNAL keyboard buffer. Call before get_key().
+pub fn scan_keyboard() {
+    asm volatile(clobber a, clobber flags, clobber memory) {
+        "txa"
+        "pha"
+        "tya"
+        "pha"
+        "jsr $FF9F"
+        "pla"
+        "tay"
+        "pla"
+        "tax"
+    }
+}
+
+// Return the next buffered PETSCII key, or zero when no key is available.
+pub fn get_key() -> u8 {
+    let key: u8 = 0
+    asm volatile(out key: u8 as mem, clobber a, clobber flags, clobber memory) {
+        "txa"
+        "pha"
+        "tya"
+        "pha"
+        "jsr $FFE4"
+        "sta {key}"
+        "pla"
+        "tay"
+        "pla"
+        "tax"
+    }
+    return key
+}
