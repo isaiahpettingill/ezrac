@@ -1,0 +1,23 @@
+import tice.lcd
+import tice.os
+
+fn main() {
+    let background: u16 = lcd.rgb(20, 24, 40)
+    let player: u16 = lcd.rgb(255, 190, 40)
+    let x: u16 = 144
+    let y: u16 = 104
+    let key: u8 = 0
+
+    lcd.fill(background)
+    lcd.fill_rect(x, y, 32, 32, player)
+
+    while key != os.KEY_CLEAR {
+        key = os.wait_key()
+        lcd.fill_rect(x, y, 32, 32, background)
+        if key == os.KEY_LEFT && x >= 8 { x -= 8 }
+        if key == os.KEY_RIGHT && x <= 280 { x += 8 }
+        if key == os.KEY_UP && y >= 8 { y -= 8 }
+        if key == os.KEY_DOWN && y <= 200 { y += 8 }
+        lcd.fill_rect(x, y, 32, 32, player)
+    }
+}

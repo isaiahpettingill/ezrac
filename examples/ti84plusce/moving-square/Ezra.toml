@@ -1,0 +1,8 @@
+[project]
+name = "TI-84 Plus CE Moving Square"
+
+[build]
+target = "ti84plusce-ez80"
+output = "8xp"
+executable = "EZRAMOVE"
+input = "src/main.ezra"

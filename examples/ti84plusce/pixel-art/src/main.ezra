@@ -1,0 +1,23 @@
+import tice.lcd
+import tice.os
+
+fn main() {
+    let sky: u16 = lcd.rgb(80, 180, 255)
+    let grass: u16 = lcd.rgb(40, 180, 70)
+    let dirt: u16 = lcd.rgb(130, 75, 30)
+    let skin: u16 = lcd.rgb(255, 205, 150)
+
+    lcd.fill(sky)
+    lcd.fill_rect(0, 180, 320, 60, grass)
+    lcd.fill_rect(96, 88, 128, 96, dirt)
+    lcd.fill_rect(112, 64, 96, 40, skin)
+    lcd.fill_rect(128, 76, 12, 12, lcd.BLACK)
+    lcd.fill_rect(180, 76, 12, 12, lcd.BLACK)
+    lcd.fill_rect(140, 96, 40, 8, lcd.RED)
+    lcd.fill_rect(80, 112, 16, 64, skin)
+    lcd.fill_rect(224, 112, 16, 64, skin)
+    lcd.fill_rect(112, 184, 40, 40, lcd.BLUE)
+    lcd.fill_rect(168, 184, 40, 40, lcd.BLUE)
+
+    let key: u8 = os.wait_key()
+}

@@ -2,6 +2,13 @@ pub const GET_KEY: u24 = 0x020D8C
 pub const CLEAR_SCREEN_FULL: u24 = 0x020810
 pub const HOME_UP: u24 = 0x020828
 
+pub const KEY_RIGHT: u8 = 0x01
+pub const KEY_LEFT: u8 = 0x02
+pub const KEY_UP: u8 = 0x03
+pub const KEY_DOWN: u8 = 0x04
+pub const KEY_ENTER: u8 = 0x05
+pub const KEY_CLEAR: u8 = 0x09
+
 pub fn wait_key() -> u8 {
     let key: u8 = 0
     asm volatile(out key: u8 as reg8, clobber a, clobber bc, clobber de, clobber hl, clobber flags) {

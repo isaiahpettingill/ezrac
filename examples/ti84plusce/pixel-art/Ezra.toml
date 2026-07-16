@@ -1,0 +1,8 @@
+[project]
+name = "TI-84 Plus CE Pixel Art"
+
+[build]
+target = "ti84plusce-ez80"
+output = "8xp"
+executable = "EZRAPIX"
+input = "src/main.ezra"

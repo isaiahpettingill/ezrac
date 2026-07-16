@@ -1,0 +1,8 @@
+[project]
+name = "TI-84 Plus CE Color Bars"
+
+[build]
+target = "ti84plusce-ez80"
+output = "8xp"
+executable = "EZRABARS"
+input = "src/main.ezra"
