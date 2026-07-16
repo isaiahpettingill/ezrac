@@ -9,6 +9,11 @@ repository = "https://github.com/isaiahpettingill/ezrac"
 [lib]
 name = "ezra"
 
+[[bin]]
+name = "ezrac"
+path = "src/main.rs"
+required-features = ["std"]
+
 [dependencies]
 dcpu = { version = "0.5.0", default-features = false, features = ["debugger-cli"], optional = true }
 ez80 = "0.5.0"
@@ -23,7 +28,8 @@ serde_json = { version = "1.0.150", optional = true }
 toml = "1.1.2"
 
 [features]
-default = ["intel", "z80", "lr35902"]
+default = ["std", "intel", "z80", "lr35902"]
+std = []
 intel = []
 z80 = []
 lr35902 = []
