@@ -1,0 +1,26 @@
+import c64.cia
+import c64.memory
+import c64.text
+import c64.vic
+
+fn main() {
+    memory.map_roms_and_io()
+    vic.background(vic.BLACK)
+    vic.clear(text.CHAR_SPACE, vic.WHITE)
+    text.put_ascii(9, 12, "RASTER BANDS - PRESS Q")
+
+    while !cia.key_pressed(cia.KEY_Q) {
+        vic.wait_raster(40)
+        vic.border(vic.RED)
+        vic.wait_raster(80)
+        vic.border(vic.ORANGE)
+        vic.wait_raster(120)
+        vic.border(vic.YELLOW)
+        vic.wait_raster(160)
+        vic.border(vic.GREEN)
+        vic.wait_raster(200)
+        vic.border(vic.BLUE)
+        vic.wait_raster(240)
+        vic.border(vic.PURPLE)
+    }
+}

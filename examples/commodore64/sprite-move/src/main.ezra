@@ -1,0 +1,54 @@
+import c64.cia
+import c64.memory
+import c64.text
+import c64.vic
+
+const SPRITE_DATA: u16 = 0x0340
+const SPRITE_POINTER: u8 = 13
+
+global sprite_shape: [u8; 64] = [
+    0x00, 0x18, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x7E, 0x00,
+    0x00, 0xFF, 0x00, 0x01, 0xFF, 0x80, 0x03, 0xFF, 0xC0,
+    0x07, 0xFF, 0xE0, 0x0F, 0xFF, 0xF0, 0x1F, 0xFF, 0xF8,
+    0x3F, 0xFF, 0xFC, 0x7F, 0xFF, 0xFE, 0x3F, 0xFF, 0xFC,
+    0x1F, 0xFF, 0xF8, 0x0F, 0xFF, 0xF0, 0x07, 0xFF, 0xE0,
+    0x03, 0xFF, 0xC0, 0x01, 0xFF, 0x80, 0x00, 0xFF, 0x00,
+    0x00, 0x7E, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x18, 0x00,
+    0x00
+]
+
+fn main() {
+    memory.map_roms_and_io()
+    vic.border(vic.BLUE)
+    vic.background(vic.BLACK)
+    vic.clear(text.CHAR_SPACE, vic.WHITE)
+    text.put_ascii(8, 2, "WASD MOVES THE SPRITE")
+    text.put_ascii(12, 4, "Q RETURNS TO BASIC")
+
+    let sprite_ram: ptr<u8> = cast<ptr<u8>>(cast<u24>(SPRITE_DATA))
+    let index: u8 = 0
+    while index < 64 {
+        *(sprite_ram + index) = sprite_shape[index]
+        index += 1
+    }
+
+    vic.sprite_pointer(0, SPRITE_POINTER)
+    vic.sprite_color(0, vic.CYAN)
+    vic.sprite_multicolor_shared(vic.WHITE, vic.BLUE)
+    vic.sprite_multicolor(0, 1)
+    vic.sprite_expand_x(0, 1)
+    vic.sprite_enable(0, 1)
+
+    let x: u16 = 160
+    let y: u8 = 120
+    while !cia.key_pressed(cia.KEY_Q) {
+        if cia.key_pressed(cia.KEY_W) { y -= 1 }
+        if cia.key_pressed(cia.KEY_S) { y += 1 }
+        if cia.key_pressed(cia.KEY_A) { x -= 1 }
+        if cia.key_pressed(cia.KEY_D) { x += 1 }
+        vic.sprite_position(0, x, y)
+        vic.wait_raster(0)
+    }
+
+    vic.sprite_enable(0, 0)
+}

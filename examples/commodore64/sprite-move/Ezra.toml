@@ -1,0 +1,7 @@
+[project]
+name = "c64-sprite-move"
+
+[build]
+input = "src/main.ezra"
+target = "commodore64-6502"
+executable = "c64-sprite-move"

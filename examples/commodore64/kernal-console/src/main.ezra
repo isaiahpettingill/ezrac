@@ -1,0 +1,39 @@
+import c64.kernal
+import c64.memory
+
+fn main() {
+    memory.map_roms_and_io()
+    kernal.clear_screen()
+    kernal.putc('E')
+    kernal.putc('Z')
+    kernal.putc('R')
+    kernal.putc('A')
+    kernal.putc(' ')
+    kernal.putc('C')
+    kernal.putc('6')
+    kernal.putc('4')
+    kernal.putc(' ')
+    kernal.putc('-')
+    kernal.putc(' ')
+    kernal.putc('P')
+    kernal.putc('R')
+    kernal.putc('E')
+    kernal.putc('S')
+    kernal.putc('S')
+    kernal.putc(' ')
+    kernal.putc('Q')
+    kernal.putc(' ')
+    kernal.putc('T')
+    kernal.putc('O')
+    kernal.putc(' ')
+    kernal.putc('E')
+    kernal.putc('X')
+    kernal.putc('I')
+    kernal.putc('T')
+
+    let key: u8 = 0
+    while key != 'Q' {
+        kernal.scan_keyboard()
+        key = kernal.get_key()
+    }
+}
