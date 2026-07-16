@@ -9,6 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use crate::workspace::{Workspace, WorkspaceFile};
+
 use crate::{
     asm::{
         AssemblyOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
@@ -23,6 +25,7 @@ use crate::{
     layout::default_layout_for_target,
     target::{Address24, CpuFamily, DEFAULT_TARGET_TRIPLE, resolve_target_profile},
     tbir::diagnostics::validate_program,
+    workspace::normalize_virtual_path,
 };
 
 #[cfg(feature = "dcpu")]
@@ -74,54 +77,16 @@ impl CompileRequest {
     }
 }
 
-/// A caller-owned file in a virtual Ezra workspace.
-///
-/// Paths use the same relative, slash-separated spelling as Ezra imports and
-/// project files. The compiler never writes into this workspace.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkspaceFile<'a> {
-    pub path: &'a str,
-    pub contents: &'a [u8],
-}
-
-impl<'a> WorkspaceFile<'a> {
-    pub const fn new(path: &'a str, contents: &'a [u8]) -> Self {
-        Self { path, contents }
-    }
-
-    pub const fn text(path: &'a str, contents: &'a str) -> Self {
-        Self::new(path, contents.as_bytes())
-    }
-}
-
-/// An in-memory project tree used for imports and embedded assets.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Workspace<'a> {
-    pub files: &'a [WorkspaceFile<'a>],
-}
-
-impl<'a> Workspace<'a> {
-    pub const fn new(files: &'a [WorkspaceFile<'a>]) -> Self {
-        Self { files }
-    }
-
-    pub fn file(&self, path: &str) -> Option<&'a [u8]> {
-        self.files
-            .iter()
-            .find(|file| file.path == path)
-            .map(|file| file.contents)
-    }
-
+impl Workspace<'_> {
     fn text_overrides(&self) -> Result<HashMap<PathBuf, String>, Diagnostic> {
         let mut overrides = HashMap::new();
         for file in self.files {
             let text = core::str::from_utf8(file.contents).map_err(|_| {
                 Diagnostic::new(format!("workspace source `{}` is not UTF-8", file.path))
             })?;
-            overrides.insert(PathBuf::from(file.path), text.to_owned());
-            // Virtual workspaces always expose portable slash-separated paths,
-            // while std::path joins with the host separator during resolution.
-            let host_path = file.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            let virtual_path = normalize_virtual_path(file.path);
+            overrides.insert(PathBuf::from(&virtual_path), text.to_owned());
+            let host_path = virtual_path.replace('/', std::path::MAIN_SEPARATOR_STR);
             overrides.insert(PathBuf::from(host_path), text.to_owned());
         }
         Ok(overrides)

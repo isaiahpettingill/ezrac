@@ -14,3 +14,4 @@ pub mod project;
 pub mod target;
 pub mod tbir;
 pub mod vm;
+pub mod workspace;
