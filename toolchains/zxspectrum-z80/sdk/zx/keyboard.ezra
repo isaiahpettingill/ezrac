@@ -13,6 +13,14 @@ pub const KEY2: u8 = 0x04
 pub const KEY3: u8 = 0x08
 pub const KEY4: u8 = 0x10
 
+pub const KEMPSTON_PORT: u8 = 0x1F
+pub const KEMPSTON_RIGHT: u8 = 0x01
+pub const KEMPSTON_LEFT: u8 = 0x02
+pub const KEMPSTON_DOWN: u8 = 0x04
+pub const KEMPSTON_UP: u8 = 0x08
+pub const KEMPSTON_FIRE: u8 = 0x10
+pub const KEMPSTON_MASK: u8 = 0x1F
+
 pub fn read_row(port: u16) -> u8 {
     let result: u8 = 0
     asm volatile(in port: u16 as reg16, out result: u8 as reg8, clobber a, clobber b, clobber c, clobber flags, clobber ports) {
@@ -21,6 +29,17 @@ pub fn read_row(port: u16) -> u8 {
         "in a, (c)"
         "cpl"
         "and 1Fh"
+        "ld {result}, a"
+    }
+    return result
+}
+
+pub fn read_kempston() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as reg8, clobber a, clobber flags, clobber ports) {
+        "in a, (1Fh)"
+        "and 1Fh"
+        "ld {result}, a"
     }
     return result
 }

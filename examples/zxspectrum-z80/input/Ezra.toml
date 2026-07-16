@@ -1,0 +1,7 @@
+[project]
+name = "zx-input"
+
+[build]
+input = "src/main.ezra"
+target = "zxspectrum-z80"
+executable = "zx-input"

@@ -1,7 +1,7 @@
 [project]
-name = "agon-mandelbrot"
+name = "agon-radial-plot"
 
 [build]
 input = "src/main.ezra"
 target = "agonlight-mos-ez80"
-executable = "agon-mandelbrot"
+executable = "agon-radial-plot"

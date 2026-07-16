@@ -1,0 +1,34 @@
+import agon.console
+
+import agon.mos
+
+import agon.text
+
+fn print_u8_line(label: ptr<u8>, value: u8) {
+    console.print(label)
+    console.print("$")
+    text.print_hex_u8(value)
+    console.newline()
+}
+
+fn print_u16_line(label: ptr<u8>, value: u16) {
+    console.print(label)
+    console.print("$")
+    text.print_hex_u16(value)
+    console.newline()
+}
+
+fn main() {
+    console.clear()
+    console.print_line("EZRA Agon diagnostics")
+    console.newline()
+
+    print_u8_line("VDP flags: ", mos.sysvar_u8(mos.SYSVAR_VDP_FLAGS))
+    print_u8_line("Key ASCII: ", mos.sysvar_u8(mos.SYSVAR_KEY_ASCII))
+        print_u8_line("Key modifiers: ", mos.sysvar_u8(mos.SYSVAR_KEY_MODS))
+        print_u8_line("Virtual key: ", mos.sysvar_u8(mos.SYSVAR_VKEY_CODE))
+    print_u16_line("Mouse X: ", mos.sysvar_u16(mos.SYSVAR_MOUSE_X))
+        print_u16_line("Mouse Y: ", mos.sysvar_u16(mos.SYSVAR_MOUSE_Y))
+        print_u8_line("Mouse buttons: ", mos.sysvar_u8(mos.SYSVAR_MOUSE_BUTTONS))
+        print_u8_line("Mouse wheel: ", mos.sysvar_u8(mos.SYSVAR_MOUSE_WHEEL))
+}

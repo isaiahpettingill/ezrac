@@ -33,6 +33,7 @@ mod cpu_behavior;
 mod dcpu_backend;
 mod execution_control_flow;
 mod fixtures;
+mod gameboy_examples;
 mod lr35902_backend;
 #[cfg(feature = "m6800")]
 mod m6800_backend;

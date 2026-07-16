@@ -16,6 +16,7 @@ pub fn read_ula() -> u8 {
     asm volatile(out result: u8 as reg8, clobber a, clobber flags, clobber ports) {
         "ld a, 0FFh"
         "in a, (0FEh)"
+        "ld {result}, a"
     }
     return result
 }

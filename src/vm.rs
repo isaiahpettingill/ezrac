@@ -1517,6 +1517,10 @@ fn eval_expr(expr: &str, labels: &HashMap<String, u32>, pc: u32) -> Result<u32, 
         match op {
             "+" => value += rhs,
             "-" => value -= rhs,
+            "*" => value *= rhs,
+            "&" => value &= rhs,
+            "|" => value |= rhs,
+            "^" => value ^= rhs,
             _ => {
                 return Err(Diagnostic::new(format!(
                     "unsupported assembly operator `{op}`"
@@ -1578,6 +1582,8 @@ fn instruction_len(cpu: AssemblerCpu, text: &str) -> Result<usize, Diagnostic> {
     if cpu == AssemblerCpu::Tms9900 {
         return tms9900::instruction_len(text);
     }
+    let normalized = asm_meta::normalize_z80_instruction_text(text);
+    let text = normalized.as_str();
     if let Some((opcode, _)) = z80_imm16_load(cpu, text) {
         let prefix_len = usize::from(opcode == 0xDD || opcode == 0xFD);
         return Ok(prefix_len + 3);
@@ -1634,6 +1640,8 @@ fn emit_instruction(
         bytes.extend(tms9900::encode_instruction(text, labels, pc)?);
         return Ok(());
     }
+    let normalized = asm_meta::normalize_z80_instruction_text(text);
+    let text = normalized.as_str();
     if let Some((opcode, value)) = z80_imm16_load(cpu, text) {
         if opcode == 0xDD || opcode == 0xFD {
             bytes.push(opcode);
@@ -2165,10 +2173,16 @@ pub(crate) fn parse_number(text: &str) -> Result<u32, Diagnostic> {
     let text = text.trim().trim_end_matches(',');
     let parsed = if let Some(hex) = text.strip_prefix('>') {
         u32::from_str_radix(hex.strip_suffix('h').unwrap_or(hex), 16)
+    } else if let Some(hex) = text.strip_prefix('$') {
+        u32::from_str_radix(hex, 16)
+    } else if let Some(binary) = text.strip_prefix('%') {
+        u32::from_str_radix(binary, 2)
     } else if let Some(hex) = text.strip_suffix('h') {
         u32::from_str_radix(hex, 16)
     } else if let Some(hex) = text.strip_prefix("0x") {
         u32::from_str_radix(hex, 16)
+    } else if let Some(binary) = text.strip_prefix("0b") {
+        u32::from_str_radix(binary, 2)
     } else {
         text.parse()
     };

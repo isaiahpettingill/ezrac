@@ -1,6 +1,6 @@
 # Agon Light MOS Examples
 
-These examples target `agonlight-mos-ez80` and use built-in EZRA SDK modules from `toolchains/agonlight-mos-ez80/sdk`.
+These examples target `agonlight-mos-ez80` and use built-in EZRA SDK modules from `toolchains/agonlight-mos-ez80/sdk`. See [`docs/agon-light-assembly-audit.md`](../../docs/agon-light-assembly-audit.md) for the comparison with the `schur/Agon-Light-Assembly` examples and the target’s intentional ADL-only scope.
 
 The target builds normal Agon MOS executables. The generated binary starts with a jump to the compiled entry point, stores the MOS executable marker `"MOS", 0, 1` at byte `64`, places program code at byte `69`, and returns to MOS after `main` finishes.
 
@@ -30,6 +30,14 @@ cargo run -- build examples/agon-mos/sdk-showcase/src/main.ezra
 
 It uses `agon.console`, `agon.vdp`, `agon.keyboard`, `agon.mouse`, and `agon.gpio` wrappers modeled after the AgonPlatform `agondev` MOS/VDP headers and examples.
 
+Build the hexadecimal diagnostics example:
+
+```sh
+cargo run -- build examples/agon-mos/hex-diagnostics/src/main.ezra
+```
+
+It demonstrates the `agon.text` fixed-width uppercase hexadecimal helpers alongside MOS keyboard, mouse, and VDP sysvars.
+
 Build the Space Invaders game:
 
 ```sh
@@ -50,6 +58,7 @@ The bundled Agon SDK currently provides:
 - `agon.keyboard`: sysvar-backed keyboard state, blocking key read, clear state, locale, and repeat/LED configuration.
 - `agon.mouse`: VDU mouse control and sysvar-backed position/button/wheel/delta reads.
 - `agon.gpio`: low-level explicit port B/C/D data and direction wrappers.
+- `agon.text`: printable ASCII output plus fixed-width uppercase hexadecimal formatting for `u8`, `u16`, and `u24`.
 
 These wrappers intentionally stay close to `agondev`'s MOS and VDP conventions. Advanced interrupts, keyboard vectors, audio, and full device drivers are deferred until EZRA has stronger support for those ABI shapes.
 

@@ -90,8 +90,16 @@ IEF_JOYPAD equ 10h
 LCDC_BG equ 01h
 LCDC_OBJ equ 02h
 LCDC_OBJ_8X16 equ 04h
+LCDC_BG_MAP_1 equ 08h
+LCDC_TILE_DATA_0 equ 10h
 LCDC_WINDOW equ 20h
+LCDC_WINDOW_MAP_1 equ 40h
 LCDC_ENABLE equ 80h
+STAT_MODE_MASK equ 03h
+STAT_HBLANK equ 00h
+STAT_VBLANK equ 01h
+STAT_OAM equ 02h
+STAT_TRANSFER equ 03h
 SC_INTERNAL equ 01h
 SC_CGB_FAST equ 02h
 SC_START equ 80h
@@ -194,15 +202,27 @@ GB_JOYPAD_VECTOR equ 0060h
     ld (hl), a
 %endmacro
 
+; Expand this routine in HRAM and call it with A = source high byte.
+; During DMG OAM DMA, code outside HRAM is not safely accessible.
+; The caller owns interrupt state; the routine clobbers AF.
+%macro GB_OAM_DMA_ROUTINE()
+    ldh (rDMA), a
+    ld a, 40
+%%wait:
+    dec a
+    jr nz, %%wait
+    ret
+%endmacro
+
+; Deprecated compatibility helper. This preserves fall-through behavior and is
+; safe only when the entire expansion executes from HRAM.
 %macro GB_OAM_DMA(source_high)
-    di
     ld a, $source_high
     ldh (rDMA), a
     ld a, 40
 %%wait:
     dec a
     jr nz, %%wait
-    ei
 %endmacro
 
 %macro GB_JOYPAD_SELECT_DPAD()

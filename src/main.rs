@@ -1497,14 +1497,68 @@ fn preprocess_assembly(
         .zip(included.line_origins)
         .map(|(line, origin)| (line.to_owned(), origin))
         .collect::<Vec<_>>();
-    expand_assembly_macros(
+    let expanded = expand_assembly_macros(
         lines,
         target,
         cpu,
         &mut HashMap::new(),
         &mut HashMap::new(),
         0,
-    )
+    )?;
+    normalize_agon_ez80asm_directives(expanded)
+}
+
+/// Normalize the AgDev directive spelling used by AgonPlatform/agon-ez80asm
+/// before sending the source to the shared eZ80 assembler.
+fn normalize_agon_ez80asm_directives(
+    assembly: ExpandedAssembly,
+) -> Result<ExpandedAssembly, String> {
+    let mut normalized = ExpandedAssembly {
+        text: String::new(),
+        line_origins: Vec::new(),
+    };
+
+    for (line, origin) in assembly.text.lines().zip(assembly.line_origins) {
+        let code = line.split(';').next().unwrap_or_default().trim();
+        let directive = code.strip_prefix('.').unwrap_or(code);
+        let (name, rest) = directive
+            .split_once(char::is_whitespace)
+            .map_or((directive, ""), |(name, rest)| (name, rest.trim()));
+
+        match name.to_ascii_lowercase().as_str() {
+            "assume" => {
+                let assumption = rest.replace(char::is_whitespace, "").to_ascii_lowercase();
+                if assumption == "adl=1" {
+                    continue;
+                }
+                if assumption == "adl=0" {
+                    return Err(format!(
+                        "{}:{}: `.assume adl=0` is not supported; ezrac assembly currently emits eZ80 ADL code only",
+                        origin.file.display(),
+                        origin.line
+                    ));
+                }
+                return Err(format!(
+                    "{}:{}: unsupported `.assume` directive `{rest}`",
+                    origin.file.display(),
+                    origin.line
+                ));
+            }
+            // The flat assembler does not need linker visibility declarations.
+            "global" | "globl" => continue,
+            "section" | "org" | "db" | "defb" | "byte" | "dw" | "defw" | "word" => {
+                normalized.text.push_str(name);
+                if !rest.is_empty() {
+                    normalized.text.push(' ');
+                    normalized.text.push_str(rest);
+                }
+            }
+            _ => normalized.text.push_str(line),
+        }
+        normalized.text.push('\n');
+        normalized.line_origins.push(origin);
+    }
+    Ok(normalized)
 }
 
 fn expand_assembly_macros(

@@ -418,6 +418,67 @@ fn generated_instruction_metadata_encodes_ez80_mode_suffixes() {
 }
 
 #[test]
+fn schur_agon_examples_accept_spasm_ng_long_mode_shorthand() {
+    // `hello_world.asm`, `extest.asm`, and `stacktest.asm` in
+    // schur/Agon-Light-Assembly use these forms.
+    let encoded_cases = [
+        ("ex.l de, hl", vec![0x5B, 0xEB]),
+        ("push.lis de", vec![0x49, 0xD5]),
+        ("pop.lis de", vec![0x49, 0xD1]),
+        ("ld.sis sp, ix", vec![0x40, 0xDD, 0xF9]),
+        ("rst.lil 10h", vec![0x5B, 0xD7]),
+    ];
+
+    for (syntax, bytes) in encoded_cases {
+        assert_eq!(
+            encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap(),
+            Some(bytes.clone()),
+            "{syntax}"
+        );
+        assert_eq!(
+            generated_instruction_len(AssemblerCpu::Ez80, syntax).unwrap(),
+            Some(bytes.len()),
+            "{syntax}"
+        );
+    }
+
+    // spasm-ng's `.L` is the shorthand used by the reference hello-world
+    // example for a 24-bit immediate load.
+    assert_eq!(
+        generated_instruction_len(AssemblerCpu::Ez80, "ld.l hl, 6A9BF4h").unwrap(),
+        Some(5)
+    );
+    assert_eq!(
+        ez80_mode_suffixed_instruction(AssemblerCpu::Ez80, "ld.l hl, 6A9BF4h"),
+        Some((0x5B, "ld hl, 6A9BF4h".to_owned()))
+    );
+    assert_eq!(
+        ez80_mode_suffixed_instruction(AssemblerCpu::Z80, "ld.l hl, 6A9BF4h"),
+        None
+    );
+}
+
+#[test]
+fn agon_ez80asm_style_instruction_case_and_whitespace_are_accepted() {
+    let cases = [
+        ("PUSH\tIX", vec![0xDD, 0xE5]),
+        ("RST.LIL 08h", vec![0x5B, 0xCF]),
+        ("LD\tA,\t05h", vec![0x3E, 0x05]),
+        // Verified with AgonPlatform/agon-ez80asm's native assembler.
+        ("LD HL, (IX+6)", vec![0xDD, 0x27, 0x06]),
+        ("LD HL, (HL)", vec![0xED, 0x27]),
+    ];
+
+    for (syntax, bytes) in cases {
+        assert_eq!(
+            encode_generated_instruction(AssemblerCpu::Ez80, syntax).unwrap(),
+            Some(bytes),
+            "{syntax}"
+        );
+    }
+}
+
+#[test]
 fn generated_instruction_metadata_encodes_both_ez80_lea_index_forms() {
     let cases = [
         ("lea hl, ix+2", vec![0xED, 0x22, 0x02]),

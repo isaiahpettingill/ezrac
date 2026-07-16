@@ -1,6 +1,6 @@
-# Mandelbrot
+# Radial Palette Plot
 
-A compact `agon.vdp` graphics demo. It enters mode 8, clears the graphics area, and plots a 160×120 color pattern calculated from each pixel coordinate.
+A compact `agon.vdp` graphics demo. It enters mode 8, clears the graphics area, and plots a 160×120 radial color pattern calculated from each pixel coordinate. This is intentionally not a Mandelbrot renderer.
 
 ## Build
 
@@ -10,7 +10,7 @@ From the repository root:
 cargo run -- build examples/agon-mos/mandelbrot/src/main.ezra
 ```
 
-This produces `examples/agon-mos/mandelbrot/target/agonlight-mos-ez80/agon-mandelbrot.bin`.
+examples/agon-mos/mandelbrot/target/agonlight-mos-ez80/agon-radial-plot.bin
 
 ## Run
 

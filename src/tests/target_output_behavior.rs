@@ -316,12 +316,20 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
         &source_path,
         r#"
                 import zx.io
+                import zx.keyboard
                 import zx.rom
                 import zx.screen
+                import zx.sound
 
                 fn main() {
                     let ula: u8 = io.read_ula()
                     screen.border(ula)
+                    keyboard.read_row(keyboard.ROW_SHIFT_ZXCV)
+                    keyboard.read_kempston()
+                    sound.beeper_with_border(1, screen.BLUE)
+                    sound.ay_set_tone(4, 0xFFFF)
+                    sound.ay_set_noise_period(0xFF)
+                    sound.ay_set_volume(4, 0xFF)
                     rom.print_char(65)
                 }
             "#,
@@ -349,6 +357,21 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
         ),
         "{asm}"
     );
+    assert!(
+        asm.contains("in a, (0FEh)\n    ld a, a"),
+        "ULA input must be copied to the inline-asm output: {asm}"
+    );
+    assert!(
+        asm.contains("and 1Fh\n    ld a, a"),
+        "keyboard input must be copied to the inline-asm output: {asm}"
+    );
+    assert!(asm.contains("in a, (1Fh)"), "{asm}");
+    assert!(asm.contains("and 1Fh"), "{asm}");
+    assert!(asm.contains("_sound_ay_set_tone:"), "{asm}");
+    assert!(asm.contains("_sound_ay_set_noise_period:"), "{asm}");
+    assert!(asm.contains("_sound_ay_set_volume:"), "{asm}");
+    assert!(asm.contains("ld bc, 0FFFDh"), "{asm}");
+    assert!(asm.contains("ld bc, 0BFFDh"), "{asm}");
     assert!(asm.contains("rst 10h"), "{asm}");
     assert!(map.contains(".text        0x008000"), "{map}");
     assert_eq!(

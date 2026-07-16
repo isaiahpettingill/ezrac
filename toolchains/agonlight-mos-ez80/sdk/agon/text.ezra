@@ -1,16 +1,29 @@
 // Agon VDU text uses ASCII for printable $20..$7E; low values are VDU commands.
-pub const CHAR_SPACE: u8 = ' '
-pub const CHAR_A: u8 = 'A'
-pub const CHAR_Z: u8 = 'Z'
-pub const CHAR_0: u8 = '0'
-pub const CHAR_9: u8 = '9'
-pub const BELL: u8 = 7
-pub const BACKSPACE: u8 = 8
-pub const TAB: u8 = 9
-pub const LF: u8 = 10
-pub const CR: u8 = 13
-pub const CLEAR: u8 = 12
-pub const HOME: u8 = 30
-pub const CURSOR: u8 = 31
+const TEXT_CHAR_A: u8 = 'A'
+const TEXT_CHAR_0: u8 = '0'
 pub fn write_ascii(ch: u8) { asm volatile(in ch: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags) { "ld a, {ch}" "rst.lis 10h" } }
 pub fn print_ascii(text: ptr<u8>) { let index: u24 = 0; while *(text + index) != 0 { write_ascii(*(text + index)); index = index + 1 } }
+
+fn hex_digit(value: u8) {
+    let digit: u8 = value & 0x0F
+    if digit < 10 {
+        write_ascii(TEXT_CHAR_0 + digit)
+        return
+    }
+    write_ascii(TEXT_CHAR_A + digit - 10)
+}
+
+pub fn print_hex_u8(value: u8) {
+    hex_digit(value >> 4)
+    hex_digit(value)
+}
+
+pub fn print_hex_u16(value: u16) {
+    print_hex_u8(cast<u8>(value >> 8))
+    print_hex_u8(cast<u8>(value))
+}
+
+pub fn print_hex_u24(value: u24) {
+    print_hex_u8(cast<u8>(value >> 16))
+    print_hex_u16(cast<u16>(value))
+}

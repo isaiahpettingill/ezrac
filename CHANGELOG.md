@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+- Audited the Game Boy assembly SDK against the GB ASM Tutorial and CC0 simple examples, adding safer HRAM OAM-DMA guidance, common LCD/STAT flags, RGBDS numeric literals and flag expressions, and assembler regression fixtures for background tiles and sprites.
+
 ## 0.1.29
 
 - Fixed `arduboy.input.read()` to expose and return its AVR inline-assembly result.
 - Flattened project artifacts to `target/<triple>/<executable>.*`, removing the redundant source-directory component from every output path.
 - Fixed AVR inline-assembly memory operand formatting and updated example documentation for the flattened paths.
+
+
 
 ## 0.1.28
 

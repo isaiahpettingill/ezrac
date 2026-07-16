@@ -3,6 +3,7 @@ import agon.console
 import agon.gpio
 import agon.keyboard
 import agon.mouse
+import agon.text
 import agon.vdp
 
 fn draw_frame() {
@@ -18,11 +19,17 @@ fn draw_frame() {
 
 fn show_input_status() {
     console.tab(0, 9)
-    console.print("Last key ASCII: ")
-    console.write(keyboard.ascii())
+    console.print("Key ASCII: $")
+    text.print_hex_u8(keyboard.ascii())
+    console.print("  VKey: $")
+    text.print_hex_u8(keyboard.vkey_code())
     console.newline()
-    console.print("Mouse buttons: ")
-    console.write('0' + mouse.buttons())
+    console.print("Mouse: $")
+    text.print_hex_u16(mouse.mouse_x())
+    console.print(", $")
+    text.print_hex_u16(mouse.mouse_y())
+    console.print("  Buttons: $")
+    text.print_hex_u8(mouse.buttons())
     console.newline()
 }
 

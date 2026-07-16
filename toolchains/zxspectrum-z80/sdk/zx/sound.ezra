@@ -14,17 +14,30 @@ pub const AY_VOLUME_C: u8 = 10
 pub const AY_ENV_FINE: u8 = 11
 pub const AY_ENV_COARSE: u8 = 12
 pub const AY_ENV_SHAPE: u8 = 13
+pub const AY_PORT_A: u8 = 14
+pub const AY_PORT_B: u8 = 15
+pub const AY_CHANNEL_COUNT: u8 = 3
+pub const AY_TONE_PERIOD_MASK: u16 = 0x0FFF
+pub const AY_NOISE_PERIOD_MASK: u8 = 0x1F
+pub const AY_VOLUME_MASK: u8 = 0x1F
 
-pub fn beeper(on: u8) {
-    asm volatile(in on: u8 as reg8, clobber a, clobber flags, clobber ports) {
-        "ld a, {on}"
+pub fn beeper_with_border(on: u8, border_color: u8) {
+    asm volatile(in on: u8 as reg8, in border_color: u8 as mem, clobber a, clobber b, clobber flags, clobber ports, clobber memory) {
         "and 01h"
         "rlca"
         "rlca"
         "rlca"
         "rlca"
+        "ld b, a"
+        "ld a, {border_color}"
+        "and 07h"
+        "or b"
         "out (0FEh), a"
     }
+}
+
+pub fn beeper(on: u8) {
+    beeper_with_border(on, 0)
 }
 
 pub fn ay_select(register: u8) {
@@ -45,11 +58,16 @@ pub fn ay_write(register: u8, value: u8) {
 }
 
 pub fn ay_set_tone(channel: u8, period: u16) {
-    let reg: u8 = channel << 1
-    ay_write(reg, cast<u8>(period))
-    ay_write(reg + 1, cast<u8>((period >> 8) & 0x0F))
+    let reg: u8 = (channel % AY_CHANNEL_COUNT) << 1
+    let masked_period: u16 = period & AY_TONE_PERIOD_MASK
+    ay_write(reg, cast<u8>(masked_period))
+    ay_write(reg + 1, cast<u8>(masked_period >> 8))
+}
+
+pub fn ay_set_noise_period(period: u8) {
+    ay_write(AY_NOISE_PERIOD, period & AY_NOISE_PERIOD_MASK)
 }
 
 pub fn ay_set_volume(channel: u8, volume: u8) {
-    ay_write(AY_VOLUME_A + channel, volume & 0x1F)
+    ay_write(AY_VOLUME_A + (channel % AY_CHANNEL_COUNT), volume & AY_VOLUME_MASK)
 }

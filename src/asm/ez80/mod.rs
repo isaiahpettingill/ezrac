@@ -242,6 +242,49 @@ fn generated_coverage_forms() -> Vec<String> {
     forms
 }
 
+/// Canonicalize eZ80 mnemonic, register, and condition spelling without
+/// changing label or numeric-literal case.
+pub fn normalize_z80_instruction_text(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (mnemonic, operands) = compact
+        .split_once(' ')
+        .map_or((compact.as_str(), ""), |(mnemonic, operands)| {
+            (mnemonic, operands)
+        });
+    let mut normalized = mnemonic.to_ascii_lowercase();
+    if operands.is_empty() {
+        return normalized;
+    }
+    normalized.push(' ');
+    let mut token = String::new();
+    for ch in operands.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+            continue;
+        }
+        push_normalized_asm_token(&mut normalized, &mut token);
+        normalized.push(ch);
+    }
+    push_normalized_asm_token(&mut normalized, &mut token);
+    normalized
+}
+
+fn push_normalized_asm_token(output: &mut String, token: &mut String) {
+    const CASE_INSENSITIVE_OPERANDS: &[&str] = &[
+        "a", "b", "c", "d", "e", "h", "l", "af", "bc", "de", "hl", "sp", "ix", "iy", "ixh", "ixl",
+        "iyh", "iyl", "i", "r", "nz", "z", "nc", "po", "pe", "p", "m",
+    ];
+    if CASE_INSENSITIVE_OPERANDS
+        .iter()
+        .any(|known| token.eq_ignore_ascii_case(known))
+    {
+        output.push_str(&token.to_ascii_lowercase());
+    } else {
+        output.push_str(token);
+    }
+    token.clear();
+}
+
 fn alu_coverage_form(op: &str, operand: &str) -> String {
     if op.contains(' ') {
         format!("{op}, {operand}")
@@ -623,6 +666,10 @@ pub fn encode_generated_instruction(
     cpu: AssemblerCpu,
     text: &str,
 ) -> Result<Option<Vec<u8>>, Diagnostic> {
+    // eZ80 mnemonics and register names are case-insensitive. Labels are
+    // resolved by the caller, so only the instruction encoder normalizes case.
+    let normalized = normalize_z80_instruction_text(text);
+    let text = normalized.as_str();
     if matches!(cpu, AssemblerCpu::I8080 | AssemblerCpu::I8085) {
         return encode_intel_8080_instruction(cpu, text);
     }
@@ -645,6 +692,9 @@ pub fn encode_generated_instruction(
         return Ok(Some(bytes));
     }
     if let Some(bytes) = parse_prefixed_reg8_instruction(text)? {
+        return Ok(Some(bytes));
+    }
+    if let Some(bytes) = parse_ez80_adl_pointer_load(cpu, text)? {
         return Ok(Some(bytes));
     }
     if let Some((dst, src)) = parse_ld_operands(text) {
@@ -713,6 +763,28 @@ pub fn encode_generated_instruction(
     }
     if let Some(bytes) = parse_rst_instruction(text)? {
         return Ok(Some(bytes));
+    }
+    Ok(None)
+}
+
+fn parse_ez80_adl_pointer_load(
+    cpu: AssemblerCpu,
+    text: &str,
+) -> Result<Option<Vec<u8>>, Diagnostic> {
+    if cpu != AssemblerCpu::Ez80 {
+        return Ok(None);
+    }
+    let Some((dst, src)) = parse_ld_operands(text) else {
+        return Ok(None);
+    };
+    if dst != "hl" {
+        return Ok(None);
+    }
+    if src == "(hl)" {
+        return Ok(Some(vec![0xED, 0x27]));
+    }
+    if let Some((prefix, offset)) = parse_index_indirect(src)? {
+        return Ok(Some(vec![prefix, 0x27, offset]));
     }
     Ok(None)
 }
@@ -875,6 +947,8 @@ pub fn generated_instruction_len(
     cpu: AssemblerCpu,
     text: &str,
 ) -> Result<Option<usize>, Diagnostic> {
+    let normalized = normalize_z80_instruction_text(text);
+    let text = normalized.as_str();
     if matches!(cpu, AssemblerCpu::I8080 | AssemblerCpu::I8085) {
         if let Some(branch) = branch_instruction(cpu, text) {
             return Ok(Some(branch.encoded_len()));
@@ -1127,11 +1201,14 @@ pub fn ez80_mode_suffixed_instruction(cpu: AssemblerCpu, text: &str) -> Option<(
         .split_once(char::is_whitespace)
         .map_or((text, ""), |(mnemonic, rest)| (mnemonic, rest.trim_start()));
     let (mnemonic, suffix) = mnemonic.rsplit_once('.')?;
-    let prefix = match suffix {
+    let suffix = suffix.to_ascii_lowercase();
+    let prefix = match suffix.as_str() {
         "sis" => 0x40,
         "lis" => 0x49,
         "sil" => 0x52,
-        "lil" => 0x5B,
+        // spasm-ng accepts `.L` as shorthand for eZ80 long instruction/long
+        // operand mode; retain it for Agon source compatibility.
+        "lil" | "l" => 0x5B,
         _ => return None,
     };
     let base = if rest.is_empty() {

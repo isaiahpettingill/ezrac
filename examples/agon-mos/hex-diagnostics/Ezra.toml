@@ -1,0 +1,7 @@
+[project]
+name = "agon-hex-diagnostics"
+
+[build]
+target = "agonlight-mos-ez80"
+output = "bin"
+executable = "hex-diagnostics"

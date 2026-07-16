@@ -49,28 +49,31 @@ fn main() {
     print_title()
     print_menu()
 
-    mos.clear_key_state()
-    let choice: u8 = mos.getkey()
-    mos.putc(choice)
-    print_order_prefix()
+    while 1 == 1 {
+        mos.clear_key_state()
+        let choice: u8 = mos.getkey()
+        mos.putc(choice)
+        print_order_prefix()
 
-    if choice == '1' {
-        print_word_coffee()
-        print_ready()
-        return
+        if choice == '1' {
+            print_word_coffee()
+            print_ready()
+            return
+        }
+
+        if choice == '2' {
+            print_word_latte()
+            print_ready()
+            return
+        }
+
+        if choice == '3' {
+            print_word_monster()
+            print_ready()
+            return
+        }
+
+        print_try_again()
+        print_menu()
     }
-
-    if choice == '2' {
-        print_word_latte()
-        print_ready()
-        return
-    }
-
-    if choice == '3' {
-        print_word_monster()
-        print_ready()
-        return
-    }
-
-    print_try_again()
 }

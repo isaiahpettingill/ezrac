@@ -1,0 +1,27 @@
+import zx.screen
+
+fn main() {
+    screen.border(screen.BLUE)
+    screen.clear_screen(0, screen.attr(screen.WHITE, screen.BLUE, screen.BRIGHT))
+
+    let cell_y: u8 = 0
+    while cell_y < screen.CHAR_ROWS {
+        let cell_x: u8 = 0
+        while cell_x < screen.CHAR_COLUMNS {
+            let pattern: u8 = 0xAA
+            if ((cell_x + cell_y) & 1) != 0 {
+                pattern = 0x55
+            }
+
+            let scanline: u8 = 0
+            while scanline < 8 {
+                screen.set_pixel_byte(cell_x, (cell_y << 3) + scanline, pattern)
+                scanline += 1
+            }
+            cell_x += 1
+        }
+        cell_y += 1
+    }
+
+    loop {}
+}

@@ -1,0 +1,25 @@
+import zx.interrupt
+import zx.screen
+import zx.sound
+
+fn main() {
+    screen.border(screen.BLUE)
+
+    // Configure a quiet AY channel-A tone on 128K models.
+    sound.ay_set_tone(0, 0x0358)
+    sound.ay_write(sound.AY_MIXER, 0x3E)
+    sound.ay_set_volume(0, 8)
+
+    // Also pulse the original ULA beeper so the example works on 48K models.
+    let speaker_on: u8 = 0
+    let frames: u8 = 0
+    loop {
+        sound.beeper_with_border(speaker_on, screen.BLUE)
+        interrupt.wait_vblank()
+        frames += 1
+        if frames == 10 {
+            frames = 0
+            speaker_on ^= 1
+        }
+    }
+}
