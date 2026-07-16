@@ -1,10 +1,11 @@
-use std::path::PathBuf;
-
-use crate::diagnostic::SourceSpan;
+use crate::{
+    compat::{SourcePathBuf, prelude::*},
+    diagnostic::SourceSpan,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
-    pub source_path: PathBuf,
+    pub source_path: SourcePathBuf,
     pub source_text: Option<String>,
     pub source_units: Vec<SourceUnit>,
     pub declarations: Vec<Declaration>,
@@ -12,7 +13,7 @@ pub struct Program {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceUnit {
-    pub path: PathBuf,
+    pub path: SourcePathBuf,
     pub text: String,
 }
 

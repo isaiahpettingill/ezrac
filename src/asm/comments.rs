@@ -1,4 +1,4 @@
-use crate::{asm::AssemblyOptions, ast::Program};
+use crate::{asm::AssemblyOptions, ast::Program, compat::prelude::*};
 
 pub fn with_readability_comments(
     assembly: String,

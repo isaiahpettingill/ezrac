@@ -1,6 +1,7 @@
 use crate::{
     asm::AssemblyOptions,
     ast::{AsmInput, AsmOutput, AssignOp, Expr, Place, Program, Type},
+    compat::{SourcePathBuf, prelude::*},
     diagnostic::Diagnostic,
     hir::HirProgram,
 };
@@ -13,7 +14,7 @@ pub mod optimize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TbirProgram {
-    pub source: std::path::PathBuf,
+    pub source: SourcePathBuf,
     pub target: TbirTarget,
     pub memory: TbirMemoryModel,
     pub declarations: Vec<TbirDeclaration>,

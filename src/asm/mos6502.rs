@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
-use crate::diagnostic::Diagnostic;
 use crate::vm::parse_number;
+use crate::{compat::prelude::*, diagnostic::Diagnostic};
 
 /// MOS 6502 CPU variant for variant-aware assembly.
 ///

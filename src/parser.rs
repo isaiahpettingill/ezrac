@@ -1,3 +1,5 @@
+use crate::compat::{SourcePath, prelude::*, source_path_owned};
+#[cfg(all(feature = "std", test))]
 use std::path::Path;
 
 use pest::{Parser, iterators::Pair};
@@ -17,7 +19,7 @@ use crate::{
 #[grammar = "ezra.pest"]
 struct EzraParser;
 
-pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
+pub fn parse_program(file: &SourcePath, source: &str) -> Result<Program, Diagnostic> {
     let original_source = source;
     let normalized;
     let source = if needs_implicit_deref_assignment_separators(source) {
@@ -40,10 +42,10 @@ pub fn parse_program(file: &Path, source: &str) -> Result<Program, Diagnostic> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Program {
-        source_path: file.to_path_buf(),
+        source_path: source_path_owned(file),
         source_text: Some(original_source.to_owned()),
         source_units: vec![SourceUnit {
-            path: file.to_path_buf(),
+            path: source_path_owned(file),
             text: original_source.to_owned(),
         }],
         declarations,
@@ -142,7 +144,7 @@ fn line_contains_assignment_op(line: &str) -> bool {
     false
 }
 
-fn build_decl(file: &Path, pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
+fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Diagnostic> {
     match pair.as_rule() {
         Rule::decl => {
             let mut predicates = Vec::new();
@@ -449,7 +451,7 @@ fn build_mmio(pair: Pair<'_, Rule>) -> Result<MmioDecl, Diagnostic> {
     })
 }
 
-fn build_fn(file: &Path, pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
+fn build_fn(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Function, Diagnostic> {
     let mut public = false;
     let mut attrs = Vec::new();
     let mut name = None;
@@ -528,7 +530,7 @@ fn build_params(pair: Pair<'_, Rule>) -> Result<Vec<Param>, Diagnostic> {
 }
 
 fn build_block(
-    file: &Path,
+    file: &SourcePath,
     pair: Pair<'_, Rule>,
 ) -> Result<(Vec<Stmt>, Vec<crate::ast::StmtSpan>), Diagnostic> {
     let mut statements = Vec::new();
@@ -542,7 +544,7 @@ fn build_block(
 }
 
 fn build_stmt(
-    file: &Path,
+    file: &SourcePath,
     pair: Pair<'_, Rule>,
 ) -> Result<(Stmt, crate::ast::StmtSpan), Diagnostic> {
     let span = pair_span(file, &pair);
@@ -672,14 +674,17 @@ fn build_stmt(
     ))
 }
 
-fn collect_pair_references(file: &Path, pair: &Pair<'_, Rule>) -> Vec<crate::ast::SourceReference> {
+fn collect_pair_references(
+    file: &SourcePath,
+    pair: &Pair<'_, Rule>,
+) -> Vec<crate::ast::SourceReference> {
     let mut references = Vec::new();
     collect_pair_references_inner(file, pair.clone(), &mut references);
     references
 }
 
 fn collect_pair_references_inner(
-    file: &Path,
+    file: &SourcePath,
     pair: Pair<'_, Rule>,
     references: &mut Vec<crate::ast::SourceReference>,
 ) {
@@ -1164,7 +1169,7 @@ fn parse_escaped(text: &str) -> Result<String, Diagnostic> {
     Ok(out)
 }
 
-fn pest_error(file: &Path, error: pest::error::Error<Rule>) -> Diagnostic {
+fn pest_error(file: &SourcePath, error: pest::error::Error<Rule>) -> Diagnostic {
     let ((line, column), (end_line, end_column)) = match error.line_col {
         pest::error::LineColLocation::Pos((line, column)) => {
             ((line, column), (line, column.saturating_add(1)))
@@ -1173,7 +1178,7 @@ fn pest_error(file: &Path, error: pest::error::Error<Rule>) -> Diagnostic {
     };
     Diagnostic::at_span(
         SourceSpan {
-            file: file.to_path_buf(),
+            file: source_path_owned(file),
             start: SourcePosition { line, column },
             end: SourcePosition {
                 line: end_line,
@@ -1184,11 +1189,11 @@ fn pest_error(file: &Path, error: pest::error::Error<Rule>) -> Diagnostic {
     )
 }
 
-fn pair_span(file: &Path, pair: &Pair<'_, Rule>) -> SourceSpan {
+fn pair_span(file: &SourcePath, pair: &Pair<'_, Rule>) -> SourceSpan {
     let (line, column) = pair.as_span().start_pos().line_col();
     let (end_line, end_column) = pair.as_span().end_pos().line_col();
     SourceSpan {
-        file: file.to_path_buf(),
+        file: source_path_owned(file),
         start: SourcePosition { line, column },
         end: SourcePosition {
             line: end_line,

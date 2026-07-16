@@ -1,5 +1,5 @@
-use crate::diagnostic::Diagnostic;
 use crate::target::AssemblerCpu;
+use crate::{compat::prelude::*, diagnostic::Diagnostic};
 
 pub mod emitter;
 

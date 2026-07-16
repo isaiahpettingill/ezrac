@@ -1,9 +1,11 @@
+use crate::compat::{prelude::*, source_path_text};
+
 use super::{TbirDeclaration, TbirProgram};
 
 pub fn text(program: &TbirProgram) -> String {
     let mut out = String::new();
     out.push_str("TBIR\n");
-    out.push_str(&format!("source: {}\n", program.source.display()));
+    out.push_str(&format!("source: {}\n", source_path_text(&program.source)));
     out.push_str(&format!(
         "target: {} pointer={} native={:?} code_size={} cache={}\n",
         program.target.name,

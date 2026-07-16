@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet};
-
 use crate::{
     asm::{AssemblyOptions, comments::with_readability_comments},
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
     },
+    compat::prelude::*,
     diagnostic::Diagnostic,
     hir::HirProgram,
     tbir::{
@@ -128,7 +127,7 @@ impl Emitter {
             .map(|(value, storage)| (value.clone(), *storage))
             .collect::<Vec<_>>();
         for (value, storage) in strings {
-            for (offset, byte) in value.bytes().chain(std::iter::once(0)).enumerate() {
+            for (offset, byte) in value.bytes().chain(core::iter::once(0)).enumerate() {
                 self.lda_imm(byte);
                 self.sta(storage.address + offset as u32);
             }
@@ -1832,7 +1831,7 @@ fn sanitize(name: &str) -> String {
         .collect()
 }
 
-#[cfg(all(test, feature = "mos6502"))]
+#[cfg(all(test, feature = "mos6502-emulator"))]
 mod tests {
     use std::path::Path;
 

@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use crate::compat::{SourcePath, prelude::*};
 
 use crate::{
     ast::{
@@ -753,7 +750,11 @@ impl Symbols {
         }
     }
 
-    fn embed_bytes(&self, source: &EmbedSource, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    fn embed_bytes(
+        &self,
+        source: &EmbedSource,
+        source_path: &SourcePath,
+    ) -> Result<Vec<u8>, Diagnostic> {
         match source {
             EmbedSource::File(path) => read_embed_file(path, source_path),
             EmbedSource::Bytes(values) => values

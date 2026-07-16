@@ -1,8 +1,12 @@
-use std::path::{Path, PathBuf};
+use core::fmt;
+
+use crate::compat::{SourcePath, SourcePathBuf, prelude::*, source_path_owned, source_path_text};
+#[cfg(all(feature = "std", test))]
+use std::path::Path;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceLocation {
-    pub file: PathBuf,
+    pub file: SourcePathBuf,
     pub line: usize,
     pub column: usize,
 }
@@ -15,7 +19,7 @@ pub struct SourcePosition {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceSpan {
-    pub file: PathBuf,
+    pub file: SourcePathBuf,
     pub start: SourcePosition,
     pub end: SourcePosition,
 }
@@ -93,13 +97,13 @@ impl Diagnostic {
     }
 }
 
-impl std::fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(span) = &self.span {
             write!(
                 f,
                 "{}:{}:{}: {}",
-                span.file.display(),
+                source_path_text(&span.file),
                 span.start.line,
                 span.start.column,
                 self.message
@@ -110,6 +114,7 @@ impl std::fmt::Display for Diagnostic {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for Diagnostic {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,7 +127,7 @@ struct SourceToken {
 ///
 /// This is kept in the compiler diagnostic layer so every consumer receives a
 /// structured range. The LSP never needs to reverse-engineer diagnostic text.
-pub fn diagnostic_span(file: &Path, source: &str, message: &str) -> Option<SourceSpan> {
+pub fn diagnostic_span(file: &SourcePath, source: &str, message: &str) -> Option<SourceSpan> {
     let tokens = source_tokens(file, source);
     let quoted = message
         .split('`')
@@ -185,7 +190,7 @@ pub fn diagnostic_span(file: &Path, source: &str, message: &str) -> Option<Sourc
         .and_then(|word| token_span(&tokens, word, false))
 }
 
-pub fn source_token_spans(file: &Path, source: &str, text: &str) -> Vec<SourceSpan> {
+pub fn source_token_spans(file: &SourcePath, source: &str, text: &str) -> Vec<SourceSpan> {
     token_spans(&source_tokens(file, source), text)
 }
 
@@ -246,7 +251,7 @@ fn token_spans(tokens: &[SourceToken], text: &str) -> Vec<SourceSpan> {
         .collect()
 }
 
-fn source_tokens(file: &Path, source: &str) -> Vec<SourceToken> {
+fn source_tokens(file: &SourcePath, source: &str) -> Vec<SourceToken> {
     let mut tokens = Vec::new();
     let mut chars = source.char_indices().peekable();
     let mut line = 1usize;
@@ -325,7 +330,7 @@ fn source_tokens(file: &Path, source: &str) -> Vec<SourceToken> {
         tokens.push(SourceToken {
             text,
             span: SourceSpan {
-                file: file.to_path_buf(),
+                file: source_path_owned(file),
                 start,
                 end: SourcePosition { line, column },
             },

@@ -39,5 +39,5 @@ mod lr35902_backend;
 mod m6800_backend;
 #[cfg(feature = "m68k")]
 mod m68k_backend;
-#[cfg(feature = "mos6502")]
+#[cfg(feature = "mos6502-emulator")]
 mod mos6502_backend;

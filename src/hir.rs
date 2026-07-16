@@ -1,7 +1,6 @@
-use std::path::PathBuf;
-
 use crate::{
     ast::{Declaration, Expr, Function, Program, Stmt, Type},
+    compat::{SourcePathBuf, prelude::*},
     diagnostic::Diagnostic,
 };
 
@@ -9,7 +8,7 @@ pub mod dump;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirProgram {
-    pub source_path: PathBuf,
+    pub source_path: SourcePathBuf,
     pub declarations: Vec<HirDeclaration>,
     pub analysis: HirAnalysis,
 }

@@ -1,4 +1,4 @@
-use crate::{diagnostic::Diagnostic, target::CpuFamily};
+use crate::{compat::prelude::*, diagnostic::Diagnostic, target::CpuFamily};
 
 pub(super) fn is_intel_8080_family(cpu: CpuFamily) -> bool {
     matches!(cpu, CpuFamily::I8080 | CpuFamily::I8085)

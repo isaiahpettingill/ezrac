@@ -1,5 +1,6 @@
 use crate::{
     ast::{AccessSegment, Declaration, Expr, Stmt},
+    compat::prelude::*,
     diagnostic::Diagnostic,
     target::{Address24, CpuFamily, memory_model_for_cpu},
 };

@@ -1,5 +1,7 @@
+use crate::compat::{SourcePath, prelude::*};
+
+#[cfg(feature = "std")]
 use std::{
-    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -867,7 +869,7 @@ impl Emitter {
     }
 
     fn emit_string_literal_initializer(&mut self, value: &str, variable: Variable) {
-        for (offset, byte) in value.bytes().chain(std::iter::once(0)).enumerate() {
+        for (offset, byte) in value.bytes().chain(core::iter::once(0)).enumerate() {
             self.line(&format!("    ld a, {byte:02X}h"));
             self.emit_store_a(scalar_var(
                 variable.addr + offset as u32,
@@ -7938,7 +7940,8 @@ fn sdk_ports(options: &AssemblyOptions) -> HashMap<String, u8> {
     ])
 }
 
-fn read_embed_file(path: &str, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
+#[cfg(feature = "std")]
+fn read_embed_file(path: &str, source_path: &SourcePath) -> Result<Vec<u8>, Diagnostic> {
     let path = Path::new(path);
     if path.is_absolute() {
         return read_embed_file_candidate(path);
@@ -7967,6 +7970,7 @@ fn read_embed_file(path: &str, source_path: &Path) -> Result<Vec<u8>, Diagnostic
     )))
 }
 
+#[cfg(feature = "std")]
 fn read_embed_file_candidate(path: &Path) -> Result<Vec<u8>, Diagnostic> {
     fs::read(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -7980,6 +7984,7 @@ fn read_embed_file_candidate(path: &Path) -> Result<Vec<u8>, Diagnostic> {
     })
 }
 
+#[cfg(feature = "std")]
 fn embed_file_candidates(path: &Path, source_path: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![
         source_path
@@ -7997,6 +8002,13 @@ fn embed_file_candidates(path: &Path, source_path: &Path) -> Vec<PathBuf> {
         }
     }
     candidates
+}
+
+#[cfg(feature = "no-std")]
+fn read_embed_file(path: &str, _source_path: &SourcePath) -> Result<Vec<u8>, Diagnostic> {
+    Err(Diagnostic::new(format!(
+        "embedded file `{path}` is unavailable without a host filesystem"
+    )))
 }
 
 #[cfg(test)]

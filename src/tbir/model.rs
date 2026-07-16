@@ -1,5 +1,7 @@
+use crate::compat::{SourcePath, prelude::*};
+
+#[cfg(feature = "std")]
 use std::{
-    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -460,7 +462,7 @@ fn eval_binary(left: i64, op: BinaryOp, right: i64) -> i64 {
 
 fn embed_bytes(
     source: &EmbedSource,
-    source_path: &Path,
+    source_path: &SourcePath,
     model: &SemanticModel,
 ) -> Result<Vec<u8>, Diagnostic> {
     match source {
@@ -473,7 +475,7 @@ fn embed_bytes(
             })
             .collect(),
         EmbedSource::Text(value) => Ok(value.as_bytes().to_vec()),
-        EmbedSource::CStr(value) => Ok(value.bytes().chain(std::iter::once(0)).collect()),
+        EmbedSource::CStr(value) => Ok(value.bytes().chain(core::iter::once(0)).collect()),
         EmbedSource::Repeat { value, len } => {
             let value = u8::try_from(model.const_value(value)?)
                 .map_err(|_| Diagnostic::new("embedded byte is outside u8 range"))?;
@@ -484,7 +486,8 @@ fn embed_bytes(
     }
 }
 
-fn read_embed_file(file: &str, source_path: &Path) -> Result<Vec<u8>, Diagnostic> {
+#[cfg(feature = "std")]
+fn read_embed_file(file: &str, source_path: &SourcePath) -> Result<Vec<u8>, Diagnostic> {
     let relative = source_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -506,6 +509,13 @@ fn read_embed_file(file: &str, source_path: &Path) -> Result<Vec<u8>, Diagnostic
                 PathBuf::from(file).display()
             ))
         })
+}
+
+#[cfg(feature = "no-std")]
+fn read_embed_file(file: &str, _source_path: &SourcePath) -> Result<Vec<u8>, Diagnostic> {
+    Err(Diagnostic::new(format!(
+        "embedded file `{file}` is unavailable without a host filesystem"
+    )))
 }
 
 fn collect_strings(program: &Program, model: &mut SemanticModel) -> Result<(), Diagnostic> {

@@ -1,10 +1,8 @@
-use std::collections::{HashMap, HashSet};
-
-use crate::diagnostic::Diagnostic;
 use crate::target::{
     Address24, AssemblerCpu, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
     EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
 };
+use crate::{compat::prelude::*, diagnostic::Diagnostic};
 use pest::{Parser, iterators::Pair};
 use pest_derive::Parser;
 

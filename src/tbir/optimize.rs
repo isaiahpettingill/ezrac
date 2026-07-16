@@ -1,7 +1,9 @@
-use std::collections::HashMap;
-
-use crate::ast::{
-    AccessPath, AccessSegment, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, UnaryOp,
+use crate::{
+    ast::{
+        AccessPath, AccessSegment, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt,
+        UnaryOp,
+    },
+    compat::prelude::*,
 };
 
 use super::TbirOptimizationReport;
@@ -21,28 +23,28 @@ fn optimize_declaration(declaration: &mut Declaration, report: &mut TbirOptimiza
         Declaration::Function(function) => optimize_function(function, report),
         Declaration::Const(decl) => {
             decl.value = optimize_expr(
-                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
             )
         }
         Declaration::Port(decl) => {
             decl.value = optimize_expr(
-                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
             )
         }
         Declaration::Mmio(decl) => {
             decl.value = optimize_expr(
-                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
             )
         }
         Declaration::Global(decl) => {
             decl.value = optimize_expr(
-                std::mem::replace(&mut decl.value, Expr::Int(0)),
+                core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
             )
@@ -60,7 +62,7 @@ fn optimize_function(function: &mut Function, report: &mut TbirOptimizationRepor
         report.inline_candidates.push(function.name.clone());
     }
     let mut constants = HashMap::new();
-    function.body = optimize_stmts(std::mem::take(&mut function.body), &mut constants, report);
+    function.body = optimize_stmts(core::mem::take(&mut function.body), &mut constants, report);
 }
 
 fn optimize_stmts(

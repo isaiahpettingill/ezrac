@@ -1,9 +1,14 @@
+use crate::compat::{prelude::*, source_path_text};
+
 use super::{HirDeclaration, HirProgram};
 
 pub fn text(program: &HirProgram) -> String {
     let mut out = String::new();
     out.push_str("HIR\n");
-    out.push_str(&format!("source: {}\n", program.source_path.display()));
+    out.push_str(&format!(
+        "source: {}\n",
+        source_path_text(&program.source_path)
+    ));
     out.push_str(&format!(
         "analysis: functions={} shared_library_candidate={}\n",
         program.analysis.function_count, program.analysis.shared_library_candidate

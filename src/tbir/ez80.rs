@@ -1,6 +1,7 @@
 use crate::{
     asm::AssemblyOptions,
     ast::{Declaration, Program, Stmt},
+    compat::prelude::*,
     diagnostic::Diagnostic,
     hir::{HirDeclaration, HirProgram},
     target::{Address24, memory_model_for_cpu},
