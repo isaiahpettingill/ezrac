@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-- Audited the Game Boy assembly SDK against the GB ASM Tutorial and CC0 simple examples, adding safer HRAM OAM-DMA guidance, common LCD/STAT flags, RGBDS numeric literals and flag expressions, and assembler regression fixtures for background tiles and sprites.
+## 0.1.30
+
+- Added filesystem-free virtual workspace compilation and executable packaging APIs, including host-independent paths plus `alloc`-only, no-std, and Wasm library builds.
+- Added the portable TinyLisp REPL for Agon Light, CP/M, Commodore 64, ZX Spectrum, and TI-99/4A, with translated keyboard input on the Spectrum and TI console-ROM KSCAN support.
+- Reworked the TMS9900 ABI around stack frames and stack arguments, adding recursion, nested calls, strings, byte pointers, division/remainder, unreachable SDK elimination, and compact wrapper inlining.
+- Reduced MOS 6502 output with bounded shared `u16` arithmetic helpers and recursion-aware caller preservation; added explicit `@inline` syntax and conservative cost-based wrapper inlining.
+- Expanded TI calculator and Commodore 64 SDKs, examples, assembler coverage, packaging, and runtime validation.
+- Audited the Game Boy assembly SDK against the GB ASM Tutorial and CC0 examples, adding safer HRAM OAM-DMA guidance, common LCD/STAT flags, RGBDS numeric literals and flag expressions, and background/sprite regression fixtures.
 
 ## 0.1.29
 
