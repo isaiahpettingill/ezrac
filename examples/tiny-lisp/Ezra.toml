@@ -1,0 +1,8 @@
+[project]
+name = "tiny-lisp"
+
+[build]
+# Agon is the default for `cargo run -- build examples/tiny-lisp/main.ezra`.
+# Override it with --target for CP/M or the Commodore 64.
+target = "agonlight-mos-ez80"
+executable = "tiny-lisp"

@@ -1,0 +1,273 @@
+// TinyLisp: a deliberately small, portable S-expression calculator.
+//
+// Forms are binary and recursive: (+ 1 2), (* (+ 2 3) 4), (- 9 1), (/ 8 2).
+// Numbers are unsigned 16-bit values. Press Q at a prompt to return to the host.
+
+@cfg(target("agonlight-mos-ez80"))
+import agon.console
+
+@cfg(target("commodore64-6502"))
+import c64.kernal
+
+@cfg(target("commodore64-6502"))
+import c64.memory
+
+@cfg(target("cpm-2.2-z80"))
+import cpm.console
+
+const LISP_SPACE: u8 = ' '
+const LISP_TAB: u8 = '\t'
+const LISP_CR: u8 = 13
+const LISP_LF: u8 = '\n'
+
+global lookahead: u8 = 0
+global has_lookahead: u8 = 0
+global parse_error: u8 = 0
+
+@cfg(target("agonlight-mos-ez80"))
+fn platform_init() {
+    console.clear()
+}
+
+@cfg(target("commodore64-6502"))
+fn platform_init() {
+    memory.map_roms_and_io()
+    kernal.clear_screen()
+}
+
+@cfg(target("cpm-2.2-z80"))
+fn platform_init() {}
+
+@cfg(target("agonlight-mos-ez80"))
+fn platform_write(ch: u8) {
+    console.write(ch)
+}
+
+@cfg(target("commodore64-6502"))
+fn platform_write(ch: u8) {
+    kernal.putc(ch)
+}
+
+@cfg(target("cpm-2.2-z80"))
+fn platform_write(ch: u8) {
+    console.write(ch)
+}
+
+@cfg(target("agonlight-mos-ez80"))
+fn platform_read() -> u8 {
+    let ch: u8 = console.read_key()
+    // MOS key reads do not echo, unlike CP/M's console input.
+    platform_write(ch)
+    return ch
+}
+
+@cfg(target("commodore64-6502"))
+fn platform_read() -> u8 {
+    let ch: u8 = 0
+    while ch == 0 {
+        kernal.scan_keyboard()
+        ch = kernal.get_key()
+    }
+    platform_write(ch)
+    return ch
+}
+
+@cfg(target("cpm-2.2-z80"))
+fn platform_read() -> u8 {
+    // BDOS function 1 supplies blocking, echoed console input.
+    return console.read()
+}
+
+fn lisp_newline() {
+    platform_write(LISP_CR)
+    platform_write(LISP_LF)
+}
+
+fn write_banner() {
+    platform_write('T')
+    platform_write('i')
+    platform_write('n')
+    platform_write('y')
+    platform_write('L')
+    platform_write('i')
+    platform_write('s')
+    platform_write('p')
+    platform_write(' ')
+    platform_write('-')
+    platform_write(' ')
+    platform_write('(')
+    platform_write('+')
+    platform_write(' ')
+    platform_write('1')
+    platform_write(' ')
+    platform_write('2')
+    platform_write(')')
+    platform_write(',')
+    platform_write(' ')
+    platform_write('(')
+    platform_write('*')
+    platform_write(' ')
+    platform_write('(')
+    platform_write('+')
+    platform_write(' ')
+    platform_write('2')
+    platform_write(' ')
+    platform_write('3')
+    platform_write(')')
+    platform_write(' ')
+    platform_write('4')
+    platform_write(')')
+    lisp_newline()
+    platform_write('Q')
+    platform_write(' ')
+    platform_write('t')
+    platform_write('o')
+    platform_write(' ')
+    platform_write('q')
+    platform_write('u')
+    platform_write('i')
+    platform_write('t')
+    platform_write('.')
+    lisp_newline()
+}
+
+fn write_prompt() {
+    platform_write('>')
+    platform_write(LISP_SPACE)
+}
+
+fn write_result_prefix() {
+    platform_write('=')
+    platform_write(LISP_SPACE)
+}
+
+fn write_error() {
+    platform_write('e')
+    platform_write('r')
+    platform_write('r')
+    platform_write('o')
+    platform_write('r')
+    lisp_newline()
+}
+
+fn write_u16(value: u16) {
+    let divisor: u16 = 10000
+    let remaining: u16 = value
+    let started: u8 = 0
+    while divisor > 0 {
+        let digit: u16 = remaining / divisor
+        if digit != 0 || started != 0 || divisor == 1 {
+            platform_write(cast<u8>(digit) + '0')
+            started = 1
+        }
+        remaining = remaining % divisor
+        divisor = divisor / 10
+    }
+}
+
+fn stream_char() -> u8 {
+    if has_lookahead != 0 {
+        has_lookahead = 0
+        return lookahead
+    }
+    return platform_read()
+}
+
+fn unread(ch: u8) {
+    lookahead = ch
+    has_lookahead = 1
+}
+
+fn read_non_space() -> u8 {
+    let ch: u8 = stream_char()
+    while ch == LISP_SPACE || ch == LISP_TAB || ch == LISP_CR || ch == LISP_LF {
+        ch = stream_char()
+    }
+    return ch
+}
+
+fn discard_line() {
+    let ch: u8 = stream_char()
+    while ch != LISP_CR && ch != LISP_LF {
+        ch = stream_char()
+    }
+}
+
+fn parse_number(first: u8) -> u16 {
+    let value: u16 = cast<u16>(first - '0')
+    let ch: u8 = stream_char()
+    while ch >= '0' && ch <= '9' {
+        value = value * 10 + cast<u16>(ch - '0')
+        ch = stream_char()
+    }
+    unread(ch)
+    return value
+}
+
+fn parse_form() -> u16 {
+    let operator: u8 = read_non_space()
+    let left: u16 = parse_expr()
+    let right: u16 = parse_expr()
+    let closing: u8 = read_non_space()
+    if closing != ')' {
+        parse_error = 1
+        return 0
+    }
+
+    if operator == '+' {
+        return left + right
+    }
+    if operator == '-' {
+        return left - right
+    }
+    if operator == '*' {
+        return left * right
+    }
+    if operator == '/' {
+        if right == 0 {
+            parse_error = 1
+            return 0
+        }
+        return left / right
+    }
+
+    parse_error = 1
+    return 0
+}
+
+fn parse_expr() -> u16 {
+    let first: u8 = read_non_space()
+    if first >= '0' && first <= '9' {
+        return parse_number(first)
+    }
+    if first == '(' {
+        return parse_form()
+    }
+    parse_error = 1
+    return 0
+}
+
+fn main() {
+    platform_init()
+    write_banner()
+
+    loop {
+        parse_error = 0
+        write_prompt()
+        let first: u8 = read_non_space()
+        if first == 'q' || first == 'Q' {
+            return
+        }
+        unread(first)
+
+        let value: u16 = parse_expr()
+        discard_line()
+        if parse_error != 0 {
+            write_error()
+        } else {
+            write_result_prefix()
+            write_u16(value)
+            lisp_newline()
+        }
+    }
+}
