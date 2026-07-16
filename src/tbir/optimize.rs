@@ -296,8 +296,6 @@ fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
         }
         (value, BinaryOp::Mul, value_expr) => power_of_two_shift(value_expr)
             .map(|shift| shift_expr(value.clone(), BinaryOp::Shl, shift)),
-        (value, BinaryOp::Div, value_expr) => power_of_two_shift(value_expr)
-            .map(|shift| shift_expr(value.clone(), BinaryOp::Shr, shift)),
         (value_expr, BinaryOp::Add | BinaryOp::BitOr | BinaryOp::BitXor, value)
             if int_value(value_expr) == Some(0) =>
         {

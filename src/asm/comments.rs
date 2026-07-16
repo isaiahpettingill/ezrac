@@ -39,11 +39,9 @@ pub fn with_readability_comments(
     }
 }
 
-fn comment_marker(backend: &str) -> &'static str {
-    match backend {
-        "m68k" | "tms9900" => "*",
-        _ => ";",
-    }
+fn comment_marker(_backend: &str) -> &'static str {
+    // Every bundled assembler and generated emitter accepts semicolon comments.
+    ";"
 }
 
 fn source_comments(program: &Program) -> Vec<String> {

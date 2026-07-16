@@ -141,12 +141,12 @@ fn tbir_reports_optimization_markers_and_dump() {
 }
 
 #[test]
-fn tbir_simplifies_power_of_two_arithmetic_and_zero_division() {
+fn tbir_simplifies_power_of_two_multiplication_and_zero_division() {
     let program = parse_program(
         Path::new("test.ezra"),
         r#"
                 fn scale(x: u8) -> u8 { return x * 8 }
-                fn halve(x: u8) -> u8 { return x / 4 }
+                fn signed_division(x: i8) -> i8 { return x / 4 }
                 fn zero(x: u8) -> u8 { return x / 0 }
             "#,
     )
@@ -162,14 +162,14 @@ fn tbir_simplifies_power_of_two_arithmetic_and_zero_division() {
         })
     ));
     assert!(matches!(
-        return_expr(&tbir, "halve"),
+        return_expr(&tbir, "signed_division"),
         Some(Expr::Binary {
-            op: BinaryOp::Shr,
+            op: BinaryOp::Div,
             ..
         })
     ));
     assert!(matches!(return_expr(&tbir, "zero"), Some(Expr::Int(0))));
-    assert!(tbir.optimizations.algebraic_simplifications >= 3);
+    assert!(tbir.optimizations.algebraic_simplifications >= 2);
 }
 
 fn return_expr<'a>(tbir: &'a TbirProgram, name: &str) -> Option<&'a Expr> {
