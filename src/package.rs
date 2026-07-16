@@ -1,11 +1,31 @@
 //! Filesystem-free executable packaging for library consumers.
 
 use alloc::{format, string::String, vec::Vec};
+use core::fmt;
 
-use crate::{
-    diagnostic::Diagnostic,
-    target::{Address24, OutputFormat},
-};
+use crate::target::{Address24, OutputFormat};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageError {
+    pub message: String,
+}
+
+impl PackageError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for PackageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for PackageError {}
 
 /// Parameters shared by target executable packagers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,7 +55,7 @@ impl PackageRequest {
 }
 
 /// Package assembled code without reading or writing host files.
-pub fn package_executable(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+pub fn package_executable(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
     if request.target.starts_with("agonlight-mos-ez80") {
         return agon_mos_bytes(request.entry_addr, code);
     }
@@ -46,22 +66,22 @@ pub fn package_executable(request: &PackageRequest, code: &[u8]) -> Result<Vec<u
         }
         OutputFormat::Commodore64Prg => commodore64_prg_bytes(request, code),
         OutputFormat::Commodore64Crt => commodore64_crt_bytes(request, code),
-        _ => Err(Diagnostic::new(format!(
+        _ => Err(PackageError::new(format!(
             "in-memory packaging for `{}` output is not implemented yet",
             request.output_format.extension()
         ))),
     }
 }
 
-fn commodore64_prg_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+fn commodore64_prg_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
     if !request.target.starts_with("commodore64-6502") {
-        return Err(Diagnostic::new(format!(
+        return Err(PackageError::new(format!(
             "target `{}` does not support Commodore 64 .prg output",
             request.target
         )));
     }
     if request.load_addr != 0x080D || request.entry_addr != 0x080D {
-        return Err(Diagnostic::new(
+        return Err(PackageError::new(
             "Commodore 64 PRG layouts must load and enter at 0x080D",
         ));
     }
@@ -75,15 +95,15 @@ fn commodore64_prg_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8
     Ok(output)
 }
 
-fn commodore64_crt_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+fn commodore64_crt_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
     if !request.target.starts_with("commodore64-6502") {
-        return Err(Diagnostic::new(format!(
+        return Err(PackageError::new(format!(
             "target `{}` does not support Commodore 64 .crt output",
             request.target
         )));
     }
     if request.load_addr != 0x8009 || request.entry_addr != 0x8009 {
-        return Err(Diagnostic::new(
+        return Err(PackageError::new(
             "standard Commodore 64 CRT layouts must load and enter at 0x8009",
         ));
     }
@@ -91,7 +111,7 @@ fn commodore64_crt_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8
     const HEADER_SIZE: usize = 0x40;
     const CHIP_HEADER_SIZE: usize = 0x10;
     if code.len() > ROM_SIZE - 9 {
-        return Err(Diagnostic::new(
+        return Err(PackageError::new(
             "program code exceeds the standard 8 KiB Commodore 64 CRT capacity",
         ));
     }
@@ -120,9 +140,9 @@ fn commodore64_crt_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8
     Ok(output)
 }
 
-fn agon_mos_bytes(entry: u32, code: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+fn agon_mos_bytes(entry: u32, code: &[u8]) -> Result<Vec<u8>, PackageError> {
     if entry > Address24::MAX {
-        return Err(Diagnostic::new(format!(
+        return Err(PackageError::new(format!(
             "Agon MOS entry address 0x{entry:X} is outside the 24-bit address space"
         )));
     }

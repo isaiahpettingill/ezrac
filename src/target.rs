@@ -1,3 +1,5 @@
+use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+
 pub const CART_MAGIC: &[u8; 4] = b"EZRA";
 pub const FORMAT_VERSION: u8 = 1;
 pub const CPU_MODE_EZ80_ADL: u8 = 1;
@@ -543,8 +545,8 @@ impl TryFrom<u32> for Address24 {
     }
 }
 
-impl std::fmt::Display for Address24 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Address24 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "0x{:06X}", self.0)
     }
 }
@@ -552,8 +554,8 @@ impl std::fmt::Display for Address24 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressOutOfRange(pub u32);
 
-impl std::fmt::Display for AddressOutOfRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AddressOutOfRange {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "address 0x{:X} is outside the 24-bit address space",
@@ -562,6 +564,7 @@ impl std::fmt::Display for AddressOutOfRange {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for AddressOutOfRange {}
 
 #[cfg(test)]

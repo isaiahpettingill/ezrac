@@ -30,6 +30,7 @@ toml = "1.1.2"
 [features]
 default = ["std", "test-runner", "intel", "z80", "lr35902"]
 std = []
+no-std = []
 test-runner = ["std", "dep:ez80"]
 intel = []
 z80 = []
