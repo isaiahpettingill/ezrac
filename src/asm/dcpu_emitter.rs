@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    asm::AssemblyOptions,
+    asm::{AssemblyOptions, comments::with_readability_comments},
     ast::{AssignOp, BinaryOp, Expr, Type, UnaryOp},
     diagnostic::Diagnostic,
     hir::HirProgram,
@@ -25,7 +25,9 @@ pub fn emit_dcpu_assembly_with_options(
 
     let hir = HirProgram::from_ast(program)?;
     let tbir = TbirProgram::lower(&hir, program, &options)?;
-    Emitter::new().emit(&tbir)
+    Emitter::new()
+        .emit(&tbir)
+        .map(|asm| with_readability_comments(asm, program, &options, "dcpu"))
 }
 
 struct Emitter {

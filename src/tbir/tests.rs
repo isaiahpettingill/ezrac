@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::{asm::AssemblyOptions, hir::HirProgram, parser::parse_program};
+use crate::{asm::AssemblyOptions, ast::BinaryOp, hir::HirProgram, parser::parse_program};
 
 use super::*;
 
@@ -138,6 +138,54 @@ fn tbir_reports_optimization_markers_and_dump() {
     assert!(dump.contains("TBIR"), "{dump}");
     assert!(dump.contains("target: ez80-adl"), "{dump}");
     assert!(dump.contains("optimizations:"), "{dump}");
+}
+
+#[test]
+fn tbir_simplifies_power_of_two_arithmetic_and_zero_division() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+                fn scale(x: u8) -> u8 { return x * 8 }
+                fn halve(x: u8) -> u8 { return x / 4 }
+                fn zero(x: u8) -> u8 { return x / 0 }
+            "#,
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+
+    assert!(matches!(
+        return_expr(&tbir, "scale"),
+        Some(Expr::Binary {
+            op: BinaryOp::Shl,
+            ..
+        })
+    ));
+    assert!(matches!(
+        return_expr(&tbir, "halve"),
+        Some(Expr::Binary {
+            op: BinaryOp::Shr,
+            ..
+        })
+    ));
+    assert!(matches!(return_expr(&tbir, "zero"), Some(Expr::Int(0))));
+    assert!(tbir.optimizations.algebraic_simplifications >= 3);
+}
+
+fn return_expr<'a>(tbir: &'a TbirProgram, name: &str) -> Option<&'a Expr> {
+    tbir.declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            TbirDeclaration::Function {
+                name: function_name,
+                body,
+                ..
+            } if function_name == name => match body.as_slice() {
+                [TbirStmt::Return(Some(expr))] => Some(expr),
+                _ => None,
+            },
+            _ => None,
+        })
 }
 
 #[test]
