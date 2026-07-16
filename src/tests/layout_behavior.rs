@@ -211,13 +211,16 @@ fn ti_ce_targets_use_tice_layout_and_sdk() {
         assert_eq!(settings.output_format, OutputFormat::Ti8xp);
         assert_eq!(settings.layout.entry.get(), 0xD1_A881);
         assert!(asm.contains("; target: eZ80 ADL mode"), "{asm}");
+        assert!(!asm.contains("    di\n"), "{asm}");
+        assert!(!asm.contains("    ld sp,"), "{asm}");
+        assert!(asm.contains("__ezra_exit:\n    ret"), "{asm}");
         assert!(asm.contains("ld (0D40000h), a"), "{asm}");
         assert!(map.contains(".text        0xD1A881"), "{map}");
         assert_eq!(
             outputs.executable.extension().and_then(|ext| ext.to_str()),
             Some("8xp")
         );
-        assert_ti8xp(&bin, b"GAME\0\0\0\0", &[0xEF, 0x7B, 0xF3, 0x31]);
+        assert_ti8xp(&bin, b"GAME\0\0\0\0", &[0xEF, 0x7B]);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -276,13 +279,16 @@ fn ti_z80_targets_use_ti_layout_and_sdk() {
         assert_eq!(settings.layout.name, expected_layout);
         assert_eq!(settings.layout.entry.get(), 0x9D95);
         assert!(asm.contains("; target: Z80"), "{asm}");
+        assert!(!asm.contains("    di\n"), "{asm}");
+        assert!(!asm.contains("    ld sp,"), "{asm}");
+        assert!(asm.contains("__ezra_exit:\n    ret"), "{asm}");
         assert!(asm.contains("ld (9340h), a"), "{asm}");
         assert!(map.contains(".text        0x009D95"), "{map}");
         assert_eq!(
             outputs.executable.extension().and_then(|ext| ext.to_str()),
             Some("8xp")
         );
-        assert_ti8xp(&bin, b"GAME\0\0\0\0", &[0xBB, 0x6D, 0xF3, 0x31]);
+        assert_ti8xp(&bin, b"GAME\0\0\0\0", &[0xBB, 0x6D]);
 
         let _ = std::fs::remove_dir_all(root);
     }

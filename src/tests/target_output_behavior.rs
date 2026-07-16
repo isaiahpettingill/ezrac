@@ -424,7 +424,7 @@ fn ti_ce_target_can_override_output_to_raw_bin() {
         outputs.executable.extension().and_then(|ext| ext.to_str()),
         Some("bin")
     );
-    assert_eq!(&bin[0..4], &[0xF3, 0x31, 0xFF, 0xFF]);
+    assert_eq!(bin[0], 0xCD); // call _main; preserve the TI-OS stack
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -452,7 +452,7 @@ fn ti_ce_target_can_emit_8ek_app_output() {
         outputs.executable.extension().and_then(|ext| ext.to_str()),
         Some("8ek")
     );
-    assert_ti_app(&app, b'E', b"GAME\0\0\0\0", 0xD1_A881, &[0xF3, 0x31]);
+    assert_ti_app(&app, b'E', b"GAME\0\0\0\0", 0xD1_A881, &[0xCD]);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -480,7 +480,7 @@ fn ti_z80_target_can_override_output_to_raw_bin() {
         outputs.executable.extension().and_then(|ext| ext.to_str()),
         Some("bin")
     );
-    assert_eq!(&bin[0..3], &[0xF3, 0x31, 0x00]);
+    assert_eq!(bin[0], 0xCD); // call _main; preserve the TI-OS stack
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -508,7 +508,7 @@ fn ti_z80_target_can_emit_8xk_app_output() {
         outputs.executable.extension().and_then(|ext| ext.to_str()),
         Some("8xk")
     );
-    assert_ti_app(&app, b'X', b"GAME\0\0\0\0", 0x00009D95, &[0xF3, 0x31]);
+    assert_ti_app(&app, b'X', b"GAME\0\0\0\0", 0x00009D95, &[0xCD]);
 
     let _ = std::fs::remove_dir_all(root);
 }

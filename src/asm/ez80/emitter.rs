@@ -51,6 +51,7 @@ pub struct AssemblyOptions {
     pub default_sdk_symbols: bool,
     pub mos_executable: bool,
     pub c64_executable: bool,
+    pub ti_os_executable: bool,
     pub load_addr: Address24,
     pub entry_addr: Address24,
     pub code_base: Address24,
@@ -71,6 +72,7 @@ impl Default for AssemblyOptions {
             default_sdk_symbols: true,
             mos_executable: false,
             c64_executable: false,
+            ti_os_executable: false,
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
             code_base: EZRA_CODE_BASE,
@@ -338,6 +340,7 @@ struct Emitter {
     debug_comments: bool,
     cpu: CpuFamily,
     mos_executable: bool,
+    ti_os_executable: bool,
     stack_top: Address24,
     eliminate_dead_code: bool,
 }
@@ -372,6 +375,7 @@ impl Emitter {
             debug_comments: options.debug_comments,
             cpu: options.cpu,
             mos_executable: options.mos_executable,
+            ti_os_executable: options.ti_os_executable,
             stack_top: options.stack_top,
             eliminate_dead_code: true,
         }
@@ -392,6 +396,9 @@ impl Emitter {
         self.line("__ezra_start:");
         if self.mos_executable {
             self.line("    ei");
+            return;
+        }
+        if self.ti_os_executable {
             return;
         }
         self.line("    di");
@@ -439,7 +446,11 @@ impl Emitter {
             self.line("");
             return;
         }
-        self.line("    jp __ezra_exit");
+        if self.ti_os_executable {
+            self.line("    ret");
+        } else {
+            self.line("    jp __ezra_exit");
+        }
         self.emit_runtime_helpers();
         self.line("");
     }

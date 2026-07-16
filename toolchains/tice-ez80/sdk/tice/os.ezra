@@ -1,10 +1,26 @@
+pub const GET_KEY: u24 = 0x020D8C
+pub const CLEAR_SCREEN_FULL: u24 = 0x020810
+pub const HOME_UP: u24 = 0x020828
+
 pub fn wait_key() -> u8 {
     let key: u8 = 0
-    asm volatile(out key: u8 as reg8, clobber a, clobber flags) {
-        "xor a"
+    asm volatile(out key: u8 as reg8, clobber a, clobber bc, clobber de, clobber hl, clobber flags) {
+        "call 020D8Ch"
         "ld {key}, a"
     }
     return key
+}
+
+pub fn clear_screen() {
+    asm volatile(clobber a, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
+        "call 020810h"
+    }
+}
+
+pub fn home_up() {
+    asm volatile(clobber a, clobber bc, clobber de, clobber hl, clobber flags) {
+        "call 020828h"
+    }
 }
 
 pub fn idle() {

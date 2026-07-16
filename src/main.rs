@@ -2167,22 +2167,27 @@ fn ti8xp_bytes(
     code: &[u8],
 ) -> Result<Vec<u8>, String> {
     let name = ti8xp_variable_name(settings, output_path)?;
-    let mut payload = ti8xp_payload_prefix(settings)?.to_vec();
-    payload.extend_from_slice(code);
-    let payload_len = u16::try_from(payload.len())
-        .map_err(|_| "TI .8xp payload exceeds 65535 bytes".to_owned())?;
-    let entry_len = payload_len
-        .checked_add(13)
-        .ok_or_else(|| "TI .8xp entry exceeds 65535 bytes".to_owned())?;
+    let mut program = ti8xp_payload_prefix(settings)?.to_vec();
+    program.extend_from_slice(code);
+    let program_len = u16::try_from(program.len())
+        .map_err(|_| "TI .8xp program exceeds 65535 bytes".to_owned())?;
+
+    // TI program variables contain a length-prefixed token stream. The outer
+    // variable data length includes this inner length word.
+    let payload_len = program_len
+        .checked_add(2)
+        .ok_or_else(|| "TI .8xp payload exceeds 65535 bytes".to_owned())?;
 
     let mut data = Vec::new();
-    push16_le(&mut data, entry_len);
+    push16_le(&mut data, 13); // variable-entry header length
+    push16_le(&mut data, payload_len);
     data.push(0x06); // protected program
     data.extend_from_slice(&name);
     data.push(0x00); // version
     data.push(0x00); // RAM/unarchived flag
     push16_le(&mut data, payload_len);
-    data.extend_from_slice(&payload);
+    push16_le(&mut data, program_len);
+    data.extend_from_slice(&program);
 
     let data_len = u16::try_from(data.len())
         .map_err(|_| "TI .8xp data section exceeds 65535 bytes".to_owned())?;
@@ -3257,6 +3262,12 @@ fn assembly_options_from_layout(
         default_sdk_symbols,
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
+        ti_os_executable: layout.name.starts_with("ti83-z80")
+            || layout.name.starts_with("ti83plus-z80")
+            || layout.name.starts_with("ti84-z80")
+            || layout.name.starts_with("ti84plus-z80")
+            || layout.name.starts_with("ti84plusce-ez80")
+            || layout.name.starts_with("ti83premiumce-ez80"),
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),

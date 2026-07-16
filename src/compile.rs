@@ -219,6 +219,12 @@ fn diagnostic_assembly_options(
         default_sdk_symbols,
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
+        ti_os_executable: target.starts_with("ti83-z80")
+            || target.starts_with("ti83plus-z80")
+            || target.starts_with("ti84-z80")
+            || target.starts_with("ti84plus-z80")
+            || target.starts_with("ti84plusce-ez80")
+            || target.starts_with("ti83premiumce-ez80"),
         load_addr: symbol("EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: symbol("EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: symbol("EZRA_CODE_BASE").unwrap_or(layout.entry),

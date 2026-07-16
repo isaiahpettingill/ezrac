@@ -31,13 +31,21 @@ pub(super) fn temp_root(name: &str) -> std::path::PathBuf {
     ))
 }
 
-pub(super) fn assert_ti8xp(bytes: &[u8], name: &[u8; 8], payload_prefix: &[u8]) {
+pub(super) fn assert_ti8xp(bytes: &[u8], name: &[u8; 8], program_prefix: &[u8]) {
     assert!(bytes.starts_with(b"**TI83F*\x1A\x0A\x00"), "{bytes:02X?}");
-    assert_eq!(&bytes[58..66], name);
-    let payload_len = u16::from_le_bytes([bytes[68], bytes[69]]) as usize;
-    let payload_start = 70;
+    assert_eq!(u16::from_le_bytes([bytes[55], bytes[56]]), 13);
+    let payload_len = u16::from_le_bytes([bytes[57], bytes[58]]) as usize;
+    assert_eq!(bytes[59], 0x06);
+    assert_eq!(&bytes[60..68], name);
+    assert_eq!(
+        u16::from_le_bytes([bytes[70], bytes[71]]) as usize,
+        payload_len
+    );
+    let payload_start = 72;
+    let program_len = u16::from_le_bytes([bytes[72], bytes[73]]) as usize;
+    assert_eq!(program_len + 2, payload_len);
     assert!(
-        bytes[payload_start..payload_start + payload_len].starts_with(payload_prefix),
+        bytes[74..74 + program_len].starts_with(program_prefix),
         "{bytes:02X?}"
     );
     let checksum_offset = payload_start + payload_len;
