@@ -741,6 +741,26 @@ fn shared_ti99_sdk_dependencies_do_not_duplicate_import_aliases() {
     assert!(names.contains("vdp.init_graphics"));
 }
 
+#[cfg(feature = "tms9900")]
+#[test]
+fn ti99_input_sdk_exposes_translated_keyboard_input() {
+    let source = "import ti99.input\nfn main() { let key: u8 = input.read_key() }\n";
+    let sdk = SdkResolver {
+        target: Some("ti99-4a-tms9900".to_owned()),
+        sdk_roots: Vec::new(),
+    };
+    let program = parse_and_resolve_imports_with_sdk(Path::new("main.ezra"), source, &sdk).unwrap();
+
+    assert!(program.declarations.iter().any(|decl| {
+        matches!(decl, Declaration::Function(function) if function.name == "input.read_key")
+    }));
+    assert!(
+        program.declarations.iter().any(|decl| {
+            matches!(decl, Declaration::Const(decl) if decl.name == "input.KEY_NONE")
+        })
+    );
+}
+
 #[cfg(feature = "m68k")]
 #[test]
 fn checks_scalar_source_for_generic_m68k_target() {
@@ -817,7 +837,8 @@ fn zxspectrum_target_uses_builtin_zx_sdk() {
                 screen.set_attr(0, 0, screen.attr(screen.WHITE, screen.BLUE, screen.BRIGHT))
                 io.write_ula(0)
                 let keys: u8 = keyboard.any_key()
-                sound.beeper(keys)
+                let key: u8 = keyboard.read_key()
+                sound.beeper(keys | key)
                 memory.select_128k_bank(0, 0, 0)
                 interrupt.disable()
             }
@@ -837,6 +858,7 @@ fn zxspectrum_target_uses_builtin_zx_sdk() {
     for name in [
         "io.write_ula",
         "keyboard.any_key",
+        "keyboard.read_key",
         "sound.ay_write",
         "memory.select_128k_bank",
         "interrupt.wait_vblank",

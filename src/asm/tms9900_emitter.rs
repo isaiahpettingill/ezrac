@@ -15,9 +15,9 @@ use crate::{
 /// Emit the initial TMS9900 source backend.
 ///
 /// Scalar values are evaluated in `R0`; `R1` and `R2` are compiler scratch
-/// registers. Arguments live in target-owned static slots and a function saves
-/// `R11` in a static link slot before calls, so recursive functions are not
-/// supported by this first ABI.
+/// registers. Arguments live in target-owned static slots. Calls preserve the
+/// active function's static link and locals on the `R10` stack, which keeps the
+/// simple static-slot ABI safe for recursive functions.
 pub fn emit_tms9900_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
@@ -60,6 +60,7 @@ struct Emitter {
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
+    link_slots: Vec<Storage>,
 }
 
 impl Emitter {
@@ -73,6 +74,7 @@ impl Emitter {
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
+            link_slots: Vec::new(),
         }
     }
 
@@ -90,6 +92,10 @@ impl Emitter {
         self.line("section .text");
         self.line("__ezra_start:");
         self.line("    lwpi >8300");
+        self.line(&format!(
+            "    li r10, >{:04X}",
+            self.options.stack_top.get().min(0xFFFF) & !1
+        ));
         self.emit_static_initializers(program)?;
         self.line("    bl @_main");
         self.line("__ezra_exit:");
@@ -168,6 +174,7 @@ impl Emitter {
         let return_label = self.next_label(&format!("{}_return", function.name));
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
+        self.link_slots.push(link_slot);
         self.return_types.push(
             function
                 .return_type
@@ -190,6 +197,7 @@ impl Emitter {
         self.line(&format!("    mov @>{:04X}, r11", link_slot.address));
         self.line("    b *r11");
         self.return_types.pop();
+        self.link_slots.pop();
         self.return_labels.pop();
         self.scopes.pop();
         Ok(())
@@ -228,11 +236,14 @@ impl Emitter {
                 then_body,
                 else_body,
             } => {
+                let then = self.next_label("if_then");
                 let otherwise = self.next_label("if_else");
                 let done = self.next_label("if_end");
                 self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
                 self.line("    ci r0, 0");
-                self.line(&format!("    jeq {otherwise}"));
+                self.line(&format!("    jne {then}"));
+                self.line(&format!("    b @{otherwise}"));
+                self.line(&format!("{then}:"));
                 self.emit_block(then_body)?;
                 self.line(&format!("    b @{done}"));
                 self.line(&format!("{otherwise}:"));
@@ -241,6 +252,7 @@ impl Emitter {
             }
             Stmt::While { condition, body } => {
                 let check = self.next_label("while_check");
+                let body_label = self.next_label("while_body");
                 let done = self.next_label("while_end");
                 self.loops.push(LoopLabels {
                     continue_label: check.clone(),
@@ -249,7 +261,9 @@ impl Emitter {
                 self.line(&format!("{check}:"));
                 self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
                 self.line("    ci r0, 0");
-                self.line(&format!("    jeq {done}"));
+                self.line(&format!("    jne {body_label}"));
+                self.line(&format!("    b @{done}"));
+                self.line(&format!("{body_label}:"));
                 self.emit_block(body)?;
                 self.line(&format!("    b @{check}"));
                 self.line(&format!("{done}:"));
@@ -333,7 +347,7 @@ impl Emitter {
             }
             Expr::Deref(pointer) => {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
-                self.line("    mov *r0, r0");
+                self.load_indirect_r0(ty)?;
             }
             Expr::Call { path, args } => self.emit_call(path, args)?,
             Expr::Unary { op, expr } => {
@@ -404,6 +418,8 @@ impl Emitter {
                 args.len()
             )));
         }
+        self.line("    dect r10");
+        self.line("    mov r1, *r10");
         for ((arg, ty), slot) in args
             .iter()
             .zip(&signature.params)
@@ -423,7 +439,39 @@ impl Emitter {
         {
             self.load_register(slot, ty, index as u8)?;
         }
+        let mut frame = Vec::new();
+        if let Some(link_slot) = self.link_slots.last().copied() {
+            frame.push((link_slot, 2));
+        }
+        if let Some(scope) = self.scopes.last() {
+            for binding in scope.values() {
+                frame.push((binding.storage, scalar_width(&self.model, &binding.ty)?));
+            }
+        }
+        frame.sort_by_key(|(storage, _)| storage.address);
+
+        for (storage, width) in &frame {
+            if *width == 1 {
+                self.line("    clr r8");
+                self.line(&format!("    movb @>{:04X}, r8", storage.address));
+            } else {
+                self.line(&format!("    mov @>{:04X}, r8", storage.address));
+            }
+            self.line("    dect r10");
+            self.line("    mov r8, *r10");
+        }
         self.line(&format!("    bl @{}", function_label(name)));
+        self.line("    mov r0, r9");
+        for (storage, width) in frame.iter().rev() {
+            self.line("    mov *r10+, r8");
+            if *width == 1 {
+                self.line(&format!("    movb r8, @>{:04X}", storage.address));
+            } else {
+                self.line(&format!("    mov r8, @>{:04X}", storage.address));
+            }
+        }
+        self.line("    mov *r10+, r1");
+        self.line("    mov r9, r0");
         Ok(())
     }
 
@@ -487,11 +535,11 @@ impl Emitter {
                 self.line(&format!("{done}:"));
             }
             BinaryOp::Mul => self.multiply(type_is_signed(ty)),
-            BinaryOp::Div | BinaryOp::Mod => {
-                return Err(Diagnostic::new(
-                    "divide and remainder are not implemented by the initial TMS9900 source backend",
-                ));
-            }
+            BinaryOp::Div | BinaryOp::Mod => self.divide(
+                op == BinaryOp::Mod,
+                type_is_signed(ty),
+                scalar_width(&self.model, ty)? == 1,
+            ),
         }
         if scalar_width(&self.model, ty)? == 1 {
             self.line("    andi r0, >00FF");
@@ -534,6 +582,66 @@ impl Emitter {
         }
     }
 
+    fn divide(&mut self, remainder: bool, signed: bool, byte: bool) {
+        // DIV divides the unsigned R2:R3 dividend by its source, leaving the
+        // quotient in R2 and remainder in R3. Expressions arrive as left in R1
+        // and right in R0, so form a zero-extended 32-bit dividend first.
+        if signed {
+            if byte {
+                self.line("    sla r1, 8");
+                self.line("    sra r1, 8");
+                self.line("    sla r0, 8");
+                self.line("    sra r0, 8");
+            }
+
+            let left_nonnegative = self.next_label("div_left_nonnegative");
+            let right_nonnegative = self.next_label("div_right_nonnegative");
+            let result_nonnegative = self.next_label("div_result_nonnegative");
+            self.line("    clr r4");
+            self.line("    clr r5");
+            self.line("    ci r1, 0");
+            self.line(&format!("    jgt {left_nonnegative}"));
+            self.line(&format!("    jeq {left_nonnegative}"));
+            self.line("    neg r1");
+            self.line("    li r5, 1");
+            self.line("    ai r4, 1");
+            self.line(&format!("{left_nonnegative}:"));
+            self.line("    ci r0, 0");
+            self.line(&format!("    jgt {right_nonnegative}"));
+            self.line(&format!("    jeq {right_nonnegative}"));
+            self.line("    neg r0");
+            self.line("    ai r4, 1");
+            self.line(&format!("{right_nonnegative}:"));
+            self.line("    mov r1, r3");
+            self.line("    clr r2");
+            self.line("    div r0, r2");
+
+            if remainder {
+                self.line("    ci r5, 0");
+                self.line(&format!("    jeq {result_nonnegative}"));
+                self.line("    neg r3");
+                self.line(&format!("{result_nonnegative}:"));
+                self.line("    mov r3, r0");
+            } else {
+                self.line("    andi r4, 1");
+                self.line("    ci r4, 0");
+                self.line(&format!("    jeq {result_nonnegative}"));
+                self.line("    neg r2");
+                self.line(&format!("{result_nonnegative}:"));
+                self.line("    mov r2, r0");
+            }
+        } else {
+            self.line("    mov r1, r3");
+            self.line("    clr r2");
+            self.line("    div r0, r2");
+            self.line(if remainder {
+                "    mov r3, r0"
+            } else {
+                "    mov r2, r0"
+            });
+        }
+    }
+
     fn emit_boolean_from_jump(&mut self, jump: &str) {
         let yes = self.next_label("comparison_true");
         let done = self.next_label("comparison_done");
@@ -572,8 +680,7 @@ impl Emitter {
             Place::Ident(name) => self.load_ident(name, ty),
             Place::Deref(pointer) => {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
-                self.line("    mov *r0, r0");
-                Ok(())
+                self.load_indirect_r0(ty)
             }
             _ => Err(Diagnostic::new(
                 "this assignment target is not implemented by the initial TMS9900 source backend",
@@ -601,7 +708,14 @@ impl Emitter {
             Place::Deref(pointer) => {
                 self.line("    mov r0, r1");
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
-                self.line("    mov r1, *r0");
+                match scalar_width(&self.model, ty)? {
+                    1 => {
+                        self.line("    swpb r1");
+                        self.line("    movb r1, *r0");
+                    }
+                    2 => self.line("    mov r1, *r0"),
+                    _ => unreachable!("scalar_width accepts only one or two bytes"),
+                }
                 Ok(())
             }
             _ => Err(Diagnostic::new(
@@ -626,11 +740,77 @@ impl Emitter {
                     "unknown TMS9900 assignment target `{name}`"
                 )))
             }
-            Place::Deref(_) => Ok(Type::Named("u16".to_owned())),
+            Place::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
+                Type::Ptr(inner) => Ok(*inner),
+                _ => Err(Diagnostic::new("dereference requires pointer")),
+            },
             _ => Err(Diagnostic::new(
                 "this assignment target is not implemented by the initial TMS9900 source backend",
             )),
         }
+    }
+
+    fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
+        match expr {
+            Expr::Int(value) => Ok(if (0..=0xFF).contains(value) {
+                Type::Named("u8".to_owned())
+            } else {
+                Type::Named("u16".to_owned())
+            }),
+            Expr::TypedInt(_, ty) | Expr::Cast { ty, .. } => self.model.resolved_type(ty),
+            Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
+            Expr::Char(_) | Expr::In(_) => Ok(Type::Named("u8".to_owned())),
+            Expr::Ident(name) => self
+                .model
+                .constant_types
+                .get(name)
+                .cloned()
+                .or_else(|| self.binding(name).map(|binding| binding.ty))
+                .or_else(|| self.model.global_types.get(name).cloned())
+                .ok_or_else(|| Diagnostic::new(format!("unknown value `{name}`"))),
+            Expr::AddressOf(name) => self
+                .model
+                .global_types
+                .get(name)
+                .cloned()
+                .map(|ty| Type::Ptr(Box::new(ty)))
+                .ok_or_else(|| Diagnostic::new(format!("unknown value `{name}`"))),
+            Expr::Field { base, field } => self
+                .model
+                .constant_types
+                .get(&format!("{base}.{field}"))
+                .cloned()
+                .ok_or_else(|| Diagnostic::new(format!("unknown field `{field}`"))),
+            Expr::Call { path, .. } => self
+                .model
+                .functions
+                .get(&path.join("."))
+                .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
+                .and_then(|signature| signature.return_type.clone())
+                .ok_or_else(|| Diagnostic::new("void function has no value")),
+            Expr::Unary { expr, .. } | Expr::Binary { left: expr, .. } => self.expr_type(expr),
+            Expr::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
+                Type::Ptr(inner) => Ok(*inner),
+                _ => Err(Diagnostic::new("dereference requires pointer")),
+            },
+            _ => Err(Diagnostic::new(
+                "expression type is not implemented by the initial TMS9900 source backend",
+            )),
+        }
+    }
+
+    fn load_indirect_r0(&mut self, ty: &Type) -> Result<(), Diagnostic> {
+        match scalar_width(&self.model, ty)? {
+            1 => {
+                self.line("    mov r0, r1");
+                self.line("    clr r0");
+                self.line("    movb *r1, r0");
+                self.line("    swpb r0");
+            }
+            2 => self.line("    mov *r0, r0"),
+            _ => unreachable!("scalar_width accepts only one or two bytes"),
+        }
+        Ok(())
     }
 
     fn load_r0(&mut self, storage: Storage, ty: &Type) -> Result<(), Diagnostic> {
@@ -883,6 +1063,116 @@ mod tests {
         }
 
         assert_eq!(ram.read_word(0xA002), (123u16 * 456).wrapping_neg());
+    }
+
+    #[test]
+    fn preserves_static_frames_for_recursive_calls() {
+        let assembly = emit(
+            r#"
+                global recursive_result: u16 = 0
+
+                fn factorial(value: u16) -> u16 {
+                    if value == 1 { return 1 }
+                    return value * factorial(value - 1)
+                }
+
+                fn main() {
+                    recursive_result = factorial(6)
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                stack_top: crate::target::Address24::new(0xFFFE),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..2000 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0xA000), 720);
+    }
+
+    #[test]
+    fn emits_and_executes_byte_pointer_access_on_libre99() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let pointer: ptr<u8> = cast<ptr<u8>>(0x9001)
+                    *pointer = 0x5A
+                    let value: u8 = *pointer
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..50 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_byte(0x9001), 0x5A);
+        assert_eq!(ram.read_byte(0xA004), 0x5A);
+    }
+
+    #[test]
+    fn emits_and_executes_divide_and_remainder_on_libre99() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let quotient: u16 = 1000 / 37
+                    let remainder: u16 = 1000 % 37
+                    let signed_quotient: i16 = -1000 / 37
+                    let signed_remainder: i16 = -1000 % 37
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..200 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0xA002), 1000 / 37);
+        assert_eq!(ram.read_word(0xA004), 1000 % 37);
+        assert_eq!(ram.read_word(0xA006), (-1000i16 / 37) as u16);
+        assert_eq!(ram.read_word(0xA008), (-1000i16 % 37) as u16);
     }
 
     #[test]

@@ -15,6 +15,18 @@ import c64.memory
 @cfg(target("cpm-2.2-z80"))
 import cpm.console
 
+@cfg(target("zxspectrum-z80"))
+import zx.keyboard
+
+@cfg(target("zxspectrum-z80"))
+import zx.rom
+
+@cfg(target("ti99-4a-tms9900"))
+import ti99.input
+
+@cfg(target("ti99-4a-tms9900"))
+import ti99.vdp
+
 const LISP_SPACE: u8 = ' '
 const LISP_TAB: u8 = '\t'
 const LISP_CR: u8 = 13
@@ -23,6 +35,9 @@ const LISP_LF: u8 = '\n'
 global lookahead: u8 = 0
 global has_lookahead: u8 = 0
 global parse_error: u8 = 0
+
+@cfg(target("ti99-4a-tms9900"))
+global ti_cursor: u16 = 0
 
 @cfg(target("agonlight-mos-ez80"))
 fn platform_init() {
@@ -38,6 +53,18 @@ fn platform_init() {
 @cfg(target("cpm-2.2-z80"))
 fn platform_init() {}
 
+@cfg(target("zxspectrum-z80"))
+fn platform_init() {
+    rom.cls()
+}
+
+@cfg(target("ti99-4a-tms9900"))
+fn platform_init() {
+    vdp.init_graphics()
+    vdp.clear_name_table(LISP_SPACE)
+    ti_cursor = 0
+}
+
 @cfg(target("agonlight-mos-ez80"))
 fn platform_write(ch: u8) {
     console.write(ch)
@@ -51,6 +78,28 @@ fn platform_write(ch: u8) {
 @cfg(target("cpm-2.2-z80"))
 fn platform_write(ch: u8) {
     console.write(ch)
+}
+
+@cfg(target("zxspectrum-z80"))
+fn platform_write(ch: u8) {
+    // The Spectrum ROM uses carriage return for newline; ignore the LF half.
+    if ch != LISP_LF {
+        rom.print_char(ch)
+    }
+}
+
+@cfg(target("ti99-4a-tms9900"))
+fn platform_write(ch: u8) {
+    if ch == LISP_CR {
+        ti_cursor = ti_cursor + 32 - (ti_cursor % 32)
+        if ti_cursor >= 768 { ti_cursor = 0 }
+        return
+    }
+    if ch == LISP_LF { return }
+    vdp.set_write_address(ti_cursor)
+    vdp.write_data(ch)
+    ti_cursor += 1
+    if ti_cursor >= 768 { ti_cursor = 0 }
 }
 
 @cfg(target("agonlight-mos-ez80"))
@@ -76,6 +125,20 @@ fn platform_read() -> u8 {
 fn platform_read() -> u8 {
     // BDOS function 1 supplies blocking, echoed console input.
     return console.read()
+}
+
+@cfg(target("zxspectrum-z80"))
+fn platform_read() -> u8 {
+    let ch: u8 = keyboard.read_key()
+    platform_write(ch)
+    return ch
+}
+
+@cfg(target("ti99-4a-tms9900"))
+fn platform_read() -> u8 {
+    let ch: u8 = input.read_key()
+    platform_write(ch)
+    return ch
 }
 
 fn lisp_newline() {

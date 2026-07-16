@@ -1,3 +1,29 @@
 // Keyboard scanning is exposed by the console ROM KSCAN routine at >000E.
+// KSCAN must run in the GPL workspace at >83E0; Ezra uses >8300.
 pub const KSCAN: u16 = 0x000E
-pub const KEY_NONE: u8 = 0
+pub const MODE_ADDRESS: u16 = 0x8374
+pub const KEY_ADDRESS: u16 = 0x8375
+pub const STATUS_ADDRESS: u16 = 0x837C
+pub const MODE_FULL: u8 = 0
+pub const STATUS_NEW_KEY: u8 = 0x20
+pub const KEY_NONE: u8 = 0xFF
+
+// Wait for a newly pressed key and return KSCAN's translated character code.
+pub fn read_key() -> u8 {
+    let mode: ptr<u8> = cast<ptr<u8>>(MODE_ADDRESS)
+    let keycode: ptr<u8> = cast<ptr<u8>>(KEY_ADDRESS)
+    let status: ptr<u8> = cast<ptr<u8>>(STATUS_ADDRESS)
+    let ch: u8 = KEY_NONE
+    *mode = MODE_FULL
+    while ch == KEY_NONE {
+        asm volatile {
+            "lwpi >83e0"
+            "bl @>000e"
+            "lwpi >8300"
+        }
+        if (*status & STATUS_NEW_KEY) != 0 {
+            ch = *keycode
+        }
+    }
+    return ch
+}
