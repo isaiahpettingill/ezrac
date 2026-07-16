@@ -1,6 +1,6 @@
 //! Filesystem-free executable packaging for library consumers.
 
-use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 
 use crate::{
     diagnostic::Diagnostic,
