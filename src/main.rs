@@ -2030,6 +2030,32 @@ fn build_executable_bytes(
     code: &[u8],
     output_path: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
+    if settings
+        .target
+        .triple
+        .value
+        .starts_with("agonlight-mos-ez80")
+        || matches!(
+            settings.output_format,
+            OutputFormat::RawBin
+                | OutputFormat::CpmCom
+                | OutputFormat::Ez180nGaem
+                | OutputFormat::IntelHex
+                | OutputFormat::ArduinoHex
+                | OutputFormat::Commodore64Prg
+                | OutputFormat::Commodore64Crt
+        )
+    {
+        let request = ezra::package::PackageRequest {
+            target: settings.target.triple.value.clone(),
+            output_format: settings.output_format,
+            load_addr: settings.layout.load.get(),
+            entry_addr: settings.layout.entry.get(),
+            executable_name: settings.executable_name.clone(),
+        };
+        return ezra::package::package_executable(&request, code)
+            .map_err(|error| error.to_string());
+    }
     if matches!(
         settings.output_format,
         OutputFormat::IntelHex | OutputFormat::ArduinoHex
