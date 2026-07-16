@@ -6,6 +6,7 @@ pub mod compile;
 pub mod diagnostic;
 pub mod hir;
 pub mod layout;
+pub mod package;
 pub mod parser;
 pub mod project;
 pub mod target;
