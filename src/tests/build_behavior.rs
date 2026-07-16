@@ -808,7 +808,7 @@ fn z80_source_emits_z80_assembly_without_ez80_adl_forms() {
     .unwrap();
 
     assert!(asm.contains("; target: Z80"), "{asm}");
-    assert!(asm.contains("ld sp, 5B00h"), "{asm}");
+    assert!(asm.contains("ld sp, F000h"), "{asm}");
     assert!(asm.contains("out (0Dh), a"), "{asm}");
     assert!(!asm.contains("out0"), "{asm}");
     assert!(!asm.contains("rst.lis"), "{asm}");

@@ -10,12 +10,12 @@ From the repository root:
 cargo run -- build examples/agon-mos/coffee-order/src/main.ezra
 ```
 
-This produces `examples/agon-mos/coffee-order/target/agonlight-mos-ez80/src/coffee-order.bin`.
+This produces `examples/agon-mos/coffee-order/target/agonlight-mos-ez80/coffee-order.bin`.
 
 ## Run
 
 With `FAB_AGON_EMULATOR_DIR` set to a local Fab Agon Emulator checkout:
 
 ```powershell
-pwsh tools/run-fab-agon.ps1 examples/agon-mos/coffee-order/target/agonlight-mos-ez80/src/coffee-order.bin
+pwsh tools/run-fab-agon.ps1 examples/agon-mos/coffee-order/target/agonlight-mos-ez80/coffee-order.bin
 ```

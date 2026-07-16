@@ -11,7 +11,7 @@ From this directory:
 
 ```sh
 ezrac build
-mgba target/gameboy-color-lr35902/src/main.gbc
+mgba target/gameboy-color-lr35902/main.gbc
 ```
 
 The second command requires [mGBA](https://mgba.io/) on `PATH`; use a Game Boy Color-capable emulator.

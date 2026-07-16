@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.29
+
+- Fixed `arduboy.input.read()` to expose and return its AVR inline-assembly result.
+- Flattened project artifacts to `target/<triple>/<executable>.*`, removing the redundant source-directory component from every output path.
+- Fixed AVR inline-assembly memory operand formatting and updated example documentation for the flattened paths.
+
 ## 0.1.28
 
 - Added the playable Arduboy Snake example and real-core Arduous validation, with AVR pointer, carry/borrow, load-flag, and SDK import fixes.

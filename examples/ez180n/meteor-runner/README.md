@@ -19,5 +19,5 @@ cargo run -- build examples/ez180n/meteor-runner/src/main.ezra
 Run with `play96` after building the `ez180N` core:
 
 ```sh
-../play96/build-mingw/play96 --core ../ez180N/target/release/ez180n.dll --cart examples/ez180n/meteor-runner/target/ez180n-ez80/src/meteor-runner.gaem --frames 180 --shot-every 45
+../play96/build-mingw/play96 --core ../ez180N/target/release/ez180n.dll --cart examples/ez180n/meteor-runner/target/ez180n-ez80/meteor-runner.gaem --frames 180 --shot-every 45
 ```

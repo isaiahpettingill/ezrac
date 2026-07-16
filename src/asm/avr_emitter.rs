@@ -1360,14 +1360,14 @@ impl Emitter {
             let binding = self.binding(&input.name)?;
             operands.insert(
                 input.name.clone(),
-                format!("${:04X}", binding.storage.address),
+                format!("{:04X}h", binding.storage.address),
             );
         }
         for output in outputs {
             let binding = self.binding(&output.name)?;
             operands.insert(
                 output.name.clone(),
-                format!("${:04X}", binding.storage.address),
+                format!("{:04X}h", binding.storage.address),
             );
         }
         let local_label_prefix = self.next_label("asm");

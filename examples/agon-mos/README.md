@@ -12,7 +12,7 @@ Build the hello example:
 cargo run -- build examples/agon-mos/hello/src/main.ezra
 ```
 
-This writes `main.asm`, `main.map`, and `main.bin` under the example project's `target/<target>/src` directory.
+This writes `main.asm`, `main.map`, and `main.bin` under the example project's `target/<target>` directory.
 
 Build the interactive coffee order example:
 
@@ -20,7 +20,7 @@ Build the interactive coffee order example:
 cargo run -- build examples/agon-mos/coffee-order/src/main.ezra
 ```
 
-It sets `[build].executable = "coffee-order"`, so the build writes `coffee-order.asm`, `coffee-order.map`, and `coffee-order.bin` under `examples/agon-mos/coffee-order/target/agonlight-mos-ez80/src`.
+It sets `[build].executable = "coffee-order"`, so the build writes `coffee-order.asm`, `coffee-order.map`, and `coffee-order.bin` under `examples/agon-mos/coffee-order/target/agonlight-mos-ez80`.
 
 Build the SDK showcase example:
 
@@ -114,7 +114,7 @@ On Windows PowerShell:
 
 ```powershell
 $env:FAB_AGON_EMULATOR_DIR = "K:\source\fab-agon-emulator"
-pwsh tools/run-fab-agon.ps1 examples/agon-mos/hello/target/agonlight-mos-ez80/src/main.bin
+pwsh tools/run-fab-agon.ps1 examples/agon-mos/hello/target/agonlight-mos-ez80/main.bin
 ```
 
 The runner copies the binary into the emulator SD card directory and starts the locally configured emulator. It does not download or redistribute emulator binaries.
@@ -123,5 +123,5 @@ To run the coffee demo instead:
 
 ```powershell
 cargo run -- build examples/agon-mos/coffee-order/src/main.ezra
-pwsh tools/run-fab-agon.ps1 examples/agon-mos/coffee-order/target/agonlight-mos-ez80/src/coffee-order.bin
+pwsh tools/run-fab-agon.ps1 examples/agon-mos/coffee-order/target/agonlight-mos-ez80/coffee-order.bin
 ```

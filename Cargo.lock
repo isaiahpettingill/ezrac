@@ -171,7 +171,7 @@ checksum = "6a31c7fd56bc3b5cc0cc372be064c43d698ff31baec6e2e8dfbb0de2e4d970b2"
 
 [[package]]
 name = "ezrac"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "dcpu",
  "ez80",

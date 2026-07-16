@@ -11,7 +11,7 @@ From this directory:
 
 ```sh
 ezrac build
-mgba target/gameboy-dmg-lr35902/src/gameboy-mandelbrot.gb
+mgba target/gameboy-dmg-lr35902/gameboy-mandelbrot.gb
 ```
 
 The second command requires [mGBA](https://mgba.io/) on `PATH`; any Game Boy emulator can open the generated ROM.

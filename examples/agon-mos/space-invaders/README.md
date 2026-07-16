@@ -8,7 +8,7 @@ A small Space Invaders-style game written in EZRA for the Agon Light MOS target.
 cargo run -- build examples/agon-mos/space-invaders/src/main.ezra
 ```
 
-The executable is written to `target/agonlight-mos-ez80/src/space-invaders.bin` under this example directory.
+The executable is written to `target/agonlight-mos-ez80/space-invaders.bin` under this example directory.
 
 ## Controls
 

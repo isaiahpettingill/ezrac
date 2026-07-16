@@ -10,12 +10,12 @@ From the repository root:
 cargo run -- build examples/agon-mos/sdk-showcase/src/main.ezra
 ```
 
-This produces `examples/agon-mos/sdk-showcase/target/agonlight-mos-ez80/src/sdk-showcase.bin`.
+This produces `examples/agon-mos/sdk-showcase/target/agonlight-mos-ez80/sdk-showcase.bin`.
 
 ## Run
 
 With `FAB_AGON_EMULATOR_DIR` set to a local Fab Agon Emulator checkout:
 
 ```powershell
-pwsh tools/run-fab-agon.ps1 examples/agon-mos/sdk-showcase/target/agonlight-mos-ez80/src/sdk-showcase.bin
+pwsh tools/run-fab-agon.ps1 examples/agon-mos/sdk-showcase/target/agonlight-mos-ez80/sdk-showcase.bin
 ```

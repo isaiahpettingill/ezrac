@@ -11,7 +11,7 @@ From this directory:
 
 ```sh
 ezrac build
-mgba target/gameboy-dmg-lr35902/src/main.gb
+mgba target/gameboy-dmg-lr35902/main.gb
 ```
 
 The second command requires [mGBA](https://mgba.io/) on `PATH`; ensure the emulator's audio is enabled, then press **A**.

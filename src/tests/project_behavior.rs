@@ -66,7 +66,7 @@ fn build_uses_project_input_kind_for_assembly() {
     .unwrap();
 
     let outputs = build_source(source_path.to_str().unwrap()).unwrap();
-    let expected_base = root.join("target/cpm-2.2-z80/src/demo");
+    let expected_base = root.join("target/cpm-2.2-z80/demo");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
     assert_eq!(outputs.map, expected_base.with_extension("map"));
@@ -119,7 +119,7 @@ fn build_uses_project_input_when_path_is_omitted() {
         target: None,
     })
     .unwrap();
-    let expected_base = root.join("target/cpm-2.2-z80/src/demo");
+    let expected_base = root.join("target/cpm-2.2-z80/demo");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
     assert_eq!(outputs.map, expected_base.with_extension("map"));
@@ -163,7 +163,6 @@ fn ez80_harness_project_config_writes_target_artifacts() {
     let expected_base = root
         .join("target")
         .join("ezra-test-flat-ez80")
-        .join("src")
         .join("harness-game");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));

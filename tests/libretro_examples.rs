@@ -457,27 +457,27 @@ fn gameboy_examples_run_on_real_core() {
     let core = core_from_env(GAMEBOY_CORE_ENV);
     let background = build_example(
         "examples/gameboy/background/src/main.ezra",
-        "examples/gameboy/background/target/gameboy-dmg-lr35902/src/main.gb",
+        "examples/gameboy/background/target/gameboy-dmg-lr35902/main.gb",
     );
     let color_input = build_example(
         "examples/gameboy/color-input/src/main.ezra",
-        "examples/gameboy/color-input/target/gameboy-color-lr35902/src/main.gbc",
+        "examples/gameboy/color-input/target/gameboy-color-lr35902/main.gbc",
     );
     let input_audio = build_example(
         "examples/gameboy/input-audio/src/main.ezra",
-        "examples/gameboy/input-audio/target/gameboy-dmg-lr35902/src/main.gb",
+        "examples/gameboy/input-audio/target/gameboy-dmg-lr35902/main.gb",
     );
     let mandelbrot = build_example(
         "examples/gameboy/mandelbrot/src/main.ezra",
-        "examples/gameboy/mandelbrot/target/gameboy-dmg-lr35902/src/gameboy-mandelbrot.gb",
+        "examples/gameboy/mandelbrot/target/gameboy-dmg-lr35902/gameboy-mandelbrot.gb",
     );
     let serial_hello = build_example(
         "examples/gameboy/serial-hello/src/main.ezra",
-        "examples/gameboy/serial-hello/target/gameboy-dmg-lr35902/src/main.gb",
+        "examples/gameboy/serial-hello/target/gameboy-dmg-lr35902/main.gb",
     );
     let sprite = build_example(
         "examples/gameboy/sprite/src/main.ezra",
-        "examples/gameboy/sprite/target/gameboy-dmg-lr35902/src/main.gb",
+        "examples/gameboy/sprite/target/gameboy-dmg-lr35902/main.gb",
     );
 
     for (rom, color) in [
@@ -594,7 +594,7 @@ fn gameboy_color_input_runs_on_real_core() {
     let core = core_from_env(GAMEBOY_CORE_ENV);
     let color_input = build_example(
         "examples/gameboy/color-input/src/main.ezra",
-        "examples/gameboy/color-input/target/gameboy-color-lr35902/src/main.gbc",
+        "examples/gameboy/color-input/target/gameboy-color-lr35902/main.gbc",
     );
     assert_valid_game_boy_rom(&color_input, true);
 
@@ -685,11 +685,11 @@ fn c64_examples_run_on_real_core() {
     let core = core_from_env(C64_CORE_ENV);
     let program = build_example(
         "examples/commodore64/hello/src/main.ezra",
-        "examples/commodore64/hello/target/commodore64-6502/src/c64-hello.prg",
+        "examples/commodore64/hello/target/commodore64-6502/c64-hello.prg",
     );
     let mandelbrot = build_example(
         "examples/commodore64/mandelbrot/src/main.ezra",
-        "examples/commodore64/mandelbrot/target/commodore64-6502/src/c64-mandelbrot.prg",
+        "examples/commodore64/mandelbrot/target/commodore64-6502/c64-mandelbrot.prg",
     );
     let image = fs::read(&program).unwrap();
     assert!(image.len() > 2, "C64 PRG has no program payload");
@@ -722,12 +722,12 @@ fn zx_spectrum_examples_run_on_real_core() {
     let core = core_from_env(ZX_SPECTRUM_CORE_ENV);
     let cartridge = build_example(
         "examples/zxspectrum-z80/hello/src/main.ezra",
-        "examples/zxspectrum-z80/hello/target/zxspectrum-z80/src/zx-hello.tap",
+        "examples/zxspectrum-z80/hello/target/zxspectrum-z80/zx-hello.tap",
     );
 
     let mandelbrot = build_example(
         "examples/zxspectrum-z80/mandelbrot/src/main.ezra",
-        "examples/zxspectrum-z80/mandelbrot/target/zxspectrum-z80/src/zx-mandelbrot.tap",
+        "examples/zxspectrum-z80/mandelbrot/target/zxspectrum-z80/zx-mandelbrot.tap",
     );
 
     let mut game = open_session(&core, &cartridge, "ZX Spectrum hello example");
@@ -889,19 +889,19 @@ fn ez180n_examples_run_on_real_core() {
     let core = core_from_env(EZ180N_CORE_ENV);
     let hello = build_example(
         "examples/ez180n/hello/src/main.ezra",
-        "examples/ez180n/hello/target/ez180n-ez80/src/ez180n-hello.gaem",
+        "examples/ez180n/hello/target/ez180n-ez80/ez180n-hello.gaem",
     );
     let jumping = build_example(
         "examples/ez180n/jumping/src/main.ezra",
-        "examples/ez180n/jumping/target/ez180n-ez80/src/ezra-game.gaem",
+        "examples/ez180n/jumping/target/ez180n-ez80/ezra-game.gaem",
     );
     let mandelbrot = build_example(
         "examples/ez180n/mandelbrot/src/main.ezra",
-        "examples/ez180n/mandelbrot/target/ez180n-ez80/src/ez180n-mandelbrot.gaem",
+        "examples/ez180n/mandelbrot/target/ez180n-ez80/ez180n-mandelbrot.gaem",
     );
     let meteor_runner = build_example(
         "examples/ez180n/meteor-runner/src/main.ezra",
-        "examples/ez180n/meteor-runner/target/ez180n-ez80/src/meteor-runner.gaem",
+        "examples/ez180n/meteor-runner/target/ez180n-ez80/meteor-runner.gaem",
     );
 
     {

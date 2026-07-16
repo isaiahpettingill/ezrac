@@ -8,4 +8,4 @@ Build from the repository root:
 cargo run -- build examples/ez180n/hello/src/main.ezra
 ```
 
-Run the generated `ez180n-hello.gaem` from `target/ez180n-ez80/src` with an ez180N-compatible core.
+Run the generated `ez180n-hello.gaem` from `target/ez180n-ez80` with an ez180N-compatible core.

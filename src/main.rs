@@ -1958,7 +1958,6 @@ fn assembly_source_options(
 }
 
 fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Result<PathBuf, String> {
-    let source_parent = source_path.parent().unwrap_or_else(|| Path::new("."));
     let source_stem = match settings.executable_name.as_deref() {
         Some(name) => name,
         None => source_path
@@ -1966,18 +1965,9 @@ fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Resul
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| format!("source path `{}` has no file stem", source_path.display()))?,
     };
-    let relative_parent = source_parent
-        .strip_prefix(
-            settings
-                .output_root
-                .parent()
-                .unwrap_or_else(|| Path::new(".")),
-        )
-        .unwrap_or(source_parent);
     Ok(settings
         .output_root
         .join(&settings.target.triple.value)
-        .join(relative_parent)
         .join(source_stem))
 }
 

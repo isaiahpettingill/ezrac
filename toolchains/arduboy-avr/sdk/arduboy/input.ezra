@@ -9,7 +9,8 @@ pub const RIGHT: u8 = 0x20
 // Reads the six Arduboy buttons into r24. The result uses A, B, UP, DOWN,
 // LEFT, and RIGHT bit constants above.
 pub fn read() -> u8 {
-    asm volatile(clobber r18, clobber flags, clobber memory) {
+    let result: u8 = 0
+    asm volatile(out result: u8 as mem, clobber r18, clobber flags, clobber memory) {
         "clr r24"
         "sbis 0Ch, 6"
         "ori r24, 01h"
@@ -23,5 +24,7 @@ pub fn read() -> u8 {
         "ori r24, 10h"
         "sbis 0Fh, 4"
         "ori r24, 20h"
+        "sts {result}, r24"
     }
+    return result
 }
