@@ -1,3 +1,5 @@
+extern crate alloc;
+
 pub mod api;
 pub mod asm;
 pub mod ast;
