@@ -1046,13 +1046,26 @@ fn infer_asm_operand_class(ty: &Type) -> String {
 }
 
 fn validate_asm_operand_class(ty: &Type, class: &str) -> Result<(), Diagnostic> {
-    let ok = match class {
-        "reg8" => type_storage_size(ty) == Some(1),
-        "reg16" => type_storage_size(ty) == Some(2),
-        "reg24" => type_storage_size(ty) == Some(3),
-        "mem" | "imm" => true,
-        _ => false,
-    };
+    let known_class = matches!(class, "reg8" | "reg16" | "reg24" | "mem" | "imm");
+    let ok = known_class
+        && match ty {
+            Type::Named(name)
+                if !matches!(
+                    name.as_str(),
+                    "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr24"
+                ) =>
+            {
+                true
+            }
+            Type::Ptr(_) => matches!(class, "reg16" | "reg24" | "mem" | "imm"),
+            _ => match class {
+                "reg8" => type_storage_size(ty) == Some(1),
+                "reg16" => type_storage_size(ty) == Some(2),
+                "reg24" => type_storage_size(ty) == Some(3),
+                "mem" | "imm" => true,
+                _ => false,
+            },
+        };
     if !ok {
         return Err(Diagnostic::new(format!(
             "inline asm operand class `{class}` is incompatible with type `{ty:?}`"
@@ -1094,7 +1107,27 @@ fn is_allowed_asm_clobber(clobber: &str) -> bool {
             | "hl"
             | "ix"
             | "iy"
+            | "al"
+            | "ah"
+            | "ax"
+            | "bl"
+            | "bh"
+            | "bx"
+            | "cl"
+            | "ch"
+            | "cx"
+            | "dl"
+            | "dh"
+            | "dx"
+            | "si"
+            | "di"
+            | "bp"
             | "sp"
+            | "cs"
+            | "ds"
+            | "es"
+            | "ss"
+            | "ip"
             | "memory"
             | "ports"
             | "flags"

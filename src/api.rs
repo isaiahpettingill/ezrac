@@ -23,7 +23,7 @@ use crate::{
         parse_and_resolve_imports_with_sdk_and_workspace,
     },
     diagnostic::Diagnostic,
-    layout::default_layout_for_target,
+    layout::{Layout, default_layout_for_target},
     package::{PackageRequest, package_executable},
     parser::parse_program,
     target::{
@@ -161,6 +161,8 @@ pub fn compile_workspace_to_assembly(
     let mut request = request.clone();
     request.source_path = PathBuf::from(&root);
     let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    let layout = layout_for_target(&request.target, target.triple.cpu);
+    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
     let sdk = request.sdk_resolver();
     let overrides = workspace.text_overrides()?;
     let root_program = parse_program(&request.source_path, source)?;
@@ -199,6 +201,7 @@ pub fn compile_workspace_to_assembly(
         request.default_sdk_symbols,
     );
     let assembly = emit_source_assembly(&program, options)?;
+    validate_generated_assembly(&assembly, target.triple.cpu, &layout)?;
     Ok(AssemblyCompilation {
         report,
         program,
@@ -212,14 +215,16 @@ pub fn build_workspace(
     root: &str,
     request: &CompileRequest,
 ) -> Result<BuildCompilation, Diagnostic> {
-    let compilation = compile_workspace_to_assembly(workspace, root, request)?;
     let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
-    let layout = default_layout_for_target(&request.target);
+    let layout = layout_for_target(&request.target, target.triple.cpu);
+    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
+    let compilation = compile_workspace_to_assembly(workspace, root, request)?;
     let assembled = assemble_subset_with_symbols_at(
         AssemblerCpu::from(target.triple.cpu),
         &compilation.assembly,
         layout.entry.get(),
     )?;
+    validate_text_section_fit(&layout, assembled.bytes.len())?;
     let package_request = PackageRequest {
         target: request.target.clone(),
         output_format: target.output_format,
@@ -256,6 +261,8 @@ fn compile_source_to_assembly_with_overrides(
     source_overrides: &HashMap<PathBuf, String>,
 ) -> Result<AssemblyCompilation, Diagnostic> {
     let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    let layout = layout_for_target(&request.target, target.triple.cpu);
+    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
     let sdk = request.sdk_resolver();
     let options = CompileOptions {
         source: request.source_path.clone(),
@@ -276,6 +283,7 @@ fn compile_source_to_assembly_with_overrides(
         request.default_sdk_symbols,
     );
     let assembly = emit_source_assembly(&program, assembly_options)?;
+    validate_generated_assembly(&assembly, target.triple.cpu, &layout)?;
 
     Ok(AssemblyCompilation {
         report,
@@ -291,7 +299,7 @@ pub fn assembly_options_for_target(
     debug_comments: bool,
     default_sdk_symbols: bool,
 ) -> AssemblyOptions {
-    let layout = default_layout_for_target(target);
+    let layout = layout_for_target(target, cpu);
     let symbol = |name: &str| {
         layout
             .symbols
@@ -336,6 +344,137 @@ pub fn assembly_options_for_target(
             .unwrap_or(defaults.rodata_base),
         section_bases: Vec::new(),
     }
+}
+
+fn layout_for_target(target: &str, cpu: CpuFamily) -> Layout {
+    let layout = default_layout_for_target(target);
+    if cpu == CpuFamily::I8086 && layout_requires_more_than_16_bits(&layout) {
+        Layout::bare_16(cpu.as_str())
+    } else {
+        layout
+    }
+}
+
+fn layout_requires_more_than_16_bits(layout: &Layout) -> bool {
+    layout.load.get() > 0xFFFF
+        || layout.entry.get() > 0xFFFF
+        || layout.stack.get() > 0xFFFF
+        || layout
+            .regions
+            .iter()
+            .any(|region| region.start.get() > 0xFFFF || region.end.get() > 0xFFFF)
+        || layout
+            .symbols
+            .iter()
+            .any(|symbol| symbol.value.get() > 0xFFFF)
+}
+
+fn validate_layout_for_cpu(
+    layout: &Layout,
+    cpu: CpuFamily,
+    target: &str,
+) -> Result<(), Diagnostic> {
+    if let Err(errors) = layout.validate() {
+        return Err(Diagnostic::new(format!(
+            "layout `{}` is invalid: {}",
+            layout.name,
+            errors
+                .into_iter()
+                .map(|error| error.message)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    let address_width_bits = crate::target::memory_model_for_cpu(cpu)
+        .map(|memory| memory.address_width_bits)
+        .ok_or_else(|| Diagnostic::new(format!("CPU `{}` has no memory model", cpu.as_str())))?;
+    let max_addr = if address_width_bits >= 24 {
+        Address24::MAX
+    } else {
+        (1u32 << address_width_bits) - 1
+    };
+    let mut violations = Vec::new();
+    if layout.load.get() > max_addr {
+        violations.push(format!("load address {}", layout.load));
+    }
+    if layout.entry.get() > max_addr {
+        violations.push(format!("entry address {}", layout.entry));
+    }
+    if layout.stack.get() > max_addr {
+        violations.push(format!("stack address {}", layout.stack));
+    }
+    for region in &layout.regions {
+        if region.start.get() > max_addr || region.end.get() > max_addr {
+            violations.push(format!(
+                "region `{}` range {}..{}",
+                region.name, region.start, region.end
+            ));
+        }
+    }
+    for symbol in &layout.symbols {
+        if symbol.value.get() > max_addr {
+            violations.push(format!("symbol `{}` value {}", symbol.name, symbol.value));
+        }
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(Diagnostic::new(format!(
+            "layout `{}` requires addresses outside the {}-bit address space for target `{target}`: {}",
+            layout.name,
+            address_width_bits,
+            violations.join(", ")
+        )))
+    }
+}
+
+fn validate_generated_assembly(
+    assembly: &str,
+    cpu: CpuFamily,
+    layout: &Layout,
+) -> Result<(), Diagnostic> {
+    let assembled = assemble_subset_with_symbols_at(cpu.into(), assembly, layout.entry.get())?;
+    validate_text_section_fit(layout, assembled.bytes.len())
+}
+
+fn validate_text_section_fit(layout: &Layout, code_len: usize) -> Result<(), Diagnostic> {
+    let section = layout
+        .sections
+        .iter()
+        .find(|section| section.name == ".text")
+        .ok_or_else(|| {
+            Diagnostic::new(format!("layout `{}` has no section `.text`", layout.name))
+        })?;
+    let region = layout
+        .regions
+        .iter()
+        .find(|region| region.name == section.region)
+        .ok_or_else(|| {
+            Diagnostic::new(format!(
+                "layout section `.text` targets unknown region `{}`",
+                section.region
+            ))
+        })?;
+    let end = if code_len == 0 {
+        layout.entry.get()
+    } else {
+        layout
+            .entry
+            .get()
+            .checked_add(
+                u32::try_from(code_len)
+                    .map_err(|_| Diagnostic::new("program code exceeds 24-bit address space"))?
+                    - 1,
+            )
+            .ok_or_else(|| Diagnostic::new("section `.text` exceeds 24-bit address space"))?
+    };
+    if layout.entry.get() < region.start.get() || end > region.end.get() {
+        return Err(Diagnostic::new(format!(
+            "section `.text` does not fit in region `{}`",
+            region.name
+        )));
+    }
+    Ok(())
 }
 
 fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<String, Diagnostic> {
@@ -467,6 +606,72 @@ mod tests {
         assert!(compilation.report.has_main);
         assert!(compilation.assembly.contains("target: Intel 8086"));
         assert!(compilation.assembly.contains("call near _twice"));
+    }
+
+    #[cfg(feature = "i8086")]
+    #[test]
+    fn arbitrary_i8086_target_uses_a_16_bit_layout() {
+        let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+        let request = CompileRequest::new("main.ezra", "custom-board-i8086");
+        let build = build_workspace(&Workspace::new(&files), "main.ezra", &request).unwrap();
+        let options = assembly_options_for_target(&request.target, CpuFamily::I8086, false, true);
+
+        assert_eq!(options.entry_addr.get(), 0);
+        assert_eq!(options.stack_top.get(), 0xFFFF);
+        assert!(!build.machine_code.is_empty());
+    }
+
+    #[cfg(feature = "i8086")]
+    #[test]
+    fn imported_aliases_are_resolved_before_i8086_inline_asm_class_validation() {
+        let files = [
+            WorkspaceFile::text(
+                "main.ezra",
+                "import types\nfn main() { let value: Word = 1 asm(in value: Word as reg16, clobber ax) { \"nop\" } }",
+            ),
+            WorkspaceFile::text("types.ezra", "pub alias Word = u16"),
+        ];
+        let compilation = compile_workspace_to_assembly(
+            &Workspace::new(&files),
+            "main.ezra",
+            &CompileRequest::new("main.ezra", "bare-i8086"),
+        )
+        .unwrap();
+
+        assert!(compilation.assembly.contains("mov ax,"));
+    }
+
+    #[cfg(feature = "i8086")]
+    #[test]
+    fn virtual_workspace_compilation_strictly_validates_i8086_inline_assembly() {
+        let files = [WorkspaceFile::text(
+            "main.ezra",
+            "fn main() { asm volatile { \"pusha\" } }",
+        )];
+        let error = compile_workspace_to_assembly(
+            &Workspace::new(&files),
+            "main.ezra",
+            &CompileRequest::new("main.ezra", "bare-i8086"),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("assembler does not support 8086 instruction `pusha`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn build_layout_validation_rejects_text_that_exceeds_its_region() {
+        let layout = Layout::bare_16("i8086");
+        let error = validate_text_section_fit(&layout, 0x8001).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "section `.text` does not fit in region `code`"
+        );
     }
 
     #[test]

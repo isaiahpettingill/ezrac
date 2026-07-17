@@ -114,7 +114,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
-- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports LR35902, MOS 6502, optional generic 8086 and M68k, optional TMS9900, and the complete AVR register-ABI backend. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The optional `i8086` feature provides both generic source codegen and a complete strict 8086 assembler. Additional eZ80, Z80-family, 8080-family, TI calculator, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
+- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports LR35902, MOS 6502, optional experimental 8086 and M68k backends, optional TMS9900, and the complete AVR register-ABI backend. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The optional `i8086` feature provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, and a complete strict 8086 assembler; aggregate parameters and returns must be passed by pointer. Additional eZ80, Z80-family, 8080-family, TI calculator, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
 - Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.
@@ -142,11 +142,12 @@ assert_eq!(build.executable_extension, "com");
 // are all caller-owned in-memory artifacts.
 ```
 
-`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. The same API performs source parsing, import resolution, code generation, assembly, and packaging under `no_std + alloc` for eZ80/Z80-family and MOS 6502 targets:
+`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. Both std and alloc-only builds validate the selected layout, strictly validate generated target assembly, and ensure the assembled `.text` bytes fit the region assigned by the layout before packaging. The same API performs source parsing, import resolution, code generation, assembly, and packaging under `no_std + alloc` for eZ80/Z80-family, MOS 6502, and experimental i8086 targets:
 
 ```sh
 cargo check --lib --no-default-features --features no-std,z80
 cargo check --lib --no-default-features --features no-std,mos6502
+cargo check --lib --no-default-features --features no-std,i8086
 ```
 
 No-std builds never access host paths: all imported SDK source and binary assets must be included in `Workspace`. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.

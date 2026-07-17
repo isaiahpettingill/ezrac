@@ -67,14 +67,16 @@ Any triple containing a supported CPU can resolve if its CPU has a memory model.
 Enable the `i8086` feature to build EZRA source or assemble a raw, single-segment 8086 binary:
 
 ```sh
-cargo run --features i8086 -- build --target bare-i8086 -o program.bin program.ezra
+cargo run --features i8086 -- build --target bare-i8086 program.ezra
 ```
 
 ```sh
 cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 --base 100h -o program.bin program.asm
 ```
 
-The 8086 hardware has a 20-bit physical address bus, while the initial bare profile intentionally exposes one 16-bit, 64 KiB segment. The source backend covers scalar and aggregate values, pointers, calls and recursion, control flow, memory and port I/O, interrupts, and inline assembly through HIR/TBIR. The assembler covers the complete documented 8086 opcode/form set and strictly rejects 80186/80286 and undocumented additions. DOS packaging and emulator execution remain separate work. See [`i8086-assembly.md`](i8086-assembly.md).
+`build` writes the generated `.asm`, `.map`, and `.bin` files under `target/bare-i8086/`; output-path overrides are available on `assemble`, not `build`.
+
+The 8086 hardware has a 20-bit physical address bus, while the initial bare profile intentionally exposes one 16-bit, 64 KiB segment. Other resolvable i8086 triples fall back to this CPU-appropriate generic layout instead of the 24-bit eZ80 layout. The source backend covers scalar values and recursion, pointers, aggregate storage, control flow, memory and port I/O, constrained interrupt handlers, and typed inline assembly through HIR/TBIR; aggregate parameters and returns are rejected in favor of pass-by-pointer APIs. The assembler covers the complete documented 8086 opcode/form set and strictly rejects 80186/80286 and undocumented additions. CLI and library source compilation strictly validate generated assembly and require its assembled `.text` bytes to fit the selected layout's `.text` region. DOS packaging and emulator execution remain separate work. See [`i8086-assembly.md`](i8086-assembly.md).
 
 ## AVR and Arduboy
 

@@ -75,6 +75,8 @@ Build source or assembly artifacts:
 ezrac build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]
 ```
 
+`build` does not accept `-o`/`--output`; it writes `.asm`, `.map`, and executable artifacts under the target directory described in [Build Artifacts](#build-artifacts). Use `[build].executable` to choose the artifact basename. The standalone `assemble` command accepts `-o`/`--output` for a specific output path.
+
 Run generated code in the compiler's target VM test path:
 
 ```sh
@@ -121,7 +123,7 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, `.8080`, `.i8086`, and `.8086` are treated as assembly.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `dcpu`, `i8086`, `m6800`, `m68k`, `mos6502`, or `tms9900`. For example, `cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 program.asm` enables the complete strict 8086 standalone assembler. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800, M68k, and 8086 have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The generic 8086 source and assembly target is documented in [`i8086-assembly.md`](i8086-assembly.md); TMS9900 syntax and scope are documented in [`tms9900-assembly.md`](tms9900-assembly.md).
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `dcpu`, `i8086`, `m6800`, `m68k`, `mos6502`, or `tms9900`. For example, `cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 program.asm` enables the complete strict 8086 standalone assembler. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800, M68k, and 8086 have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The 8086 source ABI supports scalar recursion and constrained interrupt handlers while requiring aggregate parameters and returns to be passed by pointer. CLI and library source compilation run generated assembly through the strict 8086 assembler and require its assembled `.text` bytes to fit the selected layout's `.text` region; `emit-asm` prints only after validation succeeds. See [`i8086-assembly.md`](i8086-assembly.md) for details; TMS9900 syntax and scope are documented in [`tms9900-assembly.md`](tms9900-assembly.md).
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 
@@ -307,7 +309,7 @@ Supported fields:
 [build].target          target triple
 [build].output          output format: bin, com, gaem, hex, tap, gb, prg, crt, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
-[build].assembler_cpu   i8080, i8085, z80, z80n, z180, ez80, lr35902, avr, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
+[build].assembler_cpu   i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, avr, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
@@ -431,7 +433,7 @@ ezrac assemble --target cpm-2.2-z80 --map console-output.map examples/cpm-z80/co
 ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
-The assembler accepts implemented instruction subsets for 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for AVR, M6800, M68k, and TMS9900 when built with their Cargo features. AVR source builds lower the language through the documented register ABI; see [`platforms.md`](platforms.md#avr-and-arduboy). TMS9900 also has the initial scalar source backend and TI-99/4A cartridge profile; see [`tms9900-assembly.md`](tms9900-assembly.md) for syntax and scope. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
+The assembler accepts implemented instruction subsets for 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for strict original-8086, AVR, M6800, M68k, and TMS9900 when built with their Cargo features. AVR source builds lower the language through the documented register ABI; see [`platforms.md`](platforms.md#avr-and-arduboy). TMS9900 also has the initial scalar source backend and TI-99/4A cartridge profile; see [`tms9900-assembly.md`](tms9900-assembly.md) for syntax and scope. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
 
 ## Custom Layouts
 

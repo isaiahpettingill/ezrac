@@ -1,11 +1,12 @@
 use crate::{
-    ast::{AccessSegment, Declaration, Expr, Stmt},
+    ast::{AccessSegment, Declaration, Expr, Stmt, Type},
     compat::prelude::*,
     diagnostic::Diagnostic,
     target::{Address24, CpuFamily, memory_model_for_cpu},
 };
 
 pub fn validate_program(program: &crate::ast::Program, cpu: CpuFamily) -> Result<(), Diagnostic> {
+    validate_inline_asm_operand_classes(program)?;
     let supports_port_io = cpu.capabilities().supports_port_io;
     let address_width = memory_model_for_cpu(cpu)
         .map(|memory| memory.address_width_bits)
@@ -149,9 +150,153 @@ fn port_io_error<T>(cpu: CpuFamily, port: &str) -> Result<T, Diagnostic> {
     )))
 }
 
+fn validate_inline_asm_operand_classes(program: &crate::ast::Program) -> Result<(), Diagnostic> {
+    let mut aliases = HashMap::new();
+    fn collect_aliases(declaration: &Declaration, aliases: &mut HashMap<String, Type>) {
+        match declaration {
+            Declaration::Alias(alias) => {
+                aliases.insert(alias.name.clone(), alias.ty.clone());
+            }
+            Declaration::Cfg { declaration, .. } => collect_aliases(declaration, aliases),
+            _ => {}
+        }
+    }
+    for declaration in &program.declarations {
+        collect_aliases(declaration, &mut aliases);
+    }
+
+    fn resolved_type(
+        ty: &Type,
+        aliases: &HashMap<String, Type>,
+        seen: &mut HashSet<String>,
+    ) -> Result<Type, Diagnostic> {
+        match ty {
+            Type::Named(name) if aliases.contains_key(name) => {
+                if !seen.insert(name.clone()) {
+                    return Err(Diagnostic::new(format!("cyclic type alias `{name}`")));
+                }
+                let resolved = resolved_type(&aliases[name], aliases, seen);
+                seen.remove(name);
+                resolved
+            }
+            Type::Ptr(inner) => Ok(Type::Ptr(Box::new(resolved_type(inner, aliases, seen)?))),
+            Type::Array { element, len } => Ok(Type::Array {
+                element: Box::new(resolved_type(element, aliases, seen)?),
+                len: len.clone(),
+            }),
+            Type::Named(_) => Ok(ty.clone()),
+        }
+    }
+
+    fn validate_operand(
+        ty: &Type,
+        class: &str,
+        aliases: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostic> {
+        let resolved = resolved_type(ty, aliases, &mut HashSet::new())?;
+        let valid = match &resolved {
+            Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => {
+                matches!(class, "reg8" | "mem" | "imm")
+            }
+            Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => {
+                matches!(class, "reg16" | "mem" | "imm")
+            }
+            Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => {
+                matches!(class, "reg24" | "mem" | "imm")
+            }
+            Type::Ptr(_) => matches!(class, "reg16" | "reg24" | "mem" | "imm"),
+            Type::Named(_) | Type::Array { .. } => matches!(class, "mem" | "imm"),
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(format!(
+                "inline asm operand class `{class}` is incompatible with type `{resolved:?}`"
+            )))
+        }
+    }
+
+    fn validate_stmts(stmts: &[Stmt], aliases: &HashMap<String, Type>) -> Result<(), Diagnostic> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Asm {
+                    inputs, outputs, ..
+                } => {
+                    for input in inputs {
+                        validate_operand(&input.ty, &input.class, aliases)?;
+                    }
+                    for output in outputs {
+                        validate_operand(&output.ty, &output.class, aliases)?;
+                    }
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    validate_stmts(then_body, aliases)?;
+                    validate_stmts(else_body, aliases)?;
+                }
+                Stmt::While { body, .. } | Stmt::Loop { body } => {
+                    validate_stmts(body, aliases)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_declaration(
+        declaration: &Declaration,
+        aliases: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostic> {
+        match declaration {
+            Declaration::Function(function) => validate_stmts(&function.body, aliases),
+            Declaration::Cfg { declaration, .. } => validate_declaration(declaration, aliases),
+            _ => Ok(()),
+        }
+    }
+
+    for declaration in &program.declarations {
+        validate_declaration(declaration, &aliases)?;
+    }
+    Ok(())
+}
+
 fn literal_int(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Int(value) | Expr::TypedInt(value, _) => Some(*value),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::parser::parse_program;
+
+    use super::*;
+
+    #[test]
+    fn validates_inline_asm_classes_after_alias_resolution() {
+        let valid = parse_program(
+            Path::new("valid.ezra"),
+            "alias Word = u16 fn main() { asm(in value: Word as reg16) { \"nop\" } }",
+        )
+        .unwrap();
+        validate_program(&valid, CpuFamily::I8086).unwrap();
+
+        let invalid = parse_program(
+            Path::new("invalid.ezra"),
+            "struct Pair { value: u8 } alias PairAlias = Pair fn main() { asm(in value: PairAlias as reg8) { \"nop\" } }",
+        )
+        .unwrap();
+        let error = validate_program(&invalid, CpuFamily::I8086).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("incompatible with type `Named(\"Pair\")`")
+        );
     }
 }

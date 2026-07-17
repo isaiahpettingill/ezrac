@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Added complete generic Intel 8086 source code generation for scalars, aggregates, pointers, calls and recursion, control flow, memory and port I/O, interrupts, and inline assembly, plus alloc-only API support.
+- Added generic Intel 8086 source code generation for scalar arithmetic and recursion, pointers, aggregate storage, control flow, memory and port I/O, constrained interrupt handlers, and typed inline assembly, plus alloc-only API support. Aggregate parameters and returns are explicitly rejected in favor of pass-by-pointer APIs.
 - Added an optional complete Intel 8086 standalone assembler with strict 8086-only opcode/form validation, 16-bit ModR/M addressing, segment/repeat/lock prefixes, stable label fixups, a `bare-i8086` target, and golden coverage across the documented ISA.
+- Hardened 8086 lowering with alias-aware signed operations and comparisons, one-time indirect-lvalue evaluation, MMIO access roots, constant bounds and return validation, typed ports, diagnostic allocation failures, interrupt scratch/register preservation and call isolation, and AL/AX/memory/immediate inline-assembly operands. Arbitrary resolvable i8086 triples now use a 16-bit generic layout, while CLI, std API, and alloc-only API consistently apply strict generated-assembly and `.text` region-fit validation.
 
 ## 0.1.30
 

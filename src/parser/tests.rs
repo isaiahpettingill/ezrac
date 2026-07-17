@@ -276,6 +276,32 @@ fn parses_inline_asm_clobbers() {
 }
 
 #[test]
+fn parses_i8086_inline_asm_clobbers_and_pointer_register_class() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            alias Word = u16
+            fn main() {
+                asm(in address: ptr<u8> as reg16, in word: Word as reg16, clobber ax, clobber bx, clobber ds, clobber flags) {
+                    "mov bx,{address}"
+                }
+            }
+        "#,
+    )
+    .unwrap();
+
+    let main = program.main_function().unwrap();
+    assert!(matches!(
+        &main.body[0],
+        Stmt::Asm { inputs, clobbers, .. }
+            if inputs[0].class == "reg16"
+                && inputs[1].ty == Type::Named("Word".to_owned())
+                && inputs[1].class == "reg16"
+                && clobbers == &["ax", "bx", "ds", "flags"]
+    ));
+}
+
+#[test]
 fn parses_inline_asm_input_and_output_operands() {
     let program = parse_program(
             Path::new("game.ezra"),

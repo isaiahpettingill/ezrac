@@ -3,8 +3,7 @@
 EZRAC provides optional generic source code generation and a strict Intel 8086 standalone assembler. Enable the `i8086` Cargo feature and select the `bare-i8086` target:
 
 ```sh
-cargo run --features i8086 -- build --target bare-i8086 \
-  -o program.bin program.ezra
+cargo run --features i8086 -- build --target bare-i8086 program.ezra
 ```
 
 To assemble handwritten source directly:
@@ -15,21 +14,31 @@ cargo run --features i8086 -- assemble \
   -o program.bin program.asm
 ```
 
-`8086` is accepted as a CPU alias. Files ending in `.i8086` or `.8086` are detected as assembly input in addition to `.asm` and `.s`.
+`build` writes `program.asm`, `program.map`, and `program.bin` under `target/bare-i8086/`; unlike `assemble`, it does not accept `-o`/`--output`. `8086` is accepted as a CPU alias. Files ending in `.i8086` or `.8086` are detected as assembly input in addition to `.asm` and `.s`.
 
-The source backend lowers through HIR and TBIR and supports scalar arithmetic, pointers, arrays, structs, calls and recursion, control flow, globals, MMIO, port I/O, memory helpers, interrupts, and inline assembly. It does not yet provide an emulator test backend, DOS `.COM`/MZ packaging, or 80186/80286 profiles. Those remain separate work under the wider Intel 8086-family and MS-DOS issues.
+The source backend lowers through HIR and TBIR and covers scalar arithmetic, pointers, array and struct storage, scalar calls and recursion, control flow, globals, MMIO, port I/O, memory helpers, constrained interrupt handlers, and inline assembly. Array and struct parameters or return values are deliberately rejected with pass-by-pointer diagnostics rather than assigned an unstable aggregate-call ABI. It does not yet provide an emulator test backend, DOS `.COM`/MZ packaging, or 80186/80286 profiles. Those remain separate work under the wider Intel 8086-family and MS-DOS issues.
 
 ## Target and output model
 
-The 8086 hardware has a 20-bit physical address bus, but the initial `bare-i8086` profile deliberately exposes one 16-bit, 64 KiB segment and emits a raw binary for that segment. Labels, `org`, near branches, and ordinary memory offsets are therefore 16-bit segment offsets. Far calls and jumps can still encode explicit `segment:offset` pointers.
+The 8086 hardware has a 20-bit physical address bus, but the initial `bare-i8086` profile deliberately exposes one 16-bit, 64 KiB segment and emits a raw binary for that segment. Labels, `org`, near branches, and ordinary memory offsets are therefore 16-bit segment offsets. Far calls and jumps can still encode explicit `segment:offset` pointers. Other resolvable triples containing `i8086` use the same generic 16-bit layout unless a target-specific layout is available; incompatible custom layouts produce a diagnostic.
 
 Words, immediates, displacements, data emitted with `dw`, and far-pointer fields are little-endian. In a far pointer the offset word is emitted before the segment word.
 
 ## Generated-code ABI
 
-Generated programs establish a flat small model by copying `CS` to `DS`, `ES`, and `SS`, aligning `SP` down to an even address, clearing the direction flag, and using near calls. Pointers are 16-bit offsets. Compiler-owned static slots hold parameters, locals, expression temporaries, and scalar return values; callers preserve their live slots around nested or recursive calls. Interrupt functions preserve the general and data-segment registers and return with `IRET`; naked functions remain responsible for their own complete entry and exit sequence.
+Generated programs establish a flat small model by copying `CS` to `DS`, `ES`, and `SS`, aligning `SP` down to an even address, clearing the direction flag, and using near calls. Pointers are 16-bit offsets. Compiler-owned static slots hold parameters, locals, expression temporaries, and scalar return values; callers preserve their live static frames around nested and recursive scalar calls. Startup executes `CLI` and does not implicitly execute `STI`, so maskable interrupts remain disabled until the program explicitly enables them.
+
+A non-naked `interrupt fn` must have no parameters or return value. Its prologue preserves the 8086 general/data-segment registers and compiler scratch, establishes `DS = ES = CS`, and its epilogue restores that state before `IRET`. Ordinary calls to interrupt functions, user-function calls from handlers, and `interrupt fn main` are rejected because `CALL`/`IRET` stack shapes and the static-frame ABI are not interchangeable. Programs remain responsible for installing vectors, providing a valid stack, acknowledging devices, synchronizing shared globals, and handling target-specific NMI or nesting requirements.
+
+Naked functions may contain only operand-free inline assembly and remain responsible for their complete entry/exit sequence.
+
+Inline assembly maps `reg8` operands to `AL`, `reg16` operands to `AX`, `mem` operands to direct compiler storage, and constant `imm` inputs to immediates. Register inputs are loaded before the block and register outputs are written back afterward. The backend rejects `reg24`, duplicate operands, incompatible resolved types, non-constant immediates, overlapping clobbers, and ABI-critical segment, stack, and instruction-pointer clobbers. Every generated output path then passes the result through the strict original-8086 assembler.
 
 This ABI is the generic bare-target ABI, not a DOS memory model or calling convention.
+
+## Architecture reference
+
+Code generation and assembler behavior were checked against Intel's [The 8086 Family User's Manual](http://matthieu.benoit.free.fr/cross/data_sheets/Intel_8086_users_manual.htm), including near `CALL`/`RET`, interrupt/`IRET` stack behavior, segment-register initialization, and carry propagation.
 
 ## Source syntax
 
@@ -109,5 +118,7 @@ The encoder covers every documented 8086 integer instruction and native form:
 ## Strict 8086 profile
 
 The mode intentionally rejects undocumented opcode aliases and later-family additions. This includes `POP CS`, `SALC`, opcode `82`, reserved ModR/M group extensions, immediate shift counts other than `1`, immediate `PUSH`, multi-operand `IMUL`, `PUSHA`/`POPA`, `BOUND`, string port I/O, `ENTER`/`LEAVE`, protected-mode instructions, near `Jcc`, `FS`/`GS`, operand/address-size prefixes, 32-bit registers, and every 80386+ instruction.
+
+Source compilation through `check`, `emit-asm`, or `build`, as well as the std and alloc-only APIs, runs generated 8086 assembly through this strict assembler and verifies that its assembled `.text` bytes fit the selected layout's `.text` region. `emit-asm` prints only after those checks succeed.
 
 The tests include exact golden encodings across every instruction category, all eight 16-bit ModR/M effective-address selectors, displacement and immediate boundaries, aliases, prefixes, far pointers, labels/fixups, stable two-pass sizing, and explicit rejection of post-8086 forms.

@@ -22,7 +22,7 @@ use ezra::{
     target::{
         Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE,
         EZRA_RODATA_BASE, EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format,
-        resolve_target_profile,
+        parse_target_triple, resolve_target_profile,
     },
     tbir::TbirProgram,
     vm::TestRunOptions,
@@ -1189,6 +1189,12 @@ fn write_build_artifacts(
             &assembly_source_options(source_path, &settings.layout),
         )
         .map_err(|error| error.to_string())?;
+        validate_assembled_section_fit(
+            &settings.layout,
+            ".text",
+            settings.layout.entry.get(),
+            assembled.bytes.len(),
+        )?;
         let map = build_output_map(
             settings,
             _program,
@@ -2464,7 +2470,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     }
     validate_layout_for_target(&settings)?;
     ensure_source_codegen_supported(&settings)?;
-    emit_source_assembly(
+    let assembly = emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
             &settings.layout,
@@ -2474,7 +2480,38 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
             settings.default_sdk_symbols,
         )?,
     )
-    .map_err(|error| error.with_location_if_missing(source_location).to_string())
+    .map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    validate_generated_assembly_for_command(&source_path, &source_location, &settings, &assembly)?;
+    Ok(assembly)
+}
+
+fn validate_generated_assembly_for_command(
+    source_path: &Path,
+    source_location: &SourceLocation,
+    settings: &BuildSettings,
+    assembly: &str,
+) -> Result<(), String> {
+    let assembled = ezra::vm::assemble_subset_with_options_at(
+        AssemblerCpu::from(settings.target.triple.cpu),
+        assembly,
+        settings.layout.entry.get(),
+        &assembly_source_options(source_path, &settings.layout),
+    )
+    .map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    validate_assembled_section_fit(
+        &settings.layout,
+        ".text",
+        settings.layout.entry.get(),
+        assembled.bytes.len(),
+    )
 }
 
 fn check(options: &CommandOptions) -> Result<(), String> {
@@ -2509,7 +2546,7 @@ fn check_source_with_layout(
     }
     validate_layout_for_target(&settings)?;
     ensure_source_codegen_supported(&settings)?;
-    emit_source_assembly(
+    let assembly = emit_source_assembly(
         &program,
         assembly_options_from_layout_and_program(
             &settings.layout,
@@ -2519,7 +2556,12 @@ fn check_source_with_layout(
             settings.default_sdk_symbols,
         )?,
     )
-    .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
+    .map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    validate_generated_assembly_for_command(source_path, &source_location, &settings, &assembly)?;
 
     println!(
         "ok: {} imports, {} declarations, main present",
@@ -2563,7 +2605,28 @@ fn load_layout(path: Option<&Path>, target: &str) -> Result<Layout, String> {
 }
 
 fn default_layout_for_target(target: &str) -> Layout {
-    ezra::layout::default_layout_for_target(target)
+    let layout = ezra::layout::default_layout_for_target(target);
+    if parse_target_triple(target).is_ok_and(|triple| triple.cpu == CpuFamily::I8086)
+        && layout_requires_more_than_16_bits(&layout)
+    {
+        Layout::bare_16(CpuFamily::I8086.as_str())
+    } else {
+        layout
+    }
+}
+
+fn layout_requires_more_than_16_bits(layout: &Layout) -> bool {
+    layout.load.get() > 0xFFFF
+        || layout.entry.get() > 0xFFFF
+        || layout.stack.get() > 0xFFFF
+        || layout
+            .regions
+            .iter()
+            .any(|region| region.start.get() > 0xFFFF || region.end.get() > 0xFFFF)
+        || layout
+            .symbols
+            .iter()
+            .any(|symbol| symbol.value.get() > 0xFFFF)
 }
 
 fn init_project(options: &InitOptions) -> Result<(), String> {
@@ -3292,6 +3355,145 @@ fn print_targets() {
 
 fn usage() -> String {
     "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
+}
+
+#[cfg(all(test, feature = "i8086"))]
+mod i8086_review_tests {
+    use super::*;
+
+    fn temp_source(name: &str, source: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ezrac_i8086_review_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("main.ezra");
+        std::fs::write(&path, source).unwrap();
+        path
+    }
+
+    #[test]
+    fn arbitrary_i8086_target_uses_a_16_bit_default_layout() {
+        let source_path = temp_source("generic_layout", "fn main() {}");
+        let options = CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("custom-board-i8086".to_owned()),
+        };
+        let settings = resolve_build_settings(&options, &source_path).unwrap();
+
+        assert_eq!(settings.layout.name, "bare_i8086");
+        assert_eq!(settings.layout.entry.get(), 0);
+        assert_eq!(settings.layout.stack.get(), 0xFFFF);
+        assert!(
+            settings
+                .layout
+                .regions
+                .iter()
+                .all(|region| region.end.get() <= 0xFFFF)
+        );
+        check(&options).unwrap();
+        let _ = std::fs::remove_dir_all(source_path.parent().unwrap());
+    }
+
+    #[test]
+    fn cli_check_strictly_rejects_post_8086_inline_assembly() {
+        let source_path = temp_source("strict_check", "fn main() { asm volatile { \"pusha\" } }");
+        let error = check(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("bare-i8086".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("assembler does not support 8086 instruction `pusha`"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(source_path.parent().unwrap());
+    }
+
+    #[test]
+    fn cli_emit_asm_strictly_rejects_post_8086_inline_assembly() {
+        let source_path = temp_source("strict_emit", "fn main() { asm volatile { \"pusha\" } }");
+        let error = emit_asm(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: None,
+            target: Some("bare-i8086".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("assembler does not support 8086 instruction `pusha`"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(source_path.parent().unwrap());
+    }
+
+    #[test]
+    fn cli_emit_asm_rejects_generated_text_that_exceeds_its_region() {
+        let source_path = temp_source("emit_text_fit", "fn main() {}");
+        let layout_path = source_path.parent().unwrap().join("tiny.ezralayout");
+        std::fs::write(
+            &layout_path,
+            r#"
+                layout tiny_i8086 {
+                    load 0x0000;
+                    entry 0x0000;
+                    stack 0xFFFF;
+
+                    region code 0x0000..0x0000 read execute;
+                    region rodata 0x0001..0x1FFF read;
+                    region ram 0x2000..0x7FFF read write;
+                    region assets 0x8000..0x9FFF read;
+                    region scratch 0xA000..0xAFFF read write;
+                    region stack 0xB000..0xFFFF read write reserved;
+                    section .header -> code align 1;
+                    section .text -> code align 1;
+                    section .rodata -> rodata align 1;
+                    section .data -> ram align 1;
+                    section .bss -> ram align 1;
+                    section .assets -> assets align 1;
+                    section .scratch -> scratch align 1;
+
+                    symbol EZRA_LOAD_ADDR = 0x0000;
+                    symbol EZRA_ENTRY_ADDR = 0x0000;
+                    symbol EZRA_CODE_BASE = 0x0000;
+                    symbol EZRA_STACK_TOP = 0xFFFF;
+                    symbol EZRA_RAM_BASE = 0x2000;
+                    symbol EZRA_RODATA_BASE = 0x0001;
+                    symbol EZRA_ASSET_BASE = 0x8000;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = emit_asm(&CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: Some("bare-i8086".to_owned()),
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("assembly section `.text`")
+                && error.contains("does not fit in region `code`"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(source_path.parent().unwrap());
+    }
 }
 
 #[cfg(test)]
