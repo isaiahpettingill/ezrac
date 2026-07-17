@@ -106,6 +106,13 @@ struct PackedAssetEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GameBoyBankedEmbed {
+    pub bank: u32,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CartridgeMapEntry {
     pub name: String,
     pub start: Address24,
@@ -859,6 +866,53 @@ fn global_initializer_is_zero(
             .iter()
             .all(|(_, value)| global_initializer_is_zero(value, constants, aliases)),
         _ => eval_embed_expr_with_aliases(expr, constants, aliases).is_ok_and(|value| value == 0),
+    }
+}
+
+pub fn collect_gameboy_banked_embeds(
+    program: &Program,
+) -> Result<Vec<GameBoyBankedEmbed>, Diagnostic> {
+    let aliases = collect_embed_aliases(program);
+    let constants = collect_embed_constants(program)?;
+    let mut declarations = Vec::new();
+    collect_banked_embed_declarations(&program.declarations, None, &mut declarations);
+    declarations
+        .into_iter()
+        .filter_map(|(bank, declaration)| {
+            let Declaration::Embed(embed) = declaration else {
+                return None;
+            };
+            bank.map(|bank| (bank, embed))
+        })
+        .map(|(bank, embed)| {
+            Ok(GameBoyBankedEmbed {
+                bank,
+                name: embed.name.clone(),
+                bytes: embed_bytes(&embed.source, &program.source_path, &constants, &aliases)?,
+            })
+        })
+        .collect()
+}
+
+fn collect_banked_embed_declarations<'a>(
+    declarations: &'a [Declaration],
+    enclosing_bank: Option<u32>,
+    output: &mut Vec<(Option<u32>, &'a Declaration)>,
+) {
+    for declaration in declarations {
+        match declaration {
+            Declaration::Cfg { declaration, .. } => collect_banked_embed_declarations(
+                core::slice::from_ref(declaration.as_ref()),
+                enclosing_bank,
+                output,
+            ),
+            Declaration::Bank { bank, declaration } => collect_banked_embed_declarations(
+                core::slice::from_ref(declaration.as_ref()),
+                Some(*bank),
+                output,
+            ),
+            declaration => output.push((enclosing_bank, declaration)),
+        }
     }
 }
 

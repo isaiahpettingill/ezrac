@@ -151,6 +151,11 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
             let mut bank = None;
             let mut declaration = None;
             for inner in pair.into_inner() {
+                let inner = if inner.as_rule() == Rule::decl_attr {
+                    inner.into_inner().next().unwrap()
+                } else {
+                    inner
+                };
                 match inner.as_rule() {
                     Rule::cfg_attr => predicates.push(build_cfg_attr(inner)?),
                     Rule::bank_attr => {

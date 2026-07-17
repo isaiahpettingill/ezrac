@@ -80,6 +80,45 @@ later file assigned to the next selectable switchable bank. A file may be at
 most 16 KiB (`0x4000` bytes); code selects its bank and reads it through the
 `0x4000..0x7FFF` ROM window.
 
+### Source-declared banked embeds
+
+Enable explicit source banking only for a Game Boy target with an MBC mapper:
+
+```toml
+[banking]
+enabled = true
+
+[gameboy]
+mapper = "mbc1" # or "mbc5"; `rom-only` is rejected
+```
+
+An `@cfg(bank(N))` `embed` is packed into exactly ROM bank `N`. Its generated
+symbol is an address in the switchable `0x4000..0x7FFF` window, so multiple
+embeds in a bank receive consecutive window offsets. `ptr@N` marks an access as
+using bank `N`; it is accepted in a bank-0 helper (including an ordinary
+unbanked function), or in a function declared for the same bank.
+
+```ezra
+@cfg(bank(2))
+embed level: bytes = bytes [0xA1, 0xB2]
+
+fn read_level() -> u8 {
+    // Select bank 2 first, then access the bank-2 pointer.
+    asm volatile { "ld a, 2" "call __ezra_gb_select_bank" }
+    return *(level.ptr@2)
+}
+```
+
+The generated `__ezra_gb_select_bank` helper is always in ROM bank 0. It writes
+the MBC1 or MBC5 ROM-bank registers; it accepts the low eight bits of the bank
+number. The runtime does **not** automatically select a bank for `ptr@N`.
+
+Current intentional limits: only banked `embed` declarations are supported;
+banked functions and far calls are rejected with diagnostics, banked embeds
+cannot currently use `align`, and MBC5 banks above 255 require manual mapper
+register writes. Explicit banked embeds cannot share a bank with an automatically
+assigned `gameboy.bank_files` payload.
+
 `ram_banks` describes 8 KiB external RAM banks. Omit it, or set it to `0`, for
 no cartridge RAM. `battery = true` requests battery-backed cartridge RAM and
 therefore requires a nonzero `ram_banks` value. `rumble = true` selects an

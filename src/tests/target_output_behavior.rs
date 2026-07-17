@@ -139,6 +139,65 @@ fn game_boy_targets_compile_ezra_source_with_embedded_assets() {
 }
 
 #[test]
+fn game_boy_explicit_banking_packages_banked_embed_and_emits_bank_zero_runtime() {
+    let root = temp_root("game_boy_explicit_banking");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+            [build]
+            target = "gameboy-dmg-lr35902"
+
+            [banking]
+            enabled = true
+
+            [gameboy]
+            mapper = "mbc1"
+            rom_banks = 4
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &source_path,
+        r#"
+            @cfg(bank(2))
+            embed level: bytes = bytes [0xA1, 0xB2, 0xC3]
+
+            fn main() {
+                asm volatile {
+                    "ld a, 2"
+                    "call __ezra_gb_select_bank"
+                }
+                let first: u8 = *(level.ptr@2)
+            }
+        "#,
+    )
+    .unwrap();
+
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        input_kind: Some(InputKind::Ezra),
+        assembler_cpu: None,
+        layout_path: None,
+        target: None,
+    })
+    .unwrap();
+    let assembly = std::fs::read_to_string(outputs.asm).unwrap();
+    let rom = std::fs::read(outputs.executable).unwrap();
+
+    assert!(assembly.contains("_level equ 4000h"), "{assembly}");
+    assert!(assembly.contains("__ezra_gb_select_bank:"), "{assembly}");
+    assert!(assembly.contains("ld (2000h), a"), "{assembly}");
+    assert_eq!(&rom[0x8000..0x8003], &[0xA1, 0xB2, 0xC3]);
+    assert_eq!(rom[0x0147], 0x01, "ROM should advertise MBC1");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn game_boy_source_examples_build_as_roms() {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gameboy");
     for name in [

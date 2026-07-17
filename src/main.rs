@@ -8,18 +8,21 @@ use std::{
 use ezra::{
     asm::{
         AssemblyItem, AssemblyOptions, AssemblyPreprocessOptions, AssemblyProgram,
-        emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
-        emit_mos6502_assembly_with_options, preprocess_assembly_file, preprocess_assembly_source,
+        GameBoyBankingMapper, GameBoyBankingOptions, emit_ez80_assembly_with_options,
+        emit_lr35902_assembly_with_options, emit_mos6502_assembly_with_options,
+        preprocess_assembly_file, preprocess_assembly_source,
     },
     ast::Program,
-    cart::{CartridgeHeader, build_cartridge_map, layout_section_bases},
+    cart::{
+        CartridgeHeader, build_cartridge_map, collect_gameboy_banked_embeds, layout_section_bases,
+    },
     compile::{SdkResolver, load_program_with_sdk},
     diagnostic::SourceLocation,
     hir::HirProgram,
     layout::{Layout, parse_layout},
     parser::parse_program,
     project::{
-        ArduboyConfig, AssetConfig, GameBoyConfig, GameBoyMapper, ZxSpectrumConfig,
+        ArduboyConfig, AssetConfig, BankingConfig, GameBoyConfig, GameBoyMapper, ZxSpectrumConfig,
         load_nearest_project_config, load_project_config,
     },
     target::{
@@ -624,6 +627,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         layout_path,
         asset_config: AssetConfig::default(),
         gameboy: None,
+        gameboy_banking: None,
         arduboy: None,
         zxspectrum: None,
         default_sdk_symbols: true,
@@ -672,7 +676,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| source_path.with_extension(executable_extension(&settings)));
-    let executable = build_executable_bytes(&settings, &image.bytes, Some(&output_path))?;
+    let executable = build_executable_bytes(&settings, &image.bytes, Some(&output_path), None)?;
     fs::write(&output_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     println!("wrote {}", output_path.display());
@@ -695,6 +699,7 @@ struct BuildSettings {
     layout_path: Option<PathBuf>,
     asset_config: AssetConfig,
     gameboy: Option<GameBoyConfig>,
+    gameboy_banking: Option<GameBoyBankingOptions>,
     arduboy: Option<ArduboyConfig>,
     zxspectrum: Option<ZxSpectrumConfig>,
     default_sdk_symbols: bool,
@@ -792,6 +797,29 @@ fn resolve_build_settings(
     if gameboy.is_some() && !target.triple.value.starts_with("gameboy-") {
         return Err("project `[gameboy]` configuration requires a `gameboy-*` target".to_owned());
     }
+    let banking = project
+        .as_ref()
+        .map(|project| project.banking.clone())
+        .unwrap_or_else(BankingConfig::default);
+    let gameboy_banking = if banking.enabled && target.triple.value.starts_with("gameboy-") {
+        let mapper = gameboy
+            .as_ref()
+            .map(|config| config.mapper)
+            .unwrap_or_default();
+        let mapper = match mapper {
+            GameBoyMapper::Mbc1 => GameBoyBankingMapper::Mbc1,
+            GameBoyMapper::Mbc5 => GameBoyBankingMapper::Mbc5,
+            GameBoyMapper::RomOnly => {
+                return Err(
+                    "Game Boy `[banking] enabled = true` requires `[gameboy] mapper = \"mbc1\"` or `\"mbc5\"`; `rom-only` cannot select switchable ROM banks"
+                        .to_owned(),
+                );
+            }
+        };
+        Some(GameBoyBankingOptions { mapper })
+    } else {
+        None
+    };
     let arduboy = project.as_ref().and_then(|project| project.arduboy.clone());
     if arduboy.is_some() && !target.triple.value.starts_with("arduboy-") {
         return Err("project `[arduboy]` configuration requires an `arduboy-*` target".to_owned());
@@ -827,6 +855,7 @@ fn resolve_build_settings(
         layout_path,
         asset_config,
         gameboy,
+        gameboy_banking,
         arduboy,
         zxspectrum,
         default_sdk_symbols,
@@ -1154,6 +1183,7 @@ fn build_ezra_source(
             &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
+            settings.gameboy_banking,
         )?,
     )
     .map_err(|error| {
@@ -1211,7 +1241,7 @@ fn write_assembly_build_artifacts(
     {
         apply_agon_mos_header(settings.layout.entry.get(), image.bytes)?
     } else {
-        build_executable_bytes(settings, &image.bytes, Some(&executable_path))?
+        build_executable_bytes(settings, &image.bytes, Some(&executable_path), None)?
     };
     fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
@@ -1273,7 +1303,8 @@ fn write_build_artifacts(
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let executable = build_executable_bytes(settings, &bytes, Some(&executable_path))?;
+    let executable =
+        build_executable_bytes(settings, &bytes, Some(&executable_path), Some(_program))?;
     fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
@@ -1704,6 +1735,7 @@ fn build_executable_bytes(
     settings: &BuildSettings,
     code: &[u8],
     output_path: Option<&Path>,
+    program: Option<&Program>,
 ) -> Result<Vec<u8>, String> {
     if settings.output_format == OutputFormat::Arduboy {
         return arduboy_package_bytes(settings, output_path, code);
@@ -1747,7 +1779,7 @@ fn build_executable_bytes(
         return zx_spectrum_tap_bytes(settings, output_path, code);
     }
     if settings.output_format == OutputFormat::GameBoyGb {
-        return game_boy_rom_bytes(settings, output_path, code);
+        return game_boy_rom_bytes(settings, output_path, code, program);
     }
     if settings.output_format == OutputFormat::Commodore64Prg {
         return commodore64_prg_bytes(settings, code);
@@ -2047,6 +2079,7 @@ fn game_boy_rom_bytes(
     settings: &BuildSettings,
     output_path: Option<&Path>,
     code: &[u8],
+    program: Option<&Program>,
 ) -> Result<Vec<u8>, String> {
     if !settings.target.triple.value.starts_with("gameboy-") {
         return Err(format!(
@@ -2062,6 +2095,24 @@ fn game_boy_rom_bytes(
     const INITIAL_ROM_SIZE: usize = 0x8000;
     const CODE_OFFSET: usize = 0x0150;
     let config = settings.gameboy.clone().unwrap_or_default();
+    let mut generated_payloads = BTreeMap::<usize, Vec<u8>>::new();
+    if let Some(program) = program {
+        for embed in collect_gameboy_banked_embeds(program).map_err(|error| error.to_string())? {
+            let bank = usize::try_from(embed.bank)
+                .map_err(|_| format!("Game Boy bank {} is outside host range", embed.bank))?;
+            let payload = generated_payloads.entry(bank).or_default();
+            if payload
+                .len()
+                .checked_add(embed.bytes.len())
+                .map_or(true, |len| len > BANK_SIZE)
+            {
+                return Err(format!(
+                    "banked embeds in Game Boy ROM bank {bank} exceed its 16 KiB window"
+                ));
+            }
+            payload.extend_from_slice(&embed.bytes);
+        }
+    }
     let bank_payloads = config
         .bank_files
         .iter()
@@ -2075,20 +2126,35 @@ fn game_boy_rom_bytes(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let payload_banks = game_boy_payload_banks(config.mapper, bank_payloads.len())?;
+    for bank in generated_payloads.keys() {
+        validate_game_boy_generated_bank(config.mapper, *bank)?;
+        if payload_banks.contains(bank) {
+            return Err(format!(
+                "Game Boy ROM bank {bank} is used by both a banked embed and `gameboy.bank_files`"
+            ));
+        }
+    }
     let required_banks = payload_banks
-        .last()
+        .iter()
         .copied()
+        .chain(generated_payloads.keys().copied())
+        .max()
         .map(|bank| bank + 1)
         .unwrap_or(2);
     let rom_banks = game_boy_rom_banks(&config, required_banks)?;
     let rom_size = rom_banks
         .checked_mul(BANK_SIZE)
         .ok_or_else(|| "Game Boy ROM size overflow".to_owned())?;
-    if code.len() > INITIAL_ROM_SIZE - CODE_OFFSET {
+    let fixed_code_capacity = if settings.gameboy_banking.is_some() {
+        BANK_SIZE - CODE_OFFSET
+    } else {
+        INITIAL_ROM_SIZE - CODE_OFFSET
+    };
+    if code.len() > fixed_code_capacity {
         return Err(format!(
-            "Game Boy fixed-bank code is {} bytes, but banks 0-1 support at most {} bytes from 0x0150; put switchable data/code in `gameboy.bank_files` and select its bank explicitly",
+            "Game Boy fixed-bank code is {} bytes, but bank 0 supports at most {} bytes from 0x0150 when explicit banking is enabled",
             code.len(),
-            INITIAL_ROM_SIZE - CODE_OFFSET
+            fixed_code_capacity
         ));
     }
     for (index, payload) in bank_payloads.iter().enumerate() {
@@ -2147,6 +2213,10 @@ fn game_boy_rom_bytes(
         let offset = payload_banks[index] * BANK_SIZE;
         rom[offset..offset + payload.len()].copy_from_slice(payload);
     }
+    for (bank, payload) in generated_payloads {
+        let offset = bank * BANK_SIZE;
+        rom[offset..offset + payload.len()].copy_from_slice(&payload);
+    }
     rom[0x014D] = rom[0x0134..=0x014C].iter().fold(0u8, |checksum, byte| {
         checksum.wrapping_sub(*byte).wrapping_sub(1)
     });
@@ -2159,10 +2229,28 @@ fn game_boy_rom_bytes(
     Ok(rom)
 }
 
+fn validate_game_boy_generated_bank(mapper: GameBoyMapper, bank: usize) -> Result<(), String> {
+    let maximum = match mapper {
+        GameBoyMapper::RomOnly => 0,
+        GameBoyMapper::Mbc1 => 127,
+        GameBoyMapper::Mbc5 => 511,
+    };
+    if bank == 0 || bank > maximum || (mapper == GameBoyMapper::Mbc1 && bank & 0x1F == 0) {
+        return Err(format!(
+            "Game Boy mapper `{}` cannot select explicit ROM bank {bank}",
+            game_boy_mapper_name(mapper)
+        ));
+    }
+    Ok(())
+}
+
 fn game_boy_payload_banks(
     mapper: GameBoyMapper,
     payload_count: usize,
 ) -> Result<Vec<usize>, String> {
+    if payload_count == 0 {
+        return Ok(Vec::new());
+    }
     let mut banks = Vec::with_capacity(payload_count);
     let maximum = match mapper {
         GameBoyMapper::RomOnly => 1,
@@ -2869,6 +2957,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
             &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
+            settings.gameboy_banking,
         )?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
@@ -3028,6 +3117,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
                     &settings.target.triple.value,
                     options.command.debug_comments,
                     settings.default_sdk_symbols,
+                    settings.gameboy_banking,
                 )?,
             )
             .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
@@ -3062,6 +3152,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
             &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
+            settings.gameboy_banking,
         )?,
     )
     .map_err(|error| {
@@ -3139,6 +3230,7 @@ fn check_source_with_layout(
             &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
+            settings.gameboy_banking,
         )?,
     )
     .map_err(|error| {
@@ -3581,6 +3673,7 @@ fn assembly_options_from_layout(
             || layout.name.starts_with("ti84plusce-ez80")
             || layout.name.starts_with("ti83premiumce-ez80"),
         arduboy_executable: target.starts_with("arduboy-"),
+        gameboy_banking: None,
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),
@@ -3601,9 +3694,11 @@ fn assembly_options_from_layout_and_program(
     target: &str,
     debug_comments: bool,
     default_sdk_symbols: bool,
+    gameboy_banking: Option<GameBoyBankingOptions>,
 ) -> Result<AssemblyOptions, String> {
     let mut options =
         assembly_options_from_layout(layout, cpu, target, debug_comments, default_sdk_symbols);
+    options.gameboy_banking = gameboy_banking;
     options.section_bases =
         layout_section_bases(program, layout).map_err(|error| error.to_string())?;
     Ok(options)

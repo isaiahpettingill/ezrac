@@ -47,6 +47,17 @@ pub fn emit_ez80_assembly_with_debug_comments(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GameBoyBankingMapper {
+    Mbc1,
+    Mbc5,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GameBoyBankingOptions {
+    pub mapper: GameBoyBankingMapper,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssemblyOptions {
     pub cpu: CpuFamily,
@@ -58,6 +69,8 @@ pub struct AssemblyOptions {
     pub ti_os_executable: bool,
     /// Emit the ATmega32U4 hardware vector table used by the Arduboy target.
     pub arduboy_executable: bool,
+    /// Game Boy-only explicit ROM banking configuration.
+    pub gameboy_banking: Option<GameBoyBankingOptions>,
     pub load_addr: Address24,
     pub entry_addr: Address24,
     pub code_base: Address24,
@@ -81,6 +94,7 @@ impl Default for AssemblyOptions {
             c64_executable: false,
             ti_os_executable: false,
             arduboy_executable: false,
+            gameboy_banking: None,
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
             code_base: EZRA_CODE_BASE,

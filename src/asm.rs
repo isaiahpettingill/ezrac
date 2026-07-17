@@ -58,8 +58,9 @@ pub use preprocess::{
 pub use preprocess::{FilesystemAssemblyResolver, preprocess_assembly_file};
 
 pub use ez80::{
-    AssemblyOptions, CheckedEz80Program, emit_ez80_assembly, emit_ez80_assembly_from_checked,
-    emit_ez80_assembly_with_debug_comments, emit_ez80_assembly_with_options,
+    AssemblyOptions, CheckedEz80Program, GameBoyBankingMapper, GameBoyBankingOptions,
+    emit_ez80_assembly, emit_ez80_assembly_from_checked, emit_ez80_assembly_with_debug_comments,
+    emit_ez80_assembly_with_options,
 };
 #[cfg(any(feature = "std", feature = "lr35902"))]
 pub use lr35902_emitter::emit_lr35902_assembly_with_options;
