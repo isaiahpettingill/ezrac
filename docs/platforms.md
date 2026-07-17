@@ -306,12 +306,22 @@ Target:
 zxspectrum-z80
 ```
 
-Default output is an auto-start `.tap` containing a BASIC loader and CODE block. Built-in SDK modules are:
+Default output is an auto-start `.tap` containing a BASIC loader and one CODE block. It is intended for a conventional 48K load; it does not package extra tape assets, banked content, TZX, SCL, or Z80 snapshots.
+
+Built-in SDK modules are:
 
 ```text
 zx.rom
+zx.text
 zx.screen
+zx.io
+zx.keyboard
+zx.sound
+zx.memory
+zx.interrupt
 ```
+
+`zx.rom`, `zx.text`, `zx.screen`, the keyboard matrix functions, ULA border/beeper output, and interrupt helpers target stock Spectrum hardware. `zx.keyboard.read_kempston()` requires an optional Kempston-compatible joystick interface. AY functions in `zx.sound` and the `0x7FFD` paging functions in `zx.memory` require a 128K-compatible machine; the default `zxspectrum-z80` tape loader does not configure a 128K model or load banked content.
 
 Default layout highlights:
 
@@ -328,7 +338,7 @@ Symbols include `ZX_SCREEN_BASE`, `ZX_ATTR_BASE`, `ZX_ROM_PRINT_CHAR`, and `ZX_R
 
 Coding guidance:
 
-Use ROM and screen wrappers where possible. Treat display memory as volatile and keep stack/system memory clear unless your loader and custom layout say otherwise.
+Use ROM and screen wrappers where possible. For raw keyboard reads, use the row-specific masks such as `keyboard.KEY_Z` with their matching row; `KEY0` through `KEY4` are only raw row bit positions. Treat display memory as volatile and keep stack/system memory clear unless your loader and custom layout say otherwise.
 
 ## Commodore 64
 

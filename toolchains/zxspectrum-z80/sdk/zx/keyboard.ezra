@@ -7,11 +7,19 @@ pub const ROW_POIUY: u16 = 0xDFFE
 pub const ROW_ENTER_LKJH: u16 = 0xBFFE
 pub const ROW_SPACE_SYM_MNB: u16 = 0x7FFE
 
+// Raw bit positions returned by read_row. Use the row-specific names below
+// when reading a known keyboard row.
 pub const KEY0: u8 = 0x01
 pub const KEY1: u8 = 0x02
 pub const KEY2: u8 = 0x04
 pub const KEY3: u8 = 0x08
 pub const KEY4: u8 = 0x10
+
+pub const KEY_CAPS_SHIFT: u8 = KEY0
+pub const KEY_Z: u8 = KEY1
+pub const KEY_X: u8 = KEY2
+pub const KEY_C: u8 = KEY3
+pub const KEY_V: u8 = KEY4
 
 pub const KEMPSTON_PORT: u8 = 0x1F
 pub const KEMPSTON_RIGHT: u8 = 0x01

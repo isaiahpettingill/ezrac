@@ -10,9 +10,9 @@ fn main() {
         let keys: u8 = keyboard.read_row(keyboard.ROW_SHIFT_ZXCV)
         let joystick: u8 = keyboard.read_kempston()
 
-        if (keys & keyboard.KEY1) != 0 || (joystick & keyboard.KEMPSTON_LEFT) != 0 {
+        if (keys & keyboard.KEY_Z) != 0 || (joystick & keyboard.KEMPSTON_LEFT) != 0 {
             screen.border(screen.RED)
-        } else if (keys & keyboard.KEY2) != 0 || (joystick & keyboard.KEMPSTON_RIGHT) != 0 {
+        } else if (keys & keyboard.KEY_X) != 0 || (joystick & keyboard.KEMPSTON_RIGHT) != 0 {
             screen.border(screen.GREEN)
         } else if (joystick & keyboard.KEMPSTON_FIRE) != 0 {
             screen.border(screen.YELLOW)

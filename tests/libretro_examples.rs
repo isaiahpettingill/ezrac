@@ -356,6 +356,20 @@ fn is_blue(pixel: u32) -> bool {
     blue > red && blue > green
 }
 
+fn is_red(pixel: u32) -> bool {
+    let red = (pixel >> 16) & 0xff;
+    let green = (pixel >> 8) & 0xff;
+    let blue = pixel & 0xff;
+    red > green && red > blue
+}
+
+fn is_green(pixel: u32) -> bool {
+    let red = (pixel >> 16) & 0xff;
+    let green = (pixel >> 8) & 0xff;
+    let blue = pixel & 0xff;
+    green > red && green > blue
+}
+
 fn is_cyan(pixel: u32) -> bool {
     let red = (pixel >> 16) & 0xff;
     let green = (pixel >> 8) & 0xff;
@@ -729,6 +743,18 @@ fn zx_spectrum_examples_run_on_real_core() {
         "examples/zxspectrum-z80/mandelbrot/src/main.ezra",
         "examples/zxspectrum-z80/mandelbrot/target/zxspectrum-z80/zx-mandelbrot.tap",
     );
+    let graphics = build_example(
+        "examples/zxspectrum-z80/graphics/src/main.ezra",
+        "examples/zxspectrum-z80/graphics/target/zxspectrum-z80/zx-graphics.tap",
+    );
+    let input = build_example(
+        "examples/zxspectrum-z80/input/src/main.ezra",
+        "examples/zxspectrum-z80/input/target/zxspectrum-z80/zx-input.tap",
+    );
+    let sound = build_example(
+        "examples/zxspectrum-z80/sound/src/main.ezra",
+        "examples/zxspectrum-z80/sound/target/zxspectrum-z80/zx-sound.tap",
+    );
 
     let mut game = open_session(&core, &cartridge, "ZX Spectrum hello example");
     game.run_frames(1_200).unwrap();
@@ -774,6 +800,53 @@ fn zx_spectrum_examples_run_on_real_core() {
         "ZX Spectrum Mandelbrot did not render its blue interior"
     );
     capture(&game, "zx-spectrum-mandelbrot");
+    drop(game);
+
+    let mut game = open_session(&core, &graphics, "ZX Spectrum graphics example");
+    game.run_frames(6_000).unwrap();
+    start_zx_loaded_code(&mut game);
+    game.run_frames(300).unwrap();
+    assert_non_uniform_frame(&game, "ZX Spectrum graphics example");
+    assert!(
+        is_blue(game.pixel_xrgb(2, 2).unwrap()),
+        "ZX Spectrum graphics example did not set a blue border"
+    );
+    capture(&game, "zx-spectrum-graphics");
+    drop(game);
+
+    let mut game = open_session(&core, &input, "ZX Spectrum input example");
+    game.run_frames(6_000).unwrap();
+    start_zx_loaded_code(&mut game);
+    game.run_frames(60).unwrap();
+    game.set_key(key::Z, true);
+    game.run_frames(6).unwrap();
+    assert!(
+        is_red(game.pixel_xrgb(2, 2).unwrap()),
+        "ZX Spectrum input example did not detect Z from the keyboard matrix"
+    );
+    game.set_key(key::Z, false);
+    game.set_key(key::X, true);
+    game.run_frames(6).unwrap();
+    assert!(
+        is_green(game.pixel_xrgb(2, 2).unwrap()),
+        "ZX Spectrum input example did not detect X from the keyboard matrix"
+    );
+    game.set_key(key::X, false);
+    capture(&game, "zx-spectrum-input");
+    drop(game);
+
+    let mut game = open_session(&core, &sound, "ZX Spectrum sound example");
+    game.run_frames(6_000).unwrap();
+    start_zx_loaded_code(&mut game);
+    assert!(
+        heard_audio_during(&mut game, 60),
+        "ZX Spectrum sound example did not produce ULA beeper samples"
+    );
+    assert!(
+        is_blue(game.pixel_xrgb(2, 2).unwrap()),
+        "ZX Spectrum sound example did not preserve its blue border"
+    );
+    capture(&game, "zx-spectrum-sound");
 }
 
 #[test]
