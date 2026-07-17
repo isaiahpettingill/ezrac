@@ -134,6 +134,74 @@ fn build_uses_project_input_when_path_is_omitted() {
 }
 
 #[test]
+fn build_builds_every_configured_project_target() {
+    let root = temp_root("build_multi_target_project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+            [build]
+            target = ["cpm-2.2-z80", "zxspectrum-z80"]
+            executable = "demo"
+            "#,
+    )
+    .unwrap();
+    let source_path = root.join("src/main.ezra");
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    build(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        input_kind: None,
+        assembler_cpu: None,
+        layout_path: None,
+        target: None,
+    })
+    .unwrap();
+
+    assert!(root.join("target/cpm-2.2-z80/demo.asm").exists());
+    assert!(root.join("target/cpm-2.2-z80/demo.com").exists());
+    assert!(root.join("target/zxspectrum-z80/demo.asm").exists());
+    assert!(root.join("target/zxspectrum-z80/demo.tap").exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn explicit_build_target_overrides_project_target_array() {
+    let root = temp_root("build_multi_target_override");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+            [build]
+            target = ["cpm-2.2-z80", "zxspectrum-z80"]
+            executable = "demo"
+            "#,
+    )
+    .unwrap();
+    let source_path = root.join("src/main.ezra");
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    build(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        input_kind: None,
+        assembler_cpu: None,
+        layout_path: None,
+        target: Some("zxspectrum-z80".to_owned()),
+    })
+    .unwrap();
+
+    assert!(!root.join("target/cpm-2.2-z80").exists());
+    assert!(root.join("target/zxspectrum-z80/demo.tap").exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn ez80_harness_project_config_writes_target_artifacts() {
     let root = temp_root("ez80_harness_project_artifacts");
     std::fs::create_dir_all(root.join("src")).unwrap();

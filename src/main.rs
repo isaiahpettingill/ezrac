@@ -981,10 +981,26 @@ fn validate_layout_for_target_profile(
 }
 
 fn build(options: &BuildCommandOptions) -> Result<(), String> {
-    let outputs = build_source_with_build_options(options)?;
-    println!("wrote {}", outputs.asm.display());
-    println!("wrote {}", outputs.map.display());
-    println!("wrote {}", outputs.executable.display());
+    let source_path = resolve_build_source_path(options)?;
+    let targets = if let Some(target) = &options.target {
+        vec![Some(target.clone())]
+    } else {
+        load_nearest_project_config(&source_path)
+            .map_err(|error| error.to_string())?
+            .map(|project| project.targets.into_iter().map(Some).collect())
+            .filter(|targets: &Vec<Option<String>>| !targets.is_empty())
+            .unwrap_or_else(|| vec![None])
+    };
+
+    for target in targets {
+        let mut target_options = options.clone();
+        target_options.path = Some(source_path.to_string_lossy().into_owned());
+        target_options.target = target;
+        let outputs = build_source_with_build_options(&target_options)?;
+        println!("wrote {}", outputs.asm.display());
+        println!("wrote {}", outputs.map.display());
+        println!("wrote {}", outputs.executable.display());
+    }
     Ok(())
 }
 
