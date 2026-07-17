@@ -51,7 +51,7 @@ pub fn validate_program(program: &crate::ast::Program, cpu: CpuFamily) -> Result
             Declaration::Function(function) if !supports_port_io => {
                 validate_no_port_stmts(&function.body, cpu)?;
             }
-            Declaration::Cfg { declaration, .. } => {
+            Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
                 validate_program(
                     &crate::ast::Program {
                         source_path: program.source_path.clone(),
@@ -107,6 +107,7 @@ fn validate_no_port_expr(expr: &Expr, cpu: CpuFamily) -> Result<(), Diagnostic> 
         Expr::Index { index, .. }
         | Expr::AddressOfIndex { index, .. }
         | Expr::Deref(index)
+        | Expr::BankedPointer { pointer: index, .. }
         | Expr::Unary { expr: index, .. }
         | Expr::Cast { expr: index, .. } => validate_no_port_expr(index, cpu)?,
         Expr::Access(path) | Expr::AddressOfAccess(path) => {
@@ -157,7 +158,9 @@ fn validate_inline_asm_operand_classes(program: &crate::ast::Program) -> Result<
             Declaration::Alias(alias) => {
                 aliases.insert(alias.name.clone(), alias.ty.clone());
             }
-            Declaration::Cfg { declaration, .. } => collect_aliases(declaration, aliases),
+            Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                collect_aliases(declaration, aliases)
+            }
             _ => {}
         }
     }
@@ -252,7 +255,9 @@ fn validate_inline_asm_operand_classes(program: &crate::ast::Program) -> Result<
     ) -> Result<(), Diagnostic> {
         match declaration {
             Declaration::Function(function) => validate_stmts(&function.body, aliases),
-            Declaration::Cfg { declaration, .. } => validate_declaration(declaration, aliases),
+            Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                validate_declaration(declaration, aliases)
+            }
             _ => Ok(()),
         }
     }

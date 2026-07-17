@@ -12,6 +12,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
     },
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
     target::{
@@ -118,7 +119,7 @@ pub fn collect_ez80_semantic_diagnostics(
     };
     let mut diagnostics = Vec::new();
     for declaration in &program.declarations {
-        let Declaration::Function(function) = declaration else {
+        let Declaration::Function(function) = unwrapped_declaration(declaration) else {
             continue;
         };
         collect_stmt_call_diagnostics(
@@ -173,7 +174,7 @@ fn locate_program_diagnostic(program: &Program, error: Diagnostic) -> Diagnostic
     program
         .declarations
         .iter()
-        .filter_map(|declaration| match declaration {
+        .filter_map(|declaration| match unwrapped_declaration(declaration) {
             Declaration::Function(function) => Some(function),
             _ => None,
         })
@@ -254,7 +255,7 @@ pub fn emit_ez80_assembly_from_checked(
     emitter.emit_start_tail();
     emitter.emit_function(main)?;
     for declaration in &program.declarations {
-        let Declaration::Function(function) = declaration else {
+        let Declaration::Function(function) = unwrapped_declaration(declaration) else {
             continue;
         };
         if function.name != "main" && emitted_functions.contains(&function.name) {
@@ -2834,6 +2835,7 @@ impl Emitter {
             Expr::Deref(ptr) => {
                 self.emit_deref_to_hl(ptr, width)?;
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr_to_hl(pointer, width)?,
             Expr::Field { base, field } => {
                 if self.emit_dotted_constant_to_hl(base, field, width)? {
                     return Ok(());
@@ -3182,6 +3184,7 @@ impl Emitter {
             Expr::Deref(ptr) => {
                 self.emit_deref_to_a(ptr)?;
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr_to_a(pointer)?,
             Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) | Expr::Bool(_) => {
                 let value = self.u8(expr)?;
                 self.line(&format!("    ld a, {:02X}h", value));
@@ -5335,6 +5338,7 @@ impl Emitter {
             },
             Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
             Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
             Expr::Call { path, .. }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
             {
@@ -5439,6 +5443,7 @@ impl Emitter {
                 ))),
             },
             Expr::Cast { ty, .. } => self.symbols.type_width(ty),
+            Expr::BankedPointer { pointer, .. } => self.expr_width(pointer),
             Expr::Call { path, .. }
                 if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
             {
@@ -5695,9 +5700,10 @@ impl Emitter {
                     self.validate_typed_literal_ranges(expr)
                 }
             }
-            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
-                self.validate_typed_literal_ranges(expr)
-            }
+            Expr::Unary { expr, .. }
+            | Expr::Cast { expr, .. }
+            | Expr::Deref(expr)
+            | Expr::BankedPointer { pointer: expr, .. } => self.validate_typed_literal_ranges(expr),
             Expr::Binary { left, right, .. } => {
                 self.validate_typed_literal_ranges(left)?;
                 self.validate_typed_literal_ranges(right)
@@ -5785,7 +5791,9 @@ impl Emitter {
                     }
                 }
             }
-            Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            Expr::Cast { expr, .. }
+            | Expr::Deref(expr)
+            | Expr::BankedPointer { pointer: expr, .. } => {
                 self.validate_expr_arithmetic_compatibility(expr)?;
             }
             Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
@@ -6553,7 +6561,9 @@ fn validate_expr_calls(
                 validate_expr_calls(arg, functions)?;
             }
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => validate_expr_calls(expr, functions)?,
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::BankedPointer { pointer: expr, .. } => validate_expr_calls(expr, functions)?,
         Expr::Binary { left, right, .. } => {
             validate_expr_calls(left, functions)?;
             validate_expr_calls(right, functions)?;
@@ -6840,7 +6850,10 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<String>) {
                 collect_expr_calls(value, calls);
             }
         }
-        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } | Expr::Deref(index) => {
+        Expr::Index { index, .. }
+        | Expr::AddressOfIndex { index, .. }
+        | Expr::Deref(index)
+        | Expr::BankedPointer { pointer: index, .. } => {
             collect_expr_calls(index, calls);
         }
         Expr::Access(path) | Expr::AddressOfAccess(path) => collect_access_calls(path, calls),
@@ -6977,7 +6990,9 @@ fn storage_ranges_overlap(left: Variable, right: Variable) -> bool {
 
 fn declaration_name(declaration: &Declaration) -> Option<&str> {
     match declaration {
-        Declaration::Cfg { declaration, .. } => declaration_name(declaration),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            declaration_name(declaration)
+        }
         Declaration::Import(_) => None,
         Declaration::Const(decl) => Some(&decl.name),
         Declaration::Alias(decl) => Some(&decl.name),
@@ -7026,9 +7041,10 @@ fn collect_const_dependency_names(expr: &Expr, names: &mut Vec<String>) {
                 }
             }
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
-            collect_const_dependency_names(expr, names)
-        }
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Deref(expr)
+        | Expr::BankedPointer { pointer: expr, .. } => collect_const_dependency_names(expr, names),
         Expr::Binary { left, right, .. } => {
             collect_const_dependency_names(left, names);
             collect_const_dependency_names(right, names);
@@ -7084,9 +7100,10 @@ fn collect_const_address_roots(expr: &Expr, roots: &mut Vec<String>) {
                 }
             }
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
-            collect_const_address_roots(expr, roots)
-        }
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Deref(expr)
+        | Expr::BankedPointer { pointer: expr, .. } => collect_const_address_roots(expr, roots),
         Expr::Binary { left, right, .. } => {
             collect_const_address_roots(left, roots);
             collect_const_address_roots(right, roots);
@@ -7346,6 +7363,9 @@ fn expr_summary(expr: &Expr) -> String {
             expr_summary(right)
         ),
         Expr::Cast { ty, expr } => format!("cast<{}>({})", type_display(ty), expr_summary(expr)),
+        Expr::BankedPointer { pointer, bank } => {
+            format!("banked_ptr<{bank}>({})", expr_summary(pointer))
+        }
     }
 }
 

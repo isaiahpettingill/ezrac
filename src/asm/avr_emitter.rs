@@ -669,6 +669,7 @@ impl Emitter {
                 self.copy_result_to_zp();
                 self.load_indirect(width);
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
             Expr::Call { path, args } => self.emit_call(path, args, expected)?,
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, expected)?;
@@ -1430,6 +1431,7 @@ impl Emitter {
             Expr::AddressOfAccess(path) => Ok(Type::Ptr(Box::new(self.access_type(path)?))),
             Expr::AddressOf(name) => Ok(Type::Ptr(Box::new(self.binding(name)?.ty))),
             Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
+            Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
             Expr::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
                 Type::Ptr(inner) => Ok(*inner),
                 _ => Err(Diagnostic::new("dereference requires pointer")),
@@ -2022,7 +2024,10 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<Vec<String>>) {
                 collect_expr_calls(value, calls);
             }
         }
-        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => {
             collect_expr_calls(value, calls);
         }
         Expr::Call { path, args } => {

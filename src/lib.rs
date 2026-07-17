@@ -21,6 +21,7 @@ pub mod banking;
 pub mod cart;
 #[cfg(feature = "std")]
 pub mod compile;
+mod declaration;
 pub mod diagnostic;
 pub mod hir;
 pub mod layout;

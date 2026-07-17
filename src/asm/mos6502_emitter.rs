@@ -5,6 +5,7 @@ use crate::{
         Stmt, Type, UnaryOp,
     },
     compat::prelude::*,
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
     tbir::{
@@ -100,7 +101,7 @@ impl Emitter {
         self.functions = program
             .declarations
             .iter()
-            .filter_map(|declaration| match declaration {
+            .filter_map(|declaration| match unwrapped_declaration(declaration) {
                 Declaration::Function(function) => Some((function.name.clone(), function.clone())),
                 _ => None,
             })
@@ -123,7 +124,7 @@ impl Emitter {
 
         let emitted_functions = reachable_function_names(program, &self.model);
         for declaration in &program.declarations {
-            if let Declaration::Function(function) = declaration
+            if let Declaration::Function(function) = unwrapped_declaration(declaration)
                 && emitted_functions.contains(&function.name)
                 && (function.name == "main"
                     || !mos_inline_candidate(function)
@@ -160,7 +161,7 @@ impl Emitter {
             }
         }
         for declaration in &program.declarations {
-            if let Declaration::Global(global) = declaration {
+            if let Declaration::Global(global) = unwrapped_declaration(declaration) {
                 let storage = self.model.globals[&global.name];
                 self.emit_initializer(storage, &global.ty, &global.value)?;
             }
@@ -527,6 +528,7 @@ impl Emitter {
                 self.copy_result_to_zp();
                 self.load_indirect(width);
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
             Expr::Call { path, args } => self.emit_call(path, args, expected)?,
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, expected)?;
@@ -1407,6 +1409,7 @@ impl Emitter {
                 Type::Ptr(inner) => Ok(*inner),
                 _ => Err(Diagnostic::new("dereference requires pointer")),
             },
+            Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
             Expr::Call { path, .. } => self
                 .model
                 .functions
@@ -1984,7 +1987,10 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<Vec<String>>) {
                 collect_expr_calls(value, calls);
             }
         }
-        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => {
             collect_expr_calls(value, calls);
         }
         Expr::Call { path, args } => {

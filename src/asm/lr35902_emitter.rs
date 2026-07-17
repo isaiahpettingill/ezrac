@@ -6,6 +6,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
     },
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
     target::CpuFamily,
@@ -112,14 +113,14 @@ impl Emitter {
         // Inline assembly can reference function symbols that are intentionally opaque to
         // source-level call analysis, so retain every declared function for link correctness.
         emitted_functions.extend(program.declarations.iter().filter_map(|declaration| {
-            if let Declaration::Function(function) = declaration {
+            if let Declaration::Function(function) = unwrapped_declaration(declaration) {
                 Some(function.name.clone())
             } else {
                 None
             }
         }));
         for declaration in &program.declarations {
-            if let Declaration::Function(function) = declaration
+            if let Declaration::Function(function) = unwrapped_declaration(declaration)
                 && emitted_functions.contains(&function.name)
             {
                 self.emit_function(function)?;
@@ -171,7 +172,7 @@ impl Emitter {
             }
         }
         for declaration in &program.declarations {
-            if let Declaration::Global(global) = declaration {
+            if let Declaration::Global(global) = unwrapped_declaration(declaration) {
                 let storage = self.model.globals[&global.name];
                 self.emit_initializer(storage, &global.ty, &global.value)?;
             }
@@ -535,6 +536,7 @@ impl Emitter {
                 self.copy_result_to_zp();
                 self.load_indirect(width);
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
             Expr::Call { path, args } => self.emit_call(path, args, expected)?,
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, expected)?;
@@ -1276,6 +1278,7 @@ impl Emitter {
                 Type::Ptr(inner) => Ok(*inner),
                 _ => Err(Diagnostic::new("dereference requires pointer")),
             },
+            Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
             Expr::Call { path, .. } => self
                 .model
                 .functions
@@ -1923,7 +1926,10 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<Vec<String>>) {
                 collect_expr_calls(value, calls);
             }
         }
-        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => {
             collect_expr_calls(value, calls);
         }
         Expr::Call { path, args } => {

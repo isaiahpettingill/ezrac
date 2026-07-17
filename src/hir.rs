@@ -115,7 +115,9 @@ impl HirProgram {
 
 fn lower_declaration(declaration: &Declaration) -> Option<HirDeclaration> {
     match declaration {
-        Declaration::Cfg { declaration, .. } => lower_declaration(declaration),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            lower_declaration(declaration)
+        }
         Declaration::Import(_) => None,
         Declaration::Const(decl) => Some(HirDeclaration::Const(HirObject {
             public: decl.public,
@@ -270,6 +272,7 @@ fn analyze_expr(expr: &Expr, function_name: &str, analysis: &mut HirFunctionAnal
         Expr::Index { index, .. }
         | Expr::AddressOfIndex { index, .. }
         | Expr::Deref(index)
+        | Expr::BankedPointer { pointer: index, .. }
         | Expr::Unary { expr: index, .. }
         | Expr::Cast { expr: index, .. } => analyze_expr(index, function_name, analysis),
         Expr::Access(path) | Expr::AddressOfAccess(path) => {

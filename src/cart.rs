@@ -9,6 +9,7 @@ use crate::{
         AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, Program, Stmt,
         StructDecl, Type, UnaryOp,
     },
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     layout::{Layout, Region},
     target::{
@@ -617,7 +618,7 @@ fn section_usage_from_globals(program: &Program) -> Result<HashMap<String, u32>,
     let mut usage = HashMap::<String, u32>::new();
 
     for declaration in &program.declarations {
-        let Declaration::Global(decl) = declaration else {
+        let Declaration::Global(decl) = unwrapped_declaration(declaration) else {
             continue;
         };
         if module_alias_original_name(&decl.name).is_some() {
@@ -671,7 +672,7 @@ fn section_usage_from_string_literals(program: &Program) -> Result<u32, Diagnost
 
 fn collect_declaration_string_literals(declaration: &Declaration, literals: &mut HashSet<String>) {
     match declaration {
-        Declaration::Cfg { declaration, .. } => {
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
             collect_declaration_string_literals(declaration, literals)
         }
         Declaration::Const(decl) => collect_expr_string_literals(&decl.value, literals),
@@ -748,9 +749,10 @@ fn collect_expr_string_literals(expr: &Expr, literals: &mut HashSet<String>) {
                 collect_expr_string_literals(value, literals);
             }
         }
-        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
-            collect_expr_string_literals(value, literals)
-        }
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => collect_expr_string_literals(value, literals),
         Expr::Call { args, .. } => {
             for arg in args {
                 collect_expr_string_literals(arg, literals);
@@ -783,7 +785,7 @@ fn collect_access_path_string_literals(path: &AccessPath, literals: &mut HashSet
 fn collect_structs(program: &Program) -> HashMap<String, &StructDecl> {
     let mut structs = HashMap::new();
     for declaration in &program.declarations {
-        if let Declaration::Struct(decl) = declaration {
+        if let Declaration::Struct(decl) = unwrapped_declaration(declaration) {
             structs.insert(decl.name.clone(), decl);
         }
     }
@@ -867,7 +869,7 @@ fn collect_assets(program: &Program) -> Result<Vec<AssetEntry>, Diagnostic> {
     let aliases = collect_embed_aliases(program);
     let constants = collect_embed_constants(program)?;
     for declaration in &program.declarations {
-        let Declaration::Embed(decl) = declaration else {
+        let Declaration::Embed(decl) = unwrapped_declaration(declaration) else {
             continue;
         };
         if module_alias_original_name(&decl.name).is_some() {
@@ -924,7 +926,9 @@ fn validate_embed_alignment_expr(
         Expr::Unary {
             op: UnaryOp::Not, ..
         } => err_embed_alignment_not_integer(name),
-        Expr::Unary { expr, .. } => validate_embed_alignment_expr(name, expr, program, aliases),
+        Expr::Unary { expr, .. } | Expr::BankedPointer { pointer: expr, .. } => {
+            validate_embed_alignment_expr(name, expr, program, aliases)
+        }
         Expr::Binary { op, .. } if is_bool_result_op(*op) => err_embed_alignment_not_integer(name),
         Expr::Binary { left, right, .. } => {
             validate_embed_alignment_expr(name, left, program, aliases)?;
@@ -979,7 +983,7 @@ fn is_bool_result_op(op: BinaryOp) -> bool {
 fn collect_embed_aliases(program: &Program) -> HashMap<String, Type> {
     let mut aliases = HashMap::new();
     for declaration in &program.declarations {
-        if let Declaration::Alias(decl) = declaration {
+        if let Declaration::Alias(decl) = unwrapped_declaration(declaration) {
             aliases.insert(decl.name.clone(), decl.ty.clone());
         }
     }
@@ -1183,7 +1187,7 @@ fn collect_embed_constants(program: &Program) -> Result<HashMap<String, i64>, Di
     let mut constants = HashMap::new();
     let mut evaluating = HashSet::new();
     for declaration in &program.declarations {
-        match declaration {
+        match unwrapped_declaration(declaration) {
             Declaration::Const(decl) => {
                 evaluate_embed_constant(
                     &decl.name,
@@ -1278,7 +1282,7 @@ fn find_embed_constant_declaration<'a>(
     program
         .declarations
         .iter()
-        .find_map(|declaration| match declaration {
+        .find_map(|declaration| match unwrapped_declaration(declaration) {
             Declaration::Const(decl) if decl.name == name => Some((&decl.value, Some(&decl.ty))),
             Declaration::Mmio(decl) if decl.name == name => Some((&decl.value, None)),
             _ => None,
@@ -1454,6 +1458,9 @@ fn eval_embed_expr_with_aliases(
             let value = eval_embed_expr_with_aliases(expr, constants, aliases)?;
             wrap_embed_const_value(value, ty, aliases)
         }
+        Expr::BankedPointer { pointer, .. } => {
+            eval_embed_expr_with_aliases(pointer, constants, aliases)
+        }
         _ => Err(Diagnostic::new(
             "embed expressions must be integer constants",
         )),
@@ -1474,7 +1481,10 @@ fn collect_embed_constant_dependency_names(expr: &Expr, names: &mut Vec<String>)
                 }
             }
         }
-        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } | Expr::Deref(expr) => {
+        Expr::Cast { expr, .. }
+        | Expr::Unary { expr, .. }
+        | Expr::Deref(expr)
+        | Expr::BankedPointer { pointer: expr, .. } => {
             collect_embed_constant_dependency_names(expr, names)
         }
         Expr::Binary { left, right, .. } => {

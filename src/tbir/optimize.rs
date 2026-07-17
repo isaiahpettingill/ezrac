@@ -19,7 +19,9 @@ pub fn optimize_program(program: &Program) -> (Program, TbirOptimizationReport) 
 
 fn optimize_declaration(declaration: &mut Declaration, report: &mut TbirOptimizationReport) {
     match declaration {
-        Declaration::Cfg { declaration, .. } => optimize_declaration(declaration, report),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            optimize_declaration(declaration, report)
+        }
         Declaration::Function(function) => optimize_function(function, report),
         Declaration::Const(decl) => {
             decl.value = optimize_expr(
@@ -203,6 +205,10 @@ fn optimize_expr(
                 .collect(),
         },
         Expr::Deref(value) => Expr::Deref(Box::new(optimize_expr(*value, constants, report))),
+        Expr::BankedPointer { pointer, bank } => Expr::BankedPointer {
+            pointer: Box::new(optimize_expr(*pointer, constants, report)),
+            bank,
+        },
         Expr::Call { path, args } => Expr::Call {
             path,
             args: args

@@ -672,7 +672,7 @@ fn collect_declaration_references(
                 output,
             );
         }
-        Declaration::Cfg { declaration, .. } => {
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
             collect_declaration_references(declaration, globals, default_sdk_symbols, output)
         }
         Declaration::Embed(_)
@@ -831,7 +831,10 @@ fn collect_expr_references(
                 collect_expr_references(arg, names, default_sdk_symbols, output);
             }
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Deref(expr)
+        | Expr::BankedPointer { pointer: expr, .. } => {
             collect_expr_references(expr, names, default_sdk_symbols, output)
         }
         Expr::Binary { left, right, .. } => {
@@ -1132,7 +1135,13 @@ fn validate_main_signature(main: &Function) -> Result<(), Diagnostic> {
 }
 
 fn is_entry_function(declaration: &Declaration) -> bool {
-    matches!(declaration, Declaration::Function(function) if function.name == "main")
+    match declaration {
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            is_entry_function(declaration)
+        }
+        Declaration::Function(function) => function.name == "main",
+        _ => false,
+    }
 }
 
 fn active_declarations(
@@ -1161,6 +1170,14 @@ fn active_declaration(
                 }
             }
             active_declaration(*declaration, context)
+        }
+        Declaration::Bank { bank, declaration } => {
+            active_declaration(*declaration, context).map(|declaration| {
+                declaration.map(|declaration| Declaration::Bank {
+                    bank,
+                    declaration: Box::new(declaration),
+                })
+            })
         }
         declaration => Ok(Some(declaration)),
     }
@@ -1793,6 +1810,19 @@ fn module_alias_declarations(
 
 fn alias_declaration(declaration: &Declaration, prefix: &str) -> Option<Declaration> {
     match declaration {
+        Declaration::Cfg {
+            predicates,
+            declaration,
+        } => alias_declaration(declaration, prefix).map(|declaration| Declaration::Cfg {
+            predicates: predicates.clone(),
+            declaration: Box::new(declaration),
+        }),
+        Declaration::Bank { bank, declaration } => {
+            alias_declaration(declaration, prefix).map(|declaration| Declaration::Bank {
+                bank: *bank,
+                declaration: Box::new(declaration),
+            })
+        }
         Declaration::Alias(decl) if decl.public => {
             let mut alias = decl.clone();
             alias.name = format!("{prefix}.{}", alias.name);
@@ -1923,7 +1953,7 @@ fn validate_declaration_private_import_access(
     private_imports: &HashMap<String, String>,
 ) -> Result<(), Diagnostic> {
     match declaration {
-        Declaration::Cfg { declaration, .. } => {
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
             validate_declaration_private_import_access(declaration, private_imports)
         }
         Declaration::Const(decl) => {
@@ -2130,7 +2160,9 @@ fn validate_expr_private_import_access(
             validate_type_private_import_access(ty, private_imports)?;
             validate_expr_private_import_access(expr, private_imports, locals)
         }
-        Expr::Unary { expr, .. } | Expr::Deref(expr) => {
+        Expr::Unary { expr, .. }
+        | Expr::Deref(expr)
+        | Expr::BankedPointer { pointer: expr, .. } => {
             validate_expr_private_import_access(expr, private_imports, locals)
         }
         Expr::Binary { left, right, .. } => {
@@ -2222,7 +2254,9 @@ fn reject_private_import_name(
 
 fn declaration_name(declaration: &Declaration) -> Option<&str> {
     match declaration {
-        Declaration::Cfg { declaration, .. } => declaration_name(declaration),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            declaration_name(declaration)
+        }
         Declaration::Import(_) => None,
         Declaration::Const(decl) => Some(&decl.name),
         Declaration::Alias(decl) => Some(&decl.name),
@@ -2238,7 +2272,9 @@ fn declaration_name(declaration: &Declaration) -> Option<&str> {
 
 fn declaration_is_public(declaration: &Declaration) -> bool {
     match declaration {
-        Declaration::Cfg { declaration, .. } => declaration_is_public(declaration),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            declaration_is_public(declaration)
+        }
         Declaration::Import(_) => true,
         Declaration::Const(decl) => decl.public,
         Declaration::Alias(decl) => decl.public,

@@ -6,6 +6,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
     },
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
     target::CpuFamily,
@@ -98,7 +99,7 @@ impl Emitter {
         self.functions = program
             .declarations
             .iter()
-            .filter_map(|declaration| match declaration {
+            .filter_map(|declaration| match unwrapped_declaration(declaration) {
                 Declaration::Function(function) if !function.name.contains('.') => {
                     Some((function.name.clone(), function.clone()))
                 }
@@ -131,7 +132,7 @@ impl Emitter {
         self.line("__ezra_exit:");
         self.line("    b @__ezra_exit");
         for declaration in &program.declarations {
-            if let Declaration::Function(function) = declaration
+            if let Declaration::Function(function) = unwrapped_declaration(declaration)
                 && !function.name.contains('.')
                 && reachable.contains(&function.name)
                 && (function.name == "main"
@@ -194,7 +195,7 @@ impl Emitter {
             }
         }
         for declaration in &program.declarations {
-            let Declaration::Global(global) = declaration else {
+            let Declaration::Global(global) = unwrapped_declaration(declaration) else {
                 continue;
             };
             let storage = self.model.globals[&global.name];
@@ -437,6 +438,7 @@ impl Emitter {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
                 self.load_indirect_r0(ty)?;
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, ty)?,
             Expr::Call { path, args } => self.emit_call(path, args)?,
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, ty)?;
@@ -1229,7 +1231,10 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<Vec<String>>) {
                 collect_expr_calls(value, calls);
             }
         }
-        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => {
             collect_expr_calls(value, calls);
         }
         Expr::Call { path, args } => {
@@ -1336,7 +1341,10 @@ fn collect_expr_strings(expr: &Expr, values: &mut HashSet<String>) {
                 collect_expr_strings(value, values);
             }
         }
-        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => {
             collect_expr_strings(value, values);
         }
         Expr::Call { args, .. } => {

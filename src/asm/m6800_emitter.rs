@@ -346,6 +346,7 @@ impl Emitter {
                 self.require_scalar(ty, "cast")?;
                 self.emit_expr(expr, ty)?;
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
             Expr::String(_)
             | Expr::Array(_)
             | Expr::StructInit { .. }

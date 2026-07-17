@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     ast::{BinaryOp, Declaration, EmbedSource, Expr, Program, Type, UnaryOp},
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
 };
 
@@ -230,6 +231,7 @@ impl SemanticModel {
     fn collect(&mut self, program: &Program) -> Result<(), Diagnostic> {
         let mut names = HashSet::new();
         for declaration in &program.declarations {
+            let declaration = unwrapped_declaration(declaration);
             if let Some(name) = declaration_name(declaration)
                 && !names.insert(name.to_owned())
             {
@@ -242,7 +244,7 @@ impl SemanticModel {
         let mut pending = program
             .declarations
             .iter()
-            .filter_map(|declaration| match declaration {
+            .filter_map(|declaration| match unwrapped_declaration(declaration) {
                 Declaration::Const(declaration) => Some(declaration),
                 _ => None,
             })
@@ -263,6 +265,7 @@ impl SemanticModel {
             }
         }
         for declaration in &program.declarations {
+            let declaration = unwrapped_declaration(declaration);
             if let Declaration::Struct(declaration) = declaration {
                 let mut offset = 0;
                 let mut fields = HashMap::new();
@@ -299,6 +302,7 @@ impl SemanticModel {
             }
         }
         for declaration in &program.declarations {
+            let declaration = unwrapped_declaration(declaration);
             if let Declaration::Const(declaration) = declaration {
                 if self.constants.contains_key(&declaration.name) {
                     continue;
@@ -310,6 +314,7 @@ impl SemanticModel {
             }
         }
         for declaration in &program.declarations {
+            let declaration = unwrapped_declaration(declaration);
             match declaration {
                 Declaration::Mmio(declaration) => {
                     let address = u32::try_from(self.const_value(&declaration.value)?)
@@ -376,6 +381,7 @@ impl SemanticModel {
             }
         }
         for declaration in &program.declarations {
+            let declaration = unwrapped_declaration(declaration);
             let (name, params, return_type) = match declaration {
                 Declaration::Function(function) => {
                     (&function.name, &function.params, &function.return_type)
@@ -432,7 +438,9 @@ fn declaration_name(declaration: &Declaration) -> Option<&str> {
         Declaration::Struct(value) => Some(&value.name),
         Declaration::ExternAsmFunction(value) => Some(&value.name),
         Declaration::Function(value) => Some(&value.name),
-        Declaration::Cfg { declaration, .. } => declaration_name(declaration),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            declaration_name(declaration)
+        }
         Declaration::Import(_) => None,
     }
 }
@@ -567,7 +575,7 @@ fn collect_strings(program: &Program, model: &mut SemanticModel) -> Result<(), D
     }
     let mut values = Vec::new();
     for declaration in &program.declarations {
-        match declaration {
+        match unwrapped_declaration(declaration) {
             Declaration::Const(value) => collect_expr(&value.value, &mut values),
             Declaration::Global(value) => collect_expr(&value.value, &mut values),
             Declaration::Function(value) => collect_stmts(&value.body, &mut values),

@@ -5,6 +5,7 @@ use crate::{
         AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl, Function,
         Program, Type, UnaryOp,
     },
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     target::Address24,
 };
@@ -183,25 +184,26 @@ impl Symbols {
         }
 
         for declaration in &program.declarations {
-            if let Declaration::Alias(decl) = declaration {
+            if let Declaration::Alias(decl) = unwrapped_declaration(declaration) {
                 symbols.aliases.insert(decl.name.clone(), decl.ty.clone());
             }
         }
 
         for declaration in &program.declarations {
-            if let Declaration::Struct(decl) = declaration {
+            if let Declaration::Struct(decl) = unwrapped_declaration(declaration) {
                 let layout = symbols.build_struct_layout(&decl.fields, program)?;
                 symbols.structs.insert(decl.name.clone(), layout);
             }
         }
 
         for declaration in &program.declarations {
-            if let Declaration::Alias(decl) = declaration {
+            if let Declaration::Alias(decl) = unwrapped_declaration(declaration) {
                 symbols.validate_type_names(&decl.ty)?;
             }
         }
 
         for declaration in &program.declarations {
+            let declaration = unwrapped_declaration(declaration);
             let (name, params, return_type, extern_asm, is_interrupt) = match declaration {
                 Declaration::Function(function) => (
                     &function.name,
@@ -304,7 +306,7 @@ impl Symbols {
         }
 
         for declaration in &program.declarations {
-            match declaration {
+            match unwrapped_declaration(declaration) {
                 Declaration::Const(decl) => {
                     symbols.evaluate_const_declaration(decl, program)?;
                 }
@@ -1269,6 +1271,7 @@ impl Symbols {
                 let value = self.eval_i64(expr)?;
                 self.const_cast_value(value, ty)
             }
+            Expr::BankedPointer { pointer, .. } => self.eval_i64(pointer),
             Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
             | Expr::AddressOfAccess(_)
@@ -1374,7 +1377,10 @@ impl Symbols {
                 op: UnaryOp::BitNot,
                 ..
             } => true,
-            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) => {
+            Expr::Unary { expr, .. }
+            | Expr::Cast { expr, .. }
+            | Expr::Deref(expr)
+            | Expr::BankedPointer { pointer: expr, .. } => {
                 self.const_expr_uses_wrapping_arithmetic(expr)
             }
             Expr::Array(values) => values
@@ -1438,7 +1444,7 @@ impl Symbols {
                 self.validate_const_expr_arithmetic_compatibility(expr)?;
                 self.validate_const_cast(expr, ty)?;
             }
-            Expr::Deref(expr) => {
+            Expr::Deref(expr) | Expr::BankedPointer { pointer: expr, .. } => {
                 self.validate_const_expr_arithmetic_compatibility(expr)?;
             }
             Expr::Array(values) => {
@@ -1611,6 +1617,7 @@ impl Symbols {
                 }
             }
             Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::BankedPointer { pointer, .. } => self.const_expr_type(pointer),
             Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned())))),
             Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }

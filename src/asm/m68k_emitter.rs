@@ -520,6 +520,7 @@ impl Emitter {
                 self.require_scalar(&ty)?;
                 self.emit_expr(expr, &ty)?;
             }
+            Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
             Expr::Deref(pointer) => {
                 let pointer_ty = self.expr_type(pointer)?;
                 let Type::Ptr(inner) = self.model.resolved_type(&pointer_ty)? else {
@@ -1157,6 +1158,7 @@ impl Emitter {
                 op: UnaryOp::Not, ..
             } => Ok(Type::Named("bool".to_owned())),
             Expr::Unary { expr, .. } => self.expr_type(expr),
+            Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
             Expr::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
                 Type::Ptr(inner) => Ok(*inner),
                 _ => Err(Diagnostic::new("dereference requires pointer")),
