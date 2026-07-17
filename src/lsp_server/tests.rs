@@ -155,6 +155,31 @@ fn multi_target_projects_create_an_lsp_context_for_every_target() {
 }
 
 #[test]
+fn tiny_lisp_is_clean_for_every_configured_target() {
+    let path = repository_path("examples/tiny-lisp/main.ezra");
+    let source = fs::read_to_string(&path).unwrap();
+    let options = CompileOptions {
+        source: path.clone(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+    };
+
+    for sdk in sdks_for_path(&path).unwrap() {
+        let diagnostics = check_source_semantic_diagnostics_with_sdk_and_overrides(
+            &source,
+            &options,
+            &sdk,
+            &HashMap::new(),
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "{}: {diagnostics:#?}",
+            sdk.target.as_deref().unwrap_or_default()
+        );
+    }
+}
+
+#[test]
 fn cpm_examples_resolve_the_built_in_sdk_from_their_project_target() {
     let path = repository_path("examples/cpm-z80/console-output.ezra");
     let document = OpenDocument {

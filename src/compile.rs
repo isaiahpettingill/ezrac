@@ -110,7 +110,11 @@ fn check_diagnostics_with_sdk_and_overrides(
         Ok(program) => program,
         Err(error) => return vec![error],
     };
-    let source_program = root.clone();
+    let mut source_program = root.clone();
+    source_program.declarations = match active_declarations(source_program.declarations, sdk) {
+        Ok(declarations) => declarations,
+        Err(error) => return vec![locate_source_diagnostic(error, source, &options.source)],
+    };
     let resolved = match resolve_program_imports(
         root,
         sdk,
@@ -128,7 +132,10 @@ fn check_diagnostics_with_sdk_and_overrides(
         if normalize_path(&unit.path) == normalize_path(&source_program.source_path) {
             continue;
         }
-        if let Ok(program) = parse_program(&unit.path, &unit.text) {
+        if let Ok(mut program) = parse_program(&unit.path, &unit.text)
+            && let Ok(declarations) = active_declarations(program.declarations, sdk)
+        {
+            program.declarations = declarations;
             diagnostics.extend(collect_reference_diagnostics(
                 &program,
                 &resolved,

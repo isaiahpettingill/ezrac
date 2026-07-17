@@ -408,6 +408,19 @@ fn cfg_filters_declarations_before_semantic_checks() {
         target: Some("ti84plusce-ez80".to_owned()),
         sdk_roots: Vec::new(),
     };
+    let options = CompileOptions {
+        source: PathBuf::from("game.ezra"),
+        debug_comments: false,
+        default_sdk_symbols: true,
+    };
+    let diagnostics = check_source_semantic_diagnostics_with_sdk_and_overrides(
+        source,
+        &options,
+        &sdk,
+        &HashMap::new(),
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
     assert_eq!(program.declarations.len(), 1);
