@@ -1,0 +1,218 @@
+// DOS character I/O. All pointers are near offsets in DS=program segment.
+import dos.raw
+
+pub const BELL: u8 = 7
+pub const BACKSPACE: u8 = 8
+pub const LF: u8 = 10
+pub const CR: u8 = 13
+pub const DIRECT_INPUT: u8 = 0xFF
+
+global direct_input_ready: bool = false
+
+// AH=01h: read stdin with echo and Ctrl-C checking.
+pub fn read_echo() -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,01h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+// AH=02h: write one character to stdout.
+pub fn write_char(ch: u8) {
+    let flags: u16 = 0
+    asm volatile(in ch: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dl,{ch}"
+        "mov ah,02h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+pub fn read_aux() -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,03h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+pub fn write_aux(ch: u8) {
+    let flags: u16 = 0
+    asm volatile(in ch: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dl,{ch}"
+        "mov ah,04h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+pub fn write_printer(ch: u8) {
+    let flags: u16 = 0
+    asm volatile(in ch: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dl,{ch}"
+        "mov ah,05h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+// AH=06h. Pass DIRECT_INPUT to poll stdin; direct_ready() reports ZF.
+pub fn direct_io(value: u8) -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in value: u8 as mem, out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dl,{value}"
+        "mov ah,06h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    direct_input_ready = (flags & 0x0040) == 0
+    raw.clear()
+    return result
+}
+
+pub fn try_read() -> u8 {
+    return direct_io(DIRECT_INPUT)
+}
+
+pub fn direct_ready() -> bool {
+    return direct_input_ready
+}
+
+// AH=07h: read without echo or Ctrl-C checking.
+pub fn read_raw() -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,07h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+// AH=08h: read without echo, with Ctrl-C checking.
+pub fn read_char() -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,08h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+// AH=09h: text must be terminated by '$', not NUL.
+pub fn print_dollar(text: ptr<u8>) {
+    let flags: u16 = 0
+    asm volatile(in text: ptr<u8> as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{text}"
+        "mov ah,09h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+// AH=0Ah. buffer[0]=capacity, DOS writes count to buffer[1] and data at +2.
+pub fn read_buffered(buffer: ptr<u8>) {
+    let flags: u16 = 0
+    asm volatile(in buffer: ptr<u8> as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{buffer}"
+        "mov ah,0Ah"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+pub fn buffered_count(buffer: ptr<u8>) -> u8 {
+    return *(buffer + 1)
+}
+
+pub fn buffered_data(buffer: ptr<u8>) -> ptr<u8> {
+    return buffer + 2
+}
+
+// AH=0Bh: returns 00h or FFh.
+pub fn input_status() -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,0Bh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+pub fn key_available() -> bool {
+    return input_status() != 0
+}
+
+// AH=0Ch: flush input, then invoke input function 01h, 06h, 07h, 08h, or 0Ah.
+pub fn flush_and_read(function: u8, buffer_or_value: u16) -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in function: u8 as mem, in buffer_or_value: u16 as mem, out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov al,{function}"
+        "mov dx,{buffer_or_value}"
+        "mov ah,0Ch"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+pub fn newline() {
+    write_char(CR)
+    write_char(LF)
+}

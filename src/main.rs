@@ -1095,6 +1095,7 @@ fn build_ezra_source(
             &settings.layout,
             &program,
             settings.target.triple.cpu,
+            &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -2285,6 +2286,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
             &settings.layout,
             &program,
             settings.target.triple.cpu,
+            &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -2443,6 +2445,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
                     &settings.layout,
                     &program,
                     settings.target.triple.cpu,
+                    &settings.target.triple.value,
                     options.command.debug_comments,
                     settings.default_sdk_symbols,
                 )?,
@@ -2476,6 +2479,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
             &settings.layout,
             &program,
             settings.target.triple.cpu,
+            &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -2552,6 +2556,7 @@ fn check_source_with_layout(
             &settings.layout,
             &program,
             settings.target.triple.cpu,
+            &settings.target.triple.value,
             options.debug_comments,
             settings.default_sdk_symbols,
         )?,
@@ -2978,6 +2983,7 @@ fn bare_target_cpu(target: &str) -> Option<AssemblerCpu> {
 fn assembly_options_from_layout(
     layout: &Layout,
     cpu: CpuFamily,
+    target: &str,
     debug_comments: bool,
     default_sdk_symbols: bool,
 ) -> AssemblyOptions {
@@ -2985,6 +2991,7 @@ fn assembly_options_from_layout(
         cpu,
         debug_comments,
         default_sdk_symbols,
+        dos_executable: target == ezra::target::MSDOS_COM_I8086_TARGET,
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         ti_os_executable: layout.name.starts_with("ti83-z80")
@@ -3010,11 +3017,12 @@ fn assembly_options_from_layout_and_program(
     layout: &Layout,
     program: &ezra::ast::Program,
     cpu: CpuFamily,
+    target: &str,
     debug_comments: bool,
     default_sdk_symbols: bool,
 ) -> Result<AssemblyOptions, String> {
     let mut options =
-        assembly_options_from_layout(layout, cpu, debug_comments, default_sdk_symbols);
+        assembly_options_from_layout(layout, cpu, target, debug_comments, default_sdk_symbols);
     options.section_bases =
         layout_section_bases(program, layout).map_err(|error| error.to_string())?;
     Ok(options)
@@ -3261,6 +3269,15 @@ fn print_targets() {
         },
         #[cfg(feature = "i8086")]
         TargetRow {
+            triple: "msdos-com-i8086",
+            cpu: "i8086",
+            address_width_bits: 16,
+            output: "com",
+            sdk: "dos.*",
+            status: "MS-DOS .COM source/assembly target",
+        },
+        #[cfg(feature = "i8086")]
+        TargetRow {
             triple: "bare-i8086",
             cpu: "i8086",
             address_width_bits: 16,
@@ -3374,6 +3391,41 @@ mod i8086_review_tests {
         let path = root.join("main.ezra");
         std::fs::write(&path, source).unwrap();
         path
+    }
+
+    #[test]
+    fn cli_builds_msdos_target_as_a_raw_com_from_0100h() {
+        let source_path = temp_source("msdos_com", "fn main() {}");
+        let outputs = build_source_with_build_options(&BuildCommandOptions {
+            path: Some(source_path.to_string_lossy().into_owned()),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            input_kind: None,
+            assembler_cpu: None,
+            layout_path: None,
+            target: Some("msdos-com-i8086".to_owned()),
+        })
+        .unwrap();
+        let assembly = std::fs::read_to_string(&outputs.asm).unwrap();
+        let executable = std::fs::read(&outputs.executable).unwrap();
+        let assembled =
+            ezra::vm::assemble_subset_with_symbols_at(AssemblerCpu::I8086, &assembly, 0x0100)
+                .unwrap();
+        let start = assembled
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "__ezra_start")
+            .unwrap();
+
+        assert_eq!(
+            outputs.executable.extension().and_then(|ext| ext.to_str()),
+            Some("com")
+        );
+        assert_eq!(start.addr, 0x0100);
+        assert_eq!(executable, assembled.bytes);
+        assert!(assembly.contains("    mov ax,0x4c00\n    int 0x21\n"));
+        assert!(!assembly.contains("    cli\n"));
+        let _ = std::fs::remove_dir_all(source_path.parent().unwrap());
     }
 
     #[test]

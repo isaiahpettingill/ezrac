@@ -137,7 +137,9 @@ impl Emitter {
         self.line("; target: Intel 8086 (single flat segment)");
         self.line("section .text");
         self.line("__ezra_start:");
-        self.line("    cli");
+        if !self.options.dos_executable {
+            self.line("    cli");
+        }
         self.line("    mov ax,cs");
         self.line("    mov ds,ax");
         self.line("    mov es,ax");
@@ -146,11 +148,19 @@ impl Emitter {
             "    mov sp,{}",
             imm(self.options.stack_top.get() & !1)
         ));
+        if self.options.dos_executable {
+            self.line("    sti");
+        }
         self.line("    cld");
         self.emit_static_initializers(program)?;
         self.line("    call near _main");
         self.line("__ezra_exit:");
-        self.line("    jmp near __ezra_exit");
+        if self.options.dos_executable {
+            self.line("    mov ax,0x4c00");
+            self.line("    int 0x21");
+        } else {
+            self.line("    jmp near __ezra_exit");
+        }
 
         for declaration in &program.declarations {
             if let Declaration::Function(function) = declaration {
@@ -2378,7 +2388,7 @@ fn resolve_function(path: &[String], model: &SemanticModel) -> Option<String> {
     }
 }
 fn function_label(name: &str) -> String {
-    format!("_{}", sanitize(name))
+    format!("_{}", sanitize(&name.replace('.', "__")))
 }
 fn sanitize(name: &str) -> String {
     name.chars()
@@ -2581,6 +2591,58 @@ mod tests {
         assemble_subset_with_symbols_at(AssemblerCpu::I8086, &assembly, 0)
             .unwrap_or_else(|error| panic!("{error}\n--- assembly ---\n{assembly}"));
         assembly
+    }
+
+    #[test]
+    fn emits_strict_dos_com_startup_and_return_termination_at_0100h() {
+        let program = parse_program(
+            Path::new("dos-com-test.ezra"),
+            "global VALUE: u16 = 7\nfn main() {}",
+        )
+        .unwrap();
+        let assembly = emit_i8086_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::I8086,
+                dos_executable: true,
+                entry_addr: Address24::new(0x0100),
+                code_base: Address24::new(0x0100),
+                ram_base: Address24::new(0xA000),
+                rodata_base: Address24::new(0x8000),
+                asset_base: Address24::new(0xC000),
+                stack_top: Address24::new(0xFFFE),
+                default_sdk_symbols: false,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        let image = assemble_subset_with_symbols_at(AssemblerCpu::I8086, &assembly, 0x0100)
+            .unwrap_or_else(|error| panic!("{error}\n--- assembly ---\n{assembly}"));
+        let start = image
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "__ezra_start")
+            .unwrap();
+
+        assert_eq!(start.addr, 0x0100);
+        assert!(assembly.contains("    mov ax,cs\n"));
+        assert!(assembly.contains("    mov ds,ax\n"));
+        assert!(assembly.contains("    mov es,ax\n"));
+        assert!(assembly.contains("    mov ss,ax\n    mov sp,0FFFEh\n"));
+        assert!(assembly.contains("    sti\n    cld\n"));
+        assert!(assembly.contains("    call near _main\n"));
+        assert!(assembly.contains("__ezra_exit:\n    mov ax,0x4c00\n    int 0x21\n"));
+        assert!(!assembly.contains("    cli\n"));
+        assert!(!assembly.contains("    jmp near __ezra_exit\n"));
+    }
+
+    #[test]
+    fn preserves_bare_i8086_startup_and_nonreturning_exit() {
+        let assembly = emit("fn main() {}");
+
+        assert!(assembly.contains("__ezra_start:\n    cli\n"));
+        assert!(assembly.contains("__ezra_exit:\n    jmp near __ezra_exit\n"));
+        assert!(!assembly.contains("    int 0x21\n"));
     }
 
     #[test]

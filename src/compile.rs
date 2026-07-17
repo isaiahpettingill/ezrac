@@ -222,6 +222,7 @@ fn diagnostic_assembly_options(
         cpu,
         debug_comments,
         default_sdk_symbols,
+        dos_executable: target == crate::target::MSDOS_COM_I8086_TARGET,
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         ti_os_executable: target.starts_with("ti83-z80")
@@ -1278,7 +1279,10 @@ fn read_import_source_with_overrides(
         }
     }
     if let Some(source) = builtin_sdk_source(sdk.target.as_deref(), import) {
-        return Ok((builtin_sdk_path(import), source.to_owned()));
+        return Ok((
+            builtin_sdk_path(sdk.target.as_deref(), import),
+            source.to_owned(),
+        ));
     }
     Err(Diagnostic::new(format!(
         "failed to read import `{import}` at `{}`: not found",
@@ -1305,12 +1309,59 @@ fn import_file_candidates(source_path: &Path, import: &str, sdk: &SdkResolver) -
     candidates
 }
 
-fn builtin_sdk_path(import: &str) -> PathBuf {
-    PathBuf::from(format!("builtin-sdk/{}.ezra", import.replace('.', "/")))
+fn builtin_sdk_path(target: Option<&str>, import: &str) -> PathBuf {
+    if target == Some(crate::target::MSDOS_COM_I8086_TARGET) && import.starts_with("dos.") {
+        PathBuf::from(format!(
+            "toolchains/msdos-i8086/sdk/{}.ezra",
+            import.replace('.', "/")
+        ))
+    } else {
+        PathBuf::from(format!("builtin-sdk/{}.ezra", import.replace('.', "/")))
+    }
 }
 
 fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
-    if target.is_some_and(|target| target.starts_with("arduboy-")) {
+    if target == Some(crate::target::MSDOS_COM_I8086_TARGET) {
+        match import {
+            "dos.constants" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/constants.ezra"),
+                "dos.constants",
+            )),
+            "dos.raw" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/raw.ezra"),
+                "dos.raw",
+            )),
+            "dos.console" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/console.ezra"),
+                "dos.console",
+            )),
+            "dos.file" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/file.ezra"),
+                "dos.file",
+            )),
+            "dos.directory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/directory.ezra"),
+                "dos.directory",
+            )),
+            "dos.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/memory.ezra"),
+                "dos.memory",
+            )),
+            "dos.datetime" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/datetime.ezra"),
+                "dos.datetime",
+            )),
+            "dos.process" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/process.ezra"),
+                "dos.process",
+            )),
+            "dos.psp" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/msdos-i8086/sdk/dos/psp.ezra"),
+                "dos.psp",
+            )),
+            _ => None,
+        }
+    } else if target.is_some_and(|target| target.starts_with("arduboy-")) {
         match import {
             "arduboy.core" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/core.ezra"),
@@ -1577,6 +1628,15 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
 /// LSP cannot advertise a module that import resolution would reject.
 pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
     const MODULES: &[&str] = &[
+        "dos.constants",
+        "dos.raw",
+        "dos.console",
+        "dos.file",
+        "dos.directory",
+        "dos.memory",
+        "dos.datetime",
+        "dos.process",
+        "dos.psp",
         "arduboy.core",
         "arduboy.input",
         "arduboy.oled",
@@ -2190,6 +2250,50 @@ mod i8086_validation_tests {
                 .contains("assembler does not support 8086 instruction `pusha`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn msdos_builtin_sdk_modules_resolve_at_canonical_toolchain_paths() {
+        const MODULES: &[&str] = &[
+            "dos.constants",
+            "dos.raw",
+            "dos.console",
+            "dos.file",
+            "dos.directory",
+            "dos.memory",
+            "dos.datetime",
+            "dos.process",
+            "dos.psp",
+        ];
+        let sdk = SdkResolver {
+            target: Some("msdos-com-i8086".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+
+        assert_eq!(builtin_sdk_modules(sdk.target.as_deref()), MODULES);
+        for module in MODULES {
+            let (path, source) =
+                resolve_import_source(Path::new("src/main.ezra"), module, &sdk).unwrap();
+            assert_eq!(
+                path,
+                PathBuf::from(format!(
+                    "toolchains/msdos-i8086/sdk/{}.ezra",
+                    module.replace('.', "/")
+                ))
+            );
+            assert!(!source.is_empty());
+
+            check_source_with_sdk(
+                &format!("import {module}\nfn main() {{}}\n"),
+                &CompileOptions {
+                    source: PathBuf::from("src/main.ezra"),
+                    debug_comments: false,
+                    default_sdk_symbols: true,
+                },
+                &sdk,
+            )
+            .unwrap_or_else(|error| panic!("failed to compile `{module}`: {error}"));
+        }
     }
 
     #[test]

@@ -1,0 +1,242 @@
+// DOS directory, drive, DTA, and search services. Near pointers use DS.
+import dos.constants
+import dos.raw
+
+global space_sectors_per_cluster: u16 = 0
+global space_available_clusters: u16 = 0
+global space_bytes_per_sector: u16 = 0
+global space_total_clusters: u16 = 0
+
+pub fn make(path: ptr<u8>) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov ah,39h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+pub fn remove(path: ptr<u8>) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov ah,3Ah"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+pub fn change(path: ptr<u8>) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov ah,3Bh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+// DOS 3.0+, AH=47h. drive is 0=default, 1=A; output has no drive or leading slash.
+pub fn get_current(buffer: ptr<u8>, drive: u8) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in buffer: ptr<u8> as mem, in drive: u8 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber si, clobber bp, clobber flags, clobber memory) {
+        "mov si,{buffer}"
+        "mov dl,{drive}"
+        "mov ah,47h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+// AH=1Ah. DOS reads subsequent find results through this near DTA offset.
+pub fn set_dta(dta: ptr<u8>) {
+    let flags: u16 = 0
+    asm volatile(in dta: ptr<u8> as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{dta}"
+        "mov ah,1Ah"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+// AH=2Fh returns ES:BX. The offset is returned; segment_out receives ES.
+pub fn get_dta(segment_out: ptr<u16>) -> u16 {
+    let offset: u16 = 0
+    let segment: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in segment_out: ptr<u16> as mem, out offset: u16 as mem, out segment: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber di, clobber bp, clobber flags, clobber memory) {
+        "push es"
+        "mov ah,2Fh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {offset},bx"
+        "mov ax,es"
+        "mov {segment},ax"
+        "mov di,{segment_out}"
+        "mov [di],ax"
+        "mov {flags},bp"
+        "pop es"
+    }
+    raw.clear()
+    return offset
+}
+
+// DOS 2.0+, AH=4Eh. Results are written to the current DTA.
+pub fn find_first(pattern: ptr<u8>, attributes: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in pattern: ptr<u8> as mem, in attributes: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{pattern}"
+        "mov cx,{attributes}"
+        "mov ah,4Eh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+pub fn find_next() -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,4Fh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+// AH=19h returns 0=A, 1=B, and so on.
+pub fn current_drive() -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,19h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+// AH=0Eh selects 0=A and returns the number of potentially valid drives.
+pub fn select_drive(drive: u8) -> u8 {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in drive: u8 as mem, out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dl,{drive}"
+        "mov ah,0Eh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+// AH=36h. drive is 0=default, 1=A. Values are exposed by scalar getters.
+pub fn free_space(drive: u8) -> bool {
+    let sectors: u16 = 0
+    let available: u16 = 0
+    let bytes: u16 = 0
+    let total: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in drive: u8 as mem, out sectors: u16 as mem, out available: u16 as mem, out bytes: u16 as mem, out total: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dl,{drive}"
+        "mov ah,36h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {sectors},ax"
+        "mov {available},bx"
+        "mov {bytes},cx"
+        "mov {total},dx"
+        "mov {flags},bp"
+    }
+    space_sectors_per_cluster = sectors
+    space_available_clusters = available
+    space_bytes_per_sector = bytes
+    space_total_clusters = total
+    if sectors == 0xFFFF {
+        raw.record(1, constants.ERROR_INVALID_DRIVE)
+        return false
+    }
+    raw.clear()
+    return true
+}
+
+pub fn sectors_per_cluster() -> u16 {
+    return space_sectors_per_cluster
+}
+
+pub fn available_clusters() -> u16 {
+    return space_available_clusters
+}
+
+pub fn bytes_per_sector() -> u16 {
+    return space_bytes_per_sector
+}
+
+pub fn total_clusters() -> u16 {
+    return space_total_clusters
+}
+
+pub fn dta_attribute(dta: ptr<u8>) -> u8 {
+    return *(dta + constants.DTA_ATTRIBUTE)
+}
+
+pub fn dta_time(dta: ptr<u8>) -> u16 {
+    return cast<u16>(*(dta + constants.DTA_TIME)) | (cast<u16>(*(dta + constants.DTA_TIME + 1)) << 8)
+}
+
+pub fn dta_date(dta: ptr<u8>) -> u16 {
+    return cast<u16>(*(dta + constants.DTA_DATE)) | (cast<u16>(*(dta + constants.DTA_DATE + 1)) << 8)
+}
+
+pub fn dta_size_low(dta: ptr<u8>) -> u16 {
+    return cast<u16>(*(dta + constants.DTA_SIZE_LOW)) | (cast<u16>(*(dta + constants.DTA_SIZE_LOW + 1)) << 8)
+}
+
+pub fn dta_size_high(dta: ptr<u8>) -> u16 {
+    return cast<u16>(*(dta + constants.DTA_SIZE_HIGH)) | (cast<u16>(*(dta + constants.DTA_SIZE_HIGH + 1)) << 8)
+}
+
+pub fn dta_name(dta: ptr<u8>) -> ptr<u8> {
+    return dta + constants.DTA_NAME
+}

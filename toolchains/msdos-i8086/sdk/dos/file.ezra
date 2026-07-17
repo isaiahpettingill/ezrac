@@ -1,0 +1,351 @@
+// Handle-based DOS file services. Paths and buffers are near DS offsets.
+// Carry errors are recorded in dos.raw; returned AX is a handle/count or error code.
+import dos.raw
+
+global last_seek_high: u16 = 0
+global last_extended_action: u16 = 0
+global last_file_date: u16 = 0
+
+// DOS 2.0+, AH=3Ch. Creates or truncates a file.
+pub fn create(path: ptr<u8>, attributes: u16) -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, in attributes: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov cx,{attributes}"
+        "mov ah,3Ch"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+// DOS 3.0+, AH=5Bh. Fails if the path already exists.
+pub fn create_new(path: ptr<u8>, attributes: u16) -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, in attributes: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov cx,{attributes}"
+        "mov ah,5Bh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+// DOS 3.0+, AH=5Ah. path_buffer must have room for DOS to append a name.
+pub fn create_temporary(path_buffer: ptr<u8>, attributes: u16) -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path_buffer: ptr<u8> as mem, in attributes: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path_buffer}"
+        "mov cx,{attributes}"
+        "mov ah,5Ah"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+// DOS 2.0+, AH=3Dh. mode combines access, sharing, and inheritance bits.
+pub fn open(path: ptr<u8>, mode: u8) -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, in mode: u8 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov al,{mode}"
+        "mov ah,3Dh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+// DOS 4.0+, AX=6C00h. action_taken() returns CX from the last successful call.
+pub fn extended_open(path: ptr<u8>, mode: u16, attributes: u16, action: u16) -> u16 {
+    let result: u16 = 0
+    let taken: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, in mode: u16 as mem, in attributes: u16 as mem, in action: u16 as mem, out result: u16 as mem, out taken: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber si, clobber bp, clobber flags, clobber memory) {
+        "mov si,{path}"
+        "mov bx,{mode}"
+        "mov cx,{attributes}"
+        "mov dx,{action}"
+        "mov ax,6C00h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {taken},cx"
+        "mov {flags},bp"
+    }
+    last_extended_action = taken
+    raw.record(flags, result)
+    return result
+}
+
+pub fn action_taken() -> u16 {
+    return last_extended_action
+}
+
+pub fn close(handle: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov ah,3Eh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+pub fn read(handle: u16, buffer: ptr<u8>, count: u16) -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, in buffer: ptr<u8> as mem, in count: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov cx,{count}"
+        "mov dx,{buffer}"
+        "mov ah,3Fh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+// A zero count truncates or extends at the current position on regular files.
+pub fn write(handle: u16, buffer: ptr<u8>, count: u16) -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, in buffer: ptr<u8> as mem, in count: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov cx,{count}"
+        "mov dx,{buffer}"
+        "mov ah,40h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+pub fn delete(path: ptr<u8>) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov ah,41h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+// DOS 2.0+, AH=56h. Both names are near offsets; ES is restored after use.
+pub fn rename(old_path: ptr<u8>, new_path: ptr<u8>) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in old_path: ptr<u8> as mem, in new_path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber di, clobber bp, clobber flags, clobber memory) {
+        "push es"
+        "push ds"
+        "pop es"
+        "mov dx,{old_path}"
+        "mov di,{new_path}"
+        "mov ah,56h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+        "pop es"
+    }
+    return !raw.record(flags, result)
+}
+
+// offset_high:offset_low is a signed two's-complement 32-bit displacement.
+// Returns the low result word; seek_high() returns DX from the same call.
+pub fn seek(handle: u16, origin: u8, offset_low: u16, offset_high: u16) -> u16 {
+    let result_low: u16 = 0
+    let result_high: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, in origin: u8 as mem, in offset_low: u16 as mem, in offset_high: u16 as mem, out result_low: u16 as mem, out result_high: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov al,{origin}"
+        "mov dx,{offset_low}"
+        "mov cx,{offset_high}"
+        "mov ah,42h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result_low},ax"
+        "mov {result_high},dx"
+        "mov {flags},bp"
+    }
+    last_seek_high = result_high
+    raw.record(flags, result_low)
+    return result_low
+}
+
+pub fn seek_high() -> u16 {
+    return last_seek_high
+}
+
+pub fn get_attributes(path: ptr<u8>) -> u16 {
+    let result: u16 = 0
+    let attributes: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out attributes: u16 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov ax,4300h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {attributes},cx"
+        "mov {flags},bp"
+    }
+    if raw.record(flags, result) {
+        return 0
+    }
+    return attributes
+}
+
+pub fn set_attributes(path: ptr<u8>, attributes: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in path: ptr<u8> as mem, in attributes: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dx,{path}"
+        "mov cx,{attributes}"
+        "mov ax,4301h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+pub fn duplicate(handle: u16) -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov ah,45h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+pub fn force_duplicate(source: u16, destination: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in source: u16 as mem, in destination: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{source}"
+        "mov cx,{destination}"
+        "mov ah,46h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+// DOS 3.3+, AH=68h. Flushes a handle without closing it.
+pub fn commit(handle: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov ah,68h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+// DOS 2.0+, AX=5700h. Returns packed time; file_date() returns packed date.
+pub fn get_datetime(handle: u16) -> u16 {
+    let result: u16 = 0
+    let time: u16 = 0
+    let date: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, out result: u16 as mem, out time: u16 as mem, out date: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov ax,5700h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {time},cx"
+        "mov {date},dx"
+        "mov {flags},bp"
+    }
+    last_file_date = date
+    if raw.record(flags, result) {
+        return 0
+    }
+    return time
+}
+
+pub fn file_date() -> u16 {
+    return last_file_date
+}
+
+pub fn set_datetime(handle: u16, time: u16, date: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, in time: u16 as mem, in date: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov cx,{time}"
+        "mov dx,{date}"
+        "mov ax,5701h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}

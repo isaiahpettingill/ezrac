@@ -1,0 +1,182 @@
+// DOS system date/time services. get_* refreshes scalar cached fields.
+import dos.constants
+import dos.raw
+
+global cached_year: u16 = 0
+global cached_month: u8 = 0
+global cached_day: u8 = 0
+global cached_weekday: u8 = 0
+global cached_hour: u8 = 0
+global cached_minute: u8 = 0
+global cached_second: u8 = 0
+global cached_hundredth: u8 = 0
+
+// AH=2Ah. DOS 2.0+.
+pub fn get_date() {
+    let year: u16 = 0
+    let month: u8 = 0
+    let day: u8 = 0
+    let weekday: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out year: u16 as mem, out month: u8 as mem, out day: u8 as mem, out weekday: u8 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov ah,2Ah"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {year},cx"
+        "mov {month},dh"
+        "mov {day},dl"
+        "mov {weekday},al"
+        "mov {flags},bp"
+    }
+    cached_year = year
+    cached_month = month
+    cached_day = day
+    cached_weekday = weekday
+    raw.clear()
+}
+
+pub fn date_year() -> u16 {
+    return cached_year
+}
+
+pub fn date_month() -> u8 {
+    return cached_month
+}
+
+pub fn date_day() -> u8 {
+    return cached_day
+}
+
+// 0=Sunday through 6=Saturday.
+pub fn date_weekday() -> u8 {
+    return cached_weekday
+}
+
+pub fn get_year() -> u16 {
+    get_date()
+    return cached_year
+}
+
+pub fn get_month() -> u8 {
+    get_date()
+    return cached_month
+}
+
+pub fn get_day() -> u8 {
+    get_date()
+    return cached_day
+}
+
+pub fn get_weekday() -> u8 {
+    get_date()
+    return cached_weekday
+}
+
+// AH=2Bh returns AL=FFh for an invalid date; CF is not defined for this call.
+pub fn set_date(year: u16, month: u8, day: u8) -> bool {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in year: u16 as mem, in month: u8 as mem, in day: u8 as mem, out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov cx,{year}"
+        "mov dh,{month}"
+        "mov dl,{day}"
+        "mov ah,2Bh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    if result == 0xFF {
+        raw.record(1, constants.ERROR_INVALID_DATA)
+        return false
+    }
+    raw.clear()
+    return true
+}
+
+// AH=2Ch. DOS 2.0+.
+pub fn get_time() {
+    let hour: u8 = 0
+    let minute: u8 = 0
+    let second: u8 = 0
+    let hundredth: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out hour: u8 as mem, out minute: u8 as mem, out second: u8 as mem, out hundredth: u8 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov ah,2Ch"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {hour},ch"
+        "mov {minute},cl"
+        "mov {second},dh"
+        "mov {hundredth},dl"
+        "mov {flags},bp"
+    }
+    cached_hour = hour
+    cached_minute = minute
+    cached_second = second
+    cached_hundredth = hundredth
+    raw.clear()
+}
+
+pub fn time_hour() -> u8 {
+    return cached_hour
+}
+
+pub fn time_minute() -> u8 {
+    return cached_minute
+}
+
+pub fn time_second() -> u8 {
+    return cached_second
+}
+
+pub fn time_hundredth() -> u8 {
+    return cached_hundredth
+}
+
+pub fn get_hour() -> u8 {
+    get_time()
+    return cached_hour
+}
+
+pub fn get_minute() -> u8 {
+    get_time()
+    return cached_minute
+}
+
+pub fn get_second() -> u8 {
+    get_time()
+    return cached_second
+}
+
+pub fn get_hundredth() -> u8 {
+    get_time()
+    return cached_hundredth
+}
+
+// AH=2Dh returns AL=FFh for invalid input; CF is not defined for this call.
+pub fn set_time(hour: u8, minute: u8, second: u8, hundredth: u8) -> bool {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in hour: u8 as mem, in minute: u8 as mem, in second: u8 as mem, in hundredth: u8 as mem, out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber cx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov ch,{hour}"
+        "mov cl,{minute}"
+        "mov dh,{second}"
+        "mov dl,{hundredth}"
+        "mov ah,2Dh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    if result == 0xFF {
+        raw.record(1, constants.ERROR_INVALID_DATA)
+        return false
+    }
+    raw.clear()
+    return true
+}

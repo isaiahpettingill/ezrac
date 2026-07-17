@@ -1,6 +1,7 @@
 use crate::target::{
     Address24, AssemblerCpu, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
     EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
+    MSDOS_COM_I8086_TARGET,
 };
 use crate::{compat::prelude::*, diagnostic::Diagnostic};
 use pest::{Parser, iterators::Pair};
@@ -91,6 +92,8 @@ pub fn default_layout_for_target(target: &str) -> Layout {
             AssemblerCpu::M68k => Layout::bare_m68k(),
             _ => Layout::bare_16(cpu.as_str()),
         }
+    } else if target == MSDOS_COM_I8086_TARGET {
+        Layout::msdos_i8086_com()
     } else if target.starts_with("zxspectrum-z80") {
         Layout::zx_spectrum_z80()
     } else if target.starts_with("gameboy-") {
@@ -1249,6 +1252,71 @@ impl Layout {
                 symbol("EZRA_RODATA_BASE", Address24::new(0xC000)),
                 symbol("EZRA_ASSET_BASE", Address24::new(0xE000)),
                 symbol("TI_PLOTSSCREEN", Address24::new(0x9340)),
+            ],
+        }
+    }
+
+    pub fn msdos_i8086_com() -> Self {
+        Self {
+            name: "msdos_i8086_com".to_owned(),
+            load: Address24::new(0x0100),
+            entry: Address24::new(0x0100),
+            stack: Address24::new(0xFFFE),
+            regions: vec![
+                region("psp", 0x0000, 0x00FF, &[RegionFlags::RESERVED]),
+                region(
+                    "code",
+                    0x0100,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x8000, 0x9FFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xA000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xC000, 0xDFFF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xE000,
+                    0xEFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xF000,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0100)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0100)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0100)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xFFFE)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x8000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
+                symbol("DOS_INT21", Address24::new(0x0021)),
+                symbol("DOS_PSP_BASE", Address24::new(0x0000)),
+                symbol("DOS_PSP_END", Address24::new(0x00FF)),
+                symbol("DOS_PSP_ENVIRONMENT_SEGMENT", Address24::new(0x002C)),
+                symbol("DOS_PSP_FCB1", Address24::new(0x005C)),
+                symbol("DOS_PSP_FCB2", Address24::new(0x006C)),
+                symbol("DOS_PSP_COMMAND_TAIL", Address24::new(0x0080)),
+                symbol("DOS_PSP_DTA", Address24::new(0x0080)),
+                symbol("DOS_COM_BASE", Address24::new(0x0100)),
             ],
         }
     }

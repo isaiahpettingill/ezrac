@@ -1,0 +1,250 @@
+// DOS process control. Near pointers are DS offsets in the current .COM segment.
+import dos.constants
+import dos.raw
+
+global last_wait_status: u16 = 0
+global last_version_oem: u8 = 0
+
+// DOS 2.0+, AH=4Ch. This call does not return.
+pub fn exit(code: u8) {
+    asm volatile(in code: u8 as mem, clobber ax, clobber flags, clobber memory) {
+        "mov al,{code}"
+        "mov ah,4Ch"
+        "int 21h"
+    }
+}
+
+// DOS 2.0+, AH=30h. Returns canonical major:minor, unlike DOS AX byte order.
+pub fn version() -> u16 {
+    let result: u16 = 0
+    let oem: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u16 as mem, out oem: u8 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber bp, clobber flags, clobber memory) {
+        "mov ax,3000h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {oem},bh"
+        "mov {flags},bp"
+    }
+    last_version_oem = oem
+    raw.clear()
+    return ((result & 0x00FF) << 8) | (result >> 8)
+}
+
+pub fn version_major() -> u8 {
+    return cast<u8>(version() >> 8)
+}
+
+pub fn version_minor() -> u8 {
+    return cast<u8>(version())
+}
+
+pub fn version_oem() -> u8 {
+    return last_version_oem
+}
+
+// DOS 2.0+, AH=51h. Returns a segment value; in a .COM process it normally equals DS.
+pub fn psp_segment() -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov ah,51h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},bx"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result
+}
+
+// DOS 2.0+, AH=50h. segment is a real-mode PSP segment, not a near pointer.
+pub fn set_psp(segment: u16) {
+    let flags: u16 = 0
+    asm volatile(in segment: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{segment}"
+        "mov ah,50h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+// DOS 2.0+, AH=4Bh. parameter_block is ES:BX; this flat model supplies ES=DS.
+// EXEC_LOAD_OVERLAY may require far fields this near-only SDK cannot construct safely.
+pub fn exec(mode: u8, path: ptr<u8>, parameter_block: ptr<u8>) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in mode: u8 as mem, in path: ptr<u8> as mem, in parameter_block: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "push es"
+        "push ds"
+        "pop es"
+        "mov al,{mode}"
+        "mov dx,{path}"
+        "mov bx,{parameter_block}"
+        "mov ah,4Bh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+        "pop es"
+    }
+    return !raw.record(flags, result)
+}
+
+// DOS 2.0+, AH=4Dh. Call after EXEC returns; AL=code and AH=termination type.
+pub fn wait_status() -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,4Dh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    last_wait_status = result
+    raw.clear()
+    return result
+}
+
+pub fn wait_exit_code(status: u16) -> u8 {
+    return cast<u8>(status)
+}
+
+pub fn wait_termination_type(status: u16) -> u8 {
+    return cast<u8>(status >> 8)
+}
+
+pub fn last_child_status() -> u16 {
+    return last_wait_status
+}
+
+// DOS 2.0+, AH=31h. paragraphs includes the PSP; this call does not return.
+pub fn tsr(code: u8, paragraphs: u16) {
+    asm volatile(in code: u8 as mem, in paragraphs: u16 as mem, clobber ax, clobber dx, clobber flags, clobber memory) {
+        "mov al,{code}"
+        "mov dx,{paragraphs}"
+        "mov ah,31h"
+        "int 21h"
+    }
+}
+
+// DOS 2.0+, AH=25h. Installs DS:offset, so the handler must share program DS.
+pub fn set_vector(vector: u8, offset: u16) {
+    let flags: u16 = 0
+    asm volatile(in vector: u8 as mem, in offset: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov al,{vector}"
+        "mov dx,{offset}"
+        "mov ah,25h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}
+
+// DOS 2.0+, AH=35h. Returns BX and writes ES to segment_out, then restores ES.
+pub fn get_vector(vector: u8, segment_out: ptr<u16>) -> u16 {
+    let offset: u16 = 0
+    let segment: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in vector: u8 as mem, in segment_out: ptr<u16> as mem, out offset: u16 as mem, out segment: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber di, clobber bp, clobber flags, clobber memory) {
+        "push es"
+        "mov al,{vector}"
+        "mov ah,35h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {offset},bx"
+        "mov ax,es"
+        "mov {segment},ax"
+        "mov di,{segment_out}"
+        "mov [di],ax"
+        "mov {flags},bp"
+        "pop es"
+    }
+    raw.clear()
+    return offset
+}
+
+// DOS 2.0+, AX=3300h.
+pub fn break_enabled() -> bool {
+    let state: u8 = 0
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out state: u8 as mem, out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov ax,3300h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {state},dl"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    if result == 0xFF {
+        raw.record(1, constants.ERROR_INVALID_FUNCTION)
+        return false
+    }
+    raw.clear()
+    return state != 0
+}
+
+// DOS 2.0+, AX=3301h.
+pub fn set_break(enabled: bool) -> bool {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in enabled: bool as mem, out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov dl,{enabled}"
+        "mov ax,3301h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    if result == 0xFF {
+        raw.record(1, constants.ERROR_INVALID_FUNCTION)
+        return false
+    }
+    raw.clear()
+    return true
+}
+
+// DOS 2.0+, AH=54h.
+pub fn verify_enabled() -> bool {
+    let result: u8 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u8 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ah,54h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},al"
+        "mov {flags},bp"
+    }
+    raw.clear()
+    return result != 0
+}
+
+// DOS 1.0+, AH=2Eh.
+pub fn set_verify(enabled: bool) {
+    let flags: u16 = 0
+    asm volatile(in enabled: bool as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov al,{enabled}"
+        "mov ah,2Eh"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {flags},bp"
+    }
+    raw.clear()
+}

@@ -315,6 +315,7 @@ pub fn assembly_options_for_target(
         cpu,
         debug_comments,
         default_sdk_symbols,
+        dos_executable: target == crate::target::MSDOS_COM_I8086_TARGET,
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         ti_os_executable: target.starts_with("ti83-z80")
@@ -828,5 +829,73 @@ mod tests {
         assert!(compilation.report.has_main);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "i8086")]
+    #[test]
+    fn builds_msdos_com_as_raw_bytes_at_0100h_with_a_reserved_psp() {
+        let profile = resolve_target_profile(Some("msdos-com-i8086")).unwrap();
+        let layout = default_layout_for_target("msdos-com-i8086");
+        let options = assembly_options_for_target("msdos-com-i8086", CpuFamily::I8086, false, true);
+        let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+        let build = build_workspace(
+            &Workspace::new(&files),
+            "main.ezra",
+            &CompileRequest::new("main.ezra", "msdos-com-i8086"),
+        )
+        .unwrap();
+        let start = build
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "__ezra_start")
+            .unwrap();
+        let psp = layout
+            .regions
+            .iter()
+            .find(|region| region.name == "psp")
+            .unwrap();
+
+        assert_eq!(profile.output_format, OutputFormat::CpmCom);
+        assert_eq!(profile.output_format.extension(), "com");
+        assert_eq!(layout.load.get(), 0x0100);
+        assert_eq!(layout.entry.get(), 0x0100);
+        assert_eq!((psp.start.get(), psp.end.get()), (0, 0x00FF));
+        assert!(psp.flags.contains(crate::layout::RegionFlags::RESERVED));
+        assert!(
+            layout
+                .regions
+                .iter()
+                .all(|region| region.end.get() <= 0xFFFF)
+        );
+        assert!(
+            layout
+                .symbols
+                .iter()
+                .all(|symbol| symbol.value.get() <= 0xFFFF)
+        );
+        assert_eq!(options.entry_addr.get(), 0x0100);
+        assert!(options.dos_executable);
+        assert_eq!(start.addr, 0x0100);
+        assert_eq!(build.executable_extension, "com");
+        assert_eq!(build.executable, build.machine_code);
+        assert!(build.assembly.contains("    mov ax,0x4c00\n    int 0x21\n"));
+    }
+
+    #[test]
+    fn rejects_non_i8086_and_noncanonical_msdos_targets() {
+        let cpu_error = resolve_target_profile(Some("msdos-com-z80")).unwrap_err();
+        assert_eq!(
+            cpu_error,
+            "target `msdos-com-z80` requires CPU `i8086`, not `z80`"
+        );
+
+        #[cfg(feature = "i8086")]
+        {
+            let name_error = resolve_target_profile(Some("msdos-i8086")).unwrap_err();
+            assert_eq!(
+                name_error,
+                "unsupported MS-DOS target `msdos-i8086`; expected `msdos-com-i8086`"
+            );
+        }
     }
 }

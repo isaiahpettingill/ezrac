@@ -362,6 +362,7 @@ impl OutputFormat {
 }
 
 pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
+pub const MSDOS_COM_I8086_TARGET: &str = "msdos-com-i8086";
 
 pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, String> {
     let triple = parse_target_triple(target.unwrap_or(DEFAULT_TARGET_TRIPLE))?;
@@ -378,7 +379,9 @@ pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, Str
 
 fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> {
     let target = triple.value.as_str();
-    let expected = if target.split('-').any(|part| part == "cpm") {
+    let expected = if target.starts_with("msdos-") {
+        Some(&[CpuFamily::I8086][..])
+    } else if target.split('-').any(|part| part == "cpm") {
         Some(&[CpuFamily::Z80, CpuFamily::I8080, CpuFamily::I8085][..])
     } else if target.starts_with("zxspectrum-") {
         Some(&[CpuFamily::Z80][..])
@@ -419,6 +422,11 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
             triple.cpu.as_str()
         ));
     }
+    if target.starts_with("msdos-") && target != MSDOS_COM_I8086_TARGET {
+        return Err(format!(
+            "unsupported MS-DOS target `{target}`; expected `{MSDOS_COM_I8086_TARGET}`"
+        ));
+    }
     Ok(())
 }
 
@@ -427,7 +435,9 @@ fn is_bare_target(triple: &TargetTriple) -> bool {
 }
 
 fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
-    if matches!(
+    if triple.value == MSDOS_COM_I8086_TARGET {
+        OutputFormat::CpmCom
+    } else if matches!(
         triple.cpu,
         CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::I8080 | CpuFamily::I8085
     ) && triple.value.split('-').any(|part| part == "cpm")

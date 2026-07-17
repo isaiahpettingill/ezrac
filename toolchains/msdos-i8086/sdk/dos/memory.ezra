@@ -1,0 +1,137 @@
+// DOS memory-control-block services. Returned values are real-mode segments,
+// not near pointers in DS. Sizes are 16-byte paragraphs.
+import dos.raw
+
+global last_available: u16 = 0
+
+// DOS 2.0+, AH=48h. On failure available_paragraphs() returns BX.
+pub fn allocate(paragraphs: u16) -> u16 {
+    let result: u16 = 0
+    let available: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in paragraphs: u16 as mem, out result: u16 as mem, out available: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{paragraphs}"
+        "mov ah,48h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {available},bx"
+        "mov {flags},bp"
+    }
+    last_available = available
+    raw.record(flags, result)
+    return result
+}
+
+// ES is changed only for the call and restored before generated code resumes.
+pub fn free(segment: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in segment: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "push es"
+        "mov ax,{segment}"
+        "mov es,ax"
+        "mov ah,49h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+        "pop es"
+    }
+    return !raw.record(flags, result)
+}
+
+// DOS 2.0+, AH=4Ah. On failure available_paragraphs() returns BX.
+pub fn resize(segment: u16, paragraphs: u16) -> bool {
+    let result: u16 = 0
+    let available: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in segment: u16 as mem, in paragraphs: u16 as mem, out result: u16 as mem, out available: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "push es"
+        "mov ax,{segment}"
+        "mov es,ax"
+        "mov bx,{paragraphs}"
+        "mov ah,4Ah"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {available},bx"
+        "mov {flags},bp"
+        "pop es"
+    }
+    last_available = available
+    return !raw.record(flags, result)
+}
+
+pub fn available_paragraphs() -> u16 {
+    return last_available
+}
+
+// DOS 3.0+, AX=5800h.
+pub fn get_strategy() -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ax,5800h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    raw.record(flags, result)
+    return result
+}
+
+// DOS 3.0+, AX=5801h. High-memory strategy bits require DOS 5.0+.
+pub fn set_strategy(strategy: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in strategy: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{strategy}"
+        "mov ax,5801h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}
+
+// DOS 5.0+, AX=5802h. Returns state in AL.
+pub fn get_umb_link() -> u16 {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+        "mov ax,5802h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    if raw.record(flags, result) {
+        return 0
+    }
+    return result & 0x00FF
+}
+
+// DOS 5.0+, AX=5803h.
+pub fn set_umb_link(state: u16) -> bool {
+    let result: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in state: u16 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{state}"
+        "mov ax,5803h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {flags},bp"
+    }
+    return !raw.record(flags, result)
+}

@@ -1,0 +1,27 @@
+// Shared carry/error state for dos.* wrappers. FLAGS bit 0 is carry.
+global last_failed: bool = false
+global last_error: u16 = 0
+
+// Record a DOS result captured immediately with PUSHF/POP after INT 21h.
+pub fn record(flags: u16, error: u16) -> bool {
+    last_failed = (flags & 1) != 0
+    if last_failed {
+        last_error = error
+    } else {
+        last_error = 0
+    }
+    return last_failed
+}
+
+pub fn clear() {
+    last_failed = false
+    last_error = 0
+}
+
+pub fn failed() -> bool {
+    return last_failed
+}
+
+pub fn error_code() -> u16 {
+    return last_error
+}

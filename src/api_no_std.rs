@@ -524,6 +524,7 @@ pub fn assembly_options_for_target(
         cpu,
         debug_comments,
         default_sdk_symbols,
+        dos_executable: target == crate::target::MSDOS_COM_I8086_TARGET,
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         ti_os_executable: target.starts_with("ti83-z80")
@@ -732,5 +733,23 @@ mod tests {
             error.message,
             "section `.text` does not fit in region `code`"
         );
+    }
+
+    #[test]
+    fn alloc_only_api_builds_raw_msdos_com_images() {
+        let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+        let request = CompileRequest::new("main.ezra", "msdos-com-i8086");
+        let build = build_workspace(&Workspace::new(&files), "main.ezra", &request).unwrap();
+        let start = build
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "__ezra_start")
+            .unwrap();
+
+        assert_eq!(start.addr, 0x0100);
+        assert_eq!(build.output_format, OutputFormat::CpmCom);
+        assert_eq!(build.executable_extension, "com");
+        assert_eq!(build.executable, build.machine_code);
+        assert!(build.assembly.contains("    int 0x21\n"));
     }
 }
