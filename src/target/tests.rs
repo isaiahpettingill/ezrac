@@ -31,6 +31,36 @@ fn parses_target_triples_with_optional_versions() {
     );
 }
 
+#[cfg(not(feature = "i8086"))]
+#[test]
+fn i8086_aliases_report_the_required_feature() {
+    for alias in ["i8086", "8086"] {
+        let error = AssemblerCpu::parse(alias).unwrap_err();
+        assert!(
+            error.contains("requires the `i8086` Cargo feature"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(feature = "i8086")]
+#[test]
+fn resolves_i8086_aliases_and_bare_target_capabilities() {
+    assert_eq!(AssemblerCpu::parse("i8086").unwrap(), AssemblerCpu::I8086);
+    assert_eq!(AssemblerCpu::parse("8086").unwrap(), AssemblerCpu::I8086);
+
+    for target in ["bare-i8086", "bare-8086"] {
+        let profile = resolve_target_profile(Some(target)).unwrap();
+        assert_eq!(profile.triple.cpu, CpuFamily::I8086);
+        assert_eq!(AssemblerCpu::from(profile.triple.cpu), AssemblerCpu::I8086);
+        assert_eq!(profile.memory.pointer_width_bits, 16);
+        assert_eq!(profile.memory.address_width_bits, 16);
+        assert_eq!(profile.output_format, OutputFormat::RawBin);
+        assert!(!profile.default_sdk_symbols);
+        assert!(profile.supports_port_io());
+    }
+}
+
 #[test]
 fn rejects_targets_without_known_cpu_family() {
     let error = parse_target_triple("agonlight-console8").unwrap_err();

@@ -15,6 +15,8 @@ use ::m68000::{M68000, MemoryAccess as M68kMemoryAccess, cpu_details::Mc68000};
 
 #[cfg(feature = "dcpu")]
 use crate::asm::dcpu;
+#[cfg(feature = "i8086")]
+use crate::asm::i8086;
 #[cfg(feature = "mos6502-emulator")]
 use mos6502::{cpu::CPU, memory::Bus as _, registers::StackPointer};
 
@@ -1015,7 +1017,8 @@ mod runner {
             CpuFamily::I8080 => CpuMode::I8080,
             CpuFamily::I8085 => CpuMode::I8085,
             CpuFamily::Lr35902 => CpuMode::GameBoy,
-            CpuFamily::M68k
+            CpuFamily::I8086
+            | CpuFamily::M68k
             | CpuFamily::M6800
             | CpuFamily::Mos6502
             | CpuFamily::Cmos65C02
@@ -1128,6 +1131,11 @@ pub fn assemble_program_with_options_at(
             cpu.feature_name()
         )));
     }
+    if cpu == AssemblerCpu::I8086 && base_addr > u16::MAX as u32 {
+        return Err(Diagnostic::new(format!(
+            "assembly base address 0x{base_addr:X} is outside the i8086 single-segment address space"
+        )));
+    }
     if base_addr > Address24::MAX {
         return Err(Diagnostic::new(format!(
             "assembly base address 0x{base_addr:X} is outside the 24-bit address space"
@@ -1152,11 +1160,14 @@ pub fn assemble_program_with_options_at(
     } else {
         section_base(options, ".text").unwrap_or(base_addr)
     } & 0xFF_FFFF;
+    validate_assembly_pc(cpu, default_pc, "assembly start")?;
     let mut pc = default_pc;
 
     for (item_index, item) in program.items.iter().enumerate() {
         match &item.kind {
             AssemblyItem::Label(name) => {
+                validate_assembly_pc(cpu, pc, "assembly label")
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 if pc > Address24::MAX {
                     return Err(item_diagnostic(
                         item,
@@ -1184,6 +1195,8 @@ pub fn assemble_program_with_options_at(
             }
             AssemblyItem::Section(name) => {
                 if let Some(base) = section_base(options, name) {
+                    validate_assembly_pc(cpu, base, "section base")
+                        .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                     pc = base;
                 }
             }
@@ -1191,9 +1204,11 @@ pub fn assemble_program_with_options_at(
                 let known = labels.clone().into_iter().collect::<HashMap<_, _>>();
                 pc = eval_assembly_expression(expression, &known, pc)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                validate_assembly_pc(cpu, pc, "org target")
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Data { width, values } => {
-                pc = checked_assembly_pc_advance(pc, data_len(*width, values) as u32)
+                pc = checked_assembly_pc_advance(cpu, pc, data_len(*width, values) as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Instruction(instruction) => {
@@ -1203,7 +1218,7 @@ pub fn assemble_program_with_options_at(
                 let len = instruction_len(cpu, architecture, &instruction.to_text())
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 instruction_lengths[item_index] = Some(len);
-                pc = checked_assembly_pc_advance(pc, len as u32)
+                pc = checked_assembly_pc_advance(cpu, pc, len as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
         }
@@ -1250,6 +1265,8 @@ pub fn assemble_program_with_options_at(
             AssemblyItem::Label(_) | AssemblyItem::Equ { .. } => {}
             AssemblyItem::Section(name) => {
                 if let Some(base) = section_base(options, name) {
+                    validate_assembly_pc(cpu, base, "section base")
+                        .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                     append_org_padding(&mut bytes, pc, base)
                         .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                     pc = base;
@@ -1258,6 +1275,8 @@ pub fn assemble_program_with_options_at(
             AssemblyItem::Org(expression) => {
                 let new_pc = eval_assembly_expression(expression, &labels, pc)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                validate_assembly_pc(cpu, new_pc, "org target")
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 append_org_padding(&mut bytes, pc, new_pc)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 pc = new_pc;
@@ -1265,7 +1284,7 @@ pub fn assemble_program_with_options_at(
             AssemblyItem::Data { width, values } => {
                 emit_data(cpu, *width, values, &labels, pc, &mut bytes)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
-                pc = checked_assembly_pc_advance(pc, data_len(*width, values) as u32)
+                pc = checked_assembly_pc_advance(cpu, pc, data_len(*width, values) as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Instruction(instruction) => {
@@ -1283,7 +1302,7 @@ pub fn assemble_program_with_options_at(
                 .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 let len = instruction_lengths[item_index]
                     .expect("instruction length was computed during the first pass");
-                pc = checked_assembly_pc_advance(pc, len as u32)
+                pc = checked_assembly_pc_advance(cpu, pc, len as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
         }
@@ -1495,10 +1514,24 @@ pub fn measure_assembly_program_with_options(
     Ok(len)
 }
 
-fn checked_assembly_pc_advance(pc: u32, len: u32) -> Result<u32, Diagnostic> {
+fn validate_assembly_pc(cpu: AssemblerCpu, pc: u32, description: &str) -> Result<(), Diagnostic> {
+    if cpu == AssemblerCpu::I8086 && pc > u16::MAX as u32 {
+        return Err(Diagnostic::new(format!(
+            "{description} 0x{pc:X} is outside the i8086 single-segment address space"
+        )));
+    }
+    Ok(())
+}
+
+fn checked_assembly_pc_advance(cpu: AssemblerCpu, pc: u32, len: u32) -> Result<u32, Diagnostic> {
     let end = pc
         .checked_add(len)
         .ok_or_else(|| Diagnostic::new("assembly exceeds the 24-bit address space"))?;
+    if cpu == AssemblerCpu::I8086 && end > u16::MAX as u32 + 1 {
+        return Err(Diagnostic::new(format!(
+            "assembly item at 0x{pc:04X} with length 0x{len:X} exceeds the i8086 single-segment address space"
+        )));
+    }
     if end > Address24::MAX + 1 {
         return Err(Diagnostic::new(format!(
             "assembly instruction at 0x{pc:06X} with length 0x{len:X} exceeds the 24-bit address space"
@@ -1746,6 +1779,10 @@ fn instruction_len(
     if cpu == AssemblerCpu::M68k {
         return asm_m68k::instruction_len(text);
     }
+    #[cfg(feature = "i8086")]
+    if cpu == AssemblerCpu::I8086 {
+        return i8086::instruction_len(text);
+    }
     #[cfg(any(feature = "std", feature = "mos6502"))]
     if let Some(variant) = mos6502_variant(cpu) {
         return crate::asm::mos6502::instruction_len_for_variant(text, variant);
@@ -1803,6 +1840,11 @@ fn emit_instruction(
     #[cfg(feature = "m68k")]
     if cpu == AssemblerCpu::M68k {
         bytes.extend(asm_m68k::encode(text, labels, pc, true)?);
+        return Ok(());
+    }
+    #[cfg(feature = "i8086")]
+    if cpu == AssemblerCpu::I8086 {
+        bytes.extend(i8086::encode_instruction(text, labels, pc)?);
         return Ok(());
     }
     #[cfg(any(feature = "std", feature = "mos6502"))]

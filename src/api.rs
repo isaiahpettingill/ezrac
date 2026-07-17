@@ -337,6 +337,11 @@ pub fn assembly_options_for_target(
 }
 
 fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<String, Diagnostic> {
+    if options.cpu == CpuFamily::I8086 {
+        return Err(Diagnostic::new(
+            "EZRA source code generation is not implemented for CPU `i8086`; the i8086 backend is assembly-only",
+        ));
+    }
     validate_program(program, options.cpu)?;
     match options.cpu {
         CpuFamily::Lr35902 => emit_lr35902_assembly_with_options(program, options),

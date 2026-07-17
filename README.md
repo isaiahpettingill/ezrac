@@ -106,6 +106,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/platforms.md` documents supported target profiles and platform-specific coding guidance.
 - `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
+- `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and `bare-i8086` target.
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
@@ -113,7 +114,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
-- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports LR35902, MOS 6502, optional M68k, optional TMS9900, and the complete AVR register-ABI backend. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. AVR and optional TMS9900 also support hand-written assembly through `assemble`. Additional eZ80, Z80-family, 8080-family, TI calculator, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
+- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports LR35902, MOS 6502, optional M68k, optional TMS9900, and the complete AVR register-ABI backend. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. AVR and optional TMS9900 also support hand-written assembly through `assemble`; the optional `i8086` feature provides a complete strict 8086 standalone assembler. Additional eZ80, Z80-family, 8080-family, TI calculator, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
 - Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.

@@ -12,6 +12,8 @@ pub mod dcpu;
 #[cfg(feature = "dcpu")]
 pub mod dcpu_emitter;
 pub mod ez80;
+#[cfg(feature = "i8086")]
+pub mod i8086;
 #[cfg(any(feature = "std", feature = "lr35902"))]
 pub mod lr35902;
 #[cfg(any(feature = "std", feature = "lr35902"))]

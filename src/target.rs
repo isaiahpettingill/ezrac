@@ -29,6 +29,7 @@ pub enum CpuFamily {
     M6800,
     I8080,
     I8085,
+    I8086,
     Lr35902,
     Avr,
     Mos6502,
@@ -43,6 +44,7 @@ pub enum CpuFamily {
 pub enum AssemblerCpu {
     I8080,
     I8085,
+    I8086,
     Z80,
     Z80N,
     Z180,
@@ -64,6 +66,7 @@ impl AssemblerCpu {
         let cpu = match value {
             "i8080" | "8080" => Self::I8080,
             "i8085" | "8085" => Self::I8085,
+            "i8086" | "8086" => Self::I8086,
             "z80" => Self::Z80,
             "z80n" => Self::Z80N,
             "z180" => Self::Z180,
@@ -80,7 +83,7 @@ impl AssemblerCpu {
             "dcpu" | "dcpu16" | "dcpu-16" => Self::Dcpu,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, z80, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m68k, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m68k, or avr"
                 ));
             }
         };
@@ -98,6 +101,7 @@ impl AssemblerCpu {
     pub const fn is_enabled(self) -> bool {
         match self {
             Self::I8080 | Self::I8085 => cfg!(feature = "intel"),
+            Self::I8086 => cfg!(feature = "i8086"),
             Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80 => cfg!(feature = "z80"),
             Self::Lr35902 => cfg!(feature = "lr35902"),
             Self::Avr => cfg!(feature = "avr"),
@@ -114,6 +118,7 @@ impl AssemblerCpu {
     pub const fn feature_name(self) -> &'static str {
         match self {
             Self::I8080 | Self::I8085 => "intel",
+            Self::I8086 => "i8086",
             Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80 => "z80",
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
@@ -129,6 +134,7 @@ impl AssemblerCpu {
         match self {
             Self::I8080 => "i8080",
             Self::I8085 => "i8085",
+            Self::I8086 => "i8086",
             Self::Z80 => "z80",
             Self::Z80N => "z80n",
             Self::Z180 => "z180",
@@ -152,7 +158,7 @@ impl AssemblerCpu {
             Self::Z80N => Some(CpuFamily::Z80),
             Self::Z180 => Some(CpuFamily::Z80),
             Self::Ez80 => Some(CpuFamily::Ez80),
-            Self::I8080 | Self::I8085 => None,
+            Self::I8080 | Self::I8085 | Self::I8086 => None,
             Self::Lr35902
             | Self::M6800
             | Self::M68k
@@ -184,6 +190,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::Z180 => Self::Z180,
             CpuFamily::I8080 => Self::I8080,
             CpuFamily::I8085 => Self::I8085,
+            CpuFamily::I8086 => Self::I8086,
             CpuFamily::M68k => Self::M68k,
             CpuFamily::Lr35902 => Self::Lr35902,
             CpuFamily::Avr => Self::Avr,
@@ -214,6 +221,7 @@ impl CpuFamily {
             pointer_width_bits: 16,
             address_width_bits: 16,
         };
+
         let memory24 = TargetMemoryModel {
             pointer_width_bits: 24,
             address_width_bits: 24,
@@ -228,6 +236,14 @@ impl CpuFamily {
                 has_cache: false,
             },
             Self::Z80 | Self::Z80N | Self::Z180 | Self::I8080 | Self::I8085 => TargetCapabilities {
+                name: self.as_str(),
+                memory: memory16,
+                native_int_widths: &[8, 16],
+                supports_port_io: true,
+                prefer_code_size: true,
+                has_cache: false,
+            },
+            Self::I8086 => TargetCapabilities {
                 name: self.as_str(),
                 memory: memory16,
                 native_int_widths: &[8, 16],
@@ -270,6 +286,7 @@ impl CpuFamily {
             Self::M68k => "m68k",
             Self::I8080 => "i8080",
             Self::I8085 => "i8085",
+            Self::I8086 => "i8086",
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
             Self::M6800 => "m6800",
@@ -484,6 +501,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "m68k" => Some(CpuFamily::M68k),
             "i8080" | "8080" => Some(CpuFamily::I8080),
             "i8085" | "8085" => Some(CpuFamily::I8085),
+            "i8086" | "8086" => Some(CpuFamily::I8086),
             "lr35902" => Some(CpuFamily::Lr35902),
             "avr" | "atmega32u4" => Some(CpuFamily::Avr),
             "m6800" | "6800" => Some(CpuFamily::M6800),

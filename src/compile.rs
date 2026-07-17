@@ -318,7 +318,11 @@ pub fn check_source_with_sdk_and_overrides(
         options.debug_comments,
         options.default_sdk_symbols,
     );
-    let assembly = if cpu == CpuFamily::Lr35902 {
+    let assembly = if cpu == CpuFamily::I8086 {
+        Err(Diagnostic::new(
+            "EZRA source code generation is not implemented for CPU `i8086`; the i8086 backend is assembly-only",
+        ))
+    } else if cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(&program, assembly_options)
     } else if cpu == CpuFamily::Avr {
         #[cfg(feature = "avr")]

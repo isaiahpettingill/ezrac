@@ -58,6 +58,18 @@ pub(crate) fn parse_instruction(
     let source = instruction.to_text();
     match cpu {
         AssemblerCpu::I8080 | AssemblerCpu::I8085 => intel8080::parse(cpu, &source),
+        AssemblerCpu::I8086 => {
+            #[cfg(feature = "i8086")]
+            {
+                i8086::parse(cpu, &source)
+            }
+            #[cfg(not(feature = "i8086"))]
+            {
+                Err(Diagnostic::new(
+                    "i8086 instruction parsing requires the `i8086` Cargo feature",
+                ))
+            }
+        }
         AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180 | AssemblerCpu::Ez80 => {
             z80::parse(cpu, &source)
         }
@@ -206,6 +218,8 @@ macro_rules! architecture_parser {
 
 architecture_parser!(z80, "asm/grammar/z80.pest", z80_operand);
 architecture_parser!(intel8080, "asm/grammar/intel8080.pest", intel8080_operand);
+#[cfg(feature = "i8086")]
+architecture_parser!(i8086, "asm/grammar/i8086.pest", i8086_operand);
 architecture_parser!(lr35902, "asm/grammar/lr35902.pest", lr35902_operand);
 architecture_parser!(avr, "asm/grammar/avr.pest", avr_operand);
 architecture_parser!(dcpu, "asm/grammar/dcpu.pest", dcpu_operand);
@@ -255,6 +269,15 @@ mod tests {
                 "lxi h,1234h"
             );
         }
+    }
+
+    #[cfg(feature = "i8086")]
+    #[test]
+    fn i8086_normalizes_memory_addressing() {
+        assert_eq!(
+            parse(AssemblerCpu::I8086, "mov", &["ax", "[ bx    + si + 4 ]"]).encoder_text(),
+            "mov ax,[bx+si+4]"
+        );
     }
 
     #[test]
@@ -348,6 +371,8 @@ mod tests {
     fn every_architecture_parser_rejects_unbalanced_and_empty_groups() {
         for (cpu, unbalanced) in [
             (AssemblerCpu::I8080, "(1"),
+            #[cfg(feature = "i8086")]
+            (AssemblerCpu::I8086, "[bx+si"),
             (AssemblerCpu::Z80, "(ix+1"),
             (AssemblerCpu::Lr35902, "[hl"),
             (AssemblerCpu::Avr, "(1"),

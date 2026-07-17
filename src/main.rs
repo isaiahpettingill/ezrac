@@ -794,6 +794,12 @@ fn resolve_build_settings(
 }
 
 fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
+    if settings.target.triple.cpu == CpuFamily::I8086 {
+        return Err(format!(
+            "source codegen is not implemented for target {} CPU i8086; the i8086 backend is assembly-only",
+            settings.target.triple.value
+        ));
+    }
     if matches!(
         settings.target.triple.cpu,
         CpuFamily::Ez80
@@ -856,6 +862,11 @@ fn emit_source_assembly(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, ezra::diagnostic::Diagnostic> {
+    if options.cpu == CpuFamily::I8086 {
+        return Err(ezra::diagnostic::Diagnostic::new(
+            "EZRA source code generation is not implemented for CPU `i8086`; the i8086 backend is assembly-only",
+        ));
+    }
     ezra::tbir::diagnostics::validate_program(program, options.cpu)?;
     if options.cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(program, options)
@@ -1051,7 +1062,9 @@ fn detect_input_kind(source_path: &Path, settings: &BuildSettings) -> Result<Inp
     }
     match source_path.extension().and_then(|ext| ext.to_str()) {
         Some("ezra") => Ok(InputKind::Ezra),
-        Some("asm" | "s" | "z80" | "ez80" | "i8080" | "8080") => Ok(InputKind::Assembly),
+        Some("asm" | "s" | "z80" | "ez80" | "i8080" | "8080" | "i8086" | "8086") => {
+            Ok(InputKind::Assembly)
+        }
         Some(ext) => Err(format!(
             "cannot infer input kind from extension `.{ext}`; use an `.ezra` source file or an assembly extension such as `.asm`"
         )),
@@ -3181,6 +3194,15 @@ fn print_targets() {
             output: "bin",
             sdk: "none",
             status: "bare assembly/source scaffold",
+        },
+        #[cfg(feature = "i8086")]
+        TargetRow {
+            triple: "bare-i8086",
+            cpu: "i8086",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "standalone assembly-only i8086 target",
         },
         TargetRow {
             triple: "bare-ez80",

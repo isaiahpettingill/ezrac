@@ -1,0 +1,11 @@
+// Intel 8086 operand/addressing grammar. Brackets are the only memory-address
+// delimiter; parentheses may group constant expressions. A segment override may
+// appear either on an operand (`es:[di]`) or as a leading prefix (`es: movsb`).
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom ~ (architecture_operator)? }
+architecture_operands = { i8086_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ i8086_operand)* }
+i8086_operand = { i8086_element ~ (architecture_ws ~ i8086_element)* }
+i8086_element = _{ i8086_bracketed | i8086_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+i8086_nested_element = _{ i8086_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+i8086_bracketed = { architecture_lbracket ~ architecture_ws ~ i8086_nested_element ~ (architecture_ws ~ i8086_nested_element)* ~ architecture_ws ~ architecture_rbracket }
+i8086_parenthesized = { architecture_lparen ~ architecture_ws ~ i8086_nested_element ~ (architecture_ws ~ i8086_nested_element)* ~ architecture_ws ~ architecture_rparen }

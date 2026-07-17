@@ -119,9 +119,9 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--no-default-sdk-symbols` prevents automatic default SDK/runtime symbols when the target would normally provide them.
 
-`--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, and `.8080` are treated as assembly.
+`--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, `.8080`, `.i8086`, and `.8086` are treated as assembly.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `dcpu`, `m6800`, `m68k`, `mos6502`, or `tms9900` (for example, `cargo run --features tms9900 -- assemble --target bare-tms9900 program.asm`). AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800, and M68k have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. TMS9900 syntax and scope are documented in [`tms9900-assembly.md`](tms9900-assembly.md).
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `dcpu`, `i8086`, `m6800`, `m68k`, `mos6502`, or `tms9900`. For example, `cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 program.asm` enables the complete strict 8086 standalone assembler. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800, and M68k have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The 8086 mode is assembly-only and is documented in [`i8086-assembly.md`](i8086-assembly.md); TMS9900 syntax and scope are documented in [`tms9900-assembly.md`](tms9900-assembly.md).
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 

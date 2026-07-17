@@ -6,7 +6,7 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800, and M68k. Some families require their optional Cargo feature; MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, M68k requires `m68k`, and DCPU-16 requires `dcpu`.
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085/8086, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800, and M68k. Some families require their optional Cargo feature; 8086 requires `i8086`, MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, M68k requires `m68k`, and DCPU-16 requires `dcpu`.
 
 Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have complete EZRA source code generation; optional DCPU-16, M6800, M68k, and TMS9900 targets have target-specific source emitters. MOS 6502 variants also have a source emitter; the initial TMS9900 backend is a documented 8-/16-bit scalar subset. AVR has a complete register-ABI source backend.
 
@@ -49,6 +49,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-z180` | 4 | Z180 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8080` | 4 | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8085` | 4 | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-i8086` | 3 | 8086 | 16 (single segment) | `.bin` | none | Optional `i8086` feature; complete strict 8086 standalone assembler |
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
@@ -60,6 +61,16 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
+
+## Bare Intel 8086
+
+Enable the `i8086` feature to assemble a raw, single-segment 8086 binary:
+
+```sh
+cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 --base 100h -o program.bin program.asm
+```
+
+The 8086 hardware has a 20-bit physical address bus, while the initial bare profile intentionally exposes one 16-bit, 64 KiB segment. The assembler covers the complete documented 8086 opcode/form set, ModR/M addressing, segment/repeat/lock prefixes, near and far control transfers, and raw `ESC` encodings. It strictly rejects 80186/80286 and undocumented additions. EZRA source lowering, an ABI/runtime, DOS packaging, and emulator execution are not part of this assembly-only target. See [`i8086-assembly.md`](i8086-assembly.md).
 
 ## AVR and Arduboy
 

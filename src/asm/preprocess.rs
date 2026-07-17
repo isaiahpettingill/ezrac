@@ -52,6 +52,7 @@ impl AssemblyPreprocessOptions {
             ("no-std", cfg!(feature = "no-std")),
             ("test-runner", cfg!(feature = "test-runner")),
             ("intel", cfg!(feature = "intel")),
+            ("i8086", cfg!(feature = "i8086")),
             ("z80", cfg!(feature = "z80")),
             ("lr35902", cfg!(feature = "lr35902")),
             ("avr", cfg!(feature = "avr")),

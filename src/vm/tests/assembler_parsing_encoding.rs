@@ -2,6 +2,36 @@ use super::*;
 #[cfg(feature = "mos6502")]
 use crate::target::parse_target_triple;
 
+#[cfg(feature = "i8086")]
+#[test]
+fn i8086_assembler_integrates_labels_directives_and_little_endian_data() {
+    let source = "org 1000h\nstart:\nmov ax,1234h\nmov es,ax\nrep movsw\nloop start\ndw start\n";
+    let assembled = assemble_subset_with_symbols_at(AssemblerCpu::I8086, source, 0x1000).unwrap();
+
+    assert_eq!(
+        assembled.bytes,
+        [
+            0xB8, 0x34, 0x12, 0x8E, 0xC0, 0xF3, 0xA5, 0xE2, 0xF7, 0x00, 0x10
+        ]
+    );
+    assert!(
+        assembled
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "start" && symbol.addr == 0x1000)
+    );
+
+    for (source, base) in [
+        ("nop", 0x1_0000),
+        ("org 10000h\ndb 1", 0),
+        ("org 0ffffh\ndw 1", 0),
+        ("org 0ffffh\nmov ax,bx", 0),
+    ] {
+        let error = assemble_subset_with_symbols_at(AssemblerCpu::I8086, source, base).unwrap_err();
+        assert!(error.message.contains("single-segment"), "{error}");
+    }
+}
+
 #[test]
 fn z80_assembler_uses_16_bit_absolute_branches() {
     let bytes =
