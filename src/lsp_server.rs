@@ -2084,6 +2084,7 @@ fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnost
     diagnostic_to_lsp_source(&document.text, &document.path, error)
 }
 
+#[cfg(test)]
 fn diagnostic_to_lsp_source(source: &str, path: &Path, error: &Diagnostic) -> LspDiagnostic {
     diagnostic_to_lsp_source_with_severity(source, path, error, 1)
 }
