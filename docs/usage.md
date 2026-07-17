@@ -307,13 +307,20 @@ Supported fields:
 ```text
 [build].input           default source path when running `ezrac build` without a file
 [build].target          target triple
-[build].output          output format: bin, com, gaem, hex, tap, gb, prg, crt, 8xp, 8ek, or 8xk
+[build].output          output format: bin, com, gaem, hex, arduboy, tap, gb, prg, crt, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
 [build].assembler_cpu   i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, avr, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
 [lsp].mode              application (default) or library
+[arduboy].title          required when output is arduboy
+[arduboy].author         required when output is arduboy
+[arduboy].version        required when output is arduboy
+[arduboy].description    optional package description
+[arduboy].date           optional package date
+[arduboy].genre          optional package genre
+[arduboy].source_url     optional package source URL
 ```
 
 `[lsp].mode = "library"` makes the language server type-check the configured source and its SDK imports without requiring `fn main()`. It does not add shared-library output; `build` remains executable-only.
@@ -356,6 +363,7 @@ crt, commodore64-crt Commodore 64 standard cartridge image
 8xp, ti8xp          TI protected program file
 8ek, ti8ek          reserved; rejected until TI CE flash app packaging is implemented
 8xk, ti8xk          reserved; rejected until classic TI flash app packaging is implemented
+arduboy            Arduboy schema-v2 ZIP container with info.json and Intel HEX
 ```
 
 Target defaults:
@@ -372,6 +380,22 @@ all other targets            bin
 ```
 
 Agon MOS targets use `bin` as the format name but wrap the code in the Agon MOS executable structure.
+
+Arduboy targets continue to default to a standalone `.hex`. Set `[build].output = "arduboy"` to opt into a schema-v2 `.arduboy` ZIP package. The package stores `info.json` and `<executable>.hex`; its `[arduboy]` table requires `title`, `author`, and `version`, and accepts `description`, `date`, `genre`, and `source_url`.
+
+```toml
+[build]
+target = "arduboy-avr"
+output = "arduboy"
+executable = "pocket-game"
+
+[arduboy]
+title = "Pocket Game"
+author = "Your Name"
+version = "1.0.0"
+description = "A small Arduboy game"
+source_url = "https://example.com/pocket-game"
+```
 
 ## Building Examples
 

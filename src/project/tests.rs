@@ -84,6 +84,163 @@ paths = ["sdk", "../shared"]
 }
 
 #[test]
+fn parses_explicit_banking_configuration() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[banking]\nenabled = true\n",
+    )
+    .unwrap();
+
+    assert_eq!(config.banking, BankingConfig { enabled: true });
+}
+
+#[test]
+fn defaults_and_validates_explicit_banking_configuration() {
+    let config = parse_project_config(Path::new("/project/Ezra.toml"), "").unwrap();
+    assert_eq!(config.banking, BankingConfig { enabled: false });
+
+    let error = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[banking]\nenabled = \"yes\"\n",
+    )
+    .unwrap_err();
+    assert!(error.message.contains("banking.enabled"), "{error}");
+}
+
+#[test]
+fn parses_gameboy_banking_configuration() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        r#"[gameboy]
+mapper = "mbc5"
+rom_banks = 32
+ram_banks = 4
+battery = true
+rumble = true
+bank_files = ["assets/level-2.bin", "assets/level-3.bin"]
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.gameboy,
+        Some(GameBoyConfig {
+            mapper: GameBoyMapper::Mbc5,
+            rom_banks: Some(32),
+            ram_banks: 4,
+            battery: true,
+            rumble: true,
+            bank_files: vec![
+                PathBuf::from("/project/assets/level-2.bin"),
+                PathBuf::from("/project/assets/level-3.bin"),
+            ],
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_gameboy_mapper() {
+    let error = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[gameboy]\nmapper = \"mbc3\"\n",
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("gameboy.mapper"), "{error}");
+}
+
+#[test]
+fn parses_zxspectrum_banking_configuration_without_reading_bank_files() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        r#"[zxspectrum]
+
+[[zxspectrum.banks]]
+page = 1
+file = "assets/level-1.bin"
+name = "level-1"
+
+[[zxspectrum.banks]]
+page = 7
+file = "assets/level-7.bin"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.zxspectrum,
+        Some(ZxSpectrumConfig {
+            banks: vec![
+                ZxSpectrumBank {
+                    page: 1,
+                    file: PathBuf::from("/project/assets/level-1.bin"),
+                    name: Some("level-1".to_owned()),
+                },
+                ZxSpectrumBank {
+                    page: 7,
+                    file: PathBuf::from("/project/assets/level-7.bin"),
+                    name: None,
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_zxspectrum_bank_configuration() {
+    for (source, expected) in [
+        (
+            r#"[zxspectrum]
+[[zxspectrum.banks]]
+page = 2
+file = "assets/bank.bin"
+"#,
+            "must be a u8 value of 1, 3, 4, 6, or 7",
+        ),
+        (
+            r#"[zxspectrum]
+[[zxspectrum.banks]]
+page = 1
+file = "assets/first.bin"
+[[zxspectrum.banks]]
+page = 1
+file = "assets/second.bin"
+"#,
+            "duplicates ZX Spectrum RAM page 1",
+        ),
+        (
+            r#"[zxspectrum]
+[[zxspectrum.banks]]
+page = 3
+file = "assets/bank.bin"
+name = ""
+"#,
+            "must be a nonempty ASCII string",
+        ),
+        (
+            r#"[zxspectrum]
+[[zxspectrum.banks]]
+page = 4
+file = "assets/bank.bin"
+name = "café"
+"#,
+            "must be a nonempty ASCII string",
+        ),
+        (
+            r#"[zxspectrum]
+[[zxspectrum.banks]]
+page = 4
+file = "/outside-project.bin"
+"#,
+            "must be a project-relative path",
+        ),
+    ] {
+        let error = parse_project_config(Path::new("/project/Ezra.toml"), source).unwrap_err();
+        assert!(error.message.contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn parses_multiple_build_targets() {
     let config = parse_project_config(
         Path::new("/project/Ezra.toml"),

@@ -16,6 +16,7 @@ pub mod api;
 pub mod api;
 pub mod asm;
 pub mod ast;
+pub mod banking;
 #[cfg(feature = "std")]
 pub mod cart;
 #[cfg(feature = "std")]

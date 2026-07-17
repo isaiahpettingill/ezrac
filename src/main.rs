@@ -18,7 +18,10 @@ use ezra::{
     hir::HirProgram,
     layout::{Layout, parse_layout},
     parser::parse_program,
-    project::{AssetConfig, load_nearest_project_config, load_project_config},
+    project::{
+        ArduboyConfig, AssetConfig, GameBoyConfig, GameBoyMapper, ZxSpectrumConfig,
+        load_nearest_project_config, load_project_config,
+    },
     target::{
         Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE,
         EZRA_RODATA_BASE, EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format,
@@ -620,6 +623,9 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         layout,
         layout_path,
         asset_config: AssetConfig::default(),
+        gameboy: None,
+        arduboy: None,
+        zxspectrum: None,
         default_sdk_symbols: true,
         output_root: source_path
             .parent()
@@ -688,6 +694,9 @@ struct BuildSettings {
     layout: Layout,
     layout_path: Option<PathBuf>,
     asset_config: AssetConfig,
+    gameboy: Option<GameBoyConfig>,
+    arduboy: Option<ArduboyConfig>,
+    zxspectrum: Option<ZxSpectrumConfig>,
     default_sdk_symbols: bool,
     output_root: PathBuf,
     executable_name: Option<String>,
@@ -779,6 +788,34 @@ fn resolve_build_settings(
         .as_ref()
         .map(|project| project.assets.clone())
         .unwrap_or_default();
+    let gameboy = project.as_ref().and_then(|project| project.gameboy.clone());
+    if gameboy.is_some() && !target.triple.value.starts_with("gameboy-") {
+        return Err("project `[gameboy]` configuration requires a `gameboy-*` target".to_owned());
+    }
+    let arduboy = project.as_ref().and_then(|project| project.arduboy.clone());
+    if arduboy.is_some() && !target.triple.value.starts_with("arduboy-") {
+        return Err("project `[arduboy]` configuration requires an `arduboy-*` target".to_owned());
+    }
+    let zxspectrum = project
+        .as_ref()
+        .and_then(|project| project.zxspectrum.clone());
+    if zxspectrum.is_some() && target.triple.value != "zxspectrum-z80-128k" {
+        return Err(
+            "project `[zxspectrum]` bank configuration requires the `zxspectrum-z80-128k` target"
+                .to_owned(),
+        );
+    }
+    if target.triple.value == "zxspectrum-z80-128k" {
+        if output_format != OutputFormat::ZxSpectrumTap {
+            return Err("the `zxspectrum-z80-128k` target requires `.tap` output".to_owned());
+        }
+        if layout_path.is_some() {
+            return Err(
+                "the `zxspectrum-z80-128k` target does not support custom layouts; its fixed-RAM stack and pageable window are required for safe banking"
+                    .to_owned(),
+            );
+        }
+    }
 
     Ok(BuildSettings {
         sdk,
@@ -789,6 +826,9 @@ fn resolve_build_settings(
         layout,
         layout_path,
         asset_config,
+        gameboy,
+        arduboy,
+        zxspectrum,
         default_sdk_symbols,
         output_root,
         executable_name,
@@ -1665,6 +1705,9 @@ fn build_executable_bytes(
     code: &[u8],
     output_path: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
+    if settings.output_format == OutputFormat::Arduboy {
+        return arduboy_package_bytes(settings, output_path, code);
+    }
     if settings
         .target
         .triple
@@ -1727,6 +1770,200 @@ fn build_executable_bytes(
         return build_agon_mos_executable(settings.layout.entry.get(), code);
     }
     Ok(code.to_vec())
+}
+
+fn arduboy_package_bytes(
+    settings: &BuildSettings,
+    output_path: Option<&Path>,
+    code: &[u8],
+) -> Result<Vec<u8>, String> {
+    if !settings.target.triple.value.starts_with("arduboy-") {
+        return Err(format!(
+            "target `{}` does not support Arduboy .arduboy output",
+            settings.target.triple.value
+        ));
+    }
+    let config = settings.arduboy.as_ref().ok_or_else(|| {
+        "`[arduboy]` metadata is required when `build.output = \"arduboy\"`".to_owned()
+    })?;
+    let output_path = output_path.ok_or_else(|| {
+        "Arduboy packaging requires an output path to determine the embedded HEX filename"
+            .to_owned()
+    })?;
+    let executable = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Arduboy output path `{}` has no valid executable filename",
+                output_path.display()
+            )
+        })?;
+    let hex_filename = format!("{executable}.hex");
+    let hex = ezra::package::package_executable(
+        &ezra::package::PackageRequest {
+            target: settings.target.triple.value.clone(),
+            output_format: OutputFormat::ArduinoHex,
+            load_addr: settings.layout.load.get(),
+            entry_addr: settings.layout.entry.get(),
+            executable_name: settings.executable_name.clone(),
+        },
+        code,
+    )
+    .map_err(|error| error.to_string())?;
+    let info = arduboy_info_json(config, &hex_filename);
+    stored_zip_bytes(&[("info.json", info.as_bytes()), (&hex_filename, &hex)])
+}
+
+fn arduboy_info_json(config: &ArduboyConfig, hex_filename: &str) -> String {
+    let mut fields = vec![
+        ("schemaVersion", "2".to_owned()),
+        ("title", json_string(&config.title)),
+        ("author", json_string(&config.author)),
+        ("version", json_string(&config.version)),
+    ];
+    for (name, value) in [
+        ("description", config.description.as_deref()),
+        ("date", config.date.as_deref()),
+        ("genre", config.genre.as_deref()),
+        ("sourceUrl", config.source_url.as_deref()),
+    ] {
+        if let Some(value) = value {
+            fields.push((name, json_string(value)));
+        }
+    }
+    fields.push((
+        "binaries",
+        format!(
+            "[{{\"filename\":{},\"device\":\"Arduboy\"}}]",
+            json_string(hex_filename)
+        ),
+    ));
+    let mut info = String::from("{");
+    for (index, (name, value)) in fields.into_iter().enumerate() {
+        if index != 0 {
+            info.push(',');
+        }
+        info.push_str(&json_string(name));
+        info.push(':');
+        info.push_str(&value);
+    }
+    info.push('}');
+    info
+}
+
+fn json_string(value: &str) -> String {
+    let mut json = String::with_capacity(value.len() + 2);
+    json.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            '\n' => json.push_str("\\n"),
+            '\r' => json.push_str("\\r"),
+            '\t' => json.push_str("\\t"),
+            character if character <= '\u{1F}' => {
+                json.push_str(&format!("\\u{:04X}", character as u32));
+            }
+            character => json.push(character),
+        }
+    }
+    json.push('"');
+    json
+}
+
+fn stored_zip_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
+    const LOCAL_FILE_HEADER: u32 = 0x0403_4B50;
+    const CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4B50;
+    const END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4B50;
+    const VERSION_NEEDED: u16 = 20;
+    const VERSION_MADE_BY: u16 = 20;
+    const UTF8_FLAG: u16 = 1 << 11;
+    const STORED: u16 = 0;
+    const DOS_DATE_1980_01_01: u16 = 0x0021;
+
+    let entry_count = u16::try_from(entries.len())
+        .map_err(|_| "Arduboy ZIP contains too many entries".to_owned())?;
+    let mut zip = Vec::new();
+    let mut central_directory = Vec::new();
+    for (name, data) in entries {
+        let name = name.as_bytes();
+        let name_len = u16::try_from(name.len())
+            .map_err(|_| "Arduboy ZIP entry name is too long".to_owned())?;
+        let data_len =
+            u32::try_from(data.len()).map_err(|_| "Arduboy ZIP entry exceeds 4 GiB".to_owned())?;
+        let offset =
+            u32::try_from(zip.len()).map_err(|_| "Arduboy ZIP exceeds 4 GiB".to_owned())?;
+        let crc = zip_crc32(data);
+
+        push_zip_u32(&mut zip, LOCAL_FILE_HEADER);
+        push_zip_u16(&mut zip, VERSION_NEEDED);
+        push_zip_u16(&mut zip, UTF8_FLAG);
+        push_zip_u16(&mut zip, STORED);
+        push_zip_u16(&mut zip, 0);
+        push_zip_u16(&mut zip, DOS_DATE_1980_01_01);
+        push_zip_u32(&mut zip, crc);
+        push_zip_u32(&mut zip, data_len);
+        push_zip_u32(&mut zip, data_len);
+        push_zip_u16(&mut zip, name_len);
+        push_zip_u16(&mut zip, 0);
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(data);
+
+        push_zip_u32(&mut central_directory, CENTRAL_DIRECTORY_HEADER);
+        push_zip_u16(&mut central_directory, VERSION_MADE_BY);
+        push_zip_u16(&mut central_directory, VERSION_NEEDED);
+        push_zip_u16(&mut central_directory, UTF8_FLAG);
+        push_zip_u16(&mut central_directory, STORED);
+        push_zip_u16(&mut central_directory, 0);
+        push_zip_u16(&mut central_directory, DOS_DATE_1980_01_01);
+        push_zip_u32(&mut central_directory, crc);
+        push_zip_u32(&mut central_directory, data_len);
+        push_zip_u32(&mut central_directory, data_len);
+        push_zip_u16(&mut central_directory, name_len);
+        push_zip_u16(&mut central_directory, 0);
+        push_zip_u16(&mut central_directory, 0);
+        push_zip_u16(&mut central_directory, 0);
+        push_zip_u16(&mut central_directory, 0);
+        push_zip_u32(&mut central_directory, 0);
+        push_zip_u32(&mut central_directory, offset);
+        central_directory.extend_from_slice(name);
+    }
+
+    let central_offset =
+        u32::try_from(zip.len()).map_err(|_| "Arduboy ZIP exceeds 4 GiB".to_owned())?;
+    let central_len = u32::try_from(central_directory.len())
+        .map_err(|_| "Arduboy ZIP central directory exceeds 4 GiB".to_owned())?;
+    zip.extend_from_slice(&central_directory);
+    push_zip_u32(&mut zip, END_OF_CENTRAL_DIRECTORY);
+    push_zip_u16(&mut zip, 0);
+    push_zip_u16(&mut zip, 0);
+    push_zip_u16(&mut zip, entry_count);
+    push_zip_u16(&mut zip, entry_count);
+    push_zip_u32(&mut zip, central_len);
+    push_zip_u32(&mut zip, central_offset);
+    push_zip_u16(&mut zip, 0);
+    Ok(zip)
+}
+
+fn push_zip_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_zip_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn zip_crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB8_8320 & (0u32.wrapping_sub(crc & 1)));
+        }
+    }
+    !crc
 }
 
 fn commodore64_prg_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
@@ -1820,12 +2057,54 @@ fn game_boy_rom_bytes(
     if settings.layout.load.get() != 0x0150 || settings.layout.entry.get() != 0x0150 {
         return Err("Game Boy ROM layouts must load and enter at 0x0150".to_owned());
     }
-    const ROM_SIZE: usize = 0x8000;
+
+    const BANK_SIZE: usize = 0x4000;
+    const INITIAL_ROM_SIZE: usize = 0x8000;
     const CODE_OFFSET: usize = 0x0150;
-    if code.len() > ROM_SIZE - CODE_OFFSET {
-        return Err("Game Boy ROM-only code exceeds 32 KiB cartridge capacity".to_owned());
+    let config = settings.gameboy.clone().unwrap_or_default();
+    let bank_payloads = config
+        .bank_files
+        .iter()
+        .map(|path| {
+            fs::read(path).map_err(|error| {
+                format!(
+                    "failed to read Game Boy ROM bank file `{}`: {error}",
+                    path.display()
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let payload_banks = game_boy_payload_banks(config.mapper, bank_payloads.len())?;
+    let required_banks = payload_banks
+        .last()
+        .copied()
+        .map(|bank| bank + 1)
+        .unwrap_or(2);
+    let rom_banks = game_boy_rom_banks(&config, required_banks)?;
+    let rom_size = rom_banks
+        .checked_mul(BANK_SIZE)
+        .ok_or_else(|| "Game Boy ROM size overflow".to_owned())?;
+    if code.len() > INITIAL_ROM_SIZE - CODE_OFFSET {
+        return Err(format!(
+            "Game Boy fixed-bank code is {} bytes, but banks 0-1 support at most {} bytes from 0x0150; put switchable data/code in `gameboy.bank_files` and select its bank explicitly",
+            code.len(),
+            INITIAL_ROM_SIZE - CODE_OFFSET
+        ));
     }
-    let mut rom = vec![0xFF; ROM_SIZE];
+    for (index, payload) in bank_payloads.iter().enumerate() {
+        if payload.len() > BANK_SIZE {
+            return Err(format!(
+                "Game Boy bank file `{}` is {} bytes, but switchable ROM bank {} holds at most {} bytes",
+                config.bank_files[index].display(),
+                payload.len(),
+                payload_banks[index],
+                BANK_SIZE
+            ));
+        }
+    }
+
+    let (cartridge_type, ram_size_code) = game_boy_cartridge_header(&config)?;
+    let mut rom = vec![0xFF; rom_size];
     rom[0x0100..0x0104].copy_from_slice(&[0xC3, 0x50, 0x01, 0x00]);
     rom[0x0104..0x0134].copy_from_slice(&[
         0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00,
@@ -1857,13 +2136,17 @@ fn game_boy_rom_bytes(
     };
     rom[0x0144..0x0146].copy_from_slice(b"00");
     rom[0x0146] = 0x00;
-    rom[0x0147] = 0x00;
-    rom[0x0148] = 0x00;
-    rom[0x0149] = 0x00;
+    rom[0x0147] = cartridge_type;
+    rom[0x0148] = game_boy_rom_size_code(rom_banks)?;
+    rom[0x0149] = ram_size_code;
     rom[0x014A] = 0x01;
     rom[0x014B] = 0x33;
     rom[0x014C] = 0x00;
     rom[CODE_OFFSET..CODE_OFFSET + code.len()].copy_from_slice(code);
+    for (index, payload) in bank_payloads.iter().enumerate() {
+        let offset = payload_banks[index] * BANK_SIZE;
+        rom[offset..offset + payload.len()].copy_from_slice(payload);
+    }
     rom[0x014D] = rom[0x0134..=0x014C].iter().fold(0u8, |checksum, byte| {
         checksum.wrapping_sub(*byte).wrapping_sub(1)
     });
@@ -1874,6 +2157,158 @@ fn game_boy_rom_bytes(
         .fold(0u16, |sum, (_, byte)| sum.wrapping_add(u16::from(*byte)));
     rom[0x014E..0x0150].copy_from_slice(&checksum.to_be_bytes());
     Ok(rom)
+}
+
+fn game_boy_payload_banks(
+    mapper: GameBoyMapper,
+    payload_count: usize,
+) -> Result<Vec<usize>, String> {
+    let mut banks = Vec::with_capacity(payload_count);
+    let maximum = match mapper {
+        GameBoyMapper::RomOnly => 1,
+        GameBoyMapper::Mbc1 => 127,
+        GameBoyMapper::Mbc5 => 511,
+    };
+    for bank in 2..=maximum {
+        if mapper == GameBoyMapper::Mbc1 && bank & 0x1F == 0 {
+            continue;
+        }
+        banks.push(bank);
+        if banks.len() == payload_count {
+            return Ok(banks);
+        }
+    }
+    if payload_count == 0 {
+        Ok(banks)
+    } else {
+        Err(format!(
+            "Game Boy mapper `{}` supports at most {} configured switchable bank file(s)",
+            game_boy_mapper_name(mapper),
+            banks.len()
+        ))
+    }
+}
+
+fn game_boy_rom_banks(config: &GameBoyConfig, required_banks: usize) -> Result<usize, String> {
+    let mapper_max_banks = match config.mapper {
+        GameBoyMapper::RomOnly => 2,
+        GameBoyMapper::Mbc1 => 128,
+        GameBoyMapper::Mbc5 => 512,
+    };
+    let rom_banks = config
+        .rom_banks
+        .map(usize::from)
+        .unwrap_or_else(|| required_banks.next_power_of_two().max(2));
+    if !rom_banks.is_power_of_two() || !(2..=512).contains(&rom_banks) {
+        return Err(
+            "Game Boy `gameboy.rom_banks` must be a power of two from 2 through 512".to_owned(),
+        );
+    }
+    if rom_banks < required_banks {
+        return Err(format!(
+            "Game Boy `gameboy.rom_banks` is {rom_banks}, but {} banks are required for the fixed image and {} bank file(s)",
+            required_banks,
+            required_banks - 2
+        ));
+    }
+    if rom_banks > mapper_max_banks {
+        return Err(format!(
+            "Game Boy mapper `{}` supports at most {mapper_max_banks} ROM banks, not {rom_banks}",
+            game_boy_mapper_name(config.mapper)
+        ));
+    }
+    if config.mapper == GameBoyMapper::RomOnly && (required_banks != 2 || rom_banks != 2) {
+        return Err("Game Boy ROM-only cartridges cannot use `gameboy.bank_files` or more than two ROM banks".to_owned());
+    }
+    Ok(rom_banks)
+}
+
+fn game_boy_mapper_name(mapper: GameBoyMapper) -> &'static str {
+    match mapper {
+        GameBoyMapper::RomOnly => "rom-only",
+        GameBoyMapper::Mbc1 => "mbc1",
+        GameBoyMapper::Mbc5 => "mbc5",
+    }
+}
+
+fn game_boy_rom_size_code(rom_banks: usize) -> Result<u8, String> {
+    match rom_banks {
+        2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 => Ok(rom_banks.trailing_zeros() as u8 - 1),
+        _ => Err(format!("unsupported Game Boy ROM bank count {rom_banks}")),
+    }
+}
+
+fn game_boy_cartridge_header(config: &GameBoyConfig) -> Result<(u8, u8), String> {
+    let ram_size_code = match config.ram_banks {
+        0 => 0x00,
+        1 => 0x02,
+        4 => 0x03,
+        8 => 0x05,
+        16 => 0x04,
+        _ => return Err("Game Boy RAM bank count must be one of 0, 1, 4, 8, or 16".to_owned()),
+    };
+    if config.battery && config.ram_banks == 0 {
+        return Err(
+            "Game Boy battery-backed cartridges require at least one external RAM bank".to_owned(),
+        );
+    }
+    if config.mapper == GameBoyMapper::Mbc1 && config.ram_banks > 4 {
+        return Err("Game Boy MBC1 cartridges support at most four external RAM banks".to_owned());
+    }
+    if config.mapper == GameBoyMapper::Mbc5 && config.rumble && config.ram_banks > 8 {
+        return Err(
+            "Game Boy MBC5 rumble cartridges support at most eight external RAM banks".to_owned(),
+        );
+    }
+    let cartridge_type = match config.mapper {
+        GameBoyMapper::RomOnly if config.ram_banks == 0 && !config.battery && !config.rumble => {
+            0x00
+        }
+        GameBoyMapper::RomOnly => {
+            return Err(
+                "Game Boy ROM-only cartridges cannot declare RAM, battery, or rumble".to_owned(),
+            );
+        }
+        GameBoyMapper::Mbc1 if config.rumble => {
+            return Err("Game Boy MBC1 cartridges do not support rumble".to_owned());
+        }
+        GameBoyMapper::Mbc1 if config.ram_banks == 0 => 0x01,
+        GameBoyMapper::Mbc1 if config.battery => 0x03,
+        GameBoyMapper::Mbc1 => 0x02,
+        GameBoyMapper::Mbc5 if config.rumble && config.ram_banks == 0 => 0x1C,
+        GameBoyMapper::Mbc5 if config.rumble && config.battery => 0x1E,
+        GameBoyMapper::Mbc5 if config.rumble => 0x1D,
+        GameBoyMapper::Mbc5 if config.ram_banks == 0 => 0x19,
+        GameBoyMapper::Mbc5 if config.battery => 0x1B,
+        GameBoyMapper::Mbc5 => 0x1A,
+    };
+    Ok((cartridge_type, ram_size_code))
+}
+
+#[cfg(test)]
+mod game_boy_banking_tests {
+    use super::*;
+
+    #[test]
+    fn mbc1_payload_banks_skip_unselectable_multiples_of_32() {
+        let banks = game_boy_payload_banks(GameBoyMapper::Mbc1, 31).unwrap();
+        assert_eq!(banks[..30], (2..=31).collect::<Vec<_>>());
+        assert_eq!(banks[30], 33);
+    }
+
+    #[test]
+    fn mbc5_rumble_header_describes_rom_ram_and_battery() {
+        let config = GameBoyConfig {
+            mapper: GameBoyMapper::Mbc5,
+            rom_banks: Some(8),
+            ram_banks: 4,
+            battery: true,
+            rumble: true,
+            bank_files: Vec::new(),
+        };
+        assert_eq!(game_boy_cartridge_header(&config), Ok((0x1E, 0x03)));
+        assert_eq!(game_boy_rom_size_code(8), Ok(0x02));
+    }
 }
 
 fn ti8xp_bytes(
@@ -1933,6 +2368,9 @@ fn zx_spectrum_tap_bytes(
             settings.target.triple.value
         ));
     }
+    if settings.target.triple.value == "zxspectrum-z80-128k" {
+        return zx_spectrum_128k_tap_bytes(settings, output_path, code);
+    }
     let load = u16::try_from(settings.layout.load.get())
         .map_err(|_| "ZX Spectrum load address exceeds 16-bit address space".to_owned())?;
     let entry = u16::try_from(settings.layout.entry.get())
@@ -1978,6 +2416,128 @@ fn zx_spectrum_tap_bytes(
     Ok(out)
 }
 
+const ZX_128K_BANK_WINDOW: u16 = 0xC000;
+const ZX_128K_BANK_SIZE: usize = 0x4000;
+const ZX_128K_PAGE_PORT: u16 = 0x7FFD;
+
+fn zx_spectrum_128k_tap_bytes(
+    settings: &BuildSettings,
+    output_path: Option<&Path>,
+    code: &[u8],
+) -> Result<Vec<u8>, String> {
+    let load = u16::try_from(settings.layout.load.get())
+        .map_err(|_| "ZX Spectrum load address exceeds 16-bit address space".to_owned())?;
+    let entry = u16::try_from(settings.layout.entry.get())
+        .map_err(|_| "ZX Spectrum entry address exceeds 16-bit address space".to_owned())?;
+    if load != 0x8000 || entry < load || entry > 0xBFFF {
+        return Err(
+            "the `zxspectrum-z80-128k` target requires resident code and its entry point in 0x8000..0xBFFF"
+                .to_owned(),
+        );
+    }
+    let code_length = u16::try_from(code.len())
+        .map_err(|_| "ZX Spectrum resident CODE block exceeds 65535 bytes".to_owned())?;
+    let mut banks = settings.zxspectrum.clone().unwrap_or_default().banks;
+    banks.sort_by_key(|bank| bank.page);
+    let bank_payloads = banks
+        .iter()
+        .map(|bank| {
+            let bytes = fs::read(&bank.file).map_err(|error| {
+                format!(
+                    "failed to read ZX Spectrum RAM page {} payload `{}`: {error}",
+                    bank.page,
+                    bank.file.display()
+                )
+            })?;
+            if bytes.len() > ZX_128K_BANK_SIZE {
+                return Err(format!(
+                    "ZX Spectrum RAM page {} payload `{}` is {} bytes, but a pageable RAM bank holds at most {} bytes",
+                    bank.page,
+                    bank.file.display(),
+                    bytes.len(),
+                    ZX_128K_BANK_SIZE
+                ));
+            }
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut loader = Vec::new();
+    let mut clear = vec![0xfd, b' ']; // CLEAR
+    push_zx_basic_integer(&mut clear, 0x5FFF);
+    push_zx_basic_line(&mut loader, 10, &clear)?;
+    push_zx_basic_line(&mut loader, 20, &[0xef, b' ', b'"', b'"', b' ', 0xaf])?; // LOAD "" CODE
+    let mut line = 30u16;
+    for bank in &banks {
+        let mut page = vec![0xdf, b' ']; // OUT
+        push_zx_basic_integer(&mut page, ZX_128K_PAGE_PORT);
+        page.extend_from_slice(b", ");
+        push_zx_basic_integer(&mut page, u16::from(bank.page));
+        push_zx_basic_line(&mut loader, line, &page)?;
+        line = line
+            .checked_add(10)
+            .ok_or_else(|| "ZX Spectrum BASIC loader line number overflow".to_owned())?;
+        push_zx_basic_line(&mut loader, line, &[0xef, b' ', b'"', b'"', b' ', 0xaf])?; // LOAD "" CODE
+        line = line
+            .checked_add(10)
+            .ok_or_else(|| "ZX Spectrum BASIC loader line number overflow".to_owned())?;
+    }
+    let mut restore_page_zero = vec![0xdf, b' ']; // OUT
+    push_zx_basic_integer(&mut restore_page_zero, ZX_128K_PAGE_PORT);
+    restore_page_zero.extend_from_slice(b", ");
+    push_zx_basic_integer(&mut restore_page_zero, 0);
+    push_zx_basic_line(&mut loader, line, &restore_page_zero)?;
+    line = line
+        .checked_add(10)
+        .ok_or_else(|| "ZX Spectrum BASIC loader line number overflow".to_owned())?;
+    let mut run = vec![0xf9, b' ', 0xc0, b' ']; // RANDOMIZE USR
+    push_zx_basic_integer(&mut run, entry);
+    push_zx_basic_line(&mut loader, line, &run)?;
+
+    let loader_length = u16::try_from(loader.len())
+        .map_err(|_| "ZX Spectrum BASIC loader exceeds 65535 bytes".to_owned())?;
+    let name = zx_tap_name(settings, output_path);
+    let mut loader_header = Vec::with_capacity(17);
+    loader_header.push(0); // BASIC program header
+    loader_header.extend_from_slice(&name);
+    loader_header.extend_from_slice(&loader_length.to_le_bytes());
+    loader_header.extend_from_slice(&10u16.to_le_bytes()); // auto-start at line 10
+    loader_header.extend_from_slice(&loader_length.to_le_bytes());
+
+    let mut out = Vec::new();
+    push_zx_tap_block(&mut out, 0x00, &loader_header)?;
+    push_zx_tap_block(&mut out, 0xff, &loader)?;
+    push_zx_code_block(&mut out, name, load, code_length, code)?;
+    for (bank, payload) in banks.iter().zip(&bank_payloads) {
+        let length = u16::try_from(payload.len())
+            .map_err(|_| "ZX Spectrum RAM bank payload exceeds 65535 bytes".to_owned())?;
+        let name = zx_tap_name_for(
+            bank.name
+                .as_deref()
+                .unwrap_or(&format!("BANK{}", bank.page)),
+        );
+        push_zx_code_block(&mut out, name, ZX_128K_BANK_WINDOW, length, payload)?;
+    }
+    Ok(out)
+}
+
+fn push_zx_code_block(
+    out: &mut Vec<u8>,
+    name: [u8; 10],
+    load: u16,
+    length: u16,
+    payload: &[u8],
+) -> Result<(), String> {
+    let mut header = Vec::with_capacity(17);
+    header.push(3); // CODE header
+    header.extend_from_slice(&name);
+    header.extend_from_slice(&length.to_le_bytes());
+    header.extend_from_slice(&load.to_le_bytes());
+    header.extend_from_slice(&0u16.to_le_bytes());
+    push_zx_tap_block(out, 0x00, &header)?;
+    push_zx_tap_block(out, 0xff, payload)
+}
+
 fn push_zx_basic_integer(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(value.to_string().as_bytes());
     out.push(0x0e); // numeric literal marker
@@ -2007,6 +2567,10 @@ fn zx_tap_name(settings: &BuildSettings, output_path: Option<&Path>) -> [u8; 10]
                 .and_then(|stem| stem.to_str())
         })
         .unwrap_or("EZRA");
+    zx_tap_name_for(raw)
+}
+
+fn zx_tap_name_for(raw: &str) -> [u8; 10] {
     let mut name = [b' '; 10];
     for (slot, ch) in name.iter_mut().zip(raw.chars()) {
         *slot = if ch.is_ascii_alphanumeric() || ch == '_' {
@@ -3016,6 +3580,7 @@ fn assembly_options_from_layout(
             || layout.name.starts_with("ti84plus-z80")
             || layout.name.starts_with("ti84plusce-ez80")
             || layout.name.starts_with("ti83premiumce-ez80"),
+        arduboy_executable: target.starts_with("arduboy-"),
         load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),
@@ -3561,6 +4126,100 @@ mod i8086_review_tests {
             "{error}"
         );
         let _ = std::fs::remove_dir_all(source_path.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod arduboy_package_tests {
+    use super::*;
+
+    #[test]
+    fn builds_a_schema_v2_arduboy_zip_with_stored_hex() {
+        let config = ArduboyConfig {
+            title: "A \"quoted\" game".to_owned(),
+            author: "EZRA".to_owned(),
+            version: "1.0.0".to_owned(),
+            description: Some("Line one\nLine two".to_owned()),
+            date: Some("2026-07-17".to_owned()),
+            genre: Some("Puzzle".to_owned()),
+            source_url: Some("https://example.com/game".to_owned()),
+        };
+        let info = arduboy_info_json(&config, "pocket-game.hex");
+        let zip = stored_zip_bytes(&[
+            ("info.json", info.as_bytes()),
+            ("pocket-game.hex", b":00000001FF\n"),
+        ])
+        .unwrap();
+        let entries = read_stored_zip_entries(&zip);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries["pocket-game.hex"], b":00000001FF\n");
+        let info = std::str::from_utf8(&entries["info.json"]).unwrap();
+        assert!(info.contains("\"schemaVersion\":2"), "{info}");
+        assert!(
+            info.contains("\"title\":\"A \\\"quoted\\\" game\""),
+            "{info}"
+        );
+        assert!(
+            info.contains("\"description\":\"Line one\\nLine two\""),
+            "{info}"
+        );
+        assert!(info.contains("\"date\":\"2026-07-17\""), "{info}");
+        assert!(info.contains("\"genre\":\"Puzzle\""), "{info}");
+        assert!(
+            info.contains("\"sourceUrl\":\"https://example.com/game\""),
+            "{info}"
+        );
+        assert!(
+            info.contains(
+                "\"binaries\":[{\"filename\":\"pocket-game.hex\",\"device\":\"Arduboy\"}]"
+            ),
+            "{info}"
+        );
+    }
+
+    fn read_stored_zip_entries(zip: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        const LOCAL_FILE_HEADER: u32 = 0x0403_4B50;
+        const CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4B50;
+        const END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4B50;
+
+        let mut entries = BTreeMap::new();
+        let mut offset = 0;
+        while read_u32(zip, offset) == LOCAL_FILE_HEADER {
+            assert_eq!(read_u16(zip, offset + 6), 1 << 11);
+            assert_eq!(read_u16(zip, offset + 8), 0, "entry must be stored");
+            let size = read_u32(zip, offset + 18) as usize;
+            assert_eq!(read_u32(zip, offset + 22) as usize, size);
+            let name_len = read_u16(zip, offset + 26) as usize;
+            let extra_len = read_u16(zip, offset + 28) as usize;
+            let name_start = offset + 30;
+            let data_start = name_start + name_len + extra_len;
+            let name = std::str::from_utf8(&zip[name_start..name_start + name_len])
+                .unwrap()
+                .to_owned();
+            let data = zip[data_start..data_start + size].to_vec();
+            assert_eq!(read_u32(zip, offset + 14), zip_crc32(&data));
+            entries.insert(name, data);
+            offset = data_start + size;
+        }
+        assert_eq!(read_u32(zip, offset), CENTRAL_DIRECTORY_HEADER);
+        let end_offset = zip.len() - 22;
+        assert_eq!(read_u32(zip, end_offset), END_OF_CENTRAL_DIRECTORY);
+        assert_eq!(read_u16(zip, end_offset + 10) as usize, entries.len());
+        entries
+    }
+
+    fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
     }
 }
 

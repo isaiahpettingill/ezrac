@@ -23,6 +23,11 @@ pub enum Declaration {
         predicates: Vec<CfgPredicate>,
         declaration: Box<Declaration>,
     },
+    /// A source-level bank placement request. Its runtime and output semantics are target-owned.
+    Bank {
+        bank: u32,
+        declaration: Box<Declaration>,
+    },
     Import(String),
     Const(ConstDecl),
     Alias(AliasDecl),
@@ -275,6 +280,11 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
     },
     Deref(Box<Expr>),
+    /// A pointer expression explicitly associated with a bank.
+    BankedPointer {
+        pointer: Box<Expr>,
+        bank: u32,
+    },
     Call {
         path: Vec<String>,
         args: Vec<Expr>,

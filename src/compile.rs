@@ -238,6 +238,7 @@ fn diagnostic_assembly_options(
             || target.starts_with("ti84plus-z80")
             || target.starts_with("ti84plusce-ez80")
             || target.starts_with("ti83premiumce-ez80"),
+        arduboy_executable: target.starts_with("arduboy-"),
         load_addr: symbol("EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: symbol("EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: symbol("EZRA_CODE_BASE").unwrap_or(layout.entry),
@@ -1382,6 +1383,22 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/oled.ezra"),
                 "arduboy.oled",
             )),
+            "arduboy.eeprom" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/eeprom.ezra"),
+                "arduboy.eeprom",
+            )),
+            "arduboy.timing" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/timing.ezra"),
+                "arduboy.timing",
+            )),
+            "arduboy.audio" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/audio.ezra"),
+                "arduboy.audio",
+            )),
+            "arduboy.graphics" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/graphics.ezra"),
+                "arduboy.graphics",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("gameboy-")) {
@@ -1647,6 +1664,10 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "arduboy.core",
         "arduboy.input",
         "arduboy.oled",
+        "arduboy.eeprom",
+        "arduboy.timing",
+        "arduboy.audio",
+        "arduboy.graphics",
         "gb.video",
         "gb.sprites",
         "gb.serial",

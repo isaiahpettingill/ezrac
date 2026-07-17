@@ -1,0 +1,43 @@
+// ATmega32U4 EEPROM addresses 0..15 are reserved by the bootloader.
+pub const FIRST_ADDRESS: u16 = 16
+pub const LAST_ADDRESS: u16 = 1023
+
+pub fn read_byte(address: u16) -> u8 {
+    if address < FIRST_ADDRESS || address > LAST_ADDRESS {
+        return 0
+    }
+
+    let result: u8 = 0
+    asm volatile(out result: u8 as mem, clobber r18, clobber flags, clobber memory) {
+        "out 21h, r24"
+        "out 22h, r25"
+        "sbi 1Fh, 0"
+        "in r18, 20h"
+        "sts {result}, r18"
+    }
+    return result
+}
+
+// Writes only when the stored value differs, reducing EEPROM wear.
+pub fn update(address: u16, value: u8) {
+    if address < FIRST_ADDRESS || address > LAST_ADDRESS {
+        return
+    }
+
+    asm volatile(clobber r18, clobber flags, clobber memory) {
+        ".eeprom_wait_ready:"
+        "sbic 1Fh, 1"
+        "rjmp .eeprom_wait_ready"
+        "out 21h, r24"
+        "out 22h, r25"
+        "sbi 1Fh, 0"
+        "in r18, 20h"
+        "cp r18, r22"
+        "breq .eeprom_done"
+        "out 20h, r22"
+        "cli"
+        "sbi 1Fh, 2"
+        "sbi 1Fh, 1"
+        ".eeprom_done:"
+    }
+}

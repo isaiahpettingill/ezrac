@@ -1,0 +1,35 @@
+import arduboy.audio
+import arduboy.core
+import arduboy.eeprom
+import arduboy.graphics
+import arduboy.input
+import arduboy.oled
+import arduboy.timing
+
+global smile: [u8; 8] = [0x3C, 0x42, 0xA5, 0x81, 0xA5, 0x99, 0x42, 0x3C]
+global frame: u8 = 0
+
+fn main() {
+    core.initialize()
+    oled.initialize_display()
+    timing.initialize_timer()
+    eeprom.update(eeprom.FIRST_ADDRESS, eeprom.read_byte(eeprom.FIRST_ADDRESS))
+
+    loop {
+        graphics.clear_framebuffer()
+        graphics.page(0, &smile, 8)
+        graphics.draw_sprite(60, 28, &smile, 8)
+        graphics.set_pixel(frame, 56, 1)
+        graphics.present()
+
+        if (input.read() & input.A) != 0 {
+            audio.tone(2271)
+        } else {
+            audio.stop()
+        }
+
+        timing.wait_frame()
+        frame += 1
+        if frame == graphics.WIDTH { frame = 0 }
+    }
+}

@@ -1612,14 +1612,29 @@ fn rejects_cyclic_imports() {
 #[test]
 fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
     let source = r#"
+        import arduboy.audio
         import arduboy.core
+        import arduboy.eeprom
+        import arduboy.graphics
         import arduboy.input
         import arduboy.oled
+        import arduboy.timing
+
+        global sprite: [u8; 1] = [0x01]
 
         fn main() {
             core.initialize()
             oled.initialize_display()
-            oled.command(0x40)
+            timing.initialize_timer()
+            eeprom.update(16, eeprom.read_byte(16))
+            audio.tone(2271)
+            audio.stop()
+            graphics.clear_framebuffer()
+            graphics.set_pixel(0, 0, 1)
+            graphics.draw_sprite(1, 1, &sprite, 1)
+            graphics.page(0, &sprite, 1)
+            graphics.present()
+            timing.frame_ready()
             input.read()
         }
     "#;
@@ -1630,7 +1645,15 @@ fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
 
     assert_eq!(
         builtin_sdk_modules(Some("arduboy-avr")),
-        vec!["arduboy.core", "arduboy.input", "arduboy.oled"]
+        vec![
+            "arduboy.core",
+            "arduboy.input",
+            "arduboy.oled",
+            "arduboy.eeprom",
+            "arduboy.timing",
+            "arduboy.audio",
+            "arduboy.graphics",
+        ]
     );
     check_source_with_sdk(
         source,

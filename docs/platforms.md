@@ -100,7 +100,7 @@ cargo run --features avr -- build --target bare-avr src/main.ezra
 cargo run --features avr -- build --target arduboy-avr src/main.ezra
 ```
 
-`bare-avr` produces a raw flash image. `arduboy-avr` produces Intel HEX and reserves the upper 4 KiB of the ATmega32U4's 32 KiB flash for the Caterina bootloader. Both initialize the hardware stack to `0x0AFF`, clear `r1`, and call `main` from the reset entry.
+`bare-avr` produces a raw flash image. `arduboy-avr` produces Intel HEX by default and reserves the upper 4 KiB of the ATmega32U4's 32 KiB flash for the Caterina bootloader. Set `[build].output = "arduboy"` and provide the required `[arduboy]` `title`, `author`, and `version` fields to instead create a schema-v2 `.arduboy` ZIP package containing `info.json` and `<executable>.hex`. Optional metadata fields are `description`, `date`, `genre`, and `source_url`. Both initialize the hardware stack to `0x0AFF`, clear `r1`, and call `main` from the reset entry.
 
 The AVR backend lowers scalar values, pointers, arrays, structs, strings, embedded data, control flow, calls, interrupts, and inline assembly through HIR, TBIR, and the target semantic model. Its register ABI starts byte arguments in `r24`, `r22`, `r20`, and `r18`, uses adjacent registers for wider values, and returns values in `r24` through `r26`. The bundled `arduboy.core`, `arduboy.input`, and `arduboy.oled` modules use this ABI; see `examples/arduboy/snake` for a playable example.
 
@@ -304,9 +304,10 @@ Target:
 
 ```text
 zxspectrum-z80
+zxspectrum-z80-128k
 ```
 
-Default output is an auto-start `.tap` containing a BASIC loader and one CODE block. It is intended for a conventional 48K load; it does not package extra tape assets, banked content, TZX, SCL, or Z80 snapshots.
+`zxspectrum-z80` emits an auto-start `.tap` containing a BASIC loader and one CODE block for a conventional 48K load. It does not package extra tape assets, TZX, SCL, or Z80 snapshots.
 
 Built-in SDK modules are:
 
@@ -321,9 +322,25 @@ zx.memory
 zx.interrupt
 ```
 
-`zx.rom`, `zx.text`, `zx.screen`, the keyboard matrix functions, ULA border/beeper output, and interrupt helpers target stock Spectrum hardware. `zx.keyboard.read_kempston()` requires an optional Kempston-compatible joystick interface. AY functions in `zx.sound` and the `0x7FFD` paging functions in `zx.memory` require a 128K-compatible machine; the default `zxspectrum-z80` tape loader does not configure a 128K model or load banked content.
+`zx.rom`, `zx.text`, `zx.screen`, the keyboard matrix functions, ULA border/beeper output, and interrupt helpers target stock Spectrum hardware. `zx.keyboard.read_kempston()` requires an optional Kempston-compatible joystick interface. AY functions in `zx.sound` and the `0x7FFD` paging functions in `zx.memory` require a 128K-compatible machine.
 
-Default layout highlights:
+### 128K RAM pages
+
+Use `zxspectrum-z80-128k` to package RAM-page payloads in a multi-block TAP. Its loader loads resident code at `0x8000`, pages each configured bank into `0xC000`, loads its data, restores page 0, and then calls the entry point. The generated stack is in fixed RAM at `0x6000..0x7FFF`, so a page switch cannot overwrite call frames.
+
+```toml
+[build]
+target = "zxspectrum-z80-128k"
+
+[[zxspectrum.banks]]
+page = 1
+file = "assets/level1.bin"
+name = "LEVEL1"
+```
+
+Pages `1`, `3`, `4`, `6`, and `7` are available for declared payloads; pages `0`, `2`, and `5` remain reserved for normal runtime data, resident code, and the display/system RAM. Each payload is at most 16 KiB. Payloads load in ascending page order, regardless of their declaration order. Select the required page with `zx.memory.select_128k_bank()` before reading the `0xC000..0xFFFF` window, and restore page 0 before accessing ordinary globals, rodata, or unbanked embeds.
+
+Default 48K layout highlights:
 
 ```text
 0x0000..0x3FFF   ROM, reserved
@@ -363,9 +380,7 @@ gameboy-dmg-lr35902
 gameboy-color-lr35902
 ```
 
-These targets support both EZRA source compilation and handwritten assembly through a dedicated LR35902 assembler. They do not inherit Z80-only instructions. Both produce 32 KiB ROM-only cartridges with the Nintendo logo, entry stub, title, DMG/CGB compatibility flag, and valid header/global checksums. DMG output uses
-`.gb`; Game Boy Color output uses `.gbc`. Code begins at
-`0x0150`; the ROM header occupies `0x0100..0x014F`.
+These targets support both EZRA source compilation and handwritten assembly through a dedicated LR35902 assembler. They do not inherit Z80-only instructions. By default they produce 32 KiB ROM-only cartridges; `[gameboy]` project configuration also supports MBC1 and MBC5 mapper cartridges with explicit 16 KiB switchable-bank payload files, external RAM, battery, and MBC5 rumble metadata. All cartridges receive the Nintendo logo, entry stub, title, DMG/CGB compatibility flag, and valid header/global checksums. DMG output uses `.gb`; Game Boy Color output uses `.gbc`. Code begins at `0x0150`; the ROM header occupies `0x0100..0x014F`. See `docs/gameboy-assembly.md` for bank-file placement and mapper switching rules.
 
 The assembler covers all 244 executable base instructions and all 256
 CB-prefixed instructions. It uses Z80-style parentheses for memory operands,

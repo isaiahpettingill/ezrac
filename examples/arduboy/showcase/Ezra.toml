@@ -1,0 +1,15 @@
+[project]
+name = "arduboy-sdk-showcase"
+
+[build]
+target = "arduboy-avr"
+output = "arduboy"
+executable = "ezra-arduboy-showcase"
+
+[arduboy]
+title = "EZRA Arduboy Showcase"
+author = "Isaiah Pettingill"
+version = "0.1.31"
+description = "Buffered graphics, text, sprites, EEPROM, timing, input, and audio on Arduboy."
+genre = "Action"
+source_url = "https://github.com/isaiahpettingill/ezrac"

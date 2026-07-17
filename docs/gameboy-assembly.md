@@ -8,11 +8,14 @@ gameboy-dmg-lr35902
 gameboy-color-lr35902
 ```
 
-Both targets use the dedicated `lr35902` assembler and emit a valid 32 KiB
-ROM-only cartridge. DMG builds use the `.gb` extension and compatibility byte
-`0x00`; Game Boy Color builds use `.gbc` and compatibility byte `0xC0`. The
-packager writes the entry stub, Nintendo logo, title, ROM/RAM type fields,
-header checksum, and global checksum.
+Both targets use the dedicated `lr35902` assembler. DMG builds use the `.gb`
+extension and compatibility byte `0x00`; Game Boy Color builds use `.gbc` and
+compatibility byte `0xC0`. The packager writes the entry stub, Nintendo logo,
+title, ROM/RAM type fields, header checksum, and global checksum.
+
+Without a `[gameboy]` mapper configuration, builds emit a valid 32 KiB ROM-only
+cartridge. `[gameboy]` can instead produce an MBC1 or MBC5 ROM-banked cartridge
+as configured below.
 
 ## Project
 
@@ -51,6 +54,64 @@ Code starts at `0x0150`:
 message:
     db "Hello", 0
 ```
+
+## ROM Banking
+
+Use `[gameboy]` to request a mapper cartridge and append raw data banks to the
+ROM:
+
+```toml
+[gameboy]
+mapper = "mbc5"              # "mbc1" or "mbc5"
+rom_banks = 8                 # optional power of two: 2 through 512
+ram_banks = 4                # optional: 0, 1, 4, 8, or 16
+battery = true               # optional; requires ram_banks > 0
+rumble = false               # optional; MBC5 only
+bank_files = [
+    "assets/bank2.bin",
+    "assets/bank3.bin",
+]
+```
+
+`bank_files` are raw ROM data, not separately assembled or linked programs.
+The compiler keeps executable code in fixed ROM bank 0 and the initial
+switchable ROM bank 1. The first file occupies switchable bank 2, with each
+later file assigned to the next selectable switchable bank. A file may be at
+most 16 KiB (`0x4000` bytes); code selects its bank and reads it through the
+`0x4000..0x7FFF` ROM window.
+
+`ram_banks` describes 8 KiB external RAM banks. Omit it, or set it to `0`, for
+no cartridge RAM. `battery = true` requests battery-backed cartridge RAM and
+therefore requires a nonzero `ram_banks` value. `rumble = true` selects an
+MBC5 rumble cartridge; it is invalid with MBC1. On an MBC5 rumble cartridge,
+the high RAM-bank-select bit is the rumble motor control, so `ram_banks = 16`
+is not available; use at most 8 RAM banks.
+
+MBC1 has additional hardware restrictions:
+
+- It supports at most four external RAM banks, so `ram_banks = 8` and `16`
+  require MBC5.
+- Its ROM bank register cannot select banks `0x00`, `0x20`, `0x40`, or
+  `0x60`; a zero low five-bit field aliases to the next bank. EZRA skips those
+  non-selectable physical slots when assigning bank files (after bank `0x1F`,
+  the next payload is placed in bank `0x21`). Standard MBC1 therefore provides
+  at most 123 bank-file slots after the code banks.
+- MBC1 RAM-banking mode also changes the `0x0000..0x3FFF` mapping. Change RAM
+  banks from a routine executing in the `0x4000..0x7FFF` window whose ROM bank
+  remains selected (or from a deliberately mirrored trampoline), and do not
+  return to a remapped lower-ROM address.
+
+MBC5 has a 9-bit ROM-bank number and can select banks `0x000..0x1FF`; with
+banks 0 and 1 reserved for generated code, it provides up to 510 bank-file
+slots. The MBC macros in `hardware.inc` take register-field values rather than
+trying to infer a full bank number: use the MBC1 low/high fields or the MBC5
+low-byte/high-bit pair.
+
+External RAM is unavailable until enabled and should be disabled when it is not
+being accessed. Mapper writes target cartridge address ranges rather than I/O
+registers. Run ordinary ROM-bank switching code from fixed ROM bank 0: changing
+the currently executing `0x4000..0x7FFF` bank changes subsequent instruction
+fetches immediately. The MBC1 RAM-mode caveat above is stricter.
 
 ## Instruction Set
 
@@ -149,9 +210,9 @@ Embedded assets can now be passed directly to SDK calls such as
 not need inline assembly for ordinary sprite textures, tile uploads, serial
 strings, button waits, CGB palette uploads, or wave-table audio.
 
-The backend currently emits 32 KiB ROM-only cartridges; mapper banking,
-high-level expression lowering, and interrupt functions remain future
-extensions.
+The backend currently leaves high-level expression lowering and interrupt
+functions as future extensions. ROM banking uses the mapper configuration
+above; bank files are raw data and executable code remains in banks 0 and 1.
 
 ## Macro SDK
 
@@ -160,11 +221,17 @@ Vendor `toolchains/gameboy-lr35902/sdk/asm/gb` into the project. Include
 The SDK covers hardware registers and common idioms for interrupt vectors,
 LCD/VRAM access, OAM DMA, joypad polling, timers, serial, audio channels,
 memory copy/fill, MBC banking, CGB VRAM/WRAM banking, palettes, HDMA, and speed
-switching.
+switching. For the supported mapper cartridges, use `GB_MBC1_SELECT_ROM_BANK`
+with low five-bit and high two-bit fields, or `GB_MBC5_SELECT_ROM_BANK` with
+low-byte and high-bit fields. Use the matching RAM-bank macro, and pair RAM
+access with `GB_MBC_ENABLE_RAM` and `GB_MBC_DISABLE_RAM`.
 
 The macros deliberately do not hide hardware rules: access VRAM and palette
 RAM only in safe PPU modes, run portable OAM DMA code from HRAM with interrupts
 controlled, switch ROM banks from fixed ROM, and disable LCD only in VBlank.
+MBC1 RAM-mode switching has the lower-ROM remapping caveat described above;
+MBC5 rumble uses `GB_MBC5_SELECT_RUMBLE_RAM_BANK` so its motor bit is not
+mistaken for a fourth RAM-bank bit.
 
 Primary references:
 

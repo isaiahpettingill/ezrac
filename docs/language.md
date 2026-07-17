@@ -108,6 +108,31 @@ not(...)
 
 `feature("...")` matches a target-triple component other than the CPU. Unknown feature names are rejected rather than silently evaluating to false.
 
+### Explicit Banking Syntax
+
+`@cfg(bank(N))` is a distinct top-level bank-placement attribute, not a conditional-compilation predicate. The parser preserves it alongside any ordinary `@cfg(...)` conditions:
+
+```ezra
+@cfg(bank(3))
+pub fn level_loader() {}
+```
+
+Pointer expressions may carry an explicit bank postfix. Parenthesize compound pointer expressions before the postfix:
+
+```ezra
+let tiles: ptr<u8> = tile_data@3
+let next_tile: ptr<u8> = (tiles + 16)@3
+```
+
+Enable the project-level syntax/configuration foundation with:
+
+```toml
+[banking]
+enabled = true
+```
+
+This currently records source and project metadata only. Bank switching, target eligibility, pointer representation, linking, and runtime behavior remain target-owned follow-up work.
+
 ## Types
 
 Primitive integer types are explicit:

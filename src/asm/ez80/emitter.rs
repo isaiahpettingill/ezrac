@@ -55,6 +55,8 @@ pub struct AssemblyOptions {
     pub mos_executable: bool,
     pub c64_executable: bool,
     pub ti_os_executable: bool,
+    /// Emit the ATmega32U4 hardware vector table used by the Arduboy target.
+    pub arduboy_executable: bool,
     pub load_addr: Address24,
     pub entry_addr: Address24,
     pub code_base: Address24,
@@ -77,6 +79,7 @@ impl Default for AssemblyOptions {
             mos_executable: false,
             c64_executable: false,
             ti_os_executable: false,
+            arduboy_executable: false,
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
             code_base: EZRA_CODE_BASE,

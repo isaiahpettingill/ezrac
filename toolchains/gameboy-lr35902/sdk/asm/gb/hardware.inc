@@ -61,6 +61,33 @@ GB_TILE_DATA_1 equ 08800h
 GB_BG_MAP_0 equ 09800h
 GB_BG_MAP_1 equ 09C00h
 GB_OAM equ 0FE00h
+
+GB_ROM_BANK_SIZE equ 04000h
+GB_ROM_FIXED_START equ 0000h
+GB_ROM_SWITCHABLE_START equ 04000h
+GB_ROM_SWITCHABLE_END equ 07FFFh
+GB_SRAM_START equ 0A000h
+GB_SRAM_END equ 0BFFFh
+
+GB_MBC_RAM_ENABLE_REGISTER equ 0000h
+GB_MBC_RAM_ENABLE_VALUE equ 0Ah
+GB_MBC_ROM_BANK_REGISTER equ 02000h
+GB_MBC_BANK_HIGH_REGISTER equ 04000h
+GB_MBC_MODE_REGISTER equ 06000h
+
+GB_MBC1_ROM_BANK_LOW_MASK equ 1Fh
+GB_MBC1_ROM_BANK_HIGH_MASK equ 03h
+GB_MBC1_MODE_ROM equ 00h
+GB_MBC1_MODE_RAM equ 01h
+GB_MBC1_RAM_BANK_MASK equ 03h
+
+GB_MBC5_ROM_BANK_LOW_REGISTER equ 02000h
+GB_MBC5_ROM_BANK_HIGH_REGISTER equ 03000h
+GB_MBC5_RAM_BANK_REGISTER equ 04000h
+GB_MBC5_ROM_BANK_HIGH_MASK equ 01h
+GB_MBC5_RAM_BANK_MASK equ 0Fh
+GB_MBC5_RUMBLE_RAM_BANK_MASK equ 07h
+GB_MBC5_RUMBLE_MASK equ 08h
 GB_OAM_COUNT equ 40
 GB_OAM_ENTRY_SIZE equ 4
 GB_OAM_Y equ 0
@@ -359,50 +386,125 @@ GB_JOYPAD_VECTOR equ 0060h
     jr nz, %%loop
 %endmacro
 
-; Mapper primitives. Call from fixed ROM bank 0.
+; Mapper primitives. Mapper writes take effect immediately. Run ROM-bank
+; switching code from fixed bank 0; MBC1 RAM mode also remaps 0000h..3FFFh.
 %macro GB_MBC_ENABLE_RAM()
-    ld a, 0Ah
-    ld (0000h), a
+    ld a, GB_MBC_RAM_ENABLE_VALUE
+    ld (GB_MBC_RAM_ENABLE_REGISTER), a
 %endmacro
 
 %macro GB_MBC_DISABLE_RAM()
     xor a
-    ld (0000h), a
+    ld (GB_MBC_RAM_ENABLE_REGISTER), a
 %endmacro
 
-%macro GB_MBC1_ROM_BANK(bank)
+; MBC1: the lower ROM-bank field is five bits and zero aliases to one.
+%macro GB_MBC1_ROM_BANK_LOW(bank)
     ld a, $bank
-    ld (2000h), a
+    and GB_MBC1_ROM_BANK_LOW_MASK
+    jr nz, %%write
+    inc a
+%%write:
+    ld (GB_MBC_ROM_BANK_REGISTER), a
 %endmacro
 
+; MBC1: in ROM mode, these two bits extend the 4000h..7FFFh bank; in RAM mode,
+; they select the SRAM bank and remap the 0000h..3FFFh region.
+%macro GB_MBC1_ROM_BANK_HIGH(bank)
+    ld a, $bank
+    and GB_MBC1_ROM_BANK_HIGH_MASK
+    ld (GB_MBC_BANK_HIGH_REGISTER), a
+%endmacro
+
+%macro GB_MBC1_BANKING_MODE(mode)
+    ld a, $mode
+    and 01h
+    ld (GB_MBC_MODE_REGISTER), a
+%endmacro
+
+; Select a switchable MBC1 ROM bank from its five-bit low and two-bit high fields.
+; The low field must be nonzero; this macro maps zero to one as the hardware does.
+%macro GB_MBC1_SELECT_ROM_BANK(low, high)
+    %GB_MBC1_BANKING_MODE GB_MBC1_MODE_ROM
+    %GB_MBC1_ROM_BANK_HIGH $high
+    %GB_MBC1_ROM_BANK_LOW $low
+%endmacro
+
+; Select an MBC1 SRAM bank (0..3). This enters RAM mode; see the remapping
+; warning above before returning to code in the lower ROM region.
+%macro GB_MBC1_SELECT_RAM_BANK(bank)
+    %GB_MBC1_BANKING_MODE GB_MBC1_MODE_RAM
+    ld a, $bank
+    and GB_MBC1_RAM_BANK_MASK
+    ld (GB_MBC_BANK_HIGH_REGISTER), a
+%endmacro
+
+; Compatibility alias for selecting MBC1's low ROM-bank field only.
+%macro GB_MBC1_ROM_BANK(bank)
+    %GB_MBC1_ROM_BANK_LOW $bank
+%endmacro
+
+; MBC3 helpers are retained for existing SDK users; MBC3 is not an EZRA mapper
+; configuration option.
 %macro GB_MBC3_ROM_BANK(bank)
     ld a, $bank
-    ld (2000h), a
+    ld (GB_MBC_ROM_BANK_REGISTER), a
 %endmacro
 
 %macro GB_MBC3_SELECT_RAM_RTC(value)
     ld a, $value
-    ld (4000h), a
+    ld (GB_MBC_BANK_HIGH_REGISTER), a
 %endmacro
 
 %macro GB_MBC3_LATCH_RTC()
     xor a
-    ld (6000h), a
+    ld (GB_MBC_MODE_REGISTER), a
     inc a
-    ld (6000h), a
+    ld (GB_MBC_MODE_REGISTER), a
 %endmacro
 
+; MBC5: ROM bank number is an eight-bit low field and one-bit high field.
 %macro GB_MBC5_ROM_BANK_LOW(bank)
     ld a, $bank
-    ld (2000h), a
+    ld (GB_MBC5_ROM_BANK_LOW_REGISTER), a
 %endmacro
 
 %macro GB_MBC5_ROM_BANK_HIGH(bit)
     ld a, $bit
-    ld (3000h), a
+    and GB_MBC5_ROM_BANK_HIGH_MASK
+    ld (GB_MBC5_ROM_BANK_HIGH_REGISTER), a
 %endmacro
 
+%macro GB_MBC5_SELECT_ROM_BANK(low, high)
+    %GB_MBC5_ROM_BANK_HIGH $high
+    %GB_MBC5_ROM_BANK_LOW $low
+%endmacro
+
+; Use this for non-rumble MBC5 cartridges. Rumble cartridges expose their motor
+; on bit 3 of this same register and must use the macro below instead.
+%macro GB_MBC5_SELECT_RAM_BANK(bank)
+    ld a, $bank
+    and GB_MBC5_RAM_BANK_MASK
+    ld (GB_MBC5_RAM_BANK_REGISTER), a
+%endmacro
+
+; bank is 0..7; rumble is 0 (off) or 1 (on). Clobbers AF and B.
+%macro GB_MBC5_SELECT_RUMBLE_RAM_BANK(bank, rumble)
+    ld a, $rumble
+    and 01h
+    add a, a
+    add a, a
+    add a, a
+    ld b, a
+    ld a, $bank
+    and GB_MBC5_RUMBLE_RAM_BANK_MASK
+    or b
+    ld (GB_MBC5_RAM_BANK_REGISTER), a
+%endmacro
+
+; Compatibility helper for code that writes a mapper RAM-bank register directly.
+; Mapper-specific macros above apply the correct width and rumble handling.
 %macro GB_MBC_RAM_BANK(bank)
     ld a, $bank
-    ld (4000h), a
+    ld (GB_MBC_BANK_HIGH_REGISTER), a
 %endmacro

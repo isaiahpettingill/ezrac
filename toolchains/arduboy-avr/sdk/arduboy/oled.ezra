@@ -24,32 +24,61 @@ pub fn initialize_display() {
         "ldi r16, 50h"
         "out 2Ch, r16"
     }
-    command(0xAE)
-    command(0xD5)
-    command(0x80)
-    command(0xA8)
-    command(0x3F)
-    command(0xD3)
-    command(0x00)
-    command(0x40)
-    command(0x8D)
-    command(0x14)
-    command(0x20)
-    command(0x00)
-    command(0xA1)
-    command(0xC8)
-    command(0xDA)
-    command(0x12)
-    command(0x81)
-    command(0x7F)
-    command(0xD9)
-    command(0xF1)
-    command(0xDB)
-    command(0x40)
-    command(0xA4)
-    command(0xA6)
-    command(0xAF)
-    clear()
+    // Keep this command table in one asm block. Source-level calls would
+    // duplicate argument marshalling for every SSD1306 setup byte.
+    asm volatile(clobber r24, clobber memory) {
+        "ldi r24, AEh"
+        "call _command"
+        "ldi r24, D5h"
+        "call _command"
+        "ldi r24, 80h"
+        "call _command"
+        "ldi r24, A8h"
+        "call _command"
+        "ldi r24, 3Fh"
+        "call _command"
+        "ldi r24, D3h"
+        "call _command"
+        "ldi r24, 00h"
+        "call _command"
+        "ldi r24, 40h"
+        "call _command"
+        "ldi r24, 8Dh"
+        "call _command"
+        "ldi r24, 14h"
+        "call _command"
+        "ldi r24, 20h"
+        "call _command"
+        "ldi r24, 00h"
+        "call _command"
+        "ldi r24, A1h"
+        "call _command"
+        "ldi r24, C8h"
+        "call _command"
+        "ldi r24, DAh"
+        "call _command"
+        "ldi r24, 12h"
+        "call _command"
+        "ldi r24, 81h"
+        "call _command"
+        "ldi r24, 7Fh"
+        "call _command"
+        "ldi r24, D9h"
+        "call _command"
+        "ldi r24, F1h"
+        "call _command"
+        "ldi r24, DBh"
+        "call _command"
+        "ldi r24, 40h"
+        "call _command"
+        "ldi r24, A4h"
+        "call _command"
+        "ldi r24, A6h"
+        "call _command"
+        "ldi r24, AFh"
+        "call _command"
+        "call _clear"
+    }
 }
 
 pub fn write(value: u8) {
@@ -80,11 +109,26 @@ pub fn data(value: u8) {
     }
 }
 
-// Sets the SSD1306 page and the 8-pixel column used by the game examples.
-pub fn set_cell_cursor(column: u8, page: u8) {
+// Sets the SSD1306 cursor in native pixel columns and pages.
+pub fn set_cursor(column: u8, page: u8) {
+    if column >= 128 || page >= 8 { return }
     command(0xB0 | page)
-    command((column * 8) & 0x0F)
-    command(0x10 | ((column * 8) >> 4))
+    command(column & 0x0F)
+    command(0x10 | (column >> 4))
+}
+
+// Transfers a contiguous run of display bytes through the active data stream.
+pub fn data_block(source: ptr<u8>, length: u8) {
+    let index: u8 = 0
+    while index < length {
+        data(*(source + cast<u16>(index)))
+        index += 1
+    }
+}
+
+// Sets the 8-pixel column used by the game-grid helpers.
+pub fn set_cell_cursor(column: u8, page: u8) {
+    set_cursor(column * 8, page)
 }
 
 pub fn clear() {

@@ -2,6 +2,76 @@ use super::*;
 use crate::diagnostic::SourceLocation;
 
 #[test]
+fn parses_banking_placement_as_a_non_filtering_attribute() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            @cfg(bank(0x10))
+            @cfg(cpu("ez80"))
+            pub fn banked() {}
+        "#,
+    )
+    .unwrap();
+
+    let Declaration::Bank { bank, declaration } = &program.declarations[0] else {
+        panic!(
+            "bank placement was not preserved: {:?}",
+            program.declarations[0]
+        );
+    };
+    assert_eq!(*bank, 0x10);
+    assert!(matches!(
+        declaration.as_ref(),
+        Declaration::Cfg {
+            predicates,
+            declaration,
+        } if predicates == &vec![CfgPredicate::Cpu("ez80".to_owned())]
+            && matches!(declaration.as_ref(), Declaration::Function(function) if function.name == "banked")
+    ));
+}
+
+#[test]
+fn parses_banked_pointer_postfix_expressions() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            fn main() {
+                let p: ptr<u8> = pointer@3
+                let next: ptr<u8> = (p + 1)@4
+            }
+        "#,
+    )
+    .unwrap();
+
+    let main = program.main_function().unwrap();
+    assert!(matches!(
+        &main.body[0],
+        Stmt::Let {
+            value: Expr::BankedPointer { pointer, bank },
+            ..
+        } if **pointer == Expr::Ident("pointer".to_owned()) && *bank == 3
+    ));
+    assert!(matches!(
+        &main.body[1],
+        Stmt::Let {
+            value: Expr::BankedPointer { pointer, bank },
+            ..
+        } if matches!(pointer.as_ref(), Expr::Binary { op: BinaryOp::Add, .. }) && *bank == 4
+    ));
+}
+
+#[test]
+fn rejects_duplicate_banking_placement_attributes() {
+    let error = parse_program(
+        Path::new("game.ezra"),
+        "@cfg(bank(1)) @cfg(bank(2)) fn banked() {}",
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("at most one"), "{error}");
+}
+
+#[test]
 fn parses_main_with_out() {
     let program = parse_program(
         Path::new("game.ezra"),

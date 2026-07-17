@@ -1,0 +1,27 @@
+// Timer3 drives the Arduboy speaker on PC6 / OC3A. `period` is the OCR3A
+// compare value; at the Timer3 /8 clock, 440 Hz uses period 2271.
+pub fn tone(period: u16) {
+    let low: u8 = cast<u8>(period)
+    let high: u8 = cast<u8>(period >> 8)
+
+    asm volatile(in low: u8 as mem, in high: u8 as mem, clobber r18, clobber memory) {
+        "sbi 07h, 6"
+        "lds r18, {low}"
+        "sts 98h, r18"
+        "lds r18, {high}"
+        "sts 99h, r18"
+        "ldi r18, 40h"
+        "sts 90h, r18"
+        "ldi r18, 0Ah"
+        "sts 91h, r18"
+    }
+}
+
+pub fn stop() {
+    asm volatile(clobber r18, clobber memory) {
+        "ldi r18, 00h"
+        "sts 90h, r18"
+        "sts 91h, r18"
+        "cbi 08h, 6"
+    }
+}

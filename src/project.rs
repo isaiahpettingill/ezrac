@@ -25,6 +25,10 @@ pub struct ProjectConfig {
     pub test_target: Option<String>,
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
+    pub gameboy: Option<GameBoyConfig>,
+    pub arduboy: Option<ArduboyConfig>,
+    pub zxspectrum: Option<ZxSpectrumConfig>,
+    pub banking: BankingConfig,
     pub assets: AssetConfig,
     pub sdk_paths: Vec<PathBuf>,
 }
@@ -33,6 +37,53 @@ pub struct ProjectConfig {
 pub struct CartridgeConfig {
     pub layout_file: PathBuf,
     pub manifest_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArduboyConfig {
+    pub title: String,
+    pub author: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub date: Option<String>,
+    pub genre: Option<String>,
+    pub source_url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GameBoyMapper {
+    #[default]
+    RomOnly,
+    Mbc1,
+    Mbc5,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GameBoyConfig {
+    pub mapper: GameBoyMapper,
+    pub rom_banks: Option<u16>,
+    pub ram_banks: u8,
+    pub battery: bool,
+    pub rumble: bool,
+    /// One 16 KiB payload per switchable ROM bank, starting at bank 2.
+    pub bank_files: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ZxSpectrumConfig {
+    pub banks: Vec<ZxSpectrumBank>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZxSpectrumBank {
+    pub page: u8,
+    pub file: PathBuf,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BankingConfig {
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -176,6 +227,10 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(|file| root.join(file));
 
     let cartridge = parse_cartridge_config(&value, &root)?;
+    let gameboy = parse_gameboy_config(&value, &root)?;
+    let arduboy = parse_arduboy_config(&value, output.as_deref() == Some("arduboy"))?;
+    let zxspectrum = parse_zxspectrum_config(&value, &root)?;
+    let banking = parse_banking_config(&value)?;
     let assets = parse_asset_config(&value)?;
 
     let sdk_paths = match value.get("sdk").and_then(|sdk| sdk.get("paths")) {
@@ -208,9 +263,266 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         test_target,
         layout_file,
         cartridge,
+        gameboy,
+        arduboy,
+        zxspectrum,
+        banking,
         assets,
         sdk_paths,
     })
+}
+
+fn parse_arduboy_config(
+    value: &toml::Value,
+    required: bool,
+) -> Result<Option<ArduboyConfig>, Diagnostic> {
+    let Some(arduboy) = value.get("arduboy") else {
+        return if required {
+            Err(Diagnostic::new(
+                "`[arduboy]` is required when `build.output = \"arduboy\"`",
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    if !arduboy.is_table() {
+        return Err(Diagnostic::new("project field `arduboy` must be a table"));
+    }
+    let required_value = |key: &str, field: &'static str| {
+        arduboy
+            .get(key)
+            .map(required_string(field))
+            .transpose()?
+            .ok_or_else(|| Diagnostic::new(format!("project field `{field}` is required")))
+    };
+    Ok(Some(ArduboyConfig {
+        title: required_value("title", "arduboy.title")?,
+        author: required_value("author", "arduboy.author")?,
+        version: required_value("version", "arduboy.version")?,
+        description: arduboy
+            .get("description")
+            .map(required_string("arduboy.description"))
+            .transpose()?,
+        date: arduboy
+            .get("date")
+            .map(required_string("arduboy.date"))
+            .transpose()?,
+        genre: arduboy
+            .get("genre")
+            .map(required_string("arduboy.genre"))
+            .transpose()?,
+        source_url: arduboy
+            .get("source_url")
+            .map(required_string("arduboy.source_url"))
+            .transpose()?,
+    }))
+}
+
+fn parse_gameboy_config(
+    value: &toml::Value,
+    root: &Path,
+) -> Result<Option<GameBoyConfig>, Diagnostic> {
+    let Some(gameboy) = value.get("gameboy") else {
+        return Ok(None);
+    };
+    let mapper = gameboy
+        .get("mapper")
+        .map(required_string("gameboy.mapper"))
+        .transpose()?
+        .ok_or_else(|| Diagnostic::new("project field `gameboy.mapper` is required"))?;
+    let mapper = match mapper.as_str() {
+        "rom-only" => GameBoyMapper::RomOnly,
+        "mbc1" => GameBoyMapper::Mbc1,
+        "mbc5" => GameBoyMapper::Mbc5,
+        _ => {
+            return Err(Diagnostic::new(format!(
+                "project field `gameboy.mapper` must be `rom-only`, `mbc1`, or `mbc5`, got `{mapper}`"
+            )));
+        }
+    };
+    let rom_banks = gameboy
+        .get("rom_banks")
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| {
+                    Diagnostic::new("project field `gameboy.rom_banks` must be a positive integer")
+                })
+        })
+        .transpose()?;
+    let ram_banks = gameboy
+        .get("ram_banks")
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|value| u8::try_from(value).ok())
+                .filter(|value| matches!(*value, 0 | 1 | 4 | 8 | 16))
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        "project field `gameboy.ram_banks` must be one of 0, 1, 4, 8, or 16",
+                    )
+                })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let battery = gameboy
+        .get("battery")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| Diagnostic::new("project field `gameboy.battery` must be a boolean"))
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let rumble = gameboy
+        .get("rumble")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| Diagnostic::new("project field `gameboy.rumble` must be a boolean"))
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let bank_files = match gameboy.get("bank_files") {
+        Some(toml::Value::Array(files)) => files
+            .iter()
+            .map(required_string("gameboy.bank_files"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|file| root.join(file))
+            .collect(),
+        Some(_) => {
+            return Err(Diagnostic::new(
+                "project field `gameboy.bank_files` must be an array of paths",
+            ));
+        }
+        None => Vec::new(),
+    };
+    Ok(Some(GameBoyConfig {
+        mapper,
+        rom_banks,
+        ram_banks,
+        battery,
+        rumble,
+        bank_files,
+    }))
+}
+
+fn parse_zxspectrum_config(
+    value: &toml::Value,
+    root: &Path,
+) -> Result<Option<ZxSpectrumConfig>, Diagnostic> {
+    let Some(zxspectrum) = value.get("zxspectrum") else {
+        return Ok(None);
+    };
+    let zxspectrum = zxspectrum
+        .as_table()
+        .ok_or_else(|| Diagnostic::new("project field `zxspectrum` must be a table"))?;
+    let banks = match zxspectrum.get("banks") {
+        Some(toml::Value::Array(banks)) => banks,
+        Some(_) => {
+            return Err(Diagnostic::new(
+                "project field `zxspectrum.banks` must be an array of bank tables",
+            ));
+        }
+        None => {
+            return Ok(Some(ZxSpectrumConfig::default()));
+        }
+    };
+
+    let mut seen_pages = std::collections::HashSet::new();
+    let mut parsed_banks = Vec::with_capacity(banks.len());
+    for (index, bank) in banks.iter().enumerate() {
+        let field = |name: &str| format!("zxspectrum.banks[{index}].{name}");
+        let bank = bank.as_table().ok_or_else(|| {
+            Diagnostic::new(format!(
+                "project field `zxspectrum.banks[{index}]` must be a table"
+            ))
+        })?;
+        let page = bank
+            .get("page")
+            .and_then(toml::Value::as_integer)
+            .and_then(|page| u8::try_from(page).ok())
+            .filter(|page| matches!(*page, 1 | 3 | 4 | 6 | 7))
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "project field `{}` must be a u8 value of 1, 3, 4, 6, or 7",
+                    field("page")
+                ))
+            })?;
+        if !seen_pages.insert(page) {
+            return Err(Diagnostic::new(format!(
+                "project field `{}` duplicates ZX Spectrum RAM page {page}",
+                field("page")
+            )));
+        }
+
+        let file = bank
+            .get("file")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "project field `{}` must be a project-relative path string",
+                    field("file")
+                ))
+            })?;
+        let file = Path::new(file);
+        if file.is_absolute() || file.has_root() {
+            return Err(Diagnostic::new(format!(
+                "project field `{}` must be a project-relative path",
+                field("file")
+            )));
+        }
+
+        let name = match bank.get("name") {
+            Some(toml::Value::String(name)) if !name.is_empty() && name.is_ascii() => {
+                Some(name.clone())
+            }
+            Some(toml::Value::String(_)) => {
+                return Err(Diagnostic::new(format!(
+                    "project field `{}` must be a nonempty ASCII string",
+                    field("name")
+                )));
+            }
+            Some(_) => {
+                return Err(Diagnostic::new(format!(
+                    "project field `{}` must be a string",
+                    field("name")
+                )));
+            }
+            None => None,
+        };
+
+        parsed_banks.push(ZxSpectrumBank {
+            page,
+            file: root.join(file),
+            name,
+        });
+    }
+
+    Ok(Some(ZxSpectrumConfig {
+        banks: parsed_banks,
+    }))
+}
+
+fn parse_banking_config(value: &toml::Value) -> Result<BankingConfig, Diagnostic> {
+    let Some(banking) = value.get("banking") else {
+        return Ok(BankingConfig::default());
+    };
+    let banking = banking
+        .as_table()
+        .ok_or_else(|| Diagnostic::new("project field `banking` must be a table"))?;
+    let enabled = banking
+        .get("enabled")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| Diagnostic::new("project field `banking.enabled` must be a boolean"))
+        })
+        .transpose()?
+        .unwrap_or(false);
+    Ok(BankingConfig { enabled })
 }
 
 fn parse_asset_config(value: &toml::Value) -> Result<AssetConfig, Diagnostic> {
@@ -293,6 +605,62 @@ fn required_string(field: &'static str) -> impl Fn(&toml::Value) -> Result<Strin
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| Diagnostic::new(format!("project field `{field}` must be a string")))
+    }
+}
+
+#[cfg(test)]
+mod arduboy_tests {
+    use super::*;
+
+    #[test]
+    fn parses_arduboy_schema_v2_metadata() {
+        let config = parse_project_config(
+            Path::new("/project/Ezra.toml"),
+            r#"
+                [build]
+                output = "arduboy"
+
+                [arduboy]
+                title = "Pocket Game"
+                author = "EZRA"
+                version = "1.2.3"
+                description = "A tiny game"
+                date = "2026-07-17"
+                genre = "Game"
+                source_url = "https://example.com/pocket-game"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.arduboy,
+            Some(ArduboyConfig {
+                title: "Pocket Game".to_owned(),
+                author: "EZRA".to_owned(),
+                version: "1.2.3".to_owned(),
+                description: Some("A tiny game".to_owned()),
+                date: Some("2026-07-17".to_owned()),
+                genre: Some("Game".to_owned()),
+                source_url: Some("https://example.com/pocket-game".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn arduboy_output_requires_metadata_table_and_required_fields() {
+        let error = parse_project_config(
+            Path::new("/project/Ezra.toml"),
+            "[build]\noutput = \"arduboy\"\n",
+        )
+        .unwrap_err();
+        assert!(error.message.contains("`[arduboy]` is required"), "{error}");
+
+        let error = parse_project_config(
+            Path::new("/project/Ezra.toml"),
+            "[build]\noutput = \"arduboy\"\n\n[arduboy]\ntitle = \"Game\"\n",
+        )
+        .unwrap_err();
+        assert!(error.message.contains("arduboy.author"), "{error}");
     }
 }
 

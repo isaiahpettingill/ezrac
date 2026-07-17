@@ -403,6 +403,116 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
 }
 
 #[test]
+fn zxspectrum_128k_target_loads_declared_ram_pages() {
+    let root = temp_root("zxspectrum_128k_banks");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+            import zx.memory
+
+            fn main() {
+                memory.select_128k_bank(1, 0, 0)
+                memory.select_128k_bank(0, 0, 0)
+            }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(root.join("level.bin"), [0x11, 0x22, 0x33]).unwrap();
+    std::fs::write(root.join("music.bin"), [0x44, 0x55]).unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+            [build]
+            target = "zxspectrum-z80-128k"
+            executable = "banked-demo"
+
+            [[zxspectrum.banks]]
+            page = 3
+            file = "music.bin"
+            name = "MUSIC"
+
+            [[zxspectrum.banks]]
+            page = 1
+            file = "level.bin"
+            name = "LEVEL1"
+        "#,
+    )
+    .unwrap();
+
+    let outputs = build_source(source_path.to_str().unwrap()).unwrap();
+    let assembly = std::fs::read_to_string(outputs.asm).unwrap();
+    let tape = std::fs::read(outputs.executable).unwrap();
+    assert!(assembly.contains("ld sp, 7FFFh"), "{assembly}");
+    let blocks = zx_tap_blocks(&tape);
+    assert_eq!(blocks.len(), 8, "BASIC, resident CODE, and two RAM pages");
+    assert_eq!(blocks[2].1[0], 3);
+    assert_eq!(
+        u16::from_le_bytes([blocks[2].1[13], blocks[2].1[14]]),
+        0x8000
+    );
+    assert_eq!(blocks[4].1[0], 3);
+    assert_eq!(&blocks[4].1[1..11], b"LEVEL1    ");
+    assert_eq!(
+        u16::from_le_bytes([blocks[4].1[13], blocks[4].1[14]]),
+        0xC000
+    );
+    assert_eq!(blocks[5].1, &[0x11, 0x22, 0x33]);
+    assert_eq!(blocks[6].1[0], 3);
+    assert_eq!(&blocks[6].1[1..11], b"MUSIC     ");
+    assert_eq!(
+        u16::from_le_bytes([blocks[6].1[13], blocks[6].1[14]]),
+        0xC000
+    );
+    assert_eq!(blocks[7].1, &[0x44, 0x55]);
+    assert_eq!(
+        blocks[1].1.iter().filter(|byte| **byte == 0xdf).count(),
+        3,
+        "loader must page each payload then restore page zero"
+    );
+
+    let mut offset = 0;
+    while offset < tape.len() {
+        let length = usize::from(u16::from_le_bytes([tape[offset], tape[offset + 1]]));
+        let block = &tape[offset + 2..offset + 2 + length];
+        assert_eq!(block.iter().fold(0u8, |checksum, byte| checksum ^ byte), 0);
+        offset += length + 2;
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn zxspectrum_bank_configuration_requires_the_128k_target() {
+    let root = temp_root("zxspectrum_bank_target_requirement");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+    std::fs::write(root.join("bank.bin"), [0x11]).unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+            [build]
+            target = "zxspectrum-z80"
+
+            [[zxspectrum.banks]]
+            page = 1
+            file = "bank.bin"
+        "#,
+    )
+    .unwrap();
+
+    let error = build_source(source_path.to_str().unwrap()).unwrap_err();
+    assert!(
+        error.contains("requires the `zxspectrum-z80-128k` target"),
+        "{error}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn spectrum_tap_preserves_a_custom_load_address() {
     let mut settings = resolve_build_settings(
         &CommandOptions {

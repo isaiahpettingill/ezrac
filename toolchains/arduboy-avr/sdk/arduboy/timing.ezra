@@ -1,0 +1,42 @@
+// Polled 60 Hz frame clock using Timer1 in CTC mode at 16 MHz / 64.
+pub const FRAME_RATE: u8 = 60
+
+pub fn initialize_timer() {
+    asm volatile(clobber r16, clobber memory) {
+        "ldi r16, 00h"
+        "sts 80h, r16"
+        "sts 81h, r16"
+        "sts 84h, r16"
+        "sts 85h, r16"
+        "ldi r16, 46h"
+        "sts 88h, r16"
+        "ldi r16, 10h"
+        "sts 89h, r16"
+        "ldi r16, 02h"
+        "out 16h, r16"
+        "ldi r16, 0Bh"
+        "sts 81h, r16"
+    }
+}
+
+// Returns one after consuming the Timer1 compare-A flag, otherwise zero.
+pub fn frame_ready() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as mem, clobber r18, clobber flags, clobber memory) {
+        "in r18, 16h"
+        "sbrs r18, 1"
+        "rjmp .timing_not_ready"
+        "ldi r24, 01h"
+        "out 16h, r24"
+        "rjmp .timing_done"
+        ".timing_not_ready:"
+        "clr r24"
+        ".timing_done:"
+        "sts {result}, r24"
+    }
+    return result
+}
+
+pub fn wait_frame() {
+    while frame_ready() == 0 {}
+}

@@ -94,6 +94,8 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         }
     } else if target == MSDOS_COM_I8086_TARGET {
         Layout::msdos_i8086_com()
+    } else if target == "zxspectrum-z80-128k" {
+        Layout::zx_spectrum_z80_128k()
     } else if target.starts_with("zxspectrum-z80") {
         Layout::zx_spectrum_z80()
     } else if target.starts_with("gameboy-") {
@@ -1110,6 +1112,85 @@ impl Layout {
                 symbol("EZRA_RAM_BASE", Address24::new(0xC000)),
                 symbol("EZRA_RODATA_BASE", Address24::new(0xC800)),
                 symbol("EZRA_ASSET_BASE", Address24::new(0xD000)),
+            ],
+        }
+    }
+
+    pub fn zx_spectrum_z80_128k() -> Self {
+        Self {
+            name: "zx_spectrum_z80_128k".to_owned(),
+            load: Address24::new(0x8000),
+            entry: Address24::new(0x8000),
+            // Keep call frames in fixed lower RAM rather than the pageable
+            // 0xC000..0xFFFF window used for unbanked program data.
+            stack: Address24::new(0x7FFF),
+            regions: vec![
+                region(
+                    "rom",
+                    0x0000,
+                    0x3FFF,
+                    &[RegionFlags::READ, RegionFlags::RESERVED],
+                ),
+                region(
+                    "display",
+                    0x4000,
+                    0x5AFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::VOLATILE],
+                ),
+                region(
+                    "system",
+                    0x5B00,
+                    0x5FFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "stack",
+                    0x6000,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "code",
+                    0x8000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0xC000, 0xCFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xD000,
+                    0xDFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xE000, 0xE7FF, &[RegionFlags::READ]),
+                region(
+                    "scratch",
+                    0xE800,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x8000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x8000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x8000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x7FFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xD000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0xC000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xE000)),
+                symbol("ZX_SCREEN_BASE", Address24::new(0x4000)),
+                symbol("ZX_ATTR_BASE", Address24::new(0x5800)),
+                symbol("ZX_ROM_PRINT_CHAR", Address24::new(0x0010)),
+                symbol("ZX_ROM_CLS", Address24::new(0x0DAF)),
             ],
         }
     }

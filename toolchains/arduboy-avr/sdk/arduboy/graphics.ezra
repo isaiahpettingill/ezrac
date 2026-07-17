@@ -1,0 +1,68 @@
+import arduboy.oled
+
+pub const WIDTH: u8 = 128
+pub const HEIGHT: u8 = 64
+pub const PAGE_COUNT: u8 = 8
+pub const FRAMEBUFFER_SIZE: u16 = 1024
+
+// The empty literal is zero-extended by the compiler to all 1,024 bytes.
+global framebuffer: [u8; FRAMEBUFFER_SIZE] = []
+
+pub fn clear_framebuffer() {
+    let index: u16 = 0
+    while index < FRAMEBUFFER_SIZE {
+        framebuffer[index] = 0
+        index += 1
+    }
+}
+
+pub fn set_pixel(x: u8, y: u8, lit: u8) {
+    if x >= WIDTH || y >= HEIGHT { return }
+
+    let offset: u16 = cast<u16>(y >> 3) * 128 + cast<u16>(x)
+    let mask: u8 = 1 << (y & 7)
+    if lit != 0 {
+        framebuffer[offset] = framebuffer[offset] | mask
+    } else {
+        framebuffer[offset] = framebuffer[offset] & ~mask
+    }
+}
+
+// Blits an 8-pixel-high page-oriented monochrome sprite. Source bytes are
+// columns, and transparent source bits leave the framebuffer unchanged.
+pub fn draw_sprite(x: u8, y: u8, source: ptr<u8>, width: u8) {
+    let column: u8 = 0
+    while column < width {
+        let bits: u8 = *(source + cast<u16>(column))
+        let bit: u8 = 0
+        while bit < 8 {
+            if (bits & (1 << bit)) != 0 {
+                set_pixel(x + column, y + bit, 1)
+            }
+            bit += 1
+        }
+        column += 1
+    }
+}
+
+// Copies up to one display page (128 columns) into the framebuffer.
+pub fn page(page_number: u8, source: ptr<u8>, length: u8) {
+    if page_number >= PAGE_COUNT { return }
+
+    let column: u8 = 0
+    while column < length && column < WIDTH {
+        let offset: u16 = cast<u16>(page_number) * 128 + cast<u16>(column)
+        framebuffer[offset] = *(source + cast<u16>(column))
+        column += 1
+    }
+}
+
+pub fn present() {
+    let page_number: u8 = 0
+    while page_number < PAGE_COUNT {
+        let offset: u16 = cast<u16>(page_number) * 128
+        oled.set_cursor(0, page_number)
+        oled.data_block(&framebuffer[offset], 128)
+        page_number += 1
+    }
+}

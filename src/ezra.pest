@@ -2,8 +2,11 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 program = { SOI ~ decl* ~ EOI }
-decl = { cfg_attr* ~ decl_core }
+decl = { decl_attr* ~ decl_core }
+decl_attr = { bank_attr | cfg_attr }
 decl_core = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | extern_decl | fn_decl }
+// `bank` is placement metadata, not a conditional-compilation predicate.
+bank_attr = { "@cfg" ~ "(" ~ "bank" ~ "(" ~ int_lit ~ ")" ~ ")" }
 cfg_attr = { "@cfg" ~ "(" ~ cfg_predicate ~ ")" }
 cfg_predicate = { cfg_all | cfg_any | cfg_not | cfg_call | cfg_flag }
 cfg_all = { "all" ~ "(" ~ cfg_predicates? ~ ")" }
@@ -107,7 +110,9 @@ comparison = { shift ~ (cmp_op ~ shift)* }
 shift = { additive ~ (shift_op ~ additive)* }
 additive = { multiplicative ~ (add_op ~ multiplicative)* }
 multiplicative = { unary ~ (mul_op ~ unary)* }
-unary = { unary_op* ~ primary }
+unary = { unary_op* ~ postfix_expr }
+postfix_expr = { primary ~ bank_suffix? }
+bank_suffix = { "@" ~ int_lit }
 primary = { cast_expr | in_expr | addr_access_expr | addr_index_expr | addr_field_expr | addr_expr | deref_expr | struct_lit | array_lit | call_expr | access_expr | field_expr | index_expr | literal | path_expr | "(" ~ expr ~ ")" }
 cast_expr = { "cast" ~ "<" ~ ty ~ ">" ~ "(" ~ expr ~ ")" }
 in_expr = ${ "in" ~ (" " | "\t" | "\r" | "\n")+ ~ path }

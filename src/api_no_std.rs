@@ -533,6 +533,7 @@ pub fn assembly_options_for_target(
             || target.starts_with("ti84plus-z80")
             || target.starts_with("ti84plusce-ez80")
             || target.starts_with("ti83premiumce-ez80"),
+        arduboy_executable: target.starts_with("arduboy-"),
         load_addr: symbol("EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: symbol("EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: symbol("EZRA_CODE_BASE").unwrap_or(layout.entry),

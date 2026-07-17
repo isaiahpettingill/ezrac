@@ -338,6 +338,7 @@ pub enum OutputFormat {
     ZxSpectrumTap,
     GameBoyGb,
     ArduinoHex,
+    Arduboy,
     Commodore64Prg,
     Commodore64Crt,
 }
@@ -355,6 +356,7 @@ impl OutputFormat {
             Self::ZxSpectrumTap => "tap",
             Self::GameBoyGb => "gb",
             Self::ArduinoHex => "hex",
+            Self::Arduboy => "arduboy",
             Self::Commodore64Prg => "prg",
             Self::Commodore64Crt => "crt",
         }
@@ -484,10 +486,11 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "8xk" | "ti8xk" => Ok(OutputFormat::Ti8xk),
         "tap" | "zxtap" | "spectrum-tap" => Ok(OutputFormat::ZxSpectrumTap),
         "gb" | "gameboy" | "gameboy-gb" => Ok(OutputFormat::GameBoyGb),
+        "arduboy" => Ok(OutputFormat::Arduboy),
         "prg" | "c64" | "commodore64-prg" => Ok(OutputFormat::Commodore64Prg),
         "crt" | "commodore64-crt" => Ok(OutputFormat::Commodore64Crt),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }
@@ -594,6 +597,17 @@ impl core::fmt::Display for AddressOutOfRange {
 
 #[cfg(feature = "std")]
 impl std::error::Error for AddressOutOfRange {}
+
+#[cfg(test)]
+mod arduboy_tests {
+    use super::*;
+
+    #[test]
+    fn parses_arduboy_container_output() {
+        assert_eq!(parse_output_format("arduboy"), Ok(OutputFormat::Arduboy));
+        assert_eq!(OutputFormat::Arduboy.extension(), "arduboy");
+    }
+}
 
 #[cfg(test)]
 mod tests;

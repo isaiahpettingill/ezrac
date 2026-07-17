@@ -148,23 +148,38 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
     match pair.as_rule() {
         Rule::decl => {
             let mut predicates = Vec::new();
+            let mut bank = None;
             let mut declaration = None;
             for inner in pair.into_inner() {
                 match inner.as_rule() {
                     Rule::cfg_attr => predicates.push(build_cfg_attr(inner)?),
+                    Rule::bank_attr => {
+                        if bank.replace(build_bank_attr(inner)?).is_some() {
+                            return Err(Diagnostic::new(
+                                "a declaration may have at most one `@cfg(bank(...))` attribute",
+                            ));
+                        }
+                    }
                     _ => declaration = Some(build_decl(file, inner)?),
                 }
             }
             let declaration = declaration
                 .ok_or_else(|| Diagnostic::new("conditional declaration missing declaration"))?;
-            if predicates.is_empty() {
-                Ok(declaration)
+            let declaration = if predicates.is_empty() {
+                declaration
             } else {
-                Ok(Declaration::Cfg {
+                Declaration::Cfg {
                     predicates,
                     declaration: Box::new(declaration),
-                })
-            }
+                }
+            };
+            Ok(match bank {
+                Some(bank) => Declaration::Bank {
+                    bank,
+                    declaration: Box::new(declaration),
+                },
+                None => declaration,
+            })
         }
         Rule::import_decl => Ok(Declaration::Import(
             pair.into_inner().next().unwrap().as_str().to_owned(),
@@ -184,6 +199,16 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
 
 fn build_cfg_attr(pair: Pair<'_, Rule>) -> Result<CfgPredicate, Diagnostic> {
     build_cfg_predicate(pair.into_inner().next().unwrap())
+}
+
+fn build_bank_attr(pair: Pair<'_, Rule>) -> Result<u32, Diagnostic> {
+    parse_bank_number(pair.into_inner().next().unwrap())
+}
+
+fn parse_bank_number(pair: Pair<'_, Rule>) -> Result<u32, Diagnostic> {
+    let value = parse_int(pair.as_str())?;
+    u32::try_from(value)
+        .map_err(|_| Diagnostic::new("bank number is outside the supported u32 range"))
 }
 
 fn build_cfg_predicate(pair: Pair<'_, Rule>) -> Result<CfgPredicate, Diagnostic> {
@@ -789,6 +814,17 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
         | Rule::additive
         | Rule::multiplicative => build_binary_chain(pair),
         Rule::unary => build_unary(pair),
+        Rule::postfix_expr => {
+            let mut inner = pair.into_inner();
+            let pointer = build_expr(inner.next().unwrap())?;
+            match inner.next() {
+                Some(suffix) => Ok(Expr::BankedPointer {
+                    pointer: Box::new(pointer),
+                    bank: parse_bank_number(suffix.into_inner().next().unwrap())?,
+                }),
+                None => Ok(pointer),
+            }
+        }
         Rule::primary => build_expr(pair.into_inner().next().unwrap()),
         Rule::cast_expr => {
             let mut inner = pair.into_inner();

@@ -50,6 +50,33 @@ fn zx_spectrum_layout_uses_a_stack_outside_screen_and_system_memory() {
 }
 
 #[test]
+fn zx_spectrum_128k_layout_keeps_code_and_stack_in_fixed_ram_windows() {
+    let layout = default_layout_for_target("zxspectrum-z80-128k");
+
+    assert_eq!(layout.validate(), Ok(()));
+    assert_eq!(layout.name, "zx_spectrum_z80_128k");
+    assert_eq!(layout.stack.get(), 0x7FFF);
+    assert_eq!(layout_symbol_value(&layout, "EZRA_STACK_TOP"), Some(0x7FFF));
+    assert!(layout.regions.iter().any(|region| {
+        region.name == "stack" && region.start.get() == 0x6000 && region.end.get() == 0x7FFF
+    }));
+    assert!(layout.regions.iter().any(|region| {
+        region.name == "code" && region.start.get() == 0x8000 && region.end.get() == 0xBFFF
+    }));
+    assert!(
+        layout
+            .regions
+            .iter()
+            .filter(|region| matches!(
+                region.name.as_str(),
+                "rodata" | "ram" | "assets" | "scratch"
+            ))
+            .all(|region| (0xC000..=0xFFFF).contains(&region.start.get())
+                && (0xC000..=0xFFFF).contains(&region.end.get()))
+    );
+}
+
+#[test]
 fn ti99_4a_layout_reserves_console_io_and_uses_cartridge_rom() {
     let layout = Layout::ti99_4a_tms9900();
 

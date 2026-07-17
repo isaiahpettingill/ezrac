@@ -70,12 +70,14 @@ fn rejects_targets_without_known_cpu_family() {
 #[test]
 fn resolves_z80_and_ez80_target_profiles() {
     assert!(resolve_target_profile(Some("ti84plusce-ez80")).is_ok());
-    let z80 = resolve_target_profile(Some("zxspectrum-z80")).unwrap();
+    for target in ["zxspectrum-z80", "zxspectrum-z80-128k"] {
+        let z80 = resolve_target_profile(Some(target)).unwrap();
 
-    assert_eq!(z80.triple.cpu, CpuFamily::Z80);
-    assert_eq!(z80.memory.pointer_width_bits, 16);
-    assert_eq!(z80.memory.address_width_bits, 16);
-    assert_eq!(z80.output_format, OutputFormat::ZxSpectrumTap);
+        assert_eq!(z80.triple.cpu, CpuFamily::Z80);
+        assert_eq!(z80.memory.pointer_width_bits, 16);
+        assert_eq!(z80.memory.address_width_bits, 16);
+        assert_eq!(z80.output_format, OutputFormat::ZxSpectrumTap);
+    }
 }
 
 #[test]
@@ -247,6 +249,7 @@ fn parses_output_formats() {
     assert_eq!(parse_output_format("com"), Ok(OutputFormat::CpmCom));
     assert_eq!(parse_output_format("gaem"), Ok(OutputFormat::Ez180nGaem));
     assert_eq!(parse_output_format("hex"), Ok(OutputFormat::IntelHex));
+    assert_eq!(parse_output_format("arduboy"), Ok(OutputFormat::Arduboy));
     assert_eq!(parse_output_format("8xp"), Ok(OutputFormat::Ti8xp));
     assert_eq!(parse_output_format("8ek"), Ok(OutputFormat::Ti8ek));
     assert_eq!(parse_output_format("8xk"), Ok(OutputFormat::Ti8xk));
@@ -257,7 +260,7 @@ fn parses_output_formats() {
     let error = parse_output_format("bad").unwrap_err();
     assert!(
         error.contains(
-            "expected `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
+            "expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
         ),
         "{error}"
     );
