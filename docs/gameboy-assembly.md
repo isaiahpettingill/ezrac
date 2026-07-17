@@ -92,11 +92,17 @@ enabled = true
 mapper = "mbc1" # or "mbc5"; `rom-only` is rejected
 ```
 
-An `@cfg(bank(N))` `embed` is packed into exactly ROM bank `N`. Its generated
-symbol is an address in the switchable `0x4000..0x7FFF` window, so multiple
-embeds in a bank receive consecutive window offsets. `ptr@N` marks an access as
-using bank `N`; it is accepted in a bank-0 helper (including an ordinary
-unbanked function), or in a function declared for the same bank.
+`@cfg(bank(N))` can place `embed`, `global`, and `fn` declarations in exactly
+ROM bank `N`. Banked embeds and globals receive addresses in the switchable
+`0x4000..0x7FFF` window; globals are ROM-resident and therefore read-only.
+Banked functions are called through generated resident bank-0 far-call support:
+it saves the active bank, maps the target bank, invokes the function, and
+restores the caller's bank. Nested far calls are safe.
+
+`ptr@N` documents an access through bank `N`. It is accepted in a bank-0 helper
+(including an ordinary unbanked function), where the program must map `N`
+manually before dereferencing it, or inside a function declared for that same
+bank. The qualifier does not itself switch the mapper.
 
 ```ezra
 @cfg(bank(2))
@@ -109,15 +115,17 @@ fn read_level() -> u8 {
 }
 ```
 
-The generated `__ezra_gb_select_bank` helper is always in ROM bank 0. It writes
-the MBC1 or MBC5 ROM-bank registers; it accepts the low eight bits of the bank
-number. The runtime does **not** automatically select a bank for `ptr@N`.
+The generated `__ezra_gb_select_bank` helper is always in ROM bank 0. It
+selects the low eight-bit bank value in `A`; far-call support additionally uses
+its internal 9-bit entry for MBC5. It programs both MBC1 ROM-bank fields, so
+selectable MBC1 banks above 31 work correctly. The runtime does **not**
+automatically select a bank for `ptr@N`.
 
-Current intentional limits: only banked `embed` declarations are supported;
-banked functions and far calls are rejected with diagnostics, banked embeds
-cannot currently use `align`, and MBC5 banks above 255 require manual mapper
-register writes. Explicit banked embeds cannot share a bank with an automatically
-assigned `gameboy.bank_files` payload.
+Banked globals require compile-time initializers and are read-only because they
+live in cartridge ROM. Banked embeds cannot use `align`. Explicit source-banked
+content cannot share a bank with an automatically assigned
+`gameboy.bank_files` payload. See `examples/gameboy/banking` for a complete
+MBC5 project that far-calls banked code and displays banked tile data.
 
 `ram_banks` describes 8 KiB external RAM banks. Omit it, or set it to `0`, for
 no cartridge RAM. `battery = true` requests battery-backed cartridge RAM and
@@ -142,9 +150,9 @@ MBC1 has additional hardware restrictions:
 
 MBC5 has a 9-bit ROM-bank number and can select banks `0x000..0x1FF`; with
 banks 0 and 1 reserved for generated code, it provides up to 510 bank-file
-slots. The MBC macros in `hardware.inc` take register-field values rather than
-trying to infer a full bank number: use the MBC1 low/high fields or the MBC5
-low-byte/high-bit pair.
+slots. EZRA far calls support the ninth bit. The MBC macros in `hardware.inc`
+take register-field values rather than trying to infer a full bank number: use
+the MBC1 low/high fields or the MBC5 low-byte/high-bit pair.
 
 External RAM is unavailable until enabled and should be disabled when it is not
 being accessed. Mapper writes target cartridge address ranges rather than I/O

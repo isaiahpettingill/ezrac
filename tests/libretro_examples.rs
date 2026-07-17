@@ -169,6 +169,50 @@ fn assert_valid_game_boy_rom(path: &Path, color: bool) {
     );
 }
 
+fn assert_valid_banked_game_boy_rom(path: &Path) {
+    let rom = fs::read(path).unwrap_or_else(|error| {
+        panic!("failed to read Game Boy ROM `{}`: {error}", path.display())
+    });
+    assert_eq!(
+        rom.len(),
+        0x10000,
+        "`{}` is not a four-bank Game Boy ROM",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x0147],
+        0x19,
+        "`{}` does not advertise an MBC5 cartridge",
+        path.display()
+    );
+    assert_eq!(
+        rom[0x0148],
+        0x01,
+        "`{}` has the wrong four-bank ROM size code",
+        path.display()
+    );
+    let header_checksum = rom[0x0134..=0x014C].iter().fold(0u8, |checksum, byte| {
+        checksum.wrapping_sub(*byte).wrapping_sub(1)
+    });
+    assert_eq!(
+        rom[0x014D],
+        header_checksum,
+        "`{}` has an invalid header checksum",
+        path.display()
+    );
+    let global_checksum = rom
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matches!(*index, 0x014E | 0x014F))
+        .fold(0u16, |sum, (_, byte)| sum.wrapping_add(u16::from(*byte)));
+    assert_eq!(
+        u16::from_be_bytes([rom[0x014E], rom[0x014F]]),
+        global_checksum,
+        "`{}` has an invalid global checksum",
+        path.display()
+    );
+}
+
 fn set_fat12_entry(fat: &mut [u8], cluster: u16, value: u16) {
     let offset = usize::from(cluster) + usize::from(cluster / 2);
     if cluster & 1 == 0 {
@@ -469,6 +513,10 @@ fn open_session(core: &Path, cartridge: &Path, label: &str) -> Session {
 fn gameboy_examples_run_on_real_core() {
     let _guard = lock_real_core_tests();
     let core = core_from_env(GAMEBOY_CORE_ENV);
+    let banking = build_example(
+        "examples/gameboy/banking/src/main.ezra",
+        "examples/gameboy/banking/target/gameboy-dmg-lr35902/main.gb",
+    );
     let background = build_example(
         "examples/gameboy/background/src/main.ezra",
         "examples/gameboy/background/target/gameboy-dmg-lr35902/main.gb",
@@ -494,6 +542,7 @@ fn gameboy_examples_run_on_real_core() {
         "examples/gameboy/sprite/target/gameboy-dmg-lr35902/main.gb",
     );
 
+    assert_valid_banked_game_boy_rom(&banking);
     for (rom, color) in [
         (&background, false),
         (&color_input, true),
@@ -503,6 +552,14 @@ fn gameboy_examples_run_on_real_core() {
         (&sprite, false),
     ] {
         assert_valid_game_boy_rom(rom, color);
+    }
+
+    {
+        let mut game = open_session(&core, &banking, "Game Boy banking example");
+        game.run_frames(300).unwrap();
+        assert_non_uniform_frame(&game, "Game Boy banking example");
+        assert_deterministic_video_save_state(&mut game, "gameboy-banking");
+        capture(&game, "gameboy-banking");
     }
 
     {

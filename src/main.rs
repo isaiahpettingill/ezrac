@@ -676,7 +676,8 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| source_path.with_extension(executable_extension(&settings)));
-    let executable = build_executable_bytes(&settings, &image.bytes, Some(&output_path), None)?;
+    let executable =
+        build_executable_bytes(&settings, &image.bytes, Some(&output_path), None, &[])?;
     fs::write(&output_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     println!("wrote {}", output_path.display());
@@ -1241,7 +1242,7 @@ fn write_assembly_build_artifacts(
     {
         apply_agon_mos_header(settings.layout.entry.get(), image.bytes)?
     } else {
-        build_executable_bytes(settings, &image.bytes, Some(&executable_path), None)?
+        build_executable_bytes(settings, &image.bytes, Some(&executable_path), None, &[])?
     };
     fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
@@ -1265,9 +1266,9 @@ fn write_build_artifacts(
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(executable_extension(settings));
 
-    let (bytes, map) = if settings.target.triple.cpu == CpuFamily::M68k {
+    let (bytes, map, symbols) = if settings.target.triple.cpu == CpuFamily::M68k {
         let image = build_generated_assembly_image(source_path, assembly, settings)?;
-        (image.bytes, image.map)
+        (image.bytes, image.map, Vec::new())
     } else {
         let assembled = ezra::vm::assemble_subset_with_options_at(
             AssemblerCpu::from(settings.target.triple.cpu),
@@ -1293,7 +1294,7 @@ fn write_build_artifacts(
                 .with_location_if_missing(_source_location.clone())
                 .to_string()
         })?;
-        (assembled.bytes, map)
+        (assembled.bytes, map, assembled.symbols)
     };
     if let Some(parent) = output_base.parent() {
         fs::create_dir_all(parent)
@@ -1303,8 +1304,13 @@ fn write_build_artifacts(
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let executable =
-        build_executable_bytes(settings, &bytes, Some(&executable_path), Some(_program))?;
+    let executable = build_executable_bytes(
+        settings,
+        &bytes,
+        Some(&executable_path),
+        Some(_program),
+        &symbols,
+    )?;
     fs::write(&executable_path, executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
@@ -1736,6 +1742,7 @@ fn build_executable_bytes(
     code: &[u8],
     output_path: Option<&Path>,
     program: Option<&Program>,
+    symbols: &[ezra::vm::AssemblySymbol],
 ) -> Result<Vec<u8>, String> {
     if settings.output_format == OutputFormat::Arduboy {
         return arduboy_package_bytes(settings, output_path, code);
@@ -1779,7 +1786,7 @@ fn build_executable_bytes(
         return zx_spectrum_tap_bytes(settings, output_path, code);
     }
     if settings.output_format == OutputFormat::GameBoyGb {
-        return game_boy_rom_bytes(settings, output_path, code, program);
+        return game_boy_rom_bytes(settings, output_path, code, program, symbols);
     }
     if settings.output_format == OutputFormat::Commodore64Prg {
         return commodore64_prg_bytes(settings, code);
@@ -2075,11 +2082,68 @@ fn commodore64_crt_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8
     Ok(output)
 }
 
+fn game_boy_banked_code_payloads(
+    code: &[u8],
+    symbols: &[ezra::vm::AssemblySymbol],
+    base: u32,
+) -> Result<BTreeMap<usize, Vec<u8>>, String> {
+    let mut starts = BTreeMap::new();
+    let mut ends = BTreeMap::new();
+    for symbol in symbols {
+        let Some(rest) = symbol.name.strip_prefix("__ezra_bank_") else {
+            continue;
+        };
+        let Some((bank, suffix)) = rest.split_once('_') else {
+            continue;
+        };
+        let bank = bank
+            .parse::<usize>()
+            .map_err(|_| format!("invalid generated Game Boy bank marker `{}`", symbol.name))?;
+        match suffix {
+            "start" => {
+                starts.insert(bank, symbol.addr);
+            }
+            "end" => {
+                ends.insert(bank, symbol.addr);
+            }
+            _ => {}
+        }
+    }
+    let mut payloads = BTreeMap::new();
+    for (bank, start) in starts {
+        let end = ends
+            .remove(&bank)
+            .ok_or_else(|| format!("generated Game Boy bank {bank} has no end marker"))?;
+        let start = usize::try_from(
+            start
+                .checked_sub(base)
+                .ok_or_else(|| format!("generated Game Boy bank {bank} precedes resident code"))?,
+        )
+        .map_err(|_| "generated Game Boy bank offset exceeds host range".to_owned())?;
+        let end = usize::try_from(
+            end.checked_sub(base)
+                .ok_or_else(|| format!("generated Game Boy bank {bank} precedes resident code"))?,
+        )
+        .map_err(|_| "generated Game Boy bank offset exceeds host range".to_owned())?;
+        if start > end || end > code.len() {
+            return Err(format!(
+                "generated Game Boy bank {bank} is outside assembled code"
+            ));
+        }
+        payloads.insert(bank, code[start..end].to_vec());
+    }
+    if !ends.is_empty() {
+        return Err("generated Game Boy bank end marker has no start marker".to_owned());
+    }
+    Ok(payloads)
+}
+
 fn game_boy_rom_bytes(
     settings: &BuildSettings,
     output_path: Option<&Path>,
     code: &[u8],
     program: Option<&Program>,
+    symbols: &[ezra::vm::AssemblySymbol],
 ) -> Result<Vec<u8>, String> {
     if !settings.target.triple.value.starts_with("gameboy-") {
         return Err(format!(
@@ -2095,22 +2159,38 @@ fn game_boy_rom_bytes(
     const INITIAL_ROM_SIZE: usize = 0x8000;
     const CODE_OFFSET: usize = 0x0150;
     let config = settings.gameboy.clone().unwrap_or_default();
-    let mut generated_payloads = BTreeMap::<usize, Vec<u8>>::new();
-    if let Some(program) = program {
-        for embed in collect_gameboy_banked_embeds(program).map_err(|error| error.to_string())? {
-            let bank = usize::try_from(embed.bank)
-                .map_err(|_| format!("Game Boy bank {} is outside host range", embed.bank))?;
-            let payload = generated_payloads.entry(bank).or_default();
-            if payload
-                .len()
-                .checked_add(embed.bytes.len())
-                .map_or(true, |len| len > BANK_SIZE)
+    let mut generated_payloads =
+        game_boy_banked_code_payloads(code, symbols, settings.layout.entry.get())?;
+    let banked_code_start = symbols
+        .iter()
+        .filter(|symbol| symbol.name.starts_with("__ezra_bank_") && symbol.name.ends_with("_start"))
+        .map(|symbol| symbol.addr)
+        .min();
+    let code = banked_code_start
+        .map(|address| {
+            &code[..usize::try_from(address.saturating_sub(settings.layout.entry.get()))
+                .unwrap_or(code.len())]
+        })
+        .unwrap_or(code);
+    if generated_payloads.is_empty() {
+        if let Some(program) = program {
+            for embed in
+                collect_gameboy_banked_embeds(program).map_err(|error| error.to_string())?
             {
-                return Err(format!(
-                    "banked embeds in Game Boy ROM bank {bank} exceed its 16 KiB window"
-                ));
+                let bank = usize::try_from(embed.bank)
+                    .map_err(|_| format!("Game Boy bank {} is outside host range", embed.bank))?;
+                let payload = generated_payloads.entry(bank).or_default();
+                if payload
+                    .len()
+                    .checked_add(embed.bytes.len())
+                    .map_or(true, |len| len > BANK_SIZE)
+                {
+                    return Err(format!(
+                        "banked embeds in Game Boy ROM bank {bank} exceed its 16 KiB window"
+                    ));
+                }
+                payload.extend_from_slice(&embed.bytes);
             }
-            payload.extend_from_slice(&embed.bytes);
         }
     }
     let bank_payloads = config
@@ -2130,7 +2210,7 @@ fn game_boy_rom_bytes(
         validate_game_boy_generated_bank(config.mapper, *bank)?;
         if payload_banks.contains(bank) {
             return Err(format!(
-                "Game Boy ROM bank {bank} is used by both a banked embed and `gameboy.bank_files`"
+                "Game Boy ROM bank {bank} is used by both source-banked content and `gameboy.bank_files`"
             ));
         }
     }

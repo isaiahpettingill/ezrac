@@ -1,0 +1,14 @@
+[project]
+name = "gameboy-banking"
+
+[build]
+input = "src/main.ezra"
+target = "gameboy-dmg-lr35902"
+output = "gb"
+
+[banking]
+enabled = true
+
+[gameboy]
+mapper = "mbc5"
+rom_banks = 4

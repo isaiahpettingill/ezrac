@@ -45,21 +45,26 @@ pub fn emit_lr35902_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    let banked_embed_addresses = configure_gameboy_banked_embeds(
-        &tbir.lowered_program,
-        &mut model,
-        options.gameboy_banking,
-    )?;
-    Emitter::new(model, options.gameboy_banking, banked_embed_addresses)
+    let banked_layout =
+        configure_gameboy_banking(&tbir.lowered_program, &mut model, options.gameboy_banking)?;
+    Emitter::new(model, options.gameboy_banking, banked_layout)
         .emit(&tbir.lowered_program)
         .map(|asm| with_readability_comments(asm, program, &options, "lr35902"))
 }
 
-fn configure_gameboy_banked_embeds(
+#[derive(Clone, Default)]
+struct BankedLayout {
+    data_addresses: HashMap<String, u32>,
+    globals: HashSet<String>,
+    functions: HashMap<String, u32>,
+    data: HashMap<u32, Vec<(String, Vec<u8>)>>,
+}
+
+fn configure_gameboy_banking(
     program: &Program,
     model: &mut SemanticModel,
     banking: Option<GameBoyBankingOptions>,
-) -> Result<HashMap<String, u32>, Diagnostic> {
+) -> Result<BankedLayout, Diagnostic> {
     let mut declarations = Vec::new();
     collect_banked_declarations(&program.declarations, None, &mut declarations);
     let has_banked_declarations = declarations.iter().any(|(bank, _)| bank.is_some());
@@ -69,40 +74,19 @@ fn configure_gameboy_banked_embeds(
         ));
     }
 
-    for (bank, declaration) in &declarations {
-        let Some(bank) = bank else {
-            continue;
-        };
-        if let Declaration::Function(function) = declaration
-            && *bank != 0
-        {
-            return Err(Diagnostic::new(format!(
-                "Game Boy banked function `{}` in bank {bank} is unsupported: far calls are not implemented",
-                function.name
-            )));
-        }
-        if !matches!(declaration, Declaration::Embed(_)) && *bank != 0 {
-            return Err(Diagnostic::new(
-                "Game Boy `@cfg(bank(N))` currently supports `embed` declarations only; banked code and far calls are not implemented",
-            ));
-        }
-    }
-    validate_banked_pointer_contexts(&declarations, banking.is_some())?;
-
     let Some(banking) = banking else {
-        return Ok(HashMap::new());
+        validate_banked_pointer_contexts(&declarations, None)?;
+        return Ok(BankedLayout::default());
     };
+    validate_banked_pointer_contexts(&declarations, Some(banking))?;
     let maximum_bank = match banking.mapper {
         GameBoyBankingMapper::Mbc1 => 127,
         GameBoyBankingMapper::Mbc5 => 511,
     };
+    let mut layout = BankedLayout::default();
     let mut cursors = HashMap::<u32, u32>::new();
-    let mut addresses = HashMap::new();
     for (bank, declaration) in declarations {
         let Some(bank) = bank else {
-            continue;
-        };
-        let Declaration::Embed(embed) = declaration else {
             continue;
         };
         if bank == 0
@@ -110,48 +94,157 @@ fn configure_gameboy_banked_embeds(
             || (banking.mapper == GameBoyBankingMapper::Mbc1 && bank & 0x1F == 0)
         {
             return Err(Diagnostic::new(format!(
-                "Game Boy mapper cannot place embed `{}` in ROM bank {bank}",
-                embed.name
+                "Game Boy mapper cannot place a declaration in ROM bank {bank}"
             )));
         }
-        if embed.align.is_some() {
-            return Err(Diagnostic::new(format!(
-                "banked Game Boy embed `{}` cannot specify `align` yet",
-                embed.name
-            )));
+        match declaration {
+            Declaration::Embed(embed) => {
+                if embed.align.is_some() {
+                    return Err(Diagnostic::new(format!(
+                        "banked Game Boy embed `{}` cannot specify `align`",
+                        embed.name
+                    )));
+                }
+                let bytes = model
+                    .embeds
+                    .get(&embed.name)
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "missing banked embed `{}` in semantic model",
+                            embed.name
+                        ))
+                    })?
+                    .bytes
+                    .clone();
+                let address =
+                    place_banked_data(&mut layout, &mut cursors, bank, &embed.name, bytes)?;
+                let object = model
+                    .embeds
+                    .get_mut(&embed.name)
+                    .expect("banked embed exists");
+                object.storage.address = address;
+                model
+                    .constants
+                    .insert(format!("{}.ptr", embed.name), i64::from(address));
+                model.constants.insert(
+                    format!("{}.end", embed.name),
+                    i64::from(address + object.bytes.len() as u32),
+                );
+            }
+            Declaration::Global(global) => {
+                let bytes = banked_global_bytes(model, &global.ty, &global.value)?;
+                let address =
+                    place_banked_data(&mut layout, &mut cursors, bank, &global.name, bytes)?;
+                let storage = model.globals.get_mut(&global.name).ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "missing banked global `{}` in semantic model",
+                        global.name
+                    ))
+                })?;
+                storage.address = address;
+                layout.globals.insert(global.name.clone());
+            }
+            Declaration::Function(function) => {
+                if function.name == "main" {
+                    return Err(Diagnostic::new(
+                        "Game Boy `main` must remain resident in ROM bank 0",
+                    ));
+                }
+                layout.functions.insert(function.name.clone(), bank);
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "Game Boy `@cfg(bank(N))` supports only `embed`, `global`, and `fn` declarations",
+                ));
+            }
         }
-        let object = model.embeds.get_mut(&embed.name).ok_or_else(|| {
-            Diagnostic::new(format!(
-                "missing banked embed `{}` in semantic model",
-                embed.name
-            ))
-        })?;
-        let cursor = cursors.entry(bank).or_insert(0);
-        let size = u32::try_from(object.bytes.len())
-            .map_err(|_| Diagnostic::new(format!("banked embed `{}` is too large", embed.name)))?;
-        let end = cursor.checked_add(size).ok_or_else(|| {
-            Diagnostic::new(format!(
-                "banked embed `{}` exceeds Game Boy ROM bank size",
-                embed.name
-            ))
-        })?;
-        if end > 0x4000 {
-            return Err(Diagnostic::new(format!(
-                "banked embeds in Game Boy ROM bank {bank} exceed its 16 KiB window"
-            )));
-        }
-        let address = 0x4000 + *cursor;
-        object.storage.address = address;
-        model
-            .constants
-            .insert(format!("{}.ptr", embed.name), i64::from(address));
-        model
-            .constants
-            .insert(format!("{}.end", embed.name), i64::from(address + size));
-        addresses.insert(embed.name.clone(), address);
-        *cursor = end;
     }
-    Ok(addresses)
+    Ok(layout)
+}
+
+fn place_banked_data(
+    layout: &mut BankedLayout,
+    cursors: &mut HashMap<u32, u32>,
+    bank: u32,
+    name: &str,
+    bytes: Vec<u8>,
+) -> Result<u32, Diagnostic> {
+    let cursor = cursors.entry(bank).or_insert(0);
+    let size = u32::try_from(bytes.len())
+        .map_err(|_| Diagnostic::new(format!("banked declaration `{name}` is too large")))?;
+    let end = cursor.checked_add(size).ok_or_else(|| {
+        Diagnostic::new(format!(
+            "banked declaration `{name}` exceeds Game Boy ROM bank size"
+        ))
+    })?;
+    if end > 0x4000 {
+        return Err(Diagnostic::new(format!(
+            "banked declarations in Game Boy ROM bank {bank} exceed its 16 KiB window"
+        )));
+    }
+    let address = 0x4000 + *cursor;
+    layout.data_addresses.insert(name.to_owned(), address);
+    layout
+        .data
+        .entry(bank)
+        .or_default()
+        .push((name.to_owned(), bytes));
+    *cursor = end;
+    Ok(address)
+}
+
+fn banked_global_bytes(
+    model: &SemanticModel,
+    ty: &Type,
+    value: &Expr,
+) -> Result<Vec<u8>, Diagnostic> {
+    let resolved = model.resolved_type(ty)?;
+    match (resolved, value) {
+        (Type::Array { element, len }, Expr::Array(values)) => {
+            let len = usize::try_from(model.const_value(&len)?)
+                .map_err(|_| Diagnostic::new("banked global array length must be non-negative"))?;
+            if values.len() > len {
+                return Err(Diagnostic::new(
+                    "banked global initializer has too many array values",
+                ));
+            }
+            let mut bytes = Vec::new();
+            for index in 0..len {
+                if let Some(value) = values.get(index) {
+                    bytes.extend(banked_global_bytes(model, &element, value)?);
+                } else {
+                    bytes.resize(bytes.len() + model.type_size(&element)? as usize, 0);
+                }
+            }
+            Ok(bytes)
+        }
+        (Type::Named(name), Expr::StructInit { fields, .. })
+            if model.structs.contains_key(&name) =>
+        {
+            let layout = &model.structs[&name];
+            let mut bytes = vec![0; layout.size as usize];
+            for (field_name, value) in fields {
+                let field = layout.fields.get(field_name).ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "unknown field `{field_name}` on banked global `{name}`"
+                    ))
+                })?;
+                let field_bytes = banked_global_bytes(model, &field.ty, value)?;
+                bytes[field.offset as usize..field.offset as usize + field_bytes.len()]
+                    .copy_from_slice(&field_bytes);
+            }
+            Ok(bytes)
+        }
+        (resolved, value) => {
+            let width = model.type_width(&resolved)? as usize;
+            let raw = model
+                .const_value(value)
+                .map_err(|_| Diagnostic::new("banked globals require compile-time initializers"))?;
+            let mut bytes = raw.to_le_bytes()[..width].to_vec();
+            bytes.resize(width, if raw < 0 { 0xFF } else { 0 });
+            Ok(bytes)
+        }
+    }
 }
 
 fn collect_banked_declarations<'a>(
@@ -182,19 +275,14 @@ fn collect_banked_declarations<'a>(
 
 fn validate_banked_pointer_contexts(
     declarations: &[(Option<u32>, &Declaration)],
-    banking_enabled: bool,
+    banking: Option<GameBoyBankingOptions>,
 ) -> Result<(), Diagnostic> {
     for (bank, declaration) in declarations {
         let Declaration::Function(function) = declaration else {
             continue;
         };
         for statement in &function.body {
-            validate_banked_pointer_stmt(
-                statement,
-                bank.unwrap_or(0),
-                &function.name,
-                banking_enabled,
-            )?;
+            validate_banked_pointer_stmt(statement, bank.unwrap_or(0), &function.name, banking)?;
         }
     }
     Ok(())
@@ -204,45 +292,43 @@ fn validate_banked_pointer_stmt(
     stmt: &Stmt,
     function_bank: u32,
     function: &str,
-    banking_enabled: bool,
+    banking: Option<GameBoyBankingOptions>,
 ) -> Result<(), Diagnostic> {
     match stmt {
         Stmt::Let { value, .. } | Stmt::Out { value, .. } | Stmt::Expr(value) => {
-            validate_banked_pointer_expr(value, function_bank, function, banking_enabled)
+            validate_banked_pointer_expr(value, function_bank, function, banking)
         }
         Stmt::Assign { target, value, .. } => {
-            validate_banked_pointer_place(target, function_bank, function, banking_enabled)?;
-            validate_banked_pointer_expr(value, function_bank, function, banking_enabled)
+            validate_banked_pointer_place(target, function_bank, function, banking)?;
+            validate_banked_pointer_expr(value, function_bank, function, banking)
         }
         Stmt::If {
             condition,
             then_body,
             else_body,
         } => {
-            validate_banked_pointer_expr(condition, function_bank, function, banking_enabled)?;
+            validate_banked_pointer_expr(condition, function_bank, function, banking)?;
             for statement in then_body.iter().chain(else_body) {
-                validate_banked_pointer_stmt(statement, function_bank, function, banking_enabled)?;
+                validate_banked_pointer_stmt(statement, function_bank, function, banking)?;
             }
             Ok(())
         }
         Stmt::While { condition, body } => {
-            validate_banked_pointer_expr(condition, function_bank, function, banking_enabled)?;
+            validate_banked_pointer_expr(condition, function_bank, function, banking)?;
             for statement in body {
-                validate_banked_pointer_stmt(statement, function_bank, function, banking_enabled)?;
+                validate_banked_pointer_stmt(statement, function_bank, function, banking)?;
             }
             Ok(())
         }
         Stmt::Loop { body } => {
             for statement in body {
-                validate_banked_pointer_stmt(statement, function_bank, function, banking_enabled)?;
+                validate_banked_pointer_stmt(statement, function_bank, function, banking)?;
             }
             Ok(())
         }
         Stmt::Return(value) => value
             .as_ref()
-            .map(|value| {
-                validate_banked_pointer_expr(value, function_bank, function, banking_enabled)
-            })
+            .map(|value| validate_banked_pointer_expr(value, function_bank, function, banking))
             .unwrap_or(Ok(())),
         Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => Ok(()),
     }
@@ -252,14 +338,14 @@ fn validate_banked_pointer_place(
     place: &Place,
     function_bank: u32,
     function: &str,
-    banking_enabled: bool,
+    banking: Option<GameBoyBankingOptions>,
 ) -> Result<(), Diagnostic> {
     match place {
         Place::Index { index, .. } | Place::Deref(index) => {
-            validate_banked_pointer_expr(index, function_bank, function, banking_enabled)
+            validate_banked_pointer_expr(index, function_bank, function, banking)
         }
         Place::Access(path) => {
-            validate_banked_pointer_access(path, function_bank, function, banking_enabled)
+            validate_banked_pointer_access(path, function_bank, function, banking)
         }
         Place::Ident(_) | Place::Field { .. } => Ok(()),
     }
@@ -269,11 +355,11 @@ fn validate_banked_pointer_access(
     path: &AccessPath,
     function_bank: u32,
     function: &str,
-    banking_enabled: bool,
+    banking: Option<GameBoyBankingOptions>,
 ) -> Result<(), Diagnostic> {
     for segment in &path.segments {
         if let AccessSegment::Index(index) = segment {
-            validate_banked_pointer_expr(index, function_bank, function, banking_enabled)?;
+            validate_banked_pointer_expr(index, function_bank, function, banking)?;
         }
     }
     Ok(())
@@ -283,13 +369,25 @@ fn validate_banked_pointer_expr(
     expr: &Expr,
     function_bank: u32,
     function: &str,
-    banking_enabled: bool,
+    banking: Option<GameBoyBankingOptions>,
 ) -> Result<(), Diagnostic> {
     match expr {
         Expr::BankedPointer { pointer, bank } => {
-            if !banking_enabled {
+            let Some(banking) = banking else {
                 return Err(Diagnostic::new(format!(
                     "banked pointer qualifier `@{bank}` in function `{function}` requires Game Boy `[banking] enabled = true`"
+                )));
+            };
+            let maximum = match banking.mapper {
+                GameBoyBankingMapper::Mbc1 => 127,
+                GameBoyBankingMapper::Mbc5 => 511,
+            };
+            if *bank == 0
+                || *bank > maximum
+                || (banking.mapper == GameBoyBankingMapper::Mbc1 && *bank & 0x1F == 0)
+            {
+                return Err(Diagnostic::new(format!(
+                    "banked pointer qualifier `@{bank}` in function `{function}` is not selectable by this Game Boy mapper"
                 )));
             }
             if function_bank != 0 && function_bank != *bank {
@@ -297,11 +395,11 @@ fn validate_banked_pointer_expr(
                     "banked pointer qualifier `@{bank}` in function `{function}` does not match enclosing bank {function_bank}; use it from a bank-0 helper or the matching banked function"
                 )));
             }
-            validate_banked_pointer_expr(pointer, function_bank, function, banking_enabled)
+            validate_banked_pointer_expr(pointer, function_bank, function, Some(banking))
         }
         Expr::Array(values) => {
             for value in values {
-                validate_banked_pointer_expr(value, function_bank, function, banking_enabled)?;
+                validate_banked_pointer_expr(value, function_bank, function, banking)?;
             }
             Ok(())
         }
@@ -310,26 +408,26 @@ fn validate_banked_pointer_expr(
         | Expr::Deref(index)
         | Expr::Unary { expr: index, .. }
         | Expr::Cast { expr: index, .. } => {
-            validate_banked_pointer_expr(index, function_bank, function, banking_enabled)
+            validate_banked_pointer_expr(index, function_bank, function, banking)
         }
         Expr::Access(path) | Expr::AddressOfAccess(path) => {
-            validate_banked_pointer_access(path, function_bank, function, banking_enabled)
+            validate_banked_pointer_access(path, function_bank, function, banking)
         }
         Expr::StructInit { fields, .. } => {
             for (_, value) in fields {
-                validate_banked_pointer_expr(value, function_bank, function, banking_enabled)?;
+                validate_banked_pointer_expr(value, function_bank, function, banking)?;
             }
             Ok(())
         }
         Expr::Call { args, .. } => {
             for arg in args {
-                validate_banked_pointer_expr(arg, function_bank, function, banking_enabled)?;
+                validate_banked_pointer_expr(arg, function_bank, function, banking)?;
             }
             Ok(())
         }
         Expr::Binary { left, right, .. } => {
-            validate_banked_pointer_expr(left, function_bank, function, banking_enabled)?;
-            validate_banked_pointer_expr(right, function_bank, function, banking_enabled)
+            validate_banked_pointer_expr(left, function_bank, function, banking)?;
+            validate_banked_pointer_expr(right, function_bank, function, banking)
         }
         Expr::Int(_)
         | Expr::TypedInt(_, _)
@@ -369,7 +467,7 @@ struct Emitter {
     r1: Storage,
     r2: Storage,
     indirect_offset: u8,
-    banked_embed_addresses: HashMap<String, u32>,
+    banked_layout: BankedLayout,
     gameboy_banking: Option<GameBoyBankingOptions>,
 }
 
@@ -377,7 +475,7 @@ impl Emitter {
     fn new(
         mut model: SemanticModel,
         gameboy_banking: Option<GameBoyBankingOptions>,
-        banked_embed_addresses: HashMap<String, u32>,
+        banked_layout: BankedLayout,
     ) -> Self {
         let r0 = model.allocate(3).expect("6502 result scratch allocation");
         let r1 = model.allocate(3).expect("6502 rhs scratch allocation");
@@ -395,7 +493,7 @@ impl Emitter {
             r1,
             r2,
             indirect_offset: 0,
-            banked_embed_addresses,
+            banked_layout,
             gameboy_banking,
         }
     }
@@ -409,6 +507,12 @@ impl Emitter {
         self.line("    ld sp, FFFEh");
         self.emit_storage_symbols();
         self.emit_static_initializers(program)?;
+        if self.gameboy_banking.is_some() {
+            self.line("    ld a, 1");
+            self.line("    ld (FFB0h), a");
+            self.line("    xor a");
+            self.line("    ld (FFB1h), a");
+        }
         self.line("    call _main");
         self.line("__ezra_exit:");
         self.line("    halt");
@@ -428,10 +532,12 @@ impl Emitter {
         for declaration in &program.declarations {
             if let Declaration::Function(function) = unwrapped_declaration(declaration)
                 && emitted_functions.contains(&function.name)
+                && !self.banked_layout.functions.contains_key(&function.name)
             {
                 self.emit_function(function)?;
             }
         }
+        self.emit_banked_payloads(program, &emitted_functions)?;
         for section in [".header", ".rodata", ".data", ".bss", ".assets", ".scratch"] {
             self.line(&format!("section {section}"));
         }
@@ -442,23 +548,110 @@ impl Emitter {
         let Some(banking) = self.gameboy_banking else {
             return;
         };
-        self.line("; Game Boy mapper helper; this code is resident in ROM bank 0.");
+        self.line("; Game Boy mapper and far-call runtime; always resident in ROM bank 0.");
         self.line("__ezra_gb_select_bank:");
+        self.line("    ld b, 0");
+        self.line("__ezra_gb_select_bank_9:");
+        self.line("    ld (FFB0h), a");
+        self.line("    ld c, a");
+        self.line("    ld a, b");
+        self.line("    ld (FFB1h), a");
         match banking.mapper {
             GameBoyBankingMapper::Mbc1 => {
-                self.line("    and 1F");
+                self.line("    ld a, c");
+                self.line("    and $1F");
                 self.line("    jr nz, __ezra_gb_mbc1_bank_ready");
                 self.line("    inc a");
                 self.line("__ezra_gb_mbc1_bank_ready:");
                 self.line("    ld (2000h), a");
+                self.line("    ld a, c");
+                self.line("    srl a");
+                self.line("    srl a");
+                self.line("    srl a");
+                self.line("    srl a");
+                self.line("    srl a");
+                self.line("    and $03");
+                self.line("    ld (4000h), a");
+                self.line("    xor a");
+                self.line("    ld (6000h), a");
             }
             GameBoyBankingMapper::Mbc5 => {
+                self.line("    ld a, c");
                 self.line("    ld (2000h), a");
-                self.line("    xor a");
+                self.line("    ld a, b");
+                self.line("    and $01");
                 self.line("    ld (3000h), a");
             }
         }
         self.line("    ret");
+        self.line("__ezra_gb_far_call:");
+        self.line("    ld c, a");
+        self.line("    ld d, b");
+        self.line("    ld a, (FFB0h)");
+        self.line("    push af");
+        self.line("    ld a, (FFB1h)");
+        self.line("    push af");
+        self.line("    ld a, c");
+        self.line("    ld b, d");
+        self.line("    call __ezra_gb_select_bank_9");
+        self.line("    ld de, __ezra_gb_far_return");
+        self.line("    push de");
+        self.line("    jp hl");
+        self.line("__ezra_gb_far_return:");
+        self.line("    pop af");
+        self.line("    ld b, a");
+        self.line("    pop af");
+        self.line("    call __ezra_gb_select_bank_9");
+        self.line("    ret");
+    }
+
+    fn emit_banked_payloads(
+        &mut self,
+        program: &Program,
+        emitted: &HashSet<String>,
+    ) -> Result<(), Diagnostic> {
+        let mut banks = self
+            .banked_layout
+            .data
+            .keys()
+            .copied()
+            .chain(self.banked_layout.functions.values().copied())
+            .collect::<Vec<_>>();
+        banks.sort_unstable();
+        banks.dedup();
+        for bank in banks {
+            self.line(&format!("__ezra_bank_{bank}_start:"));
+            if let Some(data) = self.banked_layout.data.get(&bank).cloned() {
+                for (name, bytes) in data {
+                    self.line(&format!("__ezra_banked_data_{name}:"));
+                    if !bytes.is_empty() {
+                        self.line(&format!(
+                            "    db {}",
+                            bytes
+                                .iter()
+                                .map(|byte| format!("{byte:02X}h"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            }
+            for declaration in &program.declarations {
+                if let Declaration::Function(function) = unwrapped_declaration(declaration)
+                    && self.banked_layout.functions.get(&function.name) == Some(&bank)
+                    && emitted.contains(&function.name)
+                {
+                    self.emit_function(function)?;
+                }
+            }
+            self.line(&format!("__ezra_bank_{bank}_end:"));
+        }
+        for (name, bank) in self.banked_layout.functions.clone() {
+            self.line(&format!(
+                "__ezra_far_{name}_address equ 4000h + (_{name} - __ezra_bank_{bank}_start)"
+            ));
+        }
+        Ok(())
     }
 
     fn emit_storage_symbols(&mut self) {
@@ -477,7 +670,8 @@ impl Emitter {
         symbols.sort_by(|left, right| left.0.cmp(&right.0));
         for (name, storage) in symbols {
             let address = self
-                .banked_embed_addresses
+                .banked_layout
+                .data_addresses
                 .get(&name)
                 .copied()
                 .unwrap_or(storage.address);
@@ -487,7 +681,7 @@ impl Emitter {
 
     fn emit_static_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
         for (name, embed) in self.model.embeds.clone() {
-            if self.banked_embed_addresses.contains_key(&name) {
+            if self.banked_layout.data_addresses.contains_key(&name) {
                 continue;
             }
             for (offset, byte) in embed.bytes.iter().copied().enumerate() {
@@ -509,6 +703,9 @@ impl Emitter {
         }
         for declaration in &program.declarations {
             if let Declaration::Global(global) = unwrapped_declaration(declaration) {
+                if self.banked_layout.globals.contains(&global.name) {
+                    continue;
+                }
                 let storage = self.model.globals[&global.name];
                 self.emit_initializer(storage, &global.ty, &global.value)?;
             }
@@ -988,7 +1185,14 @@ impl Emitter {
                 self.line("    pha");
             }
         }
-        self.line(&format!("    jsr {}", function_label(&resolved_name)));
+        if let Some(bank) = self.banked_layout.functions.get(&resolved_name).copied() {
+            self.line(&format!("    ld a, {:02X}h", bank & 0xFF));
+            self.line(&format!("    ld b, {:02X}h", bank >> 8));
+            self.line(&format!("    ld hl, __ezra_far_{resolved_name}_address"));
+            self.line("    call __ezra_gb_far_call");
+        } else {
+            self.line(&format!("    jsr {}", function_label(&resolved_name)));
+        }
         let return_storage = signature
             .return_type
             .as_ref()
@@ -1447,19 +1651,40 @@ impl Emitter {
     fn place_address(&mut self, place: &Place) -> Result<Address, Diagnostic> {
         match place {
             Place::Ident(name) => {
+                if self.banked_layout.globals.contains(name) {
+                    return Err(Diagnostic::new(format!(
+                        "banked global `{name}` is ROM-resident and cannot be assigned"
+                    )));
+                }
                 let binding = self.binding(name)?;
                 Ok(Address::Direct(binding.storage.address))
             }
             Place::Index { name, index } => {
+                if self.banked_layout.globals.contains(name) {
+                    return Err(Diagnostic::new(format!(
+                        "banked global `{name}` is ROM-resident and cannot be assigned"
+                    )));
+                }
                 self.emit_named_index_address(name, index)?;
                 Ok(Address::Indirect)
             }
             Place::Field { base, field } => {
+                if self.banked_layout.globals.contains(base) {
+                    return Err(Diagnostic::new(format!(
+                        "banked global `{base}` is ROM-resident and cannot be assigned"
+                    )));
+                }
                 let binding = self.binding(base)?;
                 let layout = self.model.field(&binding.ty, field)?;
                 Ok(Address::Direct(binding.storage.address + layout.offset))
             }
             Place::Access(path) => {
+                if self.banked_layout.globals.contains(&path.root) {
+                    return Err(Diagnostic::new(format!(
+                        "banked global `{}` is ROM-resident and cannot be assigned",
+                        path.root
+                    )));
+                }
                 self.emit_access_address(path)?;
                 Ok(Address::Indirect)
             }
@@ -2401,31 +2626,101 @@ mod tests {
     }
 
     #[test]
-    fn banked_functions_are_rejected_until_far_calls_are_implemented() {
+    fn banked_functions_emit_resident_far_call_trampolines() {
         let program = parse_program(
             Path::new("banked-function.ezra"),
             r#"
                 @cfg(bank(2))
-                fn worker() {}
-                fn main() { worker() }
+                fn worker() -> u8 { return 42 }
+                fn main() { let value: u8 = worker() }
             "#,
         )
         .unwrap();
-        let error = emit_lr35902_assembly_with_options(
+        let assembly = emit_lr35902_assembly_with_options(
             &program,
             AssemblyOptions {
                 cpu: CpuFamily::Lr35902,
+                ram_base: Address24::new(0xC000),
+                rodata_base: Address24::new(0xD000),
+                asset_base: Address24::new(0xE000),
                 gameboy_banking: Some(GameBoyBankingOptions {
                     mapper: GameBoyBankingMapper::Mbc1,
                 }),
                 ..AssemblyOptions::default()
             },
         )
-        .unwrap_err();
-        assert!(
-            error.message.contains("far calls are not implemented"),
-            "{error}"
-        );
+        .unwrap();
+        assert!(assembly.contains("__ezra_gb_far_call:"), "{assembly}");
+        assert!(assembly.contains("call __ezra_gb_far_call"), "{assembly}");
+        assert!(assembly.contains("__ezra_bank_2_start:"), "{assembly}");
+        assemble_subset_with_symbols_at(CpuFamily::Lr35902.into(), &assembly, 0x0150).unwrap();
+    }
+
+    #[test]
+    fn banked_pointer_uses_manual_mapping_from_bank_zero_and_rejects_mbc1_holes() {
+        let options = AssemblyOptions {
+            cpu: CpuFamily::Lr35902,
+            ram_base: Address24::new(0xC000),
+            rodata_base: Address24::new(0xD000),
+            asset_base: Address24::new(0xE000),
+            gameboy_banking: Some(GameBoyBankingOptions {
+                mapper: GameBoyBankingMapper::Mbc1,
+            }),
+            ..AssemblyOptions::default()
+        };
+        let accepted = parse_program(
+            Path::new("manual-banked-pointer.ezra"),
+            r#"
+            @cfg(bank(2)) embed value: bytes = bytes [0x42]
+            fn main() {
+                asm volatile { "ld a, 2" "call __ezra_gb_select_bank" }
+                let first: u8 = *(value.ptr@2)
+            }
+        "#,
+        )
+        .unwrap();
+        emit_lr35902_assembly_with_options(&accepted, options.clone()).unwrap();
+
+        let rejected = parse_program(
+            Path::new("invalid-banked-pointer.ezra"),
+            r#"
+            @cfg(bank(2)) embed value: bytes = bytes [0x42]
+            fn main() { let first: u8 = *(value.ptr@32) }
+        "#,
+        )
+        .unwrap();
+        let error = emit_lr35902_assembly_with_options(&rejected, options).unwrap_err();
+        assert!(error.message.contains("not selectable"), "{error}");
+    }
+
+    #[test]
+    fn mbc5_far_calls_preserve_the_ninth_bank_bit() {
+        let program = parse_program(
+            Path::new("mbc5-banked-function.ezra"),
+            r#"
+                @cfg(bank(257))
+                fn worker() {}
+                fn main() { worker() }
+            "#,
+        )
+        .unwrap();
+        let assembly = emit_lr35902_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::Lr35902,
+                ram_base: Address24::new(0xC000),
+                rodata_base: Address24::new(0xD000),
+                asset_base: Address24::new(0xE000),
+                gameboy_banking: Some(GameBoyBankingOptions {
+                    mapper: GameBoyBankingMapper::Mbc5,
+                }),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(assembly.contains("ld a, 01h\n    ld b, 01h"), "{assembly}");
+        assert!(assembly.contains("ld (3000h), a"), "{assembly}");
+        assemble_subset_with_symbols_at(CpuFamily::Lr35902.into(), &assembly, 0x0150).unwrap();
     }
 
     #[test]

@@ -1445,7 +1445,9 @@ fn source_imports(source: &str) -> Vec<String> {
 
 fn declaration_is_public(declaration: &Declaration) -> bool {
     match declaration {
-        Declaration::Cfg { declaration, .. } => declaration_is_public(declaration),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            declaration_is_public(declaration)
+        }
         Declaration::Import(_) => true,
         Declaration::Const(decl) => decl.public,
         Declaration::Alias(decl) => decl.public,
@@ -1774,7 +1776,9 @@ fn declaration_symbol(declaration: &Declaration) -> Option<SymbolInfo> {
                 &function.return_type,
             ),
         }),
-        Declaration::Cfg { declaration, .. } => declaration_symbol(declaration),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            declaration_symbol(declaration)
+        }
         Declaration::Import(_) => None,
     }
 }

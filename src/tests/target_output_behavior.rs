@@ -162,14 +162,16 @@ fn game_boy_explicit_banking_packages_banked_embed_and_emits_bank_zero_runtime()
         &source_path,
         r#"
             @cfg(bank(2))
+            global banked_value: u8 = 0x42
+
+            @cfg(bank(2))
             embed level: bytes = bytes [0xA1, 0xB2, 0xC3]
 
+            @cfg(bank(2))
+            fn worker() -> u8 { return banked_value + *(level.ptr@2) }
+
             fn main() {
-                asm volatile {
-                    "ld a, 2"
-                    "call __ezra_gb_select_bank"
-                }
-                let first: u8 = *(level.ptr@2)
+                let result: u8 = worker()
             }
         "#,
     )
@@ -188,10 +190,12 @@ fn game_boy_explicit_banking_packages_banked_embed_and_emits_bank_zero_runtime()
     let assembly = std::fs::read_to_string(outputs.asm).unwrap();
     let rom = std::fs::read(outputs.executable).unwrap();
 
-    assert!(assembly.contains("_level equ 4000h"), "{assembly}");
-    assert!(assembly.contains("__ezra_gb_select_bank:"), "{assembly}");
-    assert!(assembly.contains("ld (2000h), a"), "{assembly}");
-    assert_eq!(&rom[0x8000..0x8003], &[0xA1, 0xB2, 0xC3]);
+    assert!(assembly.contains("_level equ 4001h"), "{assembly}");
+    assert!(assembly.contains("_banked_value equ 4000h"), "{assembly}");
+    assert!(assembly.contains("__ezra_gb_far_call:"), "{assembly}");
+    assert!(assembly.contains("call __ezra_gb_far_call"), "{assembly}");
+    assert!(assembly.contains("__ezra_bank_2_start:"), "{assembly}");
+    assert_eq!(&rom[0x8000..0x8004], &[0x42, 0xA1, 0xB2, 0xC3]);
     assert_eq!(rom[0x0147], 0x01, "ROM should advertise MBC1");
 
     let _ = std::fs::remove_dir_all(root);

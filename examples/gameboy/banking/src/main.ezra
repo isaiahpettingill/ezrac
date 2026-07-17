@@ -1,0 +1,27 @@
+import gb.video
+
+// These declarations are stored in switchable ROM bank 2.
+@cfg(bank(2))
+global bank_marker: u8 = 0x5A
+
+@cfg(bank(2))
+embed checker_tile: bytes = bytes [
+    0xAA, 0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA,
+    0xAA, 0x55, 0x55, 0xAA, 0xAA, 0x55, 0x55, 0xAA
+]
+
+// Calls from bank 0 use a resident far-call trampoline. The trampoline maps
+// bank 2, runs this routine, and restores the previous mapping on return.
+@cfg(bank(2))
+fn draw_banked_tile() {
+    let marker: u8 = bank_marker
+    let tile_first_byte: u8 = *(checker_tile.ptr@2)
+    video.begin_update()
+    video.copy_bytes(&checker_tile, 0x8000, 16)
+    video.clear_background()
+    video.enable_background()
+}
+
+fn main() {
+    draw_banked_tile()
+}
