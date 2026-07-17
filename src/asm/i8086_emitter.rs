@@ -24,8 +24,9 @@ use crate::{
 const SCRATCH_BYTES: u32 = 8;
 
 /// Lowers an EZRA AST through HIR and TBIR and emits strict original-8086
-/// assembly.  The generated image is one flat segment; CS is copied to DS, ES,
-/// and SS before static initialization and all calls are near calls.
+/// assembly. The generated image is one flat segment; CS is copied to DS and ES
+/// before static initialization and all calls are near calls. Bare targets also initialize SS:SP;
+/// DOS `.COM` programs preserve the loader-provided stack.
 pub fn emit_i8086_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
@@ -143,13 +144,24 @@ impl Emitter {
         self.line("    mov ax,cs");
         self.line("    mov ds,ax");
         self.line("    mov es,ax");
-        self.line("    mov ss,ax");
-        self.line(&format!(
-            "    mov sp,{}",
-            imm(self.options.stack_top.get() & !1)
-        ));
         if self.options.dos_executable {
-            self.line("    sti");
+            // The fixed layout uses offsets through EFFFh and requires room for a
+            // practical stack above it. Reject undersized loader allocations before
+            // static initialization can touch memory outside the process block.
+            self.line("    mov bx,[0002h]");
+            self.line("    sub bx,ax");
+            self.line("    cmp bx,0F80h");
+            self.line("    jae short __ezra_dos_memory_ready");
+            self.line("    mov ax,0x4cff");
+            self.line("    int 0x21");
+            self.line("__ezra_dos_memory_ready:");
+        }
+        if !self.options.dos_executable {
+            self.line("    mov ss,ax");
+            self.line(&format!(
+                "    mov sp,{}",
+                imm(self.options.stack_top.get() & !1)
+            ));
         }
         self.line("    cld");
         self.emit_static_initializers(program)?;
@@ -162,8 +174,11 @@ impl Emitter {
             self.line("    jmp near __ezra_exit");
         }
 
+        let emitted_functions = reachable_function_names(program, &self.model);
         for declaration in &program.declarations {
-            if let Declaration::Function(function) = declaration {
+            if let Declaration::Function(function) = declaration
+                && emitted_functions.contains(&function.name)
+            {
                 self.emit_function(function)?;
             }
         }
@@ -2387,6 +2402,191 @@ fn resolve_function(path: &[String], model: &SemanticModel) -> Option<String> {
             .cloned()
     }
 }
+fn reachable_function_names(program: &Program, model: &SemanticModel) -> HashSet<String> {
+    let mut graph = HashMap::new();
+    let mut roots = vec!["main".to_owned()];
+
+    for declaration in &program.declarations {
+        match declaration {
+            Declaration::Function(function) => {
+                let mut calls = Vec::new();
+                collect_stmt_calls(&function.body, &mut calls);
+                graph.insert(
+                    function.name.clone(),
+                    calls
+                        .into_iter()
+                        .filter_map(|path| resolve_called_function(&path, model))
+                        .collect::<Vec<_>>(),
+                );
+                if function
+                    .attrs
+                    .iter()
+                    .any(|attr| attr == "naked" || attr == "interrupt")
+                {
+                    roots.push(function.name.clone());
+                }
+            }
+            Declaration::Global(global) => {
+                let mut calls = Vec::new();
+                collect_expr_calls(&global.value, &mut calls);
+                roots.extend(
+                    calls
+                        .into_iter()
+                        .filter_map(|path| resolve_called_function(&path, model)),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // Inline assembly references use emitted labels rather than source calls. Retain
+    // exactly the local or module-qualified functions named by an assembly token.
+    for declaration in &program.declarations {
+        let Declaration::Function(function) = declaration else {
+            continue;
+        };
+        for candidate in &program.declarations {
+            let Declaration::Function(candidate) = candidate else {
+                continue;
+            };
+            if block_mentions_asm_symbol(&function.body, &function_label(&candidate.name)) {
+                roots.push(candidate.name.clone());
+            }
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut pending = roots;
+    while let Some(name) = pending.pop() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        if let Some(calls) = graph.get(&name) {
+            pending.extend(calls.iter().cloned());
+        }
+    }
+
+    reachable
+}
+
+fn resolve_called_function(path: &[String], model: &SemanticModel) -> Option<String> {
+    let qualified = path.join(".");
+    if model.functions.contains_key(&qualified) {
+        Some(qualified)
+    } else {
+        path.last()
+            .filter(|name| model.functions.contains_key(*name))
+            .cloned()
+    }
+}
+
+fn block_mentions_asm_symbol(stmts: &[Stmt], symbol: &str) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Asm { lines, .. } => lines.iter().any(|line| {
+            line.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .any(|token| token == symbol)
+        }),
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            block_mentions_asm_symbol(then_body, symbol)
+                || block_mentions_asm_symbol(else_body, symbol)
+        }
+        Stmt::While { body, .. } | Stmt::Loop { body } => block_mentions_asm_symbol(body, symbol),
+        _ => false,
+    })
+}
+
+fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<Vec<String>>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                collect_expr_calls(value, calls);
+            }
+            Stmt::Assign { target, value, .. } => {
+                collect_place_calls(target, calls);
+                collect_expr_calls(value, calls);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_calls(condition, calls);
+                collect_stmt_calls(then_body, calls);
+                collect_stmt_calls(else_body, calls);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_calls(condition, calls);
+                collect_stmt_calls(body, calls);
+            }
+            Stmt::Loop { body } => collect_stmt_calls(body, calls),
+            Stmt::Out { value, .. } => collect_expr_calls(value, calls),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_place_calls(place: &Place, calls: &mut Vec<Vec<String>>) {
+    match place {
+        Place::Index { index, .. } | Place::Deref(index) => collect_expr_calls(index, calls),
+        Place::Access(path) => collect_access_path_calls(path, calls),
+        Place::Ident(_) | Place::Field { .. } => {}
+    }
+}
+
+fn collect_expr_calls(expr: &Expr, calls: &mut Vec<Vec<String>>) {
+    match expr {
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_calls(value, calls);
+            }
+        }
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+            collect_expr_calls(index, calls);
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => collect_access_path_calls(path, calls),
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_calls(value, calls);
+            }
+        }
+        Expr::Deref(value) | Expr::Unary { expr: value, .. } | Expr::Cast { expr: value, .. } => {
+            collect_expr_calls(value, calls);
+        }
+        Expr::Call { path, args } => {
+            calls.push(path.clone());
+            for arg in args {
+                collect_expr_calls(arg, calls);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_calls(left, calls);
+            collect_expr_calls(right, calls);
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. }
+        | Expr::AddressOf(_) => {}
+    }
+}
+
+fn collect_access_path_calls(path: &AccessPath, calls: &mut Vec<Vec<String>>) {
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            collect_expr_calls(index, calls);
+        }
+    }
+}
+
 fn function_label(name: &str) -> String {
     format!("_{}", sanitize(&name.replace('.', "__")))
 }
@@ -2628,12 +2828,33 @@ mod tests {
         assert!(assembly.contains("    mov ax,cs\n"));
         assert!(assembly.contains("    mov ds,ax\n"));
         assert!(assembly.contains("    mov es,ax\n"));
-        assert!(assembly.contains("    mov ss,ax\n    mov sp,0FFFEh\n"));
-        assert!(assembly.contains("    sti\n    cld\n"));
+        assert!(!assembly.contains("    mov ss,ax\n"));
+        assert!(!assembly.contains("    mov sp,0FFFEh\n"));
+        assert!(assembly.contains("    mov es,ax\n    mov bx,[0002h]\n"));
+        assert!(assembly.contains("    cmp bx,0F80h\n"));
+        assert!(assembly.contains("    mov ax,0x4cff\n    int 0x21\n"));
+        assert!(assembly.contains("__ezra_dos_memory_ready:\n    cld\n"));
+        assert!(!assembly.contains("    sti\n"));
         assert!(assembly.contains("    call near _main\n"));
         assert!(assembly.contains("__ezra_exit:\n    mov ax,0x4c00\n    int 0x21\n"));
         assert!(!assembly.contains("    cli\n"));
         assert!(!assembly.contains("    jmp near __ezra_exit\n"));
+    }
+
+    #[test]
+    fn omits_unreachable_i8086_functions_without_opaque_assembly_references() {
+        let assembly = emit("fn unused() {}\nfn main() {}");
+
+        assert!(!assembly.contains("_unused:"));
+        assert!(assembly.contains("_main:"));
+    }
+
+    #[test]
+    fn retains_root_functions_for_inline_assembly_symbol_references() {
+        let assembly = emit("fn helper() {}\nfn main() { asm volatile { \"call _helper\" } }");
+
+        assert!(assembly.contains("_helper:"));
+        assert!(assembly.contains("    call _helper\n"));
     }
 
     #[test]

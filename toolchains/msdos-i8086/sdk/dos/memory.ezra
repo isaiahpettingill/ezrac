@@ -19,8 +19,11 @@ pub fn allocate(paragraphs: u16) -> u16 {
         "mov {available},bx"
         "mov {flags},bp"
     }
-    last_available = available
-    raw.record(flags, result)
+    if raw.record(flags, result) {
+        last_available = available
+    } else {
+        last_available = 0
+    }
     return result
 }
 
@@ -62,12 +65,85 @@ pub fn resize(segment: u16, paragraphs: u16) -> bool {
         "mov {flags},bp"
         "pop es"
     }
-    last_available = available
-    return !raw.record(flags, result)
+    if raw.record(flags, result) {
+        last_available = available
+        return false
+    }
+    last_available = 0
+    return true
 }
 
 pub fn available_paragraphs() -> u16 {
     return last_available
+}
+
+// Allocated segments are not near pointers. Use these helpers to access them.
+pub fn read_byte(segment: u16, offset: u16) -> u8 {
+    let result: u8 = 0
+    asm volatile(in segment: u16 as mem, in offset: u16 as mem, out result: u8 as mem, clobber ax, clobber bx, clobber memory) {
+        "push es"
+        "mov ax,{segment}"
+        "mov es,ax"
+        "mov bx,{offset}"
+        "mov al,es:[bx]"
+        "pop es"
+        "mov {result},al"
+    }
+    return result
+}
+
+pub fn write_byte(segment: u16, offset: u16, value: u8) {
+    asm volatile(in segment: u16 as mem, in offset: u16 as mem, in value: u8 as mem, clobber ax, clobber bx, clobber memory) {
+        "push es"
+        "mov ax,{segment}"
+        "mov es,ax"
+        "mov bx,{offset}"
+        "mov al,{value}"
+        "mov es:[bx],al"
+        "pop es"
+    }
+}
+
+pub fn read_word(segment: u16, offset: u16) -> u16 {
+    let result: u16 = 0
+    asm volatile(in segment: u16 as mem, in offset: u16 as mem, out result: u16 as mem, clobber ax, clobber bx, clobber memory) {
+        "push es"
+        "mov ax,{segment}"
+        "mov es,ax"
+        "mov bx,{offset}"
+        "mov ax,es:[bx]"
+        "pop es"
+        "mov {result},ax"
+    }
+    return result
+}
+
+pub fn write_word(segment: u16, offset: u16, value: u16) {
+    asm volatile(in segment: u16 as mem, in offset: u16 as mem, in value: u16 as mem, clobber ax, clobber bx, clobber memory) {
+        "push es"
+        "mov ax,{segment}"
+        "mov es,ax"
+        "mov bx,{offset}"
+        "mov ax,{value}"
+        "mov es:[bx],ax"
+        "pop es"
+    }
+}
+
+pub fn copy_to_segment(segment: u16, offset: u16, source: ptr<u8>, count: u16) {
+    let index: u16 = 0
+    while index < count {
+        write_byte(segment, offset + index, *(source + index))
+        index += 1
+    }
+}
+
+pub fn copy_from_segment(destination: ptr<u8>, segment: u16, offset: u16, count: u16) {
+    let index: u16 = 0
+    while index < count {
+        *(destination + index) = read_byte(segment, offset + index)
+        index += 1
+    }
 }
 
 // DOS 3.0+, AX=5800h.

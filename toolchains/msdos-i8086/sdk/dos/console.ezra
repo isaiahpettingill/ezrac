@@ -93,7 +93,9 @@ pub fn direct_io(value: u8) -> u8 {
         "mov {result},al"
         "mov {flags},bp"
     }
-    direct_input_ready = (flags & 0x0040) == 0
+    if value == DIRECT_INPUT {
+        direct_input_ready = (flags & 0x0040) == 0
+    }
     raw.clear()
     return result
 }
@@ -208,8 +210,23 @@ pub fn flush_and_read(function: u8, buffer_or_value: u16) -> u8 {
         "mov {result},al"
         "mov {flags},bp"
     }
+    if function == 0x06 && buffer_or_value == 0x00FF {
+        direct_input_ready = (flags & 0x0040) == 0
+    }
     raw.clear()
     return result
+}
+
+pub fn flush_and_read_char(function: u8) -> u8 {
+    return flush_and_read(function, 0)
+}
+
+pub fn flush_and_direct_input() -> u8 {
+    return flush_and_read(0x06, 0x00FF)
+}
+
+pub fn flush_and_read_buffered(buffer: ptr<u8>) {
+    flush_and_read(0x0A, cast<u16>(buffer))
 }
 
 pub fn newline() {

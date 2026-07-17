@@ -44,7 +44,7 @@ cargo run -- layout
 cargo run -- header
 ```
 
-`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, CP/M `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
+`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, CP/M and MS-DOS `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
 
 `init` creates a non-destructive starter project with `.gitignore`, `Ezra.toml`, `README.md`, `src/main.ezra`, `sdk/`, and `assets/`. `install-syntax` installs syntax files for selected editors; supported editor names are `vim`, `neovim`, `nano`, `micro`, `helix`, `vscode`, `zed`, and `notepad++`.
 
@@ -106,7 +106,8 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/platforms.md` documents supported target profiles and platform-specific coding guidance.
 - `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
-- `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and `bare-i8086` target.
+- `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
+- `docs/msdos-sdk.md` documents the `msdos-com-i8086` `.COM` target and bundled `dos.*` SDK.
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
@@ -114,7 +115,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
-- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports LR35902, MOS 6502, optional experimental 8086 and M68k backends, optional TMS9900, and the complete AVR register-ABI backend. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The optional `i8086` feature provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, and a complete strict 8086 assembler; aggregate parameters and returns must be passed by pointer. Additional eZ80, Z80-family, 8080-family, TI calculator, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
+- The main source target is Agon Light MOS on eZ80 ADL. EZRA source compilation also supports LR35902, MOS 6502, optional experimental 8086 and M68k backends, optional TMS9900, and the complete AVR register-ABI backend. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The optional `i8086` feature provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, a complete strict 8086 assembler, and the `msdos-com-i8086` target with bundled `dos.*` SDK; aggregate parameters and returns must be passed by pointer. Additional eZ80, Z80-family, 8080-family, TI calculator, ZX Spectrum, CP/M, and bare profiles exist at varying maturity levels; see `docs/platforms.md`.
 - Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.

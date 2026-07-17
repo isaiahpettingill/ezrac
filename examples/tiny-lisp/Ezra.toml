@@ -8,6 +8,7 @@ target = [
     "agonlight-mos-ez80",
     "commodore64-6502",
     "cpm-2.2-z80",
+    "msdos-com-i8086",
     "zxspectrum-z80",
     "ti99-4a-tms9900",
 ]

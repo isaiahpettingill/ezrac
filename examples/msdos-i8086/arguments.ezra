@@ -1,0 +1,22 @@
+import dos.console
+import dos.psp
+
+// Copy the PSP command tail before any DOS operation that may reuse the default DTA.
+global arguments: [u8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+]
+
+fn main() {
+    let count: u8 = psp.copy_command_tail(&arguments[0], 64)
+    console.print_dollar("Raw command tail: $")
+
+    let index: u8 = 0
+    while index < count {
+        console.write_char(arguments[index])
+        index += 1
+    }
+    console.newline()
+}

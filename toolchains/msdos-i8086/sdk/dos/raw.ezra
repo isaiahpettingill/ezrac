@@ -1,6 +1,10 @@
 // Shared carry/error state for dos.* wrappers. FLAGS bit 0 is carry.
 global last_failed: bool = false
 global last_error: u16 = 0
+global last_extended_error: u16 = 0
+global last_error_class: u8 = 0
+global last_error_action: u8 = 0
+global last_error_locus: u8 = 0
 
 // Record a DOS result captured immediately with PUSHF/POP after INT 21h.
 pub fn record(flags: u16, error: u16) -> bool {
@@ -24,4 +28,42 @@ pub fn failed() -> bool {
 
 pub fn error_code() -> u16 {
     return last_error
+}
+
+// DOS 3.0+, AH=59h/BX=0. Call immediately after a failed DOS service.
+pub fn refresh_extended_error() -> u16 {
+    let code: u16 = 0
+    let class: u8 = 0
+    let action: u8 = 0
+    let locus: u8 = 0
+    asm volatile(out code: u16 as mem, out class: u8 as mem, out action: u8 as mem, out locus: u8 as mem, clobber ax, clobber bx, clobber cx, clobber flags, clobber memory) {
+        "xor bx,bx"
+        "mov ah,59h"
+        "int 21h"
+        "mov {code},ax"
+        "mov {class},bh"
+        "mov {action},bl"
+        "mov {locus},ch"
+    }
+    last_extended_error = code
+    last_error_class = class
+    last_error_action = action
+    last_error_locus = locus
+    return code
+}
+
+pub fn extended_error_code() -> u16 {
+    return last_extended_error
+}
+
+pub fn extended_error_class() -> u8 {
+    return last_error_class
+}
+
+pub fn extended_error_action() -> u8 {
+    return last_error_action
+}
+
+pub fn extended_error_locus() -> u8 {
+    return last_error_locus
 }

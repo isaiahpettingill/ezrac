@@ -75,8 +75,10 @@ pub fn set_psp(segment: u16) {
     raw.clear()
 }
 
-// DOS 2.0+, AH=4Bh. parameter_block is ES:BX; this flat model supplies ES=DS.
-// EXEC_LOAD_OVERLAY may require far fields this near-only SDK cannot construct safely.
+// DOS 3.0+, AH=4Bh. parameter_block is ES:BX; this flat model supplies ES=DS.
+// DOS 2.x may destroy SS:SP when EXEC returns, so a normal Ezra call frame cannot
+// recover safely; this wrapper deliberately does not attempt an unsafe DOS 2 thunk.
+// Far pointers stored inside the parameter block remain the caller's responsibility.
 pub fn exec(mode: u8, path: ptr<u8>, parameter_block: ptr<u8>) -> bool {
     let result: u16 = 0
     let flags: u16 = 0
@@ -137,7 +139,7 @@ pub fn tsr(code: u8, paragraphs: u16) {
     }
 }
 
-// DOS 2.0+, AH=25h. Installs DS:offset, so the handler must share program DS.
+// DOS 1.0+, AH=25h. Installs DS:offset, so the handler must share program DS.
 pub fn set_vector(vector: u8, offset: u16) {
     let flags: u16 = 0
     asm volatile(in vector: u8 as mem, in offset: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
@@ -238,7 +240,8 @@ pub fn verify_enabled() -> bool {
 // DOS 1.0+, AH=2Eh.
 pub fn set_verify(enabled: bool) {
     let flags: u16 = 0
-    asm volatile(in enabled: bool as mem, out flags: u16 as mem, clobber ax, clobber bp, clobber flags, clobber memory) {
+    asm volatile(in enabled: bool as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "xor dx,dx"
         "mov al,{enabled}"
         "mov ah,2Eh"
         "int 21h"

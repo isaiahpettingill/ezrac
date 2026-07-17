@@ -15,6 +15,9 @@ import c64.memory
 @cfg(target("cpm-2.2-z80"))
 import cpm.console
 
+@cfg(target("msdos-com-i8086"))
+import dos.console
+
 @cfg(target("zxspectrum-z80"))
 import zx.keyboard
 
@@ -53,6 +56,9 @@ fn platform_init() {
 @cfg(target("cpm-2.2-z80"))
 fn platform_init() {}
 
+@cfg(target("msdos-com-i8086"))
+fn platform_init() {}
+
 @cfg(target("zxspectrum-z80"))
 fn platform_init() {
     rom.cls()
@@ -78,6 +84,11 @@ fn platform_write(ch: u8) {
 @cfg(target("cpm-2.2-z80"))
 fn platform_write(ch: u8) {
     console.write(ch)
+}
+
+@cfg(target("msdos-com-i8086"))
+fn platform_write(ch: u8) {
+    console.write_char(ch)
 }
 
 @cfg(target("zxspectrum-z80"))
@@ -125,6 +136,12 @@ fn platform_read() -> u8 {
 fn platform_read() -> u8 {
     // BDOS function 1 supplies blocking, echoed console input.
     return console.read()
+}
+
+@cfg(target("msdos-com-i8086"))
+fn platform_read() -> u8 {
+    // DOS function 01h supplies blocking echoed input with Ctrl-C checking.
+    return console.read_echo()
 }
 
 @cfg(target("zxspectrum-z80"))

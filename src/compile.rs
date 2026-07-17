@@ -2304,6 +2304,121 @@ mod i8086_validation_tests {
     }
 
     #[test]
+    fn msdos_audited_sdk_paths_compile_through_the_strict_8086_assembler() {
+        const PROGRAMS: &[&str] = &[
+            r#"
+                import dos.console
+                fn main() {
+                    console.direct_io(console.DIRECT_INPUT)
+                    console.flush_and_read_char(1)
+                    console.flush_and_direct_input()
+                    console.flush_and_read_buffered(cast<ptr<u8>>(0xA100))
+                    console.direct_ready()
+                }
+            "#,
+            r#"
+                import dos.file
+                fn main() {
+                    let buffer: ptr<u8> = cast<ptr<u8>>(0xA100)
+                    file.extended_open("TEST.TXT", 0, 0, 0)
+                    file.read_exact(0, buffer, 1)
+                    file.write_all(1, buffer, 1)
+                    file.ioctl_device_info(0)
+                    file.ioctl_input_ready(0)
+                    file.ioctl_output_ready(1)
+                }
+            "#,
+            r#"
+                import dos.memory
+                fn main() {
+                    memory.read_byte(0x1000, 0)
+                    memory.write_byte(0x1000, 0, 1)
+                    memory.read_word(0x1000, 0)
+                    memory.write_word(0x1000, 0, 1)
+                    memory.copy_to_segment(0x1000, 0, "x", 1)
+                    memory.copy_from_segment(cast<ptr<u8>>(0xA100), 0x1000, 0, 1)
+                }
+            "#,
+            r#"
+                import dos.raw
+                fn main() {
+                    raw.refresh_extended_error()
+                    raw.extended_error_code()
+                    raw.extended_error_class()
+                    raw.extended_error_action()
+                    raw.extended_error_locus()
+                }
+            "#,
+            r#"
+                import dos.psp
+                fn main() {
+                    psp.saved_stack_offset()
+                    psp.saved_stack_segment()
+                    psp.previous_psp_offset()
+                    psp.previous_psp_segment()
+                    psp.dos_version_raw()
+                    psp.dos_version()
+                    psp.default_dta()
+                    psp.job_file_table_size()
+                    psp.job_file_table_offset()
+                    psp.job_file_table_segment()
+                    psp.job_file_table_entry(0)
+                }
+            "#,
+            r#"
+                import dos.psp
+                fn main() {
+                    psp.has_environment()
+                    psp.environment_byte(0)
+                    psp.environment_trailer_offset()
+                    psp.environment_program_path_offset()
+                    psp.fcb_file_size_low(psp.fcb1())
+                    psp.fcb_file_size_high(psp.fcb1())
+                    psp.fcb_set_random_record(psp.fcb1(), 1, 2)
+                    psp.fcb_random_record_low(psp.fcb1())
+                    psp.fcb_random_record_high(psp.fcb1())
+                }
+            "#,
+            r#"
+                import dos.directory
+                fn main() {
+                    directory.make_directory("TESTDIR")
+                    directory.remove_directory("TESTDIR")
+                    directory.change_directory(".")
+                    directory.get_current_directory(cast<ptr<u8>>(0xA100), 0)
+                    directory.free_space(0)
+                }
+            "#,
+            r#"
+                import dos.process
+                fn main() {
+                    process.version()
+                    process.exec(0, "CHILD.COM", cast<ptr<u8>>(0xA100))
+                    process.set_vector(0x60, 0x0100)
+                    process.set_verify(false)
+                }
+            "#,
+        ];
+        let sdk = SdkResolver {
+            target: Some("msdos-com-i8086".to_owned()),
+            sdk_roots: Vec::new(),
+        };
+
+        for source in PROGRAMS {
+            check_source_with_sdk(
+                source,
+                &CompileOptions {
+                    source: PathBuf::from("src/main.ezra"),
+                    debug_comments: false,
+                    default_sdk_symbols: true,
+                },
+                &sdk,
+            )
+            .unwrap_or_else(|error| panic!("failed DOS SDK strict smoke program: {error}"));
+        }
+    }
+
+    #[test]
     fn check_uses_a_16_bit_layout_for_arbitrary_i8086_targets() {
         check_source_with_sdk(
             "fn main() {}",

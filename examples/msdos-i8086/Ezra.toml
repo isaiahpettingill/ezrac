@@ -1,0 +1,5 @@
+[project]
+name = "msdos-sdk-examples"
+
+[build]
+target = "msdos-com-i8086"

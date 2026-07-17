@@ -1,19 +1,67 @@
 // Program Segment Prefix helpers for a flat .COM image where DS=PSP segment.
-import dos.constants
+const END_SEGMENT_OFFSET: u16 = 0x0002
+const PARENT_SEGMENT_OFFSET: u16 = 0x0016
+const DEFAULT_JOB_FILE_TABLE_OFFSET: u16 = 0x0018
+const DEFAULT_JOB_FILE_TABLE_SIZE: u16 = 20
+const ENVIRONMENT_SEGMENT_OFFSET: u16 = 0x002C
+const SAVED_STACK_OFFSET: u16 = 0x002E
+const JOB_FILE_TABLE_SIZE_OFFSET: u16 = 0x0032
+const JOB_FILE_TABLE_POINTER_OFFSET: u16 = 0x0034
+const PREVIOUS_PSP_POINTER_OFFSET: u16 = 0x0038
+const DOS_VERSION_OFFSET: u16 = 0x0040
+const FCB1_OFFSET: u16 = 0x005C
+const FCB2_OFFSET: u16 = 0x006C
+const COMMAND_LENGTH_OFFSET: u16 = 0x0080
+const DEFAULT_DTA_OFFSET: u16 = 0x0080
+const COMMAND_DATA_OFFSET: u16 = 0x0081
 
-fn psp_base() -> ptr<u8> {
+const FCB_SIZE_BYTES: u16 = 37
+const FCB_DRIVE_OFFSET: u16 = 0
+const FCB_NAME_OFFSET: u16 = 1
+const FCB_EXTENSION_OFFSET: u16 = 9
+const FCB_RECORD_SIZE_OFFSET: u16 = 14
+const FCB_FILE_SIZE_OFFSET: u16 = 16
+const FCB_CURRENT_RECORD_OFFSET: u16 = 32
+const FCB_RANDOM_RECORD_OFFSET: u16 = 33
+const FCB_PAD_BYTE: u8 = ' '
+const FCB_WILDCARD_BYTE: u8 = '?'
+
+fn psp_start() -> ptr<u8> {
     return cast<ptr<u8>>(0)
 }
 
 fn read_word(offset: u16) -> u16 {
-    let address: ptr<u8> = psp_base() + offset
+    let address: ptr<u8> = psp_start() + offset
     return cast<u16>(*address) | (cast<u16>(*(address + 1)) << 8)
 }
 
+fn running_dos_major() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as mem, clobber ax, clobber bx, clobber cx, clobber flags, clobber memory) {
+        "mov ax,3000h"
+        "int 21h"
+        "mov {result},al"
+    }
+    return result
+}
 
+// Reads segment:offset while preserving ES. Segment values are not near pointers.
+fn read_far_byte(segment: u16, offset: u16) -> u8 {
+    let result: u8 = 0
+    asm volatile(in segment: u16 as mem, in offset: u16 as mem, out result: u8 as mem, clobber ax, clobber bx, clobber memory) {
+        "push es"
+        "mov ax,{segment}"
+        "mov es,ax"
+        "mov bx,{offset}"
+        "mov al,es:[bx]"
+        "mov {result},al"
+        "pop es"
+    }
+    return result
+}
 
 pub fn base() -> ptr<u8> {
-    return psp_base()
+    return psp_start()
 }
 
 pub fn current_segment() -> u16 {
@@ -26,44 +74,62 @@ pub fn current_segment() -> u16 {
 }
 
 pub fn end_segment() -> u16 {
-    return read_word(constants.PSP_END_SEGMENT)
+    return read_word(END_SEGMENT_OFFSET)
 }
 
 pub fn parent_segment() -> u16 {
-    return read_word(constants.PSP_PARENT_SEGMENT)
+    return read_word(PARENT_SEGMENT_OFFSET)
 }
 
 pub fn environment_segment() -> u16 {
-    return read_word(constants.PSP_ENVIRONMENT_SEGMENT)
+    return read_word(ENVIRONMENT_SEGMENT_OFFSET)
+}
+
+pub fn has_environment() -> bool {
+    let segment: u16 = environment_segment()
+    return segment != 0 && segment != 0xFFFF
 }
 
 pub fn saved_stack_offset() -> u16 {
-    return read_word(constants.PSP_SAVED_STACK)
+    return read_word(SAVED_STACK_OFFSET)
 }
 
 pub fn saved_stack_segment() -> u16 {
-    return read_word(constants.PSP_SAVED_STACK + 2)
+    return read_word(SAVED_STACK_OFFSET + 2)
 }
 
+// DOS 3.0+. Earlier PSPs do not define the previous-PSP far pointer.
 pub fn previous_psp_offset() -> u16 {
-    return read_word(constants.PSP_PREVIOUS_PSP_POINTER)
+    return read_word(PREVIOUS_PSP_POINTER_OFFSET)
 }
 
+// DOS 3.0+.
 pub fn previous_psp_segment() -> u16 {
-    return read_word(constants.PSP_PREVIOUS_PSP_POINTER + 2)
+    return read_word(PREVIOUS_PSP_POINTER_OFFSET + 2)
 }
 
+// DOS 5.0+. Returns the PSP version word exactly as stored: major in the low byte,
+// minor in the high byte. Use dos.process.version() on older DOS releases.
+pub fn dos_version_raw() -> u16 {
+    return read_word(DOS_VERSION_OFFSET)
+}
+
+// DOS 5.0+. Returns a canonical major:minor value matching dos.constants.VERSION_*.
 pub fn dos_version() -> u16 {
-    return read_word(constants.PSP_DOS_VERSION)
+    let raw: u16 = dos_version_raw()
+    return (raw << 8) | (raw >> 8)
 }
 
+// The length byte is at PSP:80h. The shell-supplied leading separator is usually
+// included; the trailing CR is excluded from this count and the tail is not NUL-terminated.
 pub fn command_length() -> u8 {
-    return *(psp_base() + constants.PSP_COMMAND_LENGTH)
+    return *(psp_start() + COMMAND_LENGTH_OFFSET)
 }
 
-// Points to the first command-tail byte. DOS terminates the tail with CR, not NUL.
+// Tail bytes begin at PSP:81h. Copy them before using the default DTA for find
+// operations or performing full operations on either default FCB, which may overwrite them.
 pub fn command_tail() -> ptr<u8> {
-    return psp_base() + constants.PSP_COMMAND_DATA
+    return psp_start() + COMMAND_DATA_OFFSET
 }
 
 pub fn command_byte(index: u8) -> u8 {
@@ -92,22 +158,23 @@ pub fn copy_command_tail(destination: ptr<u8>, capacity: u8) -> u8 {
     return count
 }
 
+// PSP:80h is both the command-length byte and DOS's initial DTA.
 pub fn default_dta() -> ptr<u8> {
-    return psp_base() + constants.PSP_DEFAULT_DTA
+    return psp_start() + DEFAULT_DTA_OFFSET
 }
 
 pub fn fcb1() -> ptr<u8> {
-    return psp_base() + constants.PSP_FCB1
+    return psp_start() + FCB1_OFFSET
 }
 
-// The default second FCB overlaps the command-tail area when fully used.
+// The second default FCB begins at 6Ch and its full form overlaps the command tail.
 pub fn fcb2() -> ptr<u8> {
-    return psp_base() + constants.PSP_FCB2
+    return psp_start() + FCB2_OFFSET
 }
 
 pub fn fcb_clear(fcb: ptr<u8>) {
     let index: u16 = 0
-    while index < constants.FCB_SIZE {
+    while index < FCB_SIZE_BYTES {
         *(fcb + index) = 0
         index += 1
     }
@@ -122,25 +189,25 @@ pub fn fcb_init(fcb: ptr<u8>, drive: u8) {
 }
 
 pub fn fcb_set_drive(fcb: ptr<u8>, drive: u8) {
-    *(fcb + constants.FCB_DRIVE) = drive
+    *(fcb + FCB_DRIVE_OFFSET) = drive
 }
 
 pub fn fcb_set_name_char(fcb: ptr<u8>, index: u8, ch: u8) {
     if index < 8 {
-        *(fcb + constants.FCB_NAME + index) = ch
+        *(fcb + FCB_NAME_OFFSET + index) = ch
     }
 }
 
 pub fn fcb_set_extension_char(fcb: ptr<u8>, index: u8, ch: u8) {
     if index < 3 {
-        *(fcb + constants.FCB_EXTENSION + index) = ch
+        *(fcb + FCB_EXTENSION_OFFSET + index) = ch
     }
 }
 
 pub fn fcb_pad_name(fcb: ptr<u8>) {
     let index: u8 = 0
     while index < 8 {
-        fcb_set_name_char(fcb, index, constants.FCB_PAD)
+        fcb_set_name_char(fcb, index, FCB_PAD_BYTE)
         index += 1
     }
 }
@@ -148,7 +215,7 @@ pub fn fcb_pad_name(fcb: ptr<u8>) {
 pub fn fcb_pad_extension(fcb: ptr<u8>) {
     let index: u8 = 0
     while index < 3 {
-        fcb_set_extension_char(fcb, index, constants.FCB_PAD)
+        fcb_set_extension_char(fcb, index, FCB_PAD_BYTE)
         index += 1
     }
 }
@@ -156,7 +223,7 @@ pub fn fcb_pad_extension(fcb: ptr<u8>) {
 pub fn fcb_wildcard_name(fcb: ptr<u8>) {
     let index: u8 = 0
     while index < 8 {
-        fcb_set_name_char(fcb, index, constants.FCB_WILDCARD)
+        fcb_set_name_char(fcb, index, FCB_WILDCARD_BYTE)
         index += 1
     }
 }
@@ -164,77 +231,100 @@ pub fn fcb_wildcard_name(fcb: ptr<u8>) {
 pub fn fcb_wildcard_extension(fcb: ptr<u8>) {
     let index: u8 = 0
     while index < 3 {
-        fcb_set_extension_char(fcb, index, constants.FCB_WILDCARD)
+        fcb_set_extension_char(fcb, index, FCB_WILDCARD_BYTE)
         index += 1
     }
 }
 
 pub fn fcb_set_record_size(fcb: ptr<u8>, size: u16) {
-    let address: ptr<u8> = fcb + constants.FCB_RECORD_SIZE
+    let address: ptr<u8> = fcb + FCB_RECORD_SIZE_OFFSET
     *address = cast<u8>(size)
     *(address + 1) = cast<u8>(size >> 8)
 }
 
 pub fn fcb_record_size(fcb: ptr<u8>) -> u16 {
-    let address: ptr<u8> = fcb + constants.FCB_RECORD_SIZE
+    let address: ptr<u8> = fcb + FCB_RECORD_SIZE_OFFSET
     return cast<u16>(*address) | (cast<u16>(*(address + 1)) << 8)
 }
 
 pub fn fcb_set_current_record(fcb: ptr<u8>, record: u8) {
-    *(fcb + constants.FCB_CURRENT_RECORD) = record
+    *(fcb + FCB_CURRENT_RECORD_OFFSET) = record
 }
 
-// Random-record is a 24-bit scalar in the standard FCB.
-pub fn fcb_set_random_record(fcb: ptr<u8>, record: u24) {
-    *(fcb + constants.FCB_RANDOM_RECORD) = cast<u8>(record)
-    *(fcb + constants.FCB_RANDOM_RECORD + 1) = cast<u8>(record >> 8)
-    *(fcb + constants.FCB_RANDOM_RECORD + 2) = cast<u8>(record >> 16)
+pub fn fcb_file_size_low(fcb: ptr<u8>) -> u16 {
+    let address: ptr<u8> = fcb + FCB_FILE_SIZE_OFFSET
+    return cast<u16>(*address) | (cast<u16>(*(address + 1)) << 8)
+}
+
+pub fn fcb_file_size_high(fcb: ptr<u8>) -> u16 {
+    let address: ptr<u8> = fcb + FCB_FILE_SIZE_OFFSET + 2
+    return cast<u16>(*address) | (cast<u16>(*(address + 1)) << 8)
+}
+
+// The four-byte random-record field is split because this ABI has no u32 scalar.
+pub fn fcb_set_random_record(fcb: ptr<u8>, low: u16, high: u16) {
+    let address: ptr<u8> = fcb + FCB_RANDOM_RECORD_OFFSET
+    *address = cast<u8>(low)
+    *(address + 1) = cast<u8>(low >> 8)
+    *(address + 2) = cast<u8>(high)
+    *(address + 3) = cast<u8>(high >> 8)
+}
+
+pub fn fcb_random_record_low(fcb: ptr<u8>) -> u16 {
+    let address: ptr<u8> = fcb + FCB_RANDOM_RECORD_OFFSET
+    return cast<u16>(*address) | (cast<u16>(*(address + 1)) << 8)
+}
+
+pub fn fcb_random_record_high(fcb: ptr<u8>) -> u16 {
+    let address: ptr<u8> = fcb + FCB_RANDOM_RECORD_OFFSET + 2
+    return cast<u16>(*address) | (cast<u16>(*(address + 1)) << 8)
 }
 
 pub fn job_file_table_size() -> u16 {
-    return read_word(constants.PSP_JOB_FILE_TABLE_SIZE)
+    if running_dos_major() < 3 {
+        return DEFAULT_JOB_FILE_TABLE_SIZE
+    }
+    return read_word(JOB_FILE_TABLE_SIZE_OFFSET)
 }
 
-// The JFT location is a far pointer and may not be addressable through DS.
+// DOS 2.x uses the fixed 20-byte JFT at PSP:18h. DOS 3.0+ may provide a far table.
 pub fn job_file_table_offset() -> u16 {
-    return read_word(constants.PSP_JOB_FILE_TABLE_POINTER)
+    if running_dos_major() < 3 {
+        return DEFAULT_JOB_FILE_TABLE_OFFSET
+    }
+    return read_word(JOB_FILE_TABLE_POINTER_OFFSET)
 }
 
 pub fn job_file_table_segment() -> u16 {
-    return read_word(constants.PSP_JOB_FILE_TABLE_POINTER + 2)
+    if running_dos_major() < 3 {
+        return current_segment()
+    }
+    return read_word(JOB_FILE_TABLE_POINTER_OFFSET + 2)
 }
 
-// Returns FFh if index is out of range or the JFT is outside current DS.
+// Returns FFh for an out-of-range entry. FFh is also DOS's marker for an unused entry.
 pub fn job_file_table_entry(index: u16) -> u8 {
     if index >= job_file_table_size() {
         return 0xFF
     }
-    if job_file_table_segment() != current_segment() {
-        return 0xFF
-    }
-    return *(cast<ptr<u8>>(job_file_table_offset()) + index)
+    return read_far_byte(job_file_table_segment(), job_file_table_offset() + index)
 }
 
-// Read one byte through environment_segment():offset. ES is always restored.
+// Reads one byte through environment_segment():offset. Returns zero if no environment exists.
 pub fn environment_byte(offset: u16) -> u8 {
-    let segment: u16 = environment_segment()
-    let result: u8 = 0
-    asm volatile(in segment: u16 as mem, in offset: u16 as mem, out result: u8 as mem, clobber ax, clobber bx, clobber memory) {
-        "push es"
-        "mov ax,{segment}"
-        "mov es,ax"
-        "mov bx,{offset}"
-        "mov al,es:[bx]"
-        "mov {result},al"
-        "pop es"
+    if !has_environment() {
+        return 0
     }
-    return result
+    return read_far_byte(environment_segment(), offset)
 }
 
-// Returns the offset just after the environment's double NUL, or FFFFh if malformed.
+// Returns the offset just after the environment's double NUL, or FFFFh if absent/malformed.
 pub fn environment_trailer_offset() -> u16 {
+    if !has_environment() {
+        return 0xFFFF
+    }
     let offset: u16 = 0
-    while offset < 0xFFFF {
+    while offset < 0xFFFE {
         if environment_byte(offset) == 0 && environment_byte(offset + 1) == 0 {
             return offset + 2
         }
@@ -243,7 +333,7 @@ pub fn environment_trailer_offset() -> u16 {
     return 0xFFFF
 }
 
-// DOS 3.0+ stores a word count then the executable path after the environment.
+// DOS 3.0+ stores a word count followed by the executable path after the environment.
 pub fn environment_program_path_offset() -> u16 {
     let trailer: u16 = environment_trailer_offset()
     if trailer == 0xFFFF || trailer > 0xFFFD {

@@ -79,15 +79,16 @@ pub fn open(path: ptr<u8>, mode: u8) -> u16 {
 }
 
 // DOS 4.0+, AX=6C00h. action_taken() returns CX from the last successful call.
-pub fn extended_open(path: ptr<u8>, mode: u16, attributes: u16, action: u16) -> u16 {
+pub fn extended_open(path: ptr<u8>, mode: u16, attributes: u16, action: u8) -> u16 {
     let result: u16 = 0
     let taken: u16 = 0
     let flags: u16 = 0
-    asm volatile(in path: ptr<u8> as mem, in mode: u16 as mem, in attributes: u16 as mem, in action: u16 as mem, out result: u16 as mem, out taken: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber si, clobber bp, clobber flags, clobber memory) {
+    asm volatile(in path: ptr<u8> as mem, in mode: u16 as mem, in attributes: u16 as mem, in action: u8 as mem, out result: u16 as mem, out taken: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber cx, clobber dx, clobber si, clobber bp, clobber flags, clobber memory) {
         "mov si,{path}"
         "mov bx,{mode}"
         "mov cx,{attributes}"
-        "mov dx,{action}"
+        "mov dl,{action}"
+        "xor dh,dh"
         "mov ax,6C00h"
         "int 21h"
         "pushf"
@@ -96,8 +97,11 @@ pub fn extended_open(path: ptr<u8>, mode: u16, attributes: u16, action: u16) -> 
         "mov {taken},cx"
         "mov {flags},bp"
     }
-    last_extended_action = taken
-    raw.record(flags, result)
+    if raw.record(flags, result) {
+        last_extended_action = 0
+    } else {
+        last_extended_action = taken
+    }
     return result
 }
 
@@ -212,8 +216,11 @@ pub fn seek(handle: u16, origin: u8, offset_low: u16, offset_high: u16) -> u16 {
         "mov {result_high},dx"
         "mov {flags},bp"
     }
-    last_seek_high = result_high
-    raw.record(flags, result_low)
+    if raw.record(flags, result_low) {
+        last_seek_high = 0
+    } else {
+        last_seek_high = result_high
+    }
     return result_low
 }
 
@@ -322,15 +329,99 @@ pub fn get_datetime(handle: u16) -> u16 {
         "mov {date},dx"
         "mov {flags},bp"
     }
-    last_file_date = date
     if raw.record(flags, result) {
+        last_file_date = 0
         return 0
     }
+    last_file_date = date
     return time
 }
 
 pub fn file_date() -> u16 {
     return last_file_date
+}
+
+// Reads until count bytes, EOF, or error. Returns the bytes transferred.
+pub fn read_exact(handle: u16, buffer: ptr<u8>, count: u16) -> u16 {
+    let total: u16 = 0
+    while total < count {
+        let transferred: u16 = read(handle, buffer + total, count - total)
+        if raw.failed() || transferred == 0 {
+            return total
+        }
+        total += transferred
+    }
+    return total
+}
+
+// Writes until count bytes, a zero-length transfer, or error.
+pub fn write_all(handle: u16, buffer: ptr<u8>, count: u16) -> u16 {
+    let total: u16 = 0
+    while total < count {
+        let transferred: u16 = write(handle, buffer + total, count - total)
+        if raw.failed() || transferred == 0 {
+            return total
+        }
+        total += transferred
+    }
+    return total
+}
+
+// DOS 2.0+, AX=4400h. Returns device information in DX.
+pub fn ioctl_device_info(handle: u16) -> u16 {
+    let result: u16 = 0
+    let info: u16 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, out result: u16 as mem, out info: u16 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber dx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov ax,4400h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {info},dx"
+        "mov {flags},bp"
+    }
+    if raw.record(flags, result) { return 0 }
+    return info
+}
+
+// DOS 2.0+, AX=4406h. True means input is ready on the handle.
+pub fn ioctl_input_ready(handle: u16) -> bool {
+    let result: u16 = 0
+    let status: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, out result: u16 as mem, out status: u8 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov ax,4406h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {status},al"
+        "mov {flags},bp"
+    }
+    if raw.record(flags, result) { return false }
+    return status != 0
+}
+
+// DOS 2.0+, AX=4407h. True means output is ready on the handle.
+pub fn ioctl_output_ready(handle: u16) -> bool {
+    let result: u16 = 0
+    let status: u8 = 0
+    let flags: u16 = 0
+    asm volatile(in handle: u16 as mem, out result: u16 as mem, out status: u8 as mem, out flags: u16 as mem, clobber ax, clobber bx, clobber bp, clobber flags, clobber memory) {
+        "mov bx,{handle}"
+        "mov ax,4407h"
+        "int 21h"
+        "pushf"
+        "pop bp"
+        "mov {result},ax"
+        "mov {status},al"
+        "mov {flags},bp"
+    }
+    if raw.record(flags, result) { return false }
+    return status != 0
 }
 
 pub fn set_datetime(handle: u16, time: u16, date: u16) -> bool {

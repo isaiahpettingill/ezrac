@@ -50,6 +50,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-i8080` | 4 | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8085` | 4 | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8086` | 3 | 8086 | 16 (single segment) | `.bin` | none | Optional `i8086` feature; generic source backend and complete strict assembler |
+| `msdos-com-i8086` | 3 | 8086 | 16 (single segment) | `.com` | `dos.*` | First-class DOS `.COM` startup, packaging, and SDK; emulator validation pending |
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
@@ -76,7 +77,19 @@ cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 --base 10
 
 `build` writes the generated `.asm`, `.map`, and `.bin` files under `target/bare-i8086/`; output-path overrides are available on `assemble`, not `build`.
 
-The 8086 hardware has a 20-bit physical address bus, while the initial bare profile intentionally exposes one 16-bit, 64 KiB segment. Other resolvable i8086 triples fall back to this CPU-appropriate generic layout instead of the 24-bit eZ80 layout. The source backend covers scalar values and recursion, pointers, aggregate storage, control flow, memory and port I/O, constrained interrupt handlers, and typed inline assembly through HIR/TBIR; aggregate parameters and returns are rejected in favor of pass-by-pointer APIs. The assembler covers the complete documented 8086 opcode/form set and strictly rejects 80186/80286 and undocumented additions. CLI and library source compilation strictly validate generated assembly and require its assembled `.text` bytes to fit the selected layout's `.text` region. DOS packaging and emulator execution remain separate work. See [`i8086-assembly.md`](i8086-assembly.md).
+The 8086 hardware has a 20-bit physical address bus, while the initial bare profile intentionally exposes one 16-bit, 64 KiB segment. Other resolvable i8086 triples fall back to this CPU-appropriate generic layout instead of the 24-bit eZ80 layout. The source backend covers scalar values and recursion, pointers, aggregate storage, control flow, memory and port I/O, constrained interrupt handlers, and typed inline assembly through HIR/TBIR; aggregate parameters and returns are rejected in favor of pass-by-pointer APIs. The assembler covers the complete documented 8086 opcode/form set and strictly rejects 80186/80286 and undocumented additions. CLI and library source compilation strictly validate generated assembly and require its assembled `.text` bytes to fit the selected layout's `.text` region. See [`i8086-assembly.md`](i8086-assembly.md).
+
+## MS-DOS `.COM` on Intel 8086
+
+Use `msdos-com-i8086` for a flat `.COM` program with a PSP at `0000h..00FFh` and code loaded and entered at `0100h`:
+
+```sh
+cargo run --features i8086 -- build --target msdos-com-i8086 program.ezra
+```
+
+Startup establishes `DS=ES=CS`, verifies DOS granted at least `0F80h` paragraphs for the fixed layout and a 2 KiB minimum stack area, preserves the loader-provided `SS:SP`, clears the direction flag, calls `main`, and terminates a returning program with `INT 21h/AH=4Ch`. The built-in `dos.*` SDK covers console, handle-based files, directories and DTA searches, memory allocation and segment-aware access, date/time, process services, errors, constants, and PSP/FCB/JFT/environment helpers. DOS 2.0 is the baseline; newer wrappers are marked DOS 3+/4+/5+, and `EXEC` is DOS 3+ because DOS 2.x may destroy `SS:SP`.
+
+Pointers remain 16-bit near offsets. Segment values returned by DOS allocation are not pointers; use `dos.memory` far-memory accessors. Copy the PSP command tail before default-DTA searches or full default-FCB operations because these areas overlap. MZ `.EXE` packaging and deterministic emulator-backed runtime tests remain deferred. See [`msdos-sdk.md`](msdos-sdk.md) and `examples/msdos-i8086/`.
 
 ## AVR and Arduboy
 

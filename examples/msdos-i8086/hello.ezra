@@ -1,0 +1,6 @@
+import dos.console
+
+fn main() {
+    console.print_dollar("Hello from EZRA on MS-DOS!$")
+    console.newline()
+}

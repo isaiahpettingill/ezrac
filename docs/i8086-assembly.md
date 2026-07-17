@@ -1,6 +1,6 @@
 # Intel 8086 target
 
-EZRAC provides optional generic source code generation and a strict Intel 8086 standalone assembler. Enable the `i8086` Cargo feature and select the `bare-i8086` target:
+EZRAC provides optional generic source code generation, a strict Intel 8086 standalone assembler, and the first-class `msdos-com-i8086` source target. Enable the `i8086` Cargo feature and select `bare-i8086` for a raw binary:
 
 ```sh
 cargo run --features i8086 -- build --target bare-i8086 program.ezra
@@ -16,7 +16,7 @@ cargo run --features i8086 -- assemble \
 
 `build` writes `program.asm`, `program.map`, and `program.bin` under `target/bare-i8086/`; unlike `assemble`, it does not accept `-o`/`--output`. `8086` is accepted as a CPU alias. Files ending in `.i8086` or `.8086` are detected as assembly input in addition to `.asm` and `.s`.
 
-The source backend lowers through HIR and TBIR and covers scalar arithmetic, pointers, array and struct storage, scalar calls and recursion, control flow, globals, MMIO, port I/O, memory helpers, constrained interrupt handlers, and inline assembly. Array and struct parameters or return values are deliberately rejected with pass-by-pointer diagnostics rather than assigned an unstable aggregate-call ABI. It does not yet provide an emulator test backend, DOS `.COM`/MZ packaging, or 80186/80286 profiles. Those remain separate work under the wider Intel 8086-family and MS-DOS issues.
+The source backend lowers through HIR and TBIR and covers scalar arithmetic, pointers, array and struct storage, scalar calls and recursion, control flow, globals, MMIO, port I/O, memory helpers, constrained interrupt handlers, and inline assembly. Array and struct parameters or return values are deliberately rejected with pass-by-pointer diagnostics rather than assigned an unstable aggregate-call ABI. `msdos-com-i8086` adds PSP-aware load/entry layout, `.COM` packaging, DOS startup/termination, and the built-in `dos.*` SDK. MZ `.EXE`, deterministic DOS emulator execution, and 80186/80286 profiles remain separate work; see [`msdos-sdk.md`](msdos-sdk.md).
 
 ## Target and output model
 
@@ -26,7 +26,7 @@ Words, immediates, displacements, data emitted with `dw`, and far-pointer fields
 
 ## Generated-code ABI
 
-Generated programs establish a flat small model by copying `CS` to `DS`, `ES`, and `SS`, aligning `SP` down to an even address, clearing the direction flag, and using near calls. Pointers are 16-bit offsets. Compiler-owned static slots hold parameters, locals, expression temporaries, and scalar return values; callers preserve their live static frames around nested and recursive scalar calls. Startup executes `CLI` and does not implicitly execute `STI`, so maskable interrupts remain disabled until the program explicitly enables them.
+Generated programs establish a flat small model, clear the direction flag, and use near calls. Pointers are 16-bit offsets. Compiler-owned static slots hold parameters, locals, expression temporaries, and scalar return values; callers preserve their live static frames around nested and recursive scalar calls. Bare startup executes `CLI`, copies `CS` to `DS`, `ES`, and `SS`, and aligns the configured `SP` down to an even address without implicitly executing `STI`. DOS `.COM` startup instead copies `CS` only to `DS` and `ES` and preserves the loader-provided `SS:SP`, because DOS may allocate less than a full segment.
 
 A non-naked `interrupt fn` must have no parameters or return value. Its prologue preserves the 8086 general/data-segment registers and compiler scratch, establishes `DS = ES = CS`, and its epilogue restores that state before `IRET`. Ordinary calls to interrupt functions, user-function calls from handlers, and `interrupt fn main` are rejected because `CALL`/`IRET` stack shapes and the static-frame ABI are not interchangeable. Programs remain responsible for installing vectors, providing a valid stack, acknowledging devices, synchronizing shared globals, and handling target-specific NMI or nesting requirements.
 
@@ -34,7 +34,7 @@ Naked functions may contain only operand-free inline assembly and remain respons
 
 Inline assembly maps `reg8` operands to `AL`, `reg16` operands to `AX`, `mem` operands to direct compiler storage, and constant `imm` inputs to immediates. Register inputs are loaded before the block and register outputs are written back afterward. The backend rejects `reg24`, duplicate operands, incompatible resolved types, non-constant immediates, overlapping clobbers, and ABI-critical segment, stack, and instruction-pointer clobbers. Every generated output path then passes the result through the strict original-8086 assembler.
 
-This ABI is the generic bare-target ABI, not a DOS memory model or calling convention.
+The scalar calling convention is shared by bare and DOS targets. The DOS target adds its loader contract, PSP, termination path, and near-pointer SDK rules; it is not an MZ segmented memory model.
 
 ## Architecture reference
 

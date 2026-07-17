@@ -1,0 +1,62 @@
+import dos.console
+import dos.constants
+import dos.file
+import dos.raw
+
+global read_buffer: [u8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+]
+
+fn report_error() {
+    console.print_dollar("DOS file operation failed.$")
+    console.newline()
+}
+
+fn main() {
+    let path: ptr<u8> = "EZRA-DOS.TXT"
+    let message: ptr<u8> = "Written by the EZRA DOS SDK.\n"
+    let message_length: u16 = 29
+
+    let handle: u16 = file.create(path, constants.ATTRIBUTE_NORMAL)
+    if raw.failed() {
+        report_error()
+        return
+    }
+
+    if file.write_all(handle, message, message_length) != message_length || raw.failed() {
+        file.close(handle)
+        report_error()
+        return
+    }
+    if !file.close(handle) {
+        report_error()
+        return
+    }
+
+    handle = file.open(path, constants.ACCESS_READ_ONLY)
+    if raw.failed() {
+        report_error()
+        return
+    }
+
+    let count: u16 = file.read(handle, &read_buffer[0], 64)
+    if raw.failed() {
+        file.close(handle)
+        report_error()
+        return
+    }
+    file.close(handle)
+
+    file.write_all(constants.HANDLE_STDOUT, &read_buffer[0], count)
+    if raw.failed() {
+        report_error()
+        return
+    }
+
+    if !file.delete(path) {
+        report_error()
+    }
+}

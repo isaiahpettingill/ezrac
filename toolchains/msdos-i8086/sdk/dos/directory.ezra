@@ -7,7 +7,8 @@ global space_available_clusters: u16 = 0
 global space_bytes_per_sector: u16 = 0
 global space_total_clusters: u16 = 0
 
-pub fn make(path: ptr<u8>) -> bool {
+// DOS 2.0+, AH=39h. On failure, raw.error_code() receives the DOS error from AX.
+pub fn make_directory(path: ptr<u8>) -> bool {
     let result: u16 = 0
     let flags: u16 = 0
     asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
@@ -22,7 +23,8 @@ pub fn make(path: ptr<u8>) -> bool {
     return !raw.record(flags, result)
 }
 
-pub fn remove(path: ptr<u8>) -> bool {
+// DOS 2.0+, AH=3Ah. On failure, raw.error_code() receives the DOS error from AX.
+pub fn remove_directory(path: ptr<u8>) -> bool {
     let result: u16 = 0
     let flags: u16 = 0
     asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
@@ -37,7 +39,8 @@ pub fn remove(path: ptr<u8>) -> bool {
     return !raw.record(flags, result)
 }
 
-pub fn change(path: ptr<u8>) -> bool {
+// DOS 2.0+, AH=3Bh. On failure, raw.error_code() receives the DOS error from AX.
+pub fn change_directory(path: ptr<u8>) -> bool {
     let result: u16 = 0
     let flags: u16 = 0
     asm volatile(in path: ptr<u8> as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
@@ -52,8 +55,9 @@ pub fn change(path: ptr<u8>) -> bool {
     return !raw.record(flags, result)
 }
 
-// DOS 3.0+, AH=47h. drive is 0=default, 1=A; output has no drive or leading slash.
-pub fn get_current(buffer: ptr<u8>, drive: u8) -> bool {
+// DOS 2.0+, AH=47h. drive is 0=default, 1=A; output has no drive or leading slash.
+// On failure, raw.error_code() receives the DOS error from AX.
+pub fn get_current_directory(buffer: ptr<u8>, drive: u8) -> bool {
     let result: u16 = 0
     let flags: u16 = 0
     asm volatile(in buffer: ptr<u8> as mem, in drive: u8 as mem, out result: u16 as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber si, clobber bp, clobber flags, clobber memory) {
@@ -69,7 +73,24 @@ pub fn get_current(buffer: ptr<u8>, drive: u8) -> bool {
     return !raw.record(flags, result)
 }
 
-// AH=1Ah. DOS reads subsequent find results through this near DTA offset.
+// Compatibility wrappers for the original shorter API names.
+pub fn make(path: ptr<u8>) -> bool {
+    return make_directory(path)
+}
+
+pub fn remove(path: ptr<u8>) -> bool {
+    return remove_directory(path)
+}
+
+pub fn change(path: ptr<u8>) -> bool {
+    return change_directory(path)
+}
+
+pub fn get_current(buffer: ptr<u8>, drive: u8) -> bool {
+    return get_current_directory(buffer, drive)
+}
+
+// DOS 1.0+, AH=1Ah. DOS reads subsequent find results through this near DTA offset.
 pub fn set_dta(dta: ptr<u8>) {
     let flags: u16 = 0
     asm volatile(in dta: ptr<u8> as mem, out flags: u16 as mem, clobber ax, clobber dx, clobber bp, clobber flags, clobber memory) {
@@ -83,7 +104,7 @@ pub fn set_dta(dta: ptr<u8>) {
     raw.clear()
 }
 
-// AH=2Fh returns ES:BX. The offset is returned; segment_out receives ES.
+// DOS 2.0+, AH=2Fh. The offset is returned; segment_out receives ES.
 pub fn get_dta(segment_out: ptr<u16>) -> u16 {
     let offset: u16 = 0
     let segment: u16 = 0
@@ -107,6 +128,8 @@ pub fn get_dta(segment_out: ptr<u16>) -> u16 {
 }
 
 // DOS 2.0+, AH=4Eh. Results are written to the current DTA.
+// WARNING: with the default PSP:0080h DTA, find calls overwrite the command tail;
+// copy the tail first or call set_dta() with separate storage. Failures record AX.
 pub fn find_first(pattern: ptr<u8>, attributes: u16) -> bool {
     let result: u16 = 0
     let flags: u16 = 0
@@ -123,6 +146,7 @@ pub fn find_first(pattern: ptr<u8>, attributes: u16) -> bool {
     return !raw.record(flags, result)
 }
 
+// DOS 2.0+, AH=4Fh. Failure records AX, including ERROR_NO_MORE_FILES.
 pub fn find_next() -> bool {
     let result: u16 = 0
     let flags: u16 = 0
@@ -137,7 +161,7 @@ pub fn find_next() -> bool {
     return !raw.record(flags, result)
 }
 
-// AH=19h returns 0=A, 1=B, and so on.
+// DOS 1.0+, AH=19h. Returns 0=A, 1=B, and so on; no DOS error is reported.
 pub fn current_drive() -> u8 {
     let result: u8 = 0
     let flags: u16 = 0
@@ -153,7 +177,7 @@ pub fn current_drive() -> u8 {
     return result
 }
 
-// AH=0Eh selects 0=A and returns the number of potentially valid drives.
+// DOS 1.0+, AH=0Eh. Selects 0=A and returns potentially valid drives; no error is reported.
 pub fn select_drive(drive: u8) -> u8 {
     let result: u8 = 0
     let flags: u16 = 0
@@ -170,7 +194,8 @@ pub fn select_drive(drive: u8) -> u8 {
     return result
 }
 
-// AH=36h. drive is 0=default, 1=A. Values are exposed by scalar getters.
+// DOS 2.0+, AH=36h. drive is 0=default, 1=A. Values are exposed by scalar getters.
+// An invalid drive records ERROR_INVALID_DRIVE and zeros every cached result.
 pub fn free_space(drive: u8) -> bool {
     let sectors: u16 = 0
     let available: u16 = 0
@@ -189,14 +214,18 @@ pub fn free_space(drive: u8) -> bool {
         "mov {total},dx"
         "mov {flags},bp"
     }
+    if sectors == 0xFFFF {
+        space_sectors_per_cluster = 0
+        space_available_clusters = 0
+        space_bytes_per_sector = 0
+        space_total_clusters = 0
+        raw.record(1, constants.ERROR_INVALID_DRIVE)
+        return false
+    }
     space_sectors_per_cluster = sectors
     space_available_clusters = available
     space_bytes_per_sector = bytes
     space_total_clusters = total
-    if sectors == 0xFFFF {
-        raw.record(1, constants.ERROR_INVALID_DRIVE)
-        return false
-    }
     raw.clear()
     return true
 }
