@@ -15,6 +15,8 @@ pub struct ProjectConfig {
     pub root: PathBuf,
     pub input: Option<PathBuf>,
     pub target: Option<String>,
+    /// All configured build targets. The first target is the default used by CLI builds.
+    pub targets: Vec<String>,
     pub output: Option<String>,
     pub input_kind: Option<String>,
     pub assembler_cpu: Option<String>,
@@ -91,11 +93,28 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         Diagnostic::new(format!("failed to parse `{}`: {error}", path.display()))
     })?;
 
-    let target = value
-        .get("build")
-        .and_then(|build| build.get("target"))
-        .map(required_string("build.target"))
-        .transpose()?;
+    let targets = match value.get("build").and_then(|build| build.get("target")) {
+        Some(toml::Value::String(target)) => vec![target.clone()],
+        Some(toml::Value::Array(targets)) => {
+            let targets = targets
+                .iter()
+                .map(required_string("build.target"))
+                .collect::<Result<Vec<_>, _>>()?;
+            if targets.is_empty() {
+                return Err(Diagnostic::new(
+                    "project field `build.target` must contain at least one target",
+                ));
+            }
+            targets
+        }
+        Some(_) => {
+            return Err(Diagnostic::new(
+                "project field `build.target` must be a string or an array of strings",
+            ));
+        }
+        None => Vec::new(),
+    };
+    let target = targets.first().cloned();
 
     let input = value
         .get("build")
@@ -180,6 +199,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         root,
         input,
         target,
+        targets,
         output,
         input_kind,
         assembler_cpu,

@@ -2,7 +2,13 @@
 name = "tiny-lisp"
 
 [build]
-# Agon is the default for `cargo run -- build examples/tiny-lisp/main.ezra`.
-# Override it with --target for CP/M, C64, ZX Spectrum, or TI-99/4A.
-target = "agonlight-mos-ez80"
+# The first target is the default for builds; the LSP checks every target so
+# target-specific implementations remain complete and warning-free.
+target = [
+    "agonlight-mos-ez80",
+    "commodore64-6502",
+    "cpm-2.2-z80",
+    "zxspectrum-z80",
+    "ti99-4a-tms9900",
+]
 executable = "tiny-lisp"

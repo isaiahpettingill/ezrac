@@ -369,7 +369,10 @@ impl Server {
             }
         }
 
-        let mut diagnostics = configuration_errors;
+        let mut diagnostics = configuration_errors
+            .into_iter()
+            .map(|(path, diagnostic)| (path, diagnostic, false))
+            .collect::<Vec<_>>();
         for path in roots {
             let source = source_overrides
                 .get(&path)
@@ -379,16 +382,18 @@ impl Server {
                 diagnostics.push((
                     path.clone(),
                     Diagnostic::new(format!("failed to read `{}`", path.display())),
+                    false,
                 ));
                 continue;
             };
-            let sdk = match sdk_for_path(&path) {
-                Ok(sdk) => sdk,
+            let sdks = match sdks_for_path(&path) {
+                Ok(sdks) => sdks,
                 Err(error) => {
-                    diagnostics.push((path.clone(), error));
+                    diagnostics.push((path.clone(), error, false));
                     continue;
                 }
             };
+            let multi_target = sdks.len() > 1;
             let options = CompileOptions {
                 source: path.clone(),
                 debug_comments: false,
@@ -398,35 +403,45 @@ impl Server {
             let is_library = match uses_library_lsp_mode(&path) {
                 Ok(is_library) => is_library,
                 Err(error) => {
-                    diagnostics.push((path.clone(), error));
+                    diagnostics.push((path.clone(), error, false));
                     continue;
                 }
             };
-            let path_diagnostics = if is_bundled_sdk || is_library {
-                check_module_diagnostics_with_sdk_and_overrides(
-                    &source,
-                    &options,
-                    &sdk,
-                    &source_overrides,
-                )
-            } else {
-                check_source_semantic_diagnostics_with_sdk_and_overrides(
-                    &source,
-                    &options,
-                    &sdk,
-                    &source_overrides,
-                )
-            };
-            diagnostics.extend(path_diagnostics.into_iter().map(|diagnostic| {
-                let diagnostic_path = diagnostic
-                    .span
-                    .as_ref()
-                    .map(|span| span.file.clone())
-                    .unwrap_or_else(|| path.clone());
-                (diagnostic_path, diagnostic)
-            }));
+            for sdk in &sdks {
+                let target = sdk.target.as_deref().unwrap_or(DEFAULT_TARGET_TRIPLE);
+                let path_diagnostics = if is_bundled_sdk || is_library {
+                    check_module_diagnostics_with_sdk_and_overrides(
+                        &source,
+                        &options,
+                        sdk,
+                        &source_overrides,
+                    )
+                } else {
+                    check_source_semantic_diagnostics_with_sdk_and_overrides(
+                        &source,
+                        &options,
+                        sdk,
+                        &source_overrides,
+                    )
+                };
+                diagnostics.extend(path_diagnostics.into_iter().map(|mut diagnostic| {
+                    if multi_target {
+                        diagnostic.message = format!("[{target}] {}", diagnostic.message);
+                    }
+                    let diagnostic_path = diagnostic
+                        .span
+                        .as_ref()
+                        .map(|span| span.file.clone())
+                        .unwrap_or_else(|| path.clone());
+                    (diagnostic_path, diagnostic, multi_target)
+                }));
+            }
             if !is_bundled_sdk && !is_library {
-                diagnostics.extend(project_layout_diagnostics(&path));
+                diagnostics.extend(
+                    project_layout_diagnostics(&path)
+                        .into_iter()
+                        .map(|(path, diagnostic)| (path, diagnostic, false)),
+                );
             }
         }
 
@@ -440,7 +455,7 @@ impl Server {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        for (path, diagnostic) in diagnostics {
+        for (path, diagnostic, warning) in diagnostics {
             let normalized = normalize_document_path(&path);
             let (uri, source, version) = self
                 .documents
@@ -458,7 +473,12 @@ impl Server {
                 .entry(uri)
                 .or_insert_with(|| (source.clone(), version, Vec::new()))
                 .2
-                .push(diagnostic_to_lsp_source(&source, &path, &diagnostic));
+                .push(diagnostic_to_lsp_source_with_severity(
+                    &source,
+                    &path,
+                    &diagnostic,
+                    if warning { 2 } else { 1 },
+                ));
         }
 
         let current = publications.keys().cloned().collect::<BTreeSet<_>>();
@@ -600,24 +620,37 @@ fn bundled_sdk_context(path: &Path) -> Option<BundledSdkContext> {
 }
 
 fn sdk_for_path(path: &Path) -> Result<SdkResolver, Diagnostic> {
+    Ok(sdks_for_path(path)?
+        .into_iter()
+        .next()
+        .expect("target resolution always supplies at least one target"))
+}
+
+fn sdks_for_path(path: &Path) -> Result<Vec<SdkResolver>, Diagnostic> {
     if let Some(context) = bundled_sdk_context(path) {
-        return Ok(SdkResolver {
+        return Ok(vec![SdkResolver {
             target: Some(context.target.to_owned()),
             sdk_roots: vec![context.sdk_root],
-        });
+        }]);
     }
 
     let project = load_nearest_project_config(path)?;
-    Ok(SdkResolver {
-        target: project
-            .as_ref()
-            .and_then(|project| project.target.clone())
-            .or_else(|| Some(DEFAULT_TARGET_TRIPLE.to_owned())),
-        sdk_roots: project
-            .as_ref()
-            .map(|project| project.sdk_paths.clone())
-            .unwrap_or_default(),
-    })
+    let sdk_roots = project
+        .as_ref()
+        .map(|project| project.sdk_paths.clone())
+        .unwrap_or_default();
+    let targets = project
+        .as_ref()
+        .map(|project| project.targets.clone())
+        .filter(|targets| !targets.is_empty())
+        .unwrap_or_else(|| vec![DEFAULT_TARGET_TRIPLE.to_owned()]);
+    Ok(targets
+        .into_iter()
+        .map(|target| SdkResolver {
+            target: Some(target),
+            sdk_roots: sdk_roots.clone(),
+        })
+        .collect())
 }
 
 fn is_project_input(path: &Path) -> bool {
@@ -2052,6 +2085,15 @@ fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnost
 }
 
 fn diagnostic_to_lsp_source(source: &str, path: &Path, error: &Diagnostic) -> LspDiagnostic {
+    diagnostic_to_lsp_source_with_severity(source, path, error, 1)
+}
+
+fn diagnostic_to_lsp_source_with_severity(
+    source: &str,
+    path: &Path,
+    error: &Diagnostic,
+    severity: u8,
+) -> LspDiagnostic {
     let fallback_document = OpenDocument {
         path: path.to_path_buf(),
         text: source.to_owned(),
@@ -2064,7 +2106,7 @@ fn diagnostic_to_lsp_source(source: &str, path: &Path, error: &Diagnostic) -> Ls
             .filter(|span| normalize_document_path(&span.file) == normalize_document_path(path))
             .map(|span| source_span_to_range(source, span))
             .unwrap_or_else(|| diagnostic_fallback_range(&fallback_document, &error.message)),
-        severity: 1,
+        severity,
         source: "ezrac",
         message: error.message.clone(),
     }

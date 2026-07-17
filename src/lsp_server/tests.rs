@@ -124,6 +124,37 @@ fn library_lsp_mode_checks_sdk_imports_without_requiring_main() {
 }
 
 #[test]
+fn multi_target_projects_create_an_lsp_context_for_every_target() {
+    let root = std::env::temp_dir().join(format!("ezrac-lsp-multi-target-{}", std::process::id()));
+    let source_path = root.join("main.ezra");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("Ezra.toml"),
+        "[build]\ntarget = [\"agonlight-mos-ez80\", \"cpm-2.2-z80\"]\n",
+    )
+    .unwrap();
+
+    let sdks = sdks_for_path(&source_path).unwrap();
+    assert_eq!(
+        sdks.iter()
+            .filter_map(|sdk| sdk.target.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["agonlight-mos-ez80", "cpm-2.2-z80"]
+    );
+
+    let warning = diagnostic_to_lsp_source_with_severity(
+        "fn main() { platform_init() }",
+        &source_path,
+        &Diagnostic::new("[cpm-2.2-z80] unknown function `platform_init`"),
+        2,
+    );
+    assert_eq!(warning.severity, 2);
+    assert!(warning.message.starts_with("[cpm-2.2-z80]"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn cpm_examples_resolve_the_built_in_sdk_from_their_project_target() {
     let path = repository_path("examples/cpm-z80/console-output.ezra");
     let document = OpenDocument {

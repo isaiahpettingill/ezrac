@@ -84,6 +84,26 @@ paths = ["sdk", "../shared"]
 }
 
 #[test]
+fn parses_multiple_build_targets() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[build]\ntarget = [\"agonlight-mos-ez80\", \"cpm-2.2-z80\"]\n",
+    )
+    .unwrap();
+
+    assert_eq!(config.target.as_deref(), Some("agonlight-mos-ez80"));
+    assert_eq!(config.targets, vec!["agonlight-mos-ez80", "cpm-2.2-z80"]);
+}
+
+#[test]
+fn rejects_empty_build_target_array() {
+    let error = parse_project_config(Path::new("/project/Ezra.toml"), "[build]\ntarget = []\n")
+        .unwrap_err();
+
+    assert!(error.message.contains("at least one target"), "{error}");
+}
+
+#[test]
 fn parses_library_lsp_mode() {
     let config = parse_project_config(
         Path::new("/project/Ezra.toml"),
