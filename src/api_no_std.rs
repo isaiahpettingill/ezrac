@@ -4,6 +4,8 @@ use crate::compat::prelude::*;
 
 pub use crate::workspace::{Workspace, WorkspaceFile};
 
+#[cfg(feature = "i8086")]
+use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "mos6502")]
 use crate::asm::emit_mos6502_assembly_with_options;
 
@@ -105,13 +107,14 @@ pub fn compile_workspace_to_assembly(
             | CpuFamily::Z180
             | CpuFamily::I8080
             | CpuFamily::I8085
+            | CpuFamily::I8086
             | CpuFamily::Mos6502
             | CpuFamily::Cmos65C02
             | CpuFamily::Wdc65C816
             | CpuFamily::Ricoh2A03
     ) {
         return Err(Diagnostic::new(format!(
-            "no-std source code generation is currently available only for eZ80/Z80 and MOS 6502-family targets, not `{}`",
+            "no-std source code generation is currently available only for eZ80/Z80, i8086, and MOS 6502-family targets, not `{}`",
             target.triple.cpu.as_str()
         )));
     }
@@ -152,6 +155,18 @@ pub fn compile_workspace_to_assembly(
         request.default_sdk_symbols,
     );
     let assembly = match target.triple.cpu {
+        CpuFamily::I8086 => {
+            #[cfg(feature = "i8086")]
+            {
+                emit_i8086_assembly_with_options(&program, options)?
+            }
+            #[cfg(not(feature = "i8086"))]
+            {
+                return Err(Diagnostic::new(
+                    "i8086 source compilation requires the `i8086` Cargo feature",
+                ));
+            }
+        }
         CpuFamily::Mos6502 | CpuFamily::Cmos65C02 | CpuFamily::Wdc65C816 | CpuFamily::Ricoh2A03 => {
             #[cfg(feature = "mos6502")]
             {

@@ -49,7 +49,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-z180` | 4 | Z180 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8080` | 4 | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8085` | 4 | 8085 | 16 | `.bin` | none | Bare assembly/source scaffold |
-| `bare-i8086` | 3 | 8086 | 16 (single segment) | `.bin` | none | Optional `i8086` feature; complete strict 8086 standalone assembler |
+| `bare-i8086` | 3 | 8086 | 16 (single segment) | `.bin` | none | Optional `i8086` feature; generic source backend and complete strict assembler |
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
@@ -64,13 +64,17 @@ Any triple containing a supported CPU can resolve if its CPU has a memory model.
 
 ## Bare Intel 8086
 
-Enable the `i8086` feature to assemble a raw, single-segment 8086 binary:
+Enable the `i8086` feature to build EZRA source or assemble a raw, single-segment 8086 binary:
+
+```sh
+cargo run --features i8086 -- build --target bare-i8086 -o program.bin program.ezra
+```
 
 ```sh
 cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 --base 100h -o program.bin program.asm
 ```
 
-The 8086 hardware has a 20-bit physical address bus, while the initial bare profile intentionally exposes one 16-bit, 64 KiB segment. The assembler covers the complete documented 8086 opcode/form set, ModR/M addressing, segment/repeat/lock prefixes, near and far control transfers, and raw `ESC` encodings. It strictly rejects 80186/80286 and undocumented additions. EZRA source lowering, an ABI/runtime, DOS packaging, and emulator execution are not part of this assembly-only target. See [`i8086-assembly.md`](i8086-assembly.md).
+The 8086 hardware has a 20-bit physical address bus, while the initial bare profile intentionally exposes one 16-bit, 64 KiB segment. The source backend covers scalar and aggregate values, pointers, calls and recursion, control flow, memory and port I/O, interrupts, and inline assembly through HIR/TBIR. The assembler covers the complete documented 8086 opcode/form set and strictly rejects 80186/80286 and undocumented additions. DOS packaging and emulator execution remain separate work. See [`i8086-assembly.md`](i8086-assembly.md).
 
 ## AVR and Arduboy
 

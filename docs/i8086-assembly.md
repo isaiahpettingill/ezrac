@@ -1,6 +1,13 @@
-# Intel 8086 assembler mode
+# Intel 8086 target
 
-EZRAC provides an optional, strict Intel 8086 standalone assembler. Enable the `i8086` Cargo feature and select the `bare-i8086` target:
+EZRAC provides optional generic source code generation and a strict Intel 8086 standalone assembler. Enable the `i8086` Cargo feature and select the `bare-i8086` target:
+
+```sh
+cargo run --features i8086 -- build --target bare-i8086 \
+  -o program.bin program.ezra
+```
+
+To assemble handwritten source directly:
 
 ```sh
 cargo run --features i8086 -- assemble \
@@ -10,13 +17,19 @@ cargo run --features i8086 -- assemble \
 
 `8086` is accepted as a CPU alias. Files ending in `.i8086` or `.8086` are detected as assembly input in addition to `.asm` and `.s`.
 
-This target is assembly-only. It does not yet provide EZRA source lowering, an ABI/runtime, an emulator test backend, DOS `.COM`/MZ packaging, or 80186/80286 profiles. Those remain separate work under the wider Intel 8086-family and MS-DOS issues.
+The source backend lowers through HIR and TBIR and supports scalar arithmetic, pointers, arrays, structs, calls and recursion, control flow, globals, MMIO, port I/O, memory helpers, interrupts, and inline assembly. It does not yet provide an emulator test backend, DOS `.COM`/MZ packaging, or 80186/80286 profiles. Those remain separate work under the wider Intel 8086-family and MS-DOS issues.
 
 ## Target and output model
 
 The 8086 hardware has a 20-bit physical address bus, but the initial `bare-i8086` profile deliberately exposes one 16-bit, 64 KiB segment and emits a raw binary for that segment. Labels, `org`, near branches, and ordinary memory offsets are therefore 16-bit segment offsets. Far calls and jumps can still encode explicit `segment:offset` pointers.
 
 Words, immediates, displacements, data emitted with `dw`, and far-pointer fields are little-endian. In a far pointer the offset word is emitted before the segment word.
+
+## Generated-code ABI
+
+Generated programs establish a flat small model by copying `CS` to `DS`, `ES`, and `SS`, aligning `SP` down to an even address, clearing the direction flag, and using near calls. Pointers are 16-bit offsets. Compiler-owned static slots hold parameters, locals, expression temporaries, and scalar return values; callers preserve their live slots around nested or recursive calls. Interrupt functions preserve the general and data-segment registers and return with `IRET`; naked functions remain responsible for their own complete entry and exit sequence.
+
+This ABI is the generic bare-target ABI, not a DOS memory model or calling convention.
 
 ## Source syntax
 

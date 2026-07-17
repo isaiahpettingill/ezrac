@@ -14,6 +14,8 @@ pub mod dcpu_emitter;
 pub mod ez80;
 #[cfg(feature = "i8086")]
 pub mod i8086;
+#[cfg(feature = "i8086")]
+pub mod i8086_emitter;
 #[cfg(any(feature = "std", feature = "lr35902"))]
 pub mod lr35902;
 #[cfg(any(feature = "std", feature = "lr35902"))]
@@ -45,6 +47,8 @@ pub use frontend::{
     LocatedParsedAssemblyItem, ParsedAssembly, ParsedAssemblyDataValue, ParsedAssemblyItem,
     lower_parsed_assembly, parse_assembly_expression, parse_assembly_syntax,
 };
+#[cfg(feature = "i8086")]
+pub use i8086_emitter::emit_i8086_assembly_with_options;
 pub use preprocess::{
     AssemblyIncludeResolver, AssemblyPreprocessOptions, NullAssemblyIncludeResolver,
     PreprocessedAssembly, ResolvedAssemblyInclude, WorkspaceAssemblyResolver, preprocess_assembly,

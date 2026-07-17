@@ -32,6 +32,8 @@ use ezra::{
 use ezra::asm::emit_avr_assembly_with_options;
 #[cfg(feature = "dcpu")]
 use ezra::asm::emit_dcpu_assembly_with_options;
+#[cfg(feature = "i8086")]
+use ezra::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "m68k")]
 use ezra::asm::emit_m68k_assembly_with_options;
 #[cfg(feature = "m6800")]
@@ -794,12 +796,6 @@ fn resolve_build_settings(
 }
 
 fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
-    if settings.target.triple.cpu == CpuFamily::I8086 {
-        return Err(format!(
-            "source codegen is not implemented for target {} CPU i8086; the i8086 backend is assembly-only",
-            settings.target.triple.value
-        ));
-    }
     if matches!(
         settings.target.triple.cpu,
         CpuFamily::Ez80
@@ -808,6 +804,7 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::Z180
             | CpuFamily::I8080
             | CpuFamily::I8085
+            | CpuFamily::I8086
             | CpuFamily::Lr35902
             | CpuFamily::Avr
             | CpuFamily::Mos6502
@@ -862,13 +859,17 @@ fn emit_source_assembly(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, ezra::diagnostic::Diagnostic> {
-    if options.cpu == CpuFamily::I8086 {
-        return Err(ezra::diagnostic::Diagnostic::new(
-            "EZRA source code generation is not implemented for CPU `i8086`; the i8086 backend is assembly-only",
-        ));
-    }
     ezra::tbir::diagnostics::validate_program(program, options.cpu)?;
-    if options.cpu == CpuFamily::Lr35902 {
+    if options.cpu == CpuFamily::I8086 {
+        #[cfg(feature = "i8086")]
+        {
+            emit_i8086_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "i8086"))]
+        {
+            unreachable!("i8086 targets require the i8086 Cargo feature")
+        }
+    } else if options.cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(program, options)
     } else if options.cpu == CpuFamily::Avr {
         #[cfg(feature = "avr")]
@@ -3202,7 +3203,7 @@ fn print_targets() {
             address_width_bits: 16,
             output: "bin",
             sdk: "none",
-            status: "standalone assembly-only i8086 target",
+            status: "generic source/assembly i8086 target",
         },
         TargetRow {
             triple: "bare-ez80",

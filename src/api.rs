@@ -37,6 +37,8 @@ use crate::{
 
 #[cfg(feature = "dcpu")]
 use crate::asm::emit_dcpu_assembly_with_options;
+#[cfg(feature = "i8086")]
+use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "m68k")]
 use crate::asm::emit_m68k_assembly_with_options;
 #[cfg(feature = "m6800")]
@@ -337,13 +339,20 @@ pub fn assembly_options_for_target(
 }
 
 fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<String, Diagnostic> {
-    if options.cpu == CpuFamily::I8086 {
-        return Err(Diagnostic::new(
-            "EZRA source code generation is not implemented for CPU `i8086`; the i8086 backend is assembly-only",
-        ));
-    }
     validate_program(program, options.cpu)?;
     match options.cpu {
+        CpuFamily::I8086 => {
+            #[cfg(feature = "i8086")]
+            {
+                emit_i8086_assembly_with_options(program, options)
+            }
+            #[cfg(not(feature = "i8086"))]
+            {
+                Err(Diagnostic::new(
+                    "i8086 source compilation requires the `i8086` Cargo feature",
+                ))
+            }
+        }
         CpuFamily::Lr35902 => emit_lr35902_assembly_with_options(program, options),
         CpuFamily::Mos6502 | CpuFamily::Cmos65C02 | CpuFamily::Wdc65C816 | CpuFamily::Ricoh2A03 => {
             emit_mos6502_assembly_with_options(program, options)
@@ -443,6 +452,21 @@ mod tests {
 
         assert!(compilation.report.has_main);
         assert!(compilation.assembly.contains("__ezra_start:"));
+    }
+
+    #[cfg(feature = "i8086")]
+    #[test]
+    fn compiles_in_memory_source_to_i8086_assembly() {
+        let request = CompileRequest::new("memory.ezra", "bare-i8086");
+        let compilation = compile_source_to_assembly(
+            "fn twice(value: u16) -> u16 { return value * 2 }\nfn main() { let value: u16 = twice(21) }",
+            &request,
+        )
+        .unwrap();
+
+        assert!(compilation.report.has_main);
+        assert!(compilation.assembly.contains("target: Intel 8086"));
+        assert!(compilation.assembly.contains("call near _twice"));
     }
 
     #[test]

@@ -2,6 +2,8 @@
 use crate::asm::emit_avr_assembly_with_options;
 #[cfg(feature = "dcpu")]
 use crate::asm::emit_dcpu_assembly_with_options;
+#[cfg(feature = "i8086")]
+use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "m6800")]
 use crate::asm::emit_m6800_assembly_with_options;
 #[cfg(feature = "tms9900")]
@@ -319,9 +321,16 @@ pub fn check_source_with_sdk_and_overrides(
         options.default_sdk_symbols,
     );
     let assembly = if cpu == CpuFamily::I8086 {
-        Err(Diagnostic::new(
-            "EZRA source code generation is not implemented for CPU `i8086`; the i8086 backend is assembly-only",
-        ))
+        #[cfg(feature = "i8086")]
+        {
+            emit_i8086_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "i8086"))]
+        {
+            Err(Diagnostic::new(
+                "i8086 source compilation requires the `i8086` Cargo feature",
+            ))
+        }
     } else if cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(&program, assembly_options)
     } else if cpu == CpuFamily::Avr {
