@@ -143,7 +143,11 @@ assert_eq!(build.executable_extension, "com");
 // are all caller-owned in-memory artifacts.
 ```
 
-`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. Both std and alloc-only builds validate the selected layout, strictly validate generated target assembly, and ensure the assembled `.text` bytes fit the region assigned by the layout before packaging. The same API performs source parsing, import resolution, code generation, assembly, and packaging under `no_std + alloc` for eZ80/Z80-family, MOS 6502, and experimental i8086 targets:
+`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, and section-aware standalone assembly linking, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, or `link_assembly_program` from `ezra::api`. The CLI `build` command resolves flags and `Ezra.toml` into the same build/link/package pipeline; it does not own a separate compiler or packager.
+
+`ezra::api`, `diagnostic`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
+
+Both std and alloc-only builds validate the selected layout, strictly validate generated target assembly, and ensure the assembled `.text` bytes fit the region assigned by the layout before packaging. The same API performs source parsing, import resolution, code generation, assembly, and packaging under `no_std + alloc` for eZ80/Z80-family, MOS 6502, and experimental i8086 targets:
 
 ```sh
 cargo check --lib --no-default-features --features no-std,z80

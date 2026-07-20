@@ -10,12 +10,10 @@ use ezra::{
         AssemblyItem, AssemblyOptions, AssemblyPreprocessOptions, AssemblyProgram,
         GameBoyBankingMapper, GameBoyBankingOptions, emit_ez80_assembly_with_options,
         emit_lr35902_assembly_with_options, emit_mos6502_assembly_with_options,
-        preprocess_assembly_file, preprocess_assembly_source,
+        preprocess_assembly_file,
     },
     ast::Program,
-    cart::{
-        CartridgeHeader, build_cartridge_map, collect_gameboy_banked_embeds, layout_section_bases,
-    },
+    cart::{CartridgeHeader, collect_gameboy_banked_embeds, layout_section_bases},
     compile::{SdkResolver, load_program_with_sdk},
     diagnostic::SourceLocation,
     hir::HirProgram,
@@ -708,6 +706,89 @@ struct BuildSettings {
     executable_name: Option<String>,
 }
 
+fn shared_build_request(
+    settings: &BuildSettings,
+    source_path: &Path,
+) -> Result<ezra::api::BuildRequest, String> {
+    let executable_name = settings.executable_name.clone().or_else(|| {
+        source_path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+    });
+    let mut package_context = ezra::package::PackageContext::new();
+    package_context.executable_name = executable_name.clone();
+    if let Some(config) = &settings.arduboy {
+        package_context.arduboy = Some(ezra::package::ArduboyPackageOptions {
+            title: config.title.clone(),
+            author: config.author.clone(),
+            version: config.version.clone(),
+            description: config.description.clone(),
+            date: config.date.clone(),
+            genre: config.genre.clone(),
+            source_url: config.source_url.clone(),
+        });
+    }
+    if let Some(config) = &settings.gameboy {
+        let mapper = match config.mapper {
+            GameBoyMapper::RomOnly => ezra::package::GameBoyMapper::RomOnly,
+            GameBoyMapper::Mbc1 => ezra::package::GameBoyMapper::Mbc1,
+            GameBoyMapper::Mbc5 => ezra::package::GameBoyMapper::Mbc5,
+        };
+        let bank_payloads = config
+            .bank_files
+            .iter()
+            .map(|path| {
+                fs::read(path).map_err(|error| {
+                    format!(
+                        "failed to read Game Boy ROM bank file `{}`: {error}",
+                        path.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        package_context.game_boy = Some(ezra::package::GameBoyPackageOptions {
+            mapper,
+            rom_banks: config.rom_banks,
+            ram_banks: config.ram_banks,
+            battery: config.battery,
+            rumble: config.rumble,
+            bank_payloads,
+            generated_bank_payloads: Vec::new(),
+            explicit_banking: settings.gameboy_banking.is_some(),
+        });
+    }
+    if let Some(config) = &settings.zxspectrum {
+        let banks = config
+            .banks
+            .iter()
+            .map(|bank| {
+                let bytes = fs::read(&bank.file).map_err(|error| {
+                    format!(
+                        "failed to read ZX Spectrum RAM page {} payload `{}`: {error}",
+                        bank.page,
+                        bank.file.display()
+                    )
+                })?;
+                Ok(ezra::package::ZxSpectrumBankPayload {
+                    page: bank.page,
+                    name: bank.name.clone(),
+                    bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        package_context.zx_spectrum = Some(ezra::package::ZxSpectrumPackageOptions { banks });
+    }
+    Ok(ezra::api::BuildRequest {
+        target: settings.target.clone(),
+        output_format: settings.output_format,
+        assembler_cpu: settings.assembler_cpu,
+        layout: settings.layout.clone(),
+        executable_name,
+        package_context,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputKind {
     Ezra,
@@ -1224,7 +1305,19 @@ fn write_assembly_build_artifacts(
     let asm_path = output_base.with_extension("asm");
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(executable_extension(settings));
-    let image = build_assembly_image(source_path, settings)?;
+    let preprocessed = preprocess_assembly_file(
+        source_path,
+        AssemblyPreprocessOptions::for_compiled_features(
+            &settings.target.triple.value,
+            settings.assembler_cpu.as_str(),
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut build_request = shared_build_request(settings, source_path)?;
+    build_request.package_context.image_kind = ezra::package::PackageImageKind::LoadImage;
+    let linked =
+        ezra::api::link_assembly_program(source_path, &preprocessed.program, &build_request)
+            .map_err(|error| error.to_string())?;
 
     if let Some(parent) = output_base.parent() {
         fs::create_dir_all(parent)
@@ -1232,19 +1325,9 @@ fn write_assembly_build_artifacts(
     }
     fs::write(&asm_path, assembly)
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
-    fs::write(&map_path, image.map)
+    fs::write(&map_path, linked.map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let executable = if settings
-        .target
-        .triple
-        .value
-        .starts_with("agonlight-mos-ez80")
-    {
-        apply_agon_mos_header(settings.layout.entry.get(), image.bytes)?
-    } else {
-        build_executable_bytes(settings, &image.bytes, Some(&executable_path), None, &[])?
-    };
-    fs::write(&executable_path, executable)
+    fs::write(&executable_path, linked.executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
     Ok(BuildOutputs {
@@ -1266,52 +1349,23 @@ fn write_build_artifacts(
     let map_path = output_base.with_extension("map");
     let executable_path = output_base.with_extension(executable_extension(settings));
 
-    let (bytes, map, symbols) = if settings.target.triple.cpu == CpuFamily::M68k {
-        let image = build_generated_assembly_image(source_path, assembly, settings)?;
-        (image.bytes, image.map, Vec::new())
-    } else {
-        let assembled = ezra::vm::assemble_subset_with_options_at(
-            AssemblerCpu::from(settings.target.triple.cpu),
-            assembly,
-            settings.layout.entry.get(),
-            &assembly_source_options(source_path, &settings.layout),
-        )
-        .map_err(|error| error.to_string())?;
-        validate_assembled_section_fit(
-            &settings.layout,
-            ".text",
-            settings.layout.entry.get(),
-            assembled.bytes.len(),
-        )?;
-        let map = build_output_map(
-            settings,
-            _program,
-            assembled.bytes.len(),
-            &assembled.symbols,
-        )
-        .map_err(|error| {
-            error
-                .with_location_if_missing(_source_location.clone())
-                .to_string()
-        })?;
-        (assembled.bytes, map, assembled.symbols)
-    };
+    let build_request = shared_build_request(settings, source_path)?;
+    let linked =
+        ezra::api::link_generated_assembly(source_path, assembly, _program, &build_request)
+            .map_err(|error| {
+                error
+                    .with_location_if_missing(_source_location.clone())
+                    .to_string()
+            })?;
     if let Some(parent) = output_base.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
     fs::write(&asm_path, assembly)
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
-    fs::write(&map_path, map)
+    fs::write(&map_path, linked.map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
-    let executable = build_executable_bytes(
-        settings,
-        &bytes,
-        Some(&executable_path),
-        Some(_program),
-        &symbols,
-    )?;
-    fs::write(&executable_path, executable)
+    fs::write(&executable_path, linked.executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
     Ok(BuildOutputs {
@@ -1319,33 +1373,6 @@ fn write_build_artifacts(
         map: map_path,
         executable: executable_path,
     })
-}
-
-fn build_output_map(
-    settings: &BuildSettings,
-    program: &ezra::ast::Program,
-    code_len: usize,
-    symbols: &[ezra::vm::AssemblySymbol],
-) -> Result<String, ezra::diagnostic::Diagnostic> {
-    if uses_flat_output_map(settings) {
-        let code_len = u32::try_from(code_len).map_err(|_| {
-            ezra::diagnostic::Diagnostic::new("program code exceeds 24-bit address space")
-        })?;
-        let end = settings
-            .layout
-            .entry
-            .get()
-            .checked_add(code_len.saturating_sub(1))
-            .ok_or_else(|| {
-                ezra::diagnostic::Diagnostic::new("program code exceeds 24-bit address space")
-            })?;
-        return Ok(format!(
-            "section      start      end        size\n{:<12} {} 0x{:06X} 0x{:06X}\n",
-            ".text", settings.layout.entry, end, code_len
-        ));
-    }
-
-    build_cartridge_map(program, &settings.layout, code_len, symbols)
 }
 
 fn flat_assembly_map(
@@ -1371,18 +1398,6 @@ fn flat_assembly_map(
         }
     }
     Ok(out)
-}
-
-fn uses_flat_output_map(settings: &BuildSettings) -> bool {
-    settings.output_format == OutputFormat::CpmCom
-        || bare_target_cpu(&settings.target.triple.value).is_some()
-        || settings.target.triple.value.starts_with("zxspectrum-z80")
-        || settings.target.triple.value.starts_with("gameboy-")
-        || settings.target.triple.value.starts_with("arduboy-")
-        || settings.target.triple.value.starts_with("commodore64-6502")
-        || is_ti_ce_target(&settings.target.triple.value)
-        || is_ti_z80_target(&settings.target.triple.value)
-        || settings.target.triple.value.starts_with("ti99-4a-tms9900")
 }
 
 fn is_ti_ce_target(target: &str) -> bool {
@@ -1422,23 +1437,6 @@ fn build_assembly_image(
 ) -> Result<AssemblyBuildImage, String> {
     let preprocessed = preprocess_assembly_file(
         source_path,
-        AssemblyPreprocessOptions::for_compiled_features(
-            &settings.target.triple.value,
-            settings.assembler_cpu.as_str(),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    build_assembly_program_image(source_path, &preprocessed.program, settings)
-}
-
-fn build_generated_assembly_image(
-    source_path: &Path,
-    assembly: &str,
-    settings: &BuildSettings,
-) -> Result<AssemblyBuildImage, String> {
-    let preprocessed = preprocess_assembly_source(
-        &source_path.to_string_lossy(),
-        assembly,
         AssemblyPreprocessOptions::for_compiled_features(
             &settings.target.triple.value,
             settings.assembler_cpu.as_str(),
@@ -2879,23 +2877,6 @@ fn build_agon_mos_executable(entry: u32, code: &[u8]) -> Result<Vec<u8>, String>
     Ok(out)
 }
 
-fn apply_agon_mos_header(entry: u32, mut image: Vec<u8>) -> Result<Vec<u8>, String> {
-    if entry > Address24::MAX {
-        return Err(format!(
-            "Agon MOS entry address 0x{entry:X} is outside the 24-bit address space"
-        ));
-    }
-    image.resize(image.len().max(69), 0);
-    image[0..4].copy_from_slice(&[
-        0xC3,
-        (entry & 0xFF) as u8,
-        ((entry >> 8) & 0xFF) as u8,
-        ((entry >> 16) & 0xFF) as u8,
-    ]);
-    image[64..69].copy_from_slice(b"MOS\0\x01");
-    Ok(image)
-}
-
 #[cfg(test)]
 fn test_source(path: &str) -> Result<(), String> {
     test_source_with_command_options(&CommandOptions {
@@ -3720,16 +3701,6 @@ fn write_syntax_file(path: &Path, contents: &str) -> Result<(), String> {
     }
     fs::write(path, contents)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
-}
-
-fn bare_target_cpu(target: &str) -> Option<AssemblerCpu> {
-    let parts = target.split('-').collect::<Vec<_>>();
-    if !parts.contains(&"bare") {
-        return None;
-    }
-    parts
-        .into_iter()
-        .find_map(|part| AssemblerCpu::parse(part).ok())
 }
 
 fn assembly_options_from_layout(

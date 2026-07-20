@@ -1743,6 +1743,18 @@ fn eval_layout_expr(
         | Rule::additive
         | Rule::multiplicative => eval_layout_binary_expr(pair, symbols),
         Rule::unary => eval_layout_unary_expr(pair, symbols),
+        Rule::postfix_expr => {
+            let mut inner = pair.into_inner();
+            let primary = inner
+                .next()
+                .ok_or_else(|| Diagnostic::new("layout expression is empty"))?;
+            if inner.next().is_some() {
+                return Err(Diagnostic::new(
+                    "layout expressions do not support bank-qualified values",
+                ));
+            }
+            eval_layout_expr(primary, symbols)
+        }
         Rule::primary | Rule::literal => {
             let inner = pair
                 .into_inner()
