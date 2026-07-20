@@ -14,11 +14,11 @@ pub use crate::workspace::{Workspace, WorkspaceFile};
 use crate::{
     asm::{
         AssemblyItem, AssemblyOptions, AssemblyPreprocessOptions, AssemblyProgram,
-        emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
+        GameBoyBankingOptions, emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
         emit_mos6502_assembly_with_options, preprocess_assembly_source,
     },
     ast::{Declaration, Program},
-    cart::{build_cartridge_map, collect_gameboy_banked_embeds},
+    cart::{build_cartridge_map, collect_gameboy_banked_embeds, layout_section_bases},
     compile::{
         CompileOptions, CompileReport, SdkResolver, check_source_with_sdk_and_overrides,
         parse_and_resolve_imports_with_sdk_and_overrides,
@@ -133,6 +133,7 @@ pub struct BuildRequest {
     pub assembler_cpu: AssemblerCpu,
     pub layout: Layout,
     pub executable_name: Option<String>,
+    pub gameboy_banking: Option<GameBoyBankingOptions>,
     pub package_context: PackageContext,
 }
 
@@ -148,6 +149,7 @@ impl BuildRequest {
             target,
             layout,
             executable_name: None,
+            gameboy_banking: None,
             package_context: PackageContext::new(),
         })
     }
@@ -218,6 +220,24 @@ pub fn compile_workspace_to_assembly(
     root: &str,
     request: &CompileRequest,
 ) -> Result<AssemblyCompilation, Diagnostic> {
+    let build = BuildRequest::for_target(&request.target)?;
+    compile_workspace_to_assembly_with_request(workspace, root, request, &build)
+}
+
+/// Compile a virtual workspace using the layout and code-generation settings in
+/// a resolved build request.
+pub fn compile_workspace_to_assembly_with_request(
+    workspace: &Workspace<'_>,
+    root: &str,
+    request: &CompileRequest,
+    build: &BuildRequest,
+) -> Result<AssemblyCompilation, Diagnostic> {
+    if request.target != build.target.triple.value {
+        return Err(Diagnostic::new(format!(
+            "compile target `{}` does not match build target `{}`",
+            request.target, build.target.triple.value
+        )));
+    }
     let root = normalize_virtual_path(root);
     let source = workspace.file(&root).ok_or_else(|| {
         Diagnostic::new(format!("workspace does not contain root source `{root}`"))
@@ -226,9 +246,11 @@ pub fn compile_workspace_to_assembly(
         .map_err(|_| Diagnostic::new(format!("workspace source `{root}` is not UTF-8")))?;
     let mut request = request.clone();
     request.source_path = PathBuf::from(&root);
-    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
-    let layout = layout_for_target(&request.target, target.triple.cpu);
-    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
+    validate_layout_for_cpu(
+        &build.layout,
+        build.target.triple.cpu,
+        &build.target.triple.value,
+    )?;
     let sdk = request.sdk_resolver();
     let overrides = workspace.text_overrides()?;
     let root_program = parse_program(&request.source_path, source)?;
@@ -260,14 +282,17 @@ pub fn compile_workspace_to_assembly(
         declarations: program.declarations.len(),
         has_main,
     };
-    let options = assembly_options_for_target(
-        &request.target,
-        target.triple.cpu,
+    let options = assembly_options_for_layout_and_program(
+        &build.layout,
+        &program,
+        build.target.triple.cpu,
+        &build.target.triple.value,
         request.debug_comments,
         request.default_sdk_symbols,
-    );
+        build.gameboy_banking,
+    )?;
     let assembly = emit_source_assembly(&program, options)?;
-    validate_generated_assembly(&assembly, target.triple.cpu, &layout)?;
+    validate_generated_assembly(&assembly, build.target.triple.cpu, &build.layout)?;
     Ok(AssemblyCompilation {
         report,
         program,
@@ -310,7 +335,7 @@ pub fn build_workspace_with_request(
         build.target.triple.cpu,
         &build.target.triple.value,
     )?;
-    let compilation = compile_workspace_to_assembly(workspace, root, request)?;
+    let compilation = compile_workspace_to_assembly_with_request(workspace, root, request, build)?;
     let linked = link_generated_assembly(
         &request.source_path,
         &compilation.assembly,
@@ -329,6 +354,27 @@ pub fn build_workspace_with_request(
         output_format: linked.output_format,
         executable_extension: linked.executable_extension,
     })
+}
+
+/// Strictly validate generated assembly against the target assembler and the
+/// build request's `.text` region.
+pub fn validate_generated_assembly_for_request(
+    source_path: &Path,
+    assembly: &str,
+    build: &BuildRequest,
+) -> Result<(), Diagnostic> {
+    let assembled = assemble_subset_with_options_at(
+        build.assembler_cpu,
+        assembly,
+        build.layout.entry.get(),
+        &assembly_source_options(source_path, &build.layout),
+    )?;
+    validate_assembled_section_fit(
+        &build.layout,
+        ".text",
+        build.layout.entry.get(),
+        assembled.bytes.len(),
+    )
 }
 
 /// Link generated source assembly and package it using a caller-supplied build request.
@@ -507,6 +553,45 @@ pub fn link_assembly_program(
     )?;
     let image = link_assembly_program_image(source_path, program, build)?;
     package_linked(build, image.bytes, image.map, image.symbols)
+}
+
+/// Link a preprocessed standalone assembly program as flat code at an explicit
+/// base address, then package it with the resolved target settings.
+pub fn link_assembly_program_at(
+    source_path: &Path,
+    program: &AssemblyProgram,
+    base_addr: u32,
+    build: &BuildRequest,
+) -> Result<LinkedCompilation, Diagnostic> {
+    validate_layout_for_cpu(
+        &build.layout,
+        build.target.triple.cpu,
+        &build.target.triple.value,
+    )?;
+    let max_addr = if build.target.memory.address_width_bits >= 24 {
+        Address24::MAX
+    } else {
+        (1u32 << build.target.memory.address_width_bits) - 1
+    };
+    if base_addr > max_addr {
+        return Err(Diagnostic::new(format!(
+            "base address 0x{base_addr:X} is outside the {}-bit address space for target `{}`",
+            build.target.memory.address_width_bits, build.target.triple.value
+        )));
+    }
+    if build.output_format == OutputFormat::GameBoyGb && base_addr != 0x0150 {
+        return Err(Diagnostic::new(
+            "Game Boy assembly must use base address 0x0150",
+        ));
+    }
+    let assembled = assemble_program_with_options_at(
+        build.assembler_cpu,
+        program,
+        base_addr,
+        &assembly_source_options(source_path, &build.layout),
+    )?;
+    let map = flat_assembly_map(&build.layout, assembled.bytes.len(), &assembled.symbols)?;
+    package_linked(build, assembled.bytes, map, assembled.symbols)
 }
 
 fn package_linked(
@@ -780,6 +865,31 @@ fn assembly_image_bytes(
     Ok(image)
 }
 
+fn flat_assembly_map(
+    layout: &Layout,
+    code_len: usize,
+    symbols: &[AssemblySymbol],
+) -> Result<String, Diagnostic> {
+    let code_len = u32::try_from(code_len)
+        .map_err(|_| Diagnostic::new("assembled program exceeds the 24-bit address space"))?;
+    let end = layout
+        .entry
+        .get()
+        .checked_add(code_len.saturating_sub(1))
+        .ok_or_else(|| Diagnostic::new("assembled program exceeds the 24-bit address space"))?;
+    let mut out = format!(
+        "section      start      end        size\n{:<12} {} 0x{:06X} 0x{:06X}\n",
+        ".text", layout.entry, end, code_len
+    );
+    if !symbols.is_empty() {
+        out.push_str("\nsymbol       address\n");
+        for symbol in symbols {
+            out.push_str(&format!("{:<12} 0x{:06X}\n", symbol.name, symbol.addr));
+        }
+    }
+    Ok(out)
+}
+
 fn assembly_section_map(sections: &[PlacedAssemblySection], symbols: &[AssemblySymbol]) -> String {
     let mut out = String::from("section      start      end        size\n");
     for section in sections {
@@ -919,6 +1029,17 @@ pub fn assembly_options_for_target(
     default_sdk_symbols: bool,
 ) -> AssemblyOptions {
     let layout = layout_for_target(target, cpu);
+    assembly_options_for_layout(&layout, cpu, target, debug_comments, default_sdk_symbols)
+}
+
+/// Build target assembly options from an explicit layout.
+pub fn assembly_options_for_layout(
+    layout: &Layout,
+    cpu: CpuFamily,
+    target: &str,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+) -> AssemblyOptions {
     let symbol = |name: &str| {
         layout
             .symbols
@@ -929,7 +1050,6 @@ pub fn assembly_options_for_target(
     let defaults = AssemblyOptions::default();
     let is_16_bit = crate::target::memory_model_for_cpu(cpu)
         .is_some_and(|memory| memory.address_width_bits <= 16);
-
     AssemblyOptions {
         cpu,
         debug_comments,
@@ -966,6 +1086,23 @@ pub fn assembly_options_for_target(
             .unwrap_or(defaults.rodata_base),
         section_bases: Vec::new(),
     }
+}
+
+/// Build target assembly options from an explicit layout and resolved program.
+pub fn assembly_options_for_layout_and_program(
+    layout: &Layout,
+    program: &Program,
+    cpu: CpuFamily,
+    target: &str,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+    gameboy_banking: Option<GameBoyBankingOptions>,
+) -> Result<AssemblyOptions, Diagnostic> {
+    let mut options =
+        assembly_options_for_layout(layout, cpu, target, debug_comments, default_sdk_symbols);
+    options.gameboy_banking = gameboy_banking;
+    options.section_bases = layout_section_bases(program, layout)?;
+    Ok(options)
 }
 
 fn layout_for_target(target: &str, cpu: CpuFamily) -> Layout {
@@ -1454,6 +1591,37 @@ mod tests {
         assert!(linked.map.contains(".data"));
         assert_eq!(&linked.executable[64..69], b"MOS\0\x01");
         assert_eq!(linked.executable[10], 0xA5);
+    }
+
+    #[test]
+    fn links_flat_assembly_at_an_explicit_base_with_a_public_build_request() {
+        let build = BuildRequest::for_target("cpm-2.2-z80").unwrap();
+        let preprocessed = preprocess_assembly_source(
+            "memory.asm",
+            "start:\n    jp start\n",
+            AssemblyPreprocessOptions::for_compiled_features("cpm-2.2-z80", "z80"),
+        )
+        .unwrap();
+        let linked = link_assembly_program_at(
+            Path::new("memory.asm"),
+            &preprocessed.program,
+            0x0200,
+            &build,
+        )
+        .unwrap();
+
+        assert_eq!(&linked.machine_code[..3], &[0xC3, 0x00, 0x02]);
+        assert_eq!(linked.executable, linked.machine_code);
+        assert!(
+            linked.map.contains(".text        0x000100"),
+            "{}",
+            linked.map
+        );
+        assert!(
+            linked.map.contains("start        0x000200"),
+            "{}",
+            linked.map
+        );
     }
 
     #[test]

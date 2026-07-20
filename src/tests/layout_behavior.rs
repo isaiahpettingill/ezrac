@@ -659,7 +659,36 @@ fn build_can_use_custom_layout_file() {
     let map = std::fs::read_to_string(&outputs.map).unwrap();
     let asm = std::fs::read_to_string(&outputs.asm).unwrap();
     let bin = std::fs::read(&outputs.executable).unwrap();
+    let source = std::fs::read_to_string(&source_path).unwrap();
+    let layout =
+        ezra::layout::parse_layout(&std::fs::read_to_string(&layout_path).unwrap()).unwrap();
+    let resolved = resolve_build_settings(
+        &CommandOptions {
+            path: source_path.to_string_lossy().into_owned(),
+            debug_comments: false,
+            default_sdk_symbols: true,
+            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            target: None,
+        },
+        &source_path,
+    )
+    .unwrap();
+    let target = resolved.target.triple.value;
+    let files = [ezra::api::WorkspaceFile::text("game.ezra", &source)];
+    let compile_request = ezra::api::CompileRequest::new("game.ezra", &target);
+    let mut build_request = ezra::api::BuildRequest::for_target(&target).unwrap();
+    build_request.layout = layout;
+    let api = ezra::api::build_workspace_with_request(
+        &ezra::api::Workspace::new(&files),
+        "game.ezra",
+        &compile_request,
+        &build_request,
+    )
+    .unwrap();
 
+    assert_eq!(api.assembly, asm);
+    assert_eq!(api.map, map);
+    assert_eq!(api.executable, bin);
     assert!(
         map.starts_with("section      start      end        size\n"),
         "{map}"

@@ -589,7 +589,19 @@ fn spectrum_tap_preserves_a_custom_load_address() {
     )
     .unwrap();
     settings.layout.load = Address24::new(0x8001);
-    let tape = zx_spectrum_tap_bytes(&settings, None, &[0x00]).unwrap();
+    let build = shared_build_request(&settings, Path::new("game.ezra")).unwrap();
+    let tape = ezra::package::package_executable_with_context(
+        &ezra::package::PackageRequest {
+            target: settings.target.triple.value.clone(),
+            output_format: settings.output_format,
+            load_addr: settings.layout.load.get(),
+            entry_addr: settings.layout.entry.get(),
+            executable_name: build.executable_name.clone(),
+        },
+        &build.package_context,
+        &[0x00],
+    )
+    .unwrap();
     let blocks = zx_tap_blocks(&tape);
     assert_eq!(
         u16::from_le_bytes([blocks[2].1[13], blocks[2].1[14]]),

@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -7,13 +6,12 @@ use std::{
 
 use ezra::{
     asm::{
-        AssemblyItem, AssemblyOptions, AssemblyPreprocessOptions, AssemblyProgram,
-        GameBoyBankingMapper, GameBoyBankingOptions, emit_ez80_assembly_with_options,
-        emit_lr35902_assembly_with_options, emit_mos6502_assembly_with_options,
-        preprocess_assembly_file,
+        AssemblyOptions, AssemblyPreprocessOptions, GameBoyBankingMapper, GameBoyBankingOptions,
+        emit_ez80_assembly_with_options, emit_lr35902_assembly_with_options,
+        emit_mos6502_assembly_with_options, preprocess_assembly_file,
     },
     ast::Program,
-    cart::{CartridgeHeader, collect_gameboy_banked_embeds, layout_section_bases},
+    cart::CartridgeHeader,
     compile::{SdkResolver, load_program_with_sdk},
     diagnostic::SourceLocation,
     hir::HirProgram,
@@ -24,8 +22,7 @@ use ezra::{
         load_nearest_project_config, load_project_config,
     },
     target::{
-        Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_RAM_BASE,
-        EZRA_RODATA_BASE, EZRA_VRAM_BASE, OutputFormat, TargetProfile, parse_output_format,
+        Address24, AssemblerCpu, CpuFamily, OutputFormat, TargetProfile, parse_output_format,
         parse_target_triple, resolve_target_profile,
     },
     tbir::TbirProgram,
@@ -635,7 +632,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
             .join("target"),
         executable_name: None,
     };
-    let image = if let Some(base_addr) = options.base_addr {
+    if let Some(base_addr) = options.base_addr {
         let max_addr = max_address_for_target(&settings.target);
         if base_addr > max_addr {
             return Err(format!(
@@ -646,41 +643,44 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         if settings.output_format == OutputFormat::GameBoyGb && base_addr != 0x0150 {
             return Err("Game Boy assembly must use base address 0x0150".to_owned());
         }
-        let preprocessed = preprocess_assembly_file(
-            &source_path,
-            AssemblyPreprocessOptions::for_compiled_features(
-                &settings.target.triple.value,
-                settings.assembler_cpu.as_str(),
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-        let assembled = ezra::vm::assemble_program_with_options_at(
-            settings.assembler_cpu,
-            &preprocessed.program,
-            base_addr,
-            &assembly_source_options(&source_path, &settings.layout),
-        )
-        .map_err(|error| error.to_string())?;
-        AssemblyBuildImage {
-            map: flat_assembly_map(&settings.layout, assembled.bytes.len(), &assembled.symbols)?,
-            bytes: assembled.bytes,
-            symbols: assembled.symbols,
-        }
-    } else {
-        build_assembly_image(&source_path, &settings)?
-    };
+    }
+    let preprocessed = preprocess_assembly_file(
+        &source_path,
+        AssemblyPreprocessOptions::for_compiled_features(
+            &settings.target.triple.value,
+            settings.assembler_cpu.as_str(),
+        ),
+    )
+    .map_err(|error| error.to_string())?;
     let output_path = options
         .output
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| source_path.with_extension(executable_extension(&settings)));
-    let executable =
-        build_executable_bytes(&settings, &image.bytes, Some(&output_path), None, &[])?;
-    fs::write(&output_path, executable)
+    let mut build_request = shared_build_request(&settings, &source_path)?;
+    if settings.executable_name.is_none()
+        && let Some(name) = output_path.file_stem().and_then(|name| name.to_str())
+    {
+        build_request.executable_name = Some(name.to_owned());
+        build_request.package_context.executable_name = Some(name.to_owned());
+    }
+    let linked = if let Some(base_addr) = options.base_addr {
+        ezra::api::link_assembly_program_at(
+            &source_path,
+            &preprocessed.program,
+            base_addr,
+            &build_request,
+        )
+    } else {
+        build_request.package_context.image_kind = ezra::package::PackageImageKind::LoadImage;
+        ezra::api::link_assembly_program(&source_path, &preprocessed.program, &build_request)
+    }
+    .map_err(|error| error.to_string())?;
+    fs::write(&output_path, linked.executable)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     println!("wrote {}", output_path.display());
     if let Some(map_path) = options.map_path.as_ref().map(PathBuf::from) {
-        fs::write(&map_path, image.map)
+        fs::write(&map_path, linked.map)
             .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
         println!("wrote {}", map_path.display());
     }
@@ -785,6 +785,7 @@ fn shared_build_request(
         assembler_cpu: settings.assembler_cpu,
         layout: settings.layout.clone(),
         executable_name,
+        gameboy_banking: settings.gameboy_banking,
         package_context,
     })
 }
@@ -1258,7 +1259,7 @@ fn build_ezra_source(
     ensure_source_codegen_supported(settings)?;
     let assembly = emit_source_assembly(
         &program,
-        assembly_options_from_layout_and_program(
+        ezra::api::assembly_options_for_layout_and_program(
             &settings.layout,
             &program,
             settings.target.triple.cpu,
@@ -1266,7 +1267,8 @@ fn build_ezra_source(
             options.debug_comments,
             settings.default_sdk_symbols,
             settings.gameboy_banking,
-        )?,
+        )
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| {
         error
@@ -1375,352 +1377,6 @@ fn write_build_artifacts(
     })
 }
 
-fn flat_assembly_map(
-    layout: &Layout,
-    code_len: usize,
-    symbols: &[ezra::vm::AssemblySymbol],
-) -> Result<String, String> {
-    let code_len = u32::try_from(code_len)
-        .map_err(|_| "assembled program exceeds the 24-bit address space".to_owned())?;
-    let end = layout
-        .entry
-        .get()
-        .checked_add(code_len.saturating_sub(1))
-        .ok_or_else(|| "assembled program exceeds the 24-bit address space".to_owned())?;
-    let mut out = format!(
-        "section      start      end        size\n{:<12} {} 0x{:06X} 0x{:06X}\n",
-        ".text", layout.entry, end, code_len
-    );
-    if !symbols.is_empty() {
-        out.push_str("\nsymbol       address\n");
-        for symbol in symbols {
-            out.push_str(&format!("{:<12} 0x{:06X}\n", symbol.name, symbol.addr));
-        }
-    }
-    Ok(out)
-}
-
-fn is_ti_ce_target(target: &str) -> bool {
-    target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80")
-}
-
-fn is_ti_z80_target(target: &str) -> bool {
-    target.starts_with("ti83-z80")
-        || target.starts_with("ti83plus-z80")
-        || target.starts_with("ti84-z80")
-        || target.starts_with("ti84plus-z80")
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AssemblyBuildImage {
-    bytes: Vec<u8>,
-    map: String,
-    symbols: Vec<ezra::vm::AssemblySymbol>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AssemblySectionSource {
-    name: String,
-    program: AssemblyProgram,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PlacedAssemblySection {
-    name: String,
-    start: u32,
-    bytes: Vec<u8>,
-}
-
-fn build_assembly_image(
-    source_path: &Path,
-    settings: &BuildSettings,
-) -> Result<AssemblyBuildImage, String> {
-    let preprocessed = preprocess_assembly_file(
-        source_path,
-        AssemblyPreprocessOptions::for_compiled_features(
-            &settings.target.triple.value,
-            settings.assembler_cpu.as_str(),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    build_assembly_program_image(source_path, &preprocessed.program, settings)
-}
-
-fn build_assembly_program_image(
-    source_path: &Path,
-    program: &AssemblyProgram,
-    settings: &BuildSettings,
-) -> Result<AssemblyBuildImage, String> {
-    let sections = split_assembly_sections(program);
-    let section_bases = placed_assembly_section_bases(source_path, settings, &sections)?;
-    let mut options = assembly_source_options(source_path, &settings.layout);
-    options.section_bases = section_bases
-        .iter()
-        .map(|(name, start, _)| ezra::vm::AssemblySymbol {
-            name: name.clone(),
-            addr: *start,
-        })
-        .collect();
-    let assembled = ezra::vm::assemble_program_with_options_at(
-        settings.assembler_cpu,
-        program,
-        settings.layout.load.get(),
-        &options,
-    )
-    .map_err(|error| error.to_string())?;
-    let mut placed = Vec::new();
-    for (name, start, len) in section_bases {
-        validate_assembled_section_fit(&settings.layout, &name, start, len)?;
-        let offset = usize::try_from(start.saturating_sub(settings.layout.load.get()))
-            .map_err(|_| "assembly image exceeds host addressable memory".to_owned())?;
-        let end = offset
-            .checked_add(len)
-            .ok_or_else(|| "assembly image exceeds host addressable memory".to_owned())?;
-        if end > assembled.bytes.len() {
-            return Err(format!(
-                "assembled section `{name}` extends beyond the linked image"
-            ));
-        }
-        placed.push(PlacedAssemblySection {
-            name,
-            start,
-            bytes: assembled.bytes[offset..end].to_vec(),
-        });
-    }
-
-    let bytes = assembly_image_bytes(settings, &placed)?;
-    let map = assembly_section_map(&placed, &assembled.symbols);
-    Ok(AssemblyBuildImage {
-        bytes,
-        map,
-        symbols: assembled.symbols,
-    })
-}
-
-fn placed_assembly_section_bases(
-    source_path: &Path,
-    settings: &BuildSettings,
-    sections: &[AssemblySectionSource],
-) -> Result<Vec<(String, u32, usize)>, String> {
-    let mut lengths = BTreeMap::new();
-    for section in sections {
-        let len = ezra::vm::measure_assembly_program_with_options(
-            settings.assembler_cpu,
-            &section.program,
-            &ezra::vm::AssemblerSourceOptions {
-                source_path: Some(source_path.to_path_buf()),
-                ..ezra::vm::AssemblerSourceOptions::default()
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        lengths.insert(section.name.clone(), len);
-    }
-    for name in lengths.keys() {
-        if !settings
-            .layout
-            .sections
-            .iter()
-            .any(|section| &section.name == name)
-        {
-            return Err(format!(
-                "assembly section `{name}` is not defined by layout `{}`",
-                settings.layout.name
-            ));
-        }
-    }
-
-    let mut cursors = BTreeMap::<String, u32>::new();
-    let mut placed = Vec::new();
-    for section in &settings.layout.sections {
-        let Some(len) = lengths.get(&section.name).copied() else {
-            continue;
-        };
-        let region = settings
-            .layout
-            .regions
-            .iter()
-            .find(|region| region.name == section.region)
-            .ok_or_else(|| {
-                format!(
-                    "layout section `{}` targets unknown region `{}`",
-                    section.name, section.region
-                )
-            })?;
-        let cursor = cursors
-            .entry(region.name.clone())
-            .or_insert(region.start.get());
-        let start = if section.name == ".text" {
-            settings.layout.entry.get()
-        } else {
-            align_u32(*cursor, section.align)?
-        };
-        let len_u32 = u32::try_from(len)
-            .map_err(|_| format!("section `{}` exceeds 24-bit address space", section.name))?;
-        *cursor = start
-            .checked_add(len_u32)
-            .ok_or_else(|| format!("section `{}` exceeds 24-bit address space", section.name))?;
-        placed.push((section.name.clone(), start, len));
-    }
-    Ok(placed)
-}
-
-fn split_assembly_sections(program: &AssemblyProgram) -> Vec<AssemblySectionSource> {
-    let mut sections = BTreeMap::<String, AssemblyProgram>::new();
-    let mut current = ".text".to_owned();
-    sections.insert(current.clone(), AssemblyProgram { items: Vec::new() });
-    for item in &program.items {
-        if let AssemblyItem::Section(name) = &item.kind {
-            current = name.clone();
-            sections
-                .entry(current.clone())
-                .or_insert_with(|| AssemblyProgram { items: Vec::new() });
-        } else {
-            sections
-                .entry(current.clone())
-                .or_insert_with(|| AssemblyProgram { items: Vec::new() })
-                .items
-                .push(item.clone());
-        }
-    }
-    sections
-        .into_iter()
-        .map(|(name, program)| AssemblySectionSource { name, program })
-        .collect()
-}
-
-fn validate_assembled_section_fit(
-    layout: &Layout,
-    name: &str,
-    start: u32,
-    len: usize,
-) -> Result<(), String> {
-    if len == 0 {
-        return Ok(());
-    }
-    let section = layout
-        .sections
-        .iter()
-        .find(|section| section.name == name)
-        .ok_or_else(|| {
-            format!(
-                "assembly section `{name}` is not defined by layout `{}`",
-                layout.name
-            )
-        })?;
-    let region = layout
-        .regions
-        .iter()
-        .find(|region| region.name == section.region)
-        .ok_or_else(|| {
-            format!(
-                "layout section `{name}` targets unknown region `{}`",
-                section.region
-            )
-        })?;
-    let end = start
-        .checked_add(
-            u32::try_from(len)
-                .map_err(|_| format!("section `{name}` exceeds 24-bit address space"))?
-                - 1,
-        )
-        .ok_or_else(|| format!("section `{name}` exceeds 24-bit address space"))?;
-    if start < region.start.get() || end > region.end.get() {
-        return Err(format!(
-            "assembly section `{name}` range 0x{start:06X}..0x{end:06X} does not fit in region `{}`",
-            region.name
-        ));
-    }
-    Ok(())
-}
-
-fn assembly_image_bytes(
-    settings: &BuildSettings,
-    sections: &[PlacedAssemblySection],
-) -> Result<Vec<u8>, String> {
-    if settings.output_format == OutputFormat::CpmCom {
-        return Ok(sections
-            .iter()
-            .find(|section| section.name == ".text")
-            .map(|section| section.bytes.clone())
-            .unwrap_or_default());
-    }
-    let max_end = sections
-        .iter()
-        .filter(|section| !section.bytes.is_empty())
-        .map(|section| section.start + section.bytes.len() as u32)
-        .max()
-        .unwrap_or(settings.layout.load.get());
-    let len = usize::try_from(max_end.saturating_sub(settings.layout.load.get()))
-        .map_err(|_| "assembly image exceeds host addressable memory".to_owned())?;
-    let mut image = vec![0; len];
-    for section in sections {
-        let offset = section
-            .start
-            .checked_sub(settings.layout.load.get())
-            .ok_or_else(|| {
-                format!(
-                    "section `{}` starts before layout load address",
-                    section.name
-                )
-            })?;
-        let offset = usize::try_from(offset)
-            .map_err(|_| "assembly image exceeds host addressable memory".to_owned())?;
-        image[offset..offset + section.bytes.len()].copy_from_slice(&section.bytes);
-    }
-    Ok(image)
-}
-
-fn assembly_section_map(
-    sections: &[PlacedAssemblySection],
-    symbols: &[ezra::vm::AssemblySymbol],
-) -> String {
-    let mut out = String::from("section      start      end        size\n");
-    for section in sections {
-        let len = section.bytes.len() as u32;
-        let end = section.start + len.saturating_sub(1);
-        out.push_str(&format!(
-            "{:<12} 0x{:06X} 0x{:06X} 0x{:06X}\n",
-            section.name, section.start, end, len
-        ));
-    }
-    if !symbols.is_empty() {
-        out.push_str("\nsymbol       address\n");
-        for symbol in symbols {
-            out.push_str(&format!("{:<12} 0x{:06X}\n", symbol.name, symbol.addr));
-        }
-    }
-    out
-}
-
-fn align_u32(value: u32, align: u32) -> Result<u32, String> {
-    if align <= 1 {
-        return Ok(value);
-    }
-    let mask = align - 1;
-    value
-        .checked_add(mask)
-        .map(|value| value & !mask)
-        .ok_or_else(|| "aligned address exceeds 24-bit address space".to_owned())
-}
-
-fn assembly_source_options(
-    source_path: &Path,
-    layout: &Layout,
-) -> ezra::vm::AssemblerSourceOptions {
-    ezra::vm::AssemblerSourceOptions {
-        source_path: Some(source_path.to_path_buf()),
-        symbols: layout
-            .symbols
-            .iter()
-            .map(|symbol| ezra::vm::AssemblySymbol {
-                name: symbol.name.clone(),
-                addr: symbol.value.get(),
-            })
-            .collect(),
-        ..ezra::vm::AssemblerSourceOptions::default()
-    }
-}
-
 fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Result<PathBuf, String> {
     let source_stem = match settings.executable_name.as_deref() {
         Some(name) => name,
@@ -1733,1148 +1389,6 @@ fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Resul
         .output_root
         .join(&settings.target.triple.value)
         .join(source_stem))
-}
-
-fn build_executable_bytes(
-    settings: &BuildSettings,
-    code: &[u8],
-    output_path: Option<&Path>,
-    program: Option<&Program>,
-    symbols: &[ezra::vm::AssemblySymbol],
-) -> Result<Vec<u8>, String> {
-    if settings.output_format == OutputFormat::Arduboy {
-        return arduboy_package_bytes(settings, output_path, code);
-    }
-    if settings
-        .target
-        .triple
-        .value
-        .starts_with("agonlight-mos-ez80")
-        || matches!(
-            settings.output_format,
-            OutputFormat::RawBin
-                | OutputFormat::CpmCom
-                | OutputFormat::Ez180nGaem
-                | OutputFormat::IntelHex
-                | OutputFormat::ArduinoHex
-                | OutputFormat::Commodore64Prg
-                | OutputFormat::Commodore64Crt
-        )
-    {
-        let request = ezra::package::PackageRequest {
-            target: settings.target.triple.value.clone(),
-            output_format: settings.output_format,
-            load_addr: settings.layout.load.get(),
-            entry_addr: settings.layout.entry.get(),
-            executable_name: settings.executable_name.clone(),
-        };
-        return ezra::package::package_executable(&request, code)
-            .map_err(|error| error.to_string());
-    }
-    if matches!(
-        settings.output_format,
-        OutputFormat::IntelHex | OutputFormat::ArduinoHex
-    ) {
-        return Ok(intel_hex_bytes(settings.layout.load.get(), code));
-    }
-    if settings.output_format == OutputFormat::Ti8xp {
-        return ti8xp_bytes(settings, output_path, code);
-    }
-    if settings.output_format == OutputFormat::ZxSpectrumTap {
-        return zx_spectrum_tap_bytes(settings, output_path, code);
-    }
-    if settings.output_format == OutputFormat::GameBoyGb {
-        return game_boy_rom_bytes(settings, output_path, code, program, symbols);
-    }
-    if settings.output_format == OutputFormat::Commodore64Prg {
-        return commodore64_prg_bytes(settings, code);
-    }
-    if settings.output_format == OutputFormat::Commodore64Crt {
-        return commodore64_crt_bytes(settings, code);
-    }
-    if matches!(
-        settings.output_format,
-        OutputFormat::Ti8ek | OutputFormat::Ti8xk
-    ) {
-        return ti_app_bytes(settings, output_path, code);
-    }
-    if settings
-        .target
-        .triple
-        .value
-        .starts_with("agonlight-mos-ez80")
-    {
-        return build_agon_mos_executable(settings.layout.entry.get(), code);
-    }
-    Ok(code.to_vec())
-}
-
-fn arduboy_package_bytes(
-    settings: &BuildSettings,
-    output_path: Option<&Path>,
-    code: &[u8],
-) -> Result<Vec<u8>, String> {
-    if !settings.target.triple.value.starts_with("arduboy-") {
-        return Err(format!(
-            "target `{}` does not support Arduboy .arduboy output",
-            settings.target.triple.value
-        ));
-    }
-    let config = settings.arduboy.as_ref().ok_or_else(|| {
-        "`[arduboy]` metadata is required when `build.output = \"arduboy\"`".to_owned()
-    })?;
-    let output_path = output_path.ok_or_else(|| {
-        "Arduboy packaging requires an output path to determine the embedded HEX filename"
-            .to_owned()
-    })?;
-    let executable = output_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "Arduboy output path `{}` has no valid executable filename",
-                output_path.display()
-            )
-        })?;
-    let hex_filename = format!("{executable}.hex");
-    let hex = ezra::package::package_executable(
-        &ezra::package::PackageRequest {
-            target: settings.target.triple.value.clone(),
-            output_format: OutputFormat::ArduinoHex,
-            load_addr: settings.layout.load.get(),
-            entry_addr: settings.layout.entry.get(),
-            executable_name: settings.executable_name.clone(),
-        },
-        code,
-    )
-    .map_err(|error| error.to_string())?;
-    let info = arduboy_info_json(config, &hex_filename);
-    stored_zip_bytes(&[("info.json", info.as_bytes()), (&hex_filename, &hex)])
-}
-
-fn arduboy_info_json(config: &ArduboyConfig, hex_filename: &str) -> String {
-    let mut fields = vec![
-        ("schemaVersion", "2".to_owned()),
-        ("title", json_string(&config.title)),
-        ("author", json_string(&config.author)),
-        ("version", json_string(&config.version)),
-    ];
-    for (name, value) in [
-        ("description", config.description.as_deref()),
-        ("date", config.date.as_deref()),
-        ("genre", config.genre.as_deref()),
-        ("sourceUrl", config.source_url.as_deref()),
-    ] {
-        if let Some(value) = value {
-            fields.push((name, json_string(value)));
-        }
-    }
-    fields.push((
-        "binaries",
-        format!(
-            "[{{\"filename\":{},\"device\":\"Arduboy\"}}]",
-            json_string(hex_filename)
-        ),
-    ));
-    let mut info = String::from("{");
-    for (index, (name, value)) in fields.into_iter().enumerate() {
-        if index != 0 {
-            info.push(',');
-        }
-        info.push_str(&json_string(name));
-        info.push(':');
-        info.push_str(&value);
-    }
-    info.push('}');
-    info
-}
-
-fn json_string(value: &str) -> String {
-    let mut json = String::with_capacity(value.len() + 2);
-    json.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => json.push_str("\\\""),
-            '\\' => json.push_str("\\\\"),
-            '\n' => json.push_str("\\n"),
-            '\r' => json.push_str("\\r"),
-            '\t' => json.push_str("\\t"),
-            character if character <= '\u{1F}' => {
-                json.push_str(&format!("\\u{:04X}", character as u32));
-            }
-            character => json.push(character),
-        }
-    }
-    json.push('"');
-    json
-}
-
-fn stored_zip_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
-    const LOCAL_FILE_HEADER: u32 = 0x0403_4B50;
-    const CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4B50;
-    const END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4B50;
-    const VERSION_NEEDED: u16 = 20;
-    const VERSION_MADE_BY: u16 = 20;
-    const UTF8_FLAG: u16 = 1 << 11;
-    const STORED: u16 = 0;
-    const DOS_DATE_1980_01_01: u16 = 0x0021;
-
-    let entry_count = u16::try_from(entries.len())
-        .map_err(|_| "Arduboy ZIP contains too many entries".to_owned())?;
-    let mut zip = Vec::new();
-    let mut central_directory = Vec::new();
-    for (name, data) in entries {
-        let name = name.as_bytes();
-        let name_len = u16::try_from(name.len())
-            .map_err(|_| "Arduboy ZIP entry name is too long".to_owned())?;
-        let data_len =
-            u32::try_from(data.len()).map_err(|_| "Arduboy ZIP entry exceeds 4 GiB".to_owned())?;
-        let offset =
-            u32::try_from(zip.len()).map_err(|_| "Arduboy ZIP exceeds 4 GiB".to_owned())?;
-        let crc = zip_crc32(data);
-
-        push_zip_u32(&mut zip, LOCAL_FILE_HEADER);
-        push_zip_u16(&mut zip, VERSION_NEEDED);
-        push_zip_u16(&mut zip, UTF8_FLAG);
-        push_zip_u16(&mut zip, STORED);
-        push_zip_u16(&mut zip, 0);
-        push_zip_u16(&mut zip, DOS_DATE_1980_01_01);
-        push_zip_u32(&mut zip, crc);
-        push_zip_u32(&mut zip, data_len);
-        push_zip_u32(&mut zip, data_len);
-        push_zip_u16(&mut zip, name_len);
-        push_zip_u16(&mut zip, 0);
-        zip.extend_from_slice(name);
-        zip.extend_from_slice(data);
-
-        push_zip_u32(&mut central_directory, CENTRAL_DIRECTORY_HEADER);
-        push_zip_u16(&mut central_directory, VERSION_MADE_BY);
-        push_zip_u16(&mut central_directory, VERSION_NEEDED);
-        push_zip_u16(&mut central_directory, UTF8_FLAG);
-        push_zip_u16(&mut central_directory, STORED);
-        push_zip_u16(&mut central_directory, 0);
-        push_zip_u16(&mut central_directory, DOS_DATE_1980_01_01);
-        push_zip_u32(&mut central_directory, crc);
-        push_zip_u32(&mut central_directory, data_len);
-        push_zip_u32(&mut central_directory, data_len);
-        push_zip_u16(&mut central_directory, name_len);
-        push_zip_u16(&mut central_directory, 0);
-        push_zip_u16(&mut central_directory, 0);
-        push_zip_u16(&mut central_directory, 0);
-        push_zip_u16(&mut central_directory, 0);
-        push_zip_u32(&mut central_directory, 0);
-        push_zip_u32(&mut central_directory, offset);
-        central_directory.extend_from_slice(name);
-    }
-
-    let central_offset =
-        u32::try_from(zip.len()).map_err(|_| "Arduboy ZIP exceeds 4 GiB".to_owned())?;
-    let central_len = u32::try_from(central_directory.len())
-        .map_err(|_| "Arduboy ZIP central directory exceeds 4 GiB".to_owned())?;
-    zip.extend_from_slice(&central_directory);
-    push_zip_u32(&mut zip, END_OF_CENTRAL_DIRECTORY);
-    push_zip_u16(&mut zip, 0);
-    push_zip_u16(&mut zip, 0);
-    push_zip_u16(&mut zip, entry_count);
-    push_zip_u16(&mut zip, entry_count);
-    push_zip_u32(&mut zip, central_len);
-    push_zip_u32(&mut zip, central_offset);
-    push_zip_u16(&mut zip, 0);
-    Ok(zip)
-}
-
-fn push_zip_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_zip_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn zip_crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xEDB8_8320 & (0u32.wrapping_sub(crc & 1)));
-        }
-    }
-    !crc
-}
-
-fn commodore64_prg_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
-    if !settings.target.triple.value.starts_with("commodore64-6502") {
-        return Err(format!(
-            "target `{}` does not support Commodore 64 .prg output",
-            settings.target.triple.value
-        ));
-    }
-    if settings.layout.load.get() != 0x080D || settings.layout.entry.get() != 0x080D {
-        return Err("Commodore 64 PRG layouts must load and enter at 0x080D".to_owned());
-    }
-
-    // BASIC starts at $0801. This tokenized `10 SYS2061` line invokes the
-    // machine-code entry point at $080D when a PRG is autostarted by VICE.
-    const BASIC_AUTOSTART: [u8; 12] = [
-        0x0B, 0x08, // next BASIC line at $080B
-        0x0A, 0x00, // line 10
-        0x9E, // SYS token
-        b'2', b'0', b'6', b'1', 0x00, // SYS2061
-        0x00, 0x00, // end of BASIC program
-    ];
-
-    let mut output = Vec::with_capacity(code.len() + 2 + BASIC_AUTOSTART.len());
-    output.extend_from_slice(&0x0801u16.to_le_bytes());
-    output.extend_from_slice(&BASIC_AUTOSTART);
-    output.extend_from_slice(code);
-    Ok(output)
-}
-
-fn commodore64_crt_bytes(settings: &BuildSettings, code: &[u8]) -> Result<Vec<u8>, String> {
-    if !settings.target.triple.value.starts_with("commodore64-6502") {
-        return Err(format!(
-            "target `{}` does not support Commodore 64 .crt output",
-            settings.target.triple.value
-        ));
-    }
-    if settings.layout.load.get() != 0x8009 || settings.layout.entry.get() != 0x8009 {
-        return Err("standard Commodore 64 CRT layouts must load and enter at 0x8009".to_owned());
-    }
-    const ROM_SIZE: usize = 0x2000;
-    const CARTRIDGE_HEADER_SIZE: usize = 0x40;
-    const CHIP_HEADER_SIZE: usize = 0x10;
-    const CARTRIDGE_STARTUP_SIZE: usize = 9;
-    if code.len() > ROM_SIZE - CARTRIDGE_STARTUP_SIZE {
-        return Err(format!(
-            "program code is {} bytes, but the standard 8 KiB Commodore 64 CRT supports at most {} bytes; use a smaller program or a bank-switched cartridge format",
-            code.len(),
-            ROM_SIZE - CARTRIDGE_STARTUP_SIZE
-        ));
-    }
-
-    let mut output = Vec::with_capacity(CARTRIDGE_HEADER_SIZE + CHIP_HEADER_SIZE + ROM_SIZE);
-    output.extend_from_slice(b"C64 CARTRIDGE   ");
-    output.extend_from_slice(&0x40u32.to_be_bytes());
-    output.extend_from_slice(&0x0100u16.to_be_bytes());
-    output.extend_from_slice(&0u16.to_be_bytes()); // Standard cartridge hardware type.
-    output.push(0); // EXROM asserted: 8 KiB cartridge mode.
-    output.push(1); // GAME inactive.
-    output.extend_from_slice(&[0; 6]);
-    let mut name = [0u8; 32];
-    name[..10].copy_from_slice(b"EZRA C64  ");
-    output.extend_from_slice(&name);
-
-    output.extend_from_slice(b"CHIP");
-    output.extend_from_slice(&(u32::try_from(CHIP_HEADER_SIZE + ROM_SIZE).unwrap()).to_be_bytes());
-    output.extend_from_slice(&0u16.to_be_bytes()); // ROM chip.
-    output.extend_from_slice(&0u16.to_be_bytes()); // Bank 0.
-    output.extend_from_slice(&0x8000u16.to_be_bytes());
-    output.extend_from_slice(&(ROM_SIZE as u16).to_be_bytes());
-
-    output.extend_from_slice(&0x8009u16.to_le_bytes()); // Cold-start vector.
-    output.extend_from_slice(&0x8009u16.to_le_bytes()); // Warm-start vector.
-    output.extend_from_slice(b"CBM80");
-    output.extend_from_slice(code);
-    output.resize(CARTRIDGE_HEADER_SIZE + CHIP_HEADER_SIZE + ROM_SIZE, 0xFF);
-    Ok(output)
-}
-
-fn game_boy_banked_code_payloads(
-    code: &[u8],
-    symbols: &[ezra::vm::AssemblySymbol],
-    base: u32,
-) -> Result<BTreeMap<usize, Vec<u8>>, String> {
-    let mut starts = BTreeMap::new();
-    let mut ends = BTreeMap::new();
-    for symbol in symbols {
-        let Some(rest) = symbol.name.strip_prefix("__ezra_bank_") else {
-            continue;
-        };
-        let Some((bank, suffix)) = rest.split_once('_') else {
-            continue;
-        };
-        let bank = bank
-            .parse::<usize>()
-            .map_err(|_| format!("invalid generated Game Boy bank marker `{}`", symbol.name))?;
-        match suffix {
-            "start" => {
-                starts.insert(bank, symbol.addr);
-            }
-            "end" => {
-                ends.insert(bank, symbol.addr);
-            }
-            _ => {}
-        }
-    }
-    let mut payloads = BTreeMap::new();
-    for (bank, start) in starts {
-        let end = ends
-            .remove(&bank)
-            .ok_or_else(|| format!("generated Game Boy bank {bank} has no end marker"))?;
-        let start = usize::try_from(
-            start
-                .checked_sub(base)
-                .ok_or_else(|| format!("generated Game Boy bank {bank} precedes resident code"))?,
-        )
-        .map_err(|_| "generated Game Boy bank offset exceeds host range".to_owned())?;
-        let end = usize::try_from(
-            end.checked_sub(base)
-                .ok_or_else(|| format!("generated Game Boy bank {bank} precedes resident code"))?,
-        )
-        .map_err(|_| "generated Game Boy bank offset exceeds host range".to_owned())?;
-        if start > end || end > code.len() {
-            return Err(format!(
-                "generated Game Boy bank {bank} is outside assembled code"
-            ));
-        }
-        payloads.insert(bank, code[start..end].to_vec());
-    }
-    if !ends.is_empty() {
-        return Err("generated Game Boy bank end marker has no start marker".to_owned());
-    }
-    Ok(payloads)
-}
-
-fn game_boy_rom_bytes(
-    settings: &BuildSettings,
-    output_path: Option<&Path>,
-    code: &[u8],
-    program: Option<&Program>,
-    symbols: &[ezra::vm::AssemblySymbol],
-) -> Result<Vec<u8>, String> {
-    if !settings.target.triple.value.starts_with("gameboy-") {
-        return Err(format!(
-            "target `{}` does not support Game Boy .gb output",
-            settings.target.triple.value
-        ));
-    }
-    if settings.layout.load.get() != 0x0150 || settings.layout.entry.get() != 0x0150 {
-        return Err("Game Boy ROM layouts must load and enter at 0x0150".to_owned());
-    }
-
-    const BANK_SIZE: usize = 0x4000;
-    const INITIAL_ROM_SIZE: usize = 0x8000;
-    const CODE_OFFSET: usize = 0x0150;
-    let config = settings.gameboy.clone().unwrap_or_default();
-    let mut generated_payloads =
-        game_boy_banked_code_payloads(code, symbols, settings.layout.entry.get())?;
-    let banked_code_start = symbols
-        .iter()
-        .filter(|symbol| symbol.name.starts_with("__ezra_bank_") && symbol.name.ends_with("_start"))
-        .map(|symbol| symbol.addr)
-        .min();
-    let code = banked_code_start
-        .map(|address| {
-            &code[..usize::try_from(address.saturating_sub(settings.layout.entry.get()))
-                .unwrap_or(code.len())]
-        })
-        .unwrap_or(code);
-    if generated_payloads.is_empty() {
-        if let Some(program) = program {
-            for embed in
-                collect_gameboy_banked_embeds(program).map_err(|error| error.to_string())?
-            {
-                let bank = usize::try_from(embed.bank)
-                    .map_err(|_| format!("Game Boy bank {} is outside host range", embed.bank))?;
-                let payload = generated_payloads.entry(bank).or_default();
-                if payload
-                    .len()
-                    .checked_add(embed.bytes.len())
-                    .map_or(true, |len| len > BANK_SIZE)
-                {
-                    return Err(format!(
-                        "banked embeds in Game Boy ROM bank {bank} exceed its 16 KiB window"
-                    ));
-                }
-                payload.extend_from_slice(&embed.bytes);
-            }
-        }
-    }
-    let bank_payloads = config
-        .bank_files
-        .iter()
-        .map(|path| {
-            fs::read(path).map_err(|error| {
-                format!(
-                    "failed to read Game Boy ROM bank file `{}`: {error}",
-                    path.display()
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let payload_banks = game_boy_payload_banks(config.mapper, bank_payloads.len())?;
-    for bank in generated_payloads.keys() {
-        validate_game_boy_generated_bank(config.mapper, *bank)?;
-        if payload_banks.contains(bank) {
-            return Err(format!(
-                "Game Boy ROM bank {bank} is used by both source-banked content and `gameboy.bank_files`"
-            ));
-        }
-    }
-    let required_banks = payload_banks
-        .iter()
-        .copied()
-        .chain(generated_payloads.keys().copied())
-        .max()
-        .map(|bank| bank + 1)
-        .unwrap_or(2);
-    let rom_banks = game_boy_rom_banks(&config, required_banks)?;
-    let rom_size = rom_banks
-        .checked_mul(BANK_SIZE)
-        .ok_or_else(|| "Game Boy ROM size overflow".to_owned())?;
-    let fixed_code_capacity = if settings.gameboy_banking.is_some() {
-        BANK_SIZE - CODE_OFFSET
-    } else {
-        INITIAL_ROM_SIZE - CODE_OFFSET
-    };
-    if code.len() > fixed_code_capacity {
-        return Err(format!(
-            "Game Boy fixed-bank code is {} bytes, but bank 0 supports at most {} bytes from 0x0150 when explicit banking is enabled",
-            code.len(),
-            fixed_code_capacity
-        ));
-    }
-    for (index, payload) in bank_payloads.iter().enumerate() {
-        if payload.len() > BANK_SIZE {
-            return Err(format!(
-                "Game Boy bank file `{}` is {} bytes, but switchable ROM bank {} holds at most {} bytes",
-                config.bank_files[index].display(),
-                payload.len(),
-                payload_banks[index],
-                BANK_SIZE
-            ));
-        }
-    }
-
-    let (cartridge_type, ram_size_code) = game_boy_cartridge_header(&config)?;
-    let mut rom = vec![0xFF; rom_size];
-    rom[0x0100..0x0104].copy_from_slice(&[0xC3, 0x50, 0x01, 0x00]);
-    rom[0x0104..0x0134].copy_from_slice(&[
-        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00,
-        0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD,
-        0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB,
-        0xB9, 0x33, 0x3E,
-    ]);
-    let title = settings
-        .executable_name
-        .as_deref()
-        .or_else(|| {
-            output_path
-                .and_then(|path| path.file_stem())
-                .and_then(|name| name.to_str())
-        })
-        .unwrap_or("EZRA");
-    rom[0x0134..0x0144].fill(0);
-    for (slot, ch) in rom[0x0134..0x0143].iter_mut().zip(title.bytes()) {
-        *slot = if ch.is_ascii_alphanumeric() || ch == b' ' {
-            ch
-        } else {
-            b'_'
-        };
-    }
-    rom[0x0143] = if settings.target.triple.value.starts_with("gameboy-color-") {
-        0xC0
-    } else {
-        0x00
-    };
-    rom[0x0144..0x0146].copy_from_slice(b"00");
-    rom[0x0146] = 0x00;
-    rom[0x0147] = cartridge_type;
-    rom[0x0148] = game_boy_rom_size_code(rom_banks)?;
-    rom[0x0149] = ram_size_code;
-    rom[0x014A] = 0x01;
-    rom[0x014B] = 0x33;
-    rom[0x014C] = 0x00;
-    rom[CODE_OFFSET..CODE_OFFSET + code.len()].copy_from_slice(code);
-    for (index, payload) in bank_payloads.iter().enumerate() {
-        let offset = payload_banks[index] * BANK_SIZE;
-        rom[offset..offset + payload.len()].copy_from_slice(payload);
-    }
-    for (bank, payload) in generated_payloads {
-        let offset = bank * BANK_SIZE;
-        rom[offset..offset + payload.len()].copy_from_slice(&payload);
-    }
-    rom[0x014D] = rom[0x0134..=0x014C].iter().fold(0u8, |checksum, byte| {
-        checksum.wrapping_sub(*byte).wrapping_sub(1)
-    });
-    let checksum = rom
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !matches!(*index, 0x014E | 0x014F))
-        .fold(0u16, |sum, (_, byte)| sum.wrapping_add(u16::from(*byte)));
-    rom[0x014E..0x0150].copy_from_slice(&checksum.to_be_bytes());
-    Ok(rom)
-}
-
-fn validate_game_boy_generated_bank(mapper: GameBoyMapper, bank: usize) -> Result<(), String> {
-    let maximum = match mapper {
-        GameBoyMapper::RomOnly => 0,
-        GameBoyMapper::Mbc1 => 127,
-        GameBoyMapper::Mbc5 => 511,
-    };
-    if bank == 0 || bank > maximum || (mapper == GameBoyMapper::Mbc1 && bank & 0x1F == 0) {
-        return Err(format!(
-            "Game Boy mapper `{}` cannot select explicit ROM bank {bank}",
-            game_boy_mapper_name(mapper)
-        ));
-    }
-    Ok(())
-}
-
-fn game_boy_payload_banks(
-    mapper: GameBoyMapper,
-    payload_count: usize,
-) -> Result<Vec<usize>, String> {
-    if payload_count == 0 {
-        return Ok(Vec::new());
-    }
-    let mut banks = Vec::with_capacity(payload_count);
-    let maximum = match mapper {
-        GameBoyMapper::RomOnly => 1,
-        GameBoyMapper::Mbc1 => 127,
-        GameBoyMapper::Mbc5 => 511,
-    };
-    for bank in 2..=maximum {
-        if mapper == GameBoyMapper::Mbc1 && bank & 0x1F == 0 {
-            continue;
-        }
-        banks.push(bank);
-        if banks.len() == payload_count {
-            return Ok(banks);
-        }
-    }
-    if payload_count == 0 {
-        Ok(banks)
-    } else {
-        Err(format!(
-            "Game Boy mapper `{}` supports at most {} configured switchable bank file(s)",
-            game_boy_mapper_name(mapper),
-            banks.len()
-        ))
-    }
-}
-
-fn game_boy_rom_banks(config: &GameBoyConfig, required_banks: usize) -> Result<usize, String> {
-    let mapper_max_banks = match config.mapper {
-        GameBoyMapper::RomOnly => 2,
-        GameBoyMapper::Mbc1 => 128,
-        GameBoyMapper::Mbc5 => 512,
-    };
-    let rom_banks = config
-        .rom_banks
-        .map(usize::from)
-        .unwrap_or_else(|| required_banks.next_power_of_two().max(2));
-    if !rom_banks.is_power_of_two() || !(2..=512).contains(&rom_banks) {
-        return Err(
-            "Game Boy `gameboy.rom_banks` must be a power of two from 2 through 512".to_owned(),
-        );
-    }
-    if rom_banks < required_banks {
-        return Err(format!(
-            "Game Boy `gameboy.rom_banks` is {rom_banks}, but {} banks are required for the fixed image and {} bank file(s)",
-            required_banks,
-            required_banks - 2
-        ));
-    }
-    if rom_banks > mapper_max_banks {
-        return Err(format!(
-            "Game Boy mapper `{}` supports at most {mapper_max_banks} ROM banks, not {rom_banks}",
-            game_boy_mapper_name(config.mapper)
-        ));
-    }
-    if config.mapper == GameBoyMapper::RomOnly && (required_banks != 2 || rom_banks != 2) {
-        return Err("Game Boy ROM-only cartridges cannot use `gameboy.bank_files` or more than two ROM banks".to_owned());
-    }
-    Ok(rom_banks)
-}
-
-fn game_boy_mapper_name(mapper: GameBoyMapper) -> &'static str {
-    match mapper {
-        GameBoyMapper::RomOnly => "rom-only",
-        GameBoyMapper::Mbc1 => "mbc1",
-        GameBoyMapper::Mbc5 => "mbc5",
-    }
-}
-
-fn game_boy_rom_size_code(rom_banks: usize) -> Result<u8, String> {
-    match rom_banks {
-        2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 => Ok(rom_banks.trailing_zeros() as u8 - 1),
-        _ => Err(format!("unsupported Game Boy ROM bank count {rom_banks}")),
-    }
-}
-
-fn game_boy_cartridge_header(config: &GameBoyConfig) -> Result<(u8, u8), String> {
-    let ram_size_code = match config.ram_banks {
-        0 => 0x00,
-        1 => 0x02,
-        4 => 0x03,
-        8 => 0x05,
-        16 => 0x04,
-        _ => return Err("Game Boy RAM bank count must be one of 0, 1, 4, 8, or 16".to_owned()),
-    };
-    if config.battery && config.ram_banks == 0 {
-        return Err(
-            "Game Boy battery-backed cartridges require at least one external RAM bank".to_owned(),
-        );
-    }
-    if config.mapper == GameBoyMapper::Mbc1 && config.ram_banks > 4 {
-        return Err("Game Boy MBC1 cartridges support at most four external RAM banks".to_owned());
-    }
-    if config.mapper == GameBoyMapper::Mbc5 && config.rumble && config.ram_banks > 8 {
-        return Err(
-            "Game Boy MBC5 rumble cartridges support at most eight external RAM banks".to_owned(),
-        );
-    }
-    let cartridge_type = match config.mapper {
-        GameBoyMapper::RomOnly if config.ram_banks == 0 && !config.battery && !config.rumble => {
-            0x00
-        }
-        GameBoyMapper::RomOnly => {
-            return Err(
-                "Game Boy ROM-only cartridges cannot declare RAM, battery, or rumble".to_owned(),
-            );
-        }
-        GameBoyMapper::Mbc1 if config.rumble => {
-            return Err("Game Boy MBC1 cartridges do not support rumble".to_owned());
-        }
-        GameBoyMapper::Mbc1 if config.ram_banks == 0 => 0x01,
-        GameBoyMapper::Mbc1 if config.battery => 0x03,
-        GameBoyMapper::Mbc1 => 0x02,
-        GameBoyMapper::Mbc5 if config.rumble && config.ram_banks == 0 => 0x1C,
-        GameBoyMapper::Mbc5 if config.rumble && config.battery => 0x1E,
-        GameBoyMapper::Mbc5 if config.rumble => 0x1D,
-        GameBoyMapper::Mbc5 if config.ram_banks == 0 => 0x19,
-        GameBoyMapper::Mbc5 if config.battery => 0x1B,
-        GameBoyMapper::Mbc5 => 0x1A,
-    };
-    Ok((cartridge_type, ram_size_code))
-}
-
-#[cfg(test)]
-mod game_boy_banking_tests {
-    use super::*;
-
-    #[test]
-    fn mbc1_payload_banks_skip_unselectable_multiples_of_32() {
-        let banks = game_boy_payload_banks(GameBoyMapper::Mbc1, 31).unwrap();
-        assert_eq!(banks[..30], (2..=31).collect::<Vec<_>>());
-        assert_eq!(banks[30], 33);
-    }
-
-    #[test]
-    fn mbc5_rumble_header_describes_rom_ram_and_battery() {
-        let config = GameBoyConfig {
-            mapper: GameBoyMapper::Mbc5,
-            rom_banks: Some(8),
-            ram_banks: 4,
-            battery: true,
-            rumble: true,
-            bank_files: Vec::new(),
-        };
-        assert_eq!(game_boy_cartridge_header(&config), Ok((0x1E, 0x03)));
-        assert_eq!(game_boy_rom_size_code(8), Ok(0x02));
-    }
-}
-
-fn ti8xp_bytes(
-    settings: &BuildSettings,
-    output_path: Option<&Path>,
-    code: &[u8],
-) -> Result<Vec<u8>, String> {
-    let name = ti8xp_variable_name(settings, output_path)?;
-    let mut program = ti8xp_payload_prefix(settings)?.to_vec();
-    program.extend_from_slice(code);
-    let program_len = u16::try_from(program.len())
-        .map_err(|_| "TI .8xp program exceeds 65535 bytes".to_owned())?;
-
-    // TI program variables contain a length-prefixed token stream. The outer
-    // variable data length includes this inner length word.
-    let payload_len = program_len
-        .checked_add(2)
-        .ok_or_else(|| "TI .8xp payload exceeds 65535 bytes".to_owned())?;
-
-    let mut data = Vec::new();
-    push16_le(&mut data, 13); // variable-entry header length
-    push16_le(&mut data, payload_len);
-    data.push(0x06); // protected program
-    data.extend_from_slice(&name);
-    data.push(0x00); // version
-    data.push(0x00); // RAM/unarchived flag
-    push16_le(&mut data, payload_len);
-    push16_le(&mut data, program_len);
-    data.extend_from_slice(&program);
-
-    let data_len = u16::try_from(data.len())
-        .map_err(|_| "TI .8xp data section exceeds 65535 bytes".to_owned())?;
-    let checksum = data
-        .iter()
-        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
-
-    let mut out = Vec::with_capacity(11 + 42 + 2 + data.len() + 2);
-    out.extend_from_slice(b"**TI83F*\x1A\x0A\x00");
-    let mut comment = [0u8; 42];
-    let text = b"Generated by ezrac";
-    comment[..text.len()].copy_from_slice(text);
-    out.extend_from_slice(&comment);
-    push16_le(&mut out, data_len);
-    out.extend_from_slice(&data);
-    push16_le(&mut out, checksum);
-    Ok(out)
-}
-
-fn zx_spectrum_tap_bytes(
-    settings: &BuildSettings,
-    output_path: Option<&Path>,
-    code: &[u8],
-) -> Result<Vec<u8>, String> {
-    if !settings.target.triple.value.starts_with("zxspectrum-z80") {
-        return Err(format!(
-            "target `{}` does not support ZX Spectrum .tap output",
-            settings.target.triple.value
-        ));
-    }
-    if settings.target.triple.value == "zxspectrum-z80-128k" {
-        return zx_spectrum_128k_tap_bytes(settings, output_path, code);
-    }
-    let load = u16::try_from(settings.layout.load.get())
-        .map_err(|_| "ZX Spectrum load address exceeds 16-bit address space".to_owned())?;
-    let entry = u16::try_from(settings.layout.entry.get())
-        .map_err(|_| "ZX Spectrum entry address exceeds 16-bit address space".to_owned())?;
-    let ram_top = load
-        .checked_sub(1)
-        .ok_or_else(|| "ZX Spectrum CODE load address must be above zero".to_owned())?;
-    let length = u16::try_from(code.len())
-        .map_err(|_| "ZX Spectrum CODE block exceeds 65535 bytes".to_owned())?;
-    let name = zx_tap_name(settings, output_path);
-
-    let mut loader = Vec::new();
-    let mut clear = vec![0xfd, b' ']; // CLEAR
-    push_zx_basic_integer(&mut clear, ram_top);
-    push_zx_basic_line(&mut loader, 10, &clear)?;
-    push_zx_basic_line(&mut loader, 20, &[0xef, b' ', b'"', b'"', b' ', 0xaf])?; // LOAD "" CODE
-    let mut run = vec![0xf9, b' ', 0xc0, b' ']; // RANDOMIZE USR
-    push_zx_basic_integer(&mut run, entry);
-    push_zx_basic_line(&mut loader, 30, &run)?;
-    let loader_length = u16::try_from(loader.len())
-        .map_err(|_| "ZX Spectrum BASIC loader exceeds 65535 bytes".to_owned())?;
-
-    let mut loader_header = Vec::with_capacity(17);
-    loader_header.push(0); // BASIC program header
-    loader_header.extend_from_slice(&name);
-    loader_header.extend_from_slice(&loader_length.to_le_bytes());
-    loader_header.extend_from_slice(&10u16.to_le_bytes()); // auto-start at line 10
-    loader_header.extend_from_slice(&loader_length.to_le_bytes());
-
-    let mut code_header = Vec::with_capacity(17);
-    code_header.push(3); // CODE header
-    code_header.extend_from_slice(&name);
-    code_header.extend_from_slice(&length.to_le_bytes());
-    code_header.extend_from_slice(&load.to_le_bytes());
-    code_header.extend_from_slice(&0u16.to_le_bytes());
-
-    let mut out =
-        Vec::with_capacity(8 + loader_header.len() + loader.len() + code_header.len() + code.len());
-    push_zx_tap_block(&mut out, 0x00, &loader_header)?;
-    push_zx_tap_block(&mut out, 0xff, &loader)?;
-    push_zx_tap_block(&mut out, 0x00, &code_header)?;
-    push_zx_tap_block(&mut out, 0xff, code)?;
-    Ok(out)
-}
-
-const ZX_128K_BANK_WINDOW: u16 = 0xC000;
-const ZX_128K_BANK_SIZE: usize = 0x4000;
-const ZX_128K_PAGE_PORT: u16 = 0x7FFD;
-
-fn zx_spectrum_128k_tap_bytes(
-    settings: &BuildSettings,
-    output_path: Option<&Path>,
-    code: &[u8],
-) -> Result<Vec<u8>, String> {
-    let load = u16::try_from(settings.layout.load.get())
-        .map_err(|_| "ZX Spectrum load address exceeds 16-bit address space".to_owned())?;
-    let entry = u16::try_from(settings.layout.entry.get())
-        .map_err(|_| "ZX Spectrum entry address exceeds 16-bit address space".to_owned())?;
-    if load != 0x8000 || entry < load || entry > 0xBFFF {
-        return Err(
-            "the `zxspectrum-z80-128k` target requires resident code and its entry point in 0x8000..0xBFFF"
-                .to_owned(),
-        );
-    }
-    let code_length = u16::try_from(code.len())
-        .map_err(|_| "ZX Spectrum resident CODE block exceeds 65535 bytes".to_owned())?;
-    let mut banks = settings.zxspectrum.clone().unwrap_or_default().banks;
-    banks.sort_by_key(|bank| bank.page);
-    let bank_payloads = banks
-        .iter()
-        .map(|bank| {
-            let bytes = fs::read(&bank.file).map_err(|error| {
-                format!(
-                    "failed to read ZX Spectrum RAM page {} payload `{}`: {error}",
-                    bank.page,
-                    bank.file.display()
-                )
-            })?;
-            if bytes.len() > ZX_128K_BANK_SIZE {
-                return Err(format!(
-                    "ZX Spectrum RAM page {} payload `{}` is {} bytes, but a pageable RAM bank holds at most {} bytes",
-                    bank.page,
-                    bank.file.display(),
-                    bytes.len(),
-                    ZX_128K_BANK_SIZE
-                ));
-            }
-            Ok(bytes)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    let mut loader = Vec::new();
-    let mut clear = vec![0xfd, b' ']; // CLEAR
-    push_zx_basic_integer(&mut clear, 0x5FFF);
-    push_zx_basic_line(&mut loader, 10, &clear)?;
-    push_zx_basic_line(&mut loader, 20, &[0xef, b' ', b'"', b'"', b' ', 0xaf])?; // LOAD "" CODE
-    let mut line = 30u16;
-    for bank in &banks {
-        let mut page = vec![0xdf, b' ']; // OUT
-        push_zx_basic_integer(&mut page, ZX_128K_PAGE_PORT);
-        page.extend_from_slice(b", ");
-        push_zx_basic_integer(&mut page, u16::from(bank.page));
-        push_zx_basic_line(&mut loader, line, &page)?;
-        line = line
-            .checked_add(10)
-            .ok_or_else(|| "ZX Spectrum BASIC loader line number overflow".to_owned())?;
-        push_zx_basic_line(&mut loader, line, &[0xef, b' ', b'"', b'"', b' ', 0xaf])?; // LOAD "" CODE
-        line = line
-            .checked_add(10)
-            .ok_or_else(|| "ZX Spectrum BASIC loader line number overflow".to_owned())?;
-    }
-    let mut restore_page_zero = vec![0xdf, b' ']; // OUT
-    push_zx_basic_integer(&mut restore_page_zero, ZX_128K_PAGE_PORT);
-    restore_page_zero.extend_from_slice(b", ");
-    push_zx_basic_integer(&mut restore_page_zero, 0);
-    push_zx_basic_line(&mut loader, line, &restore_page_zero)?;
-    line = line
-        .checked_add(10)
-        .ok_or_else(|| "ZX Spectrum BASIC loader line number overflow".to_owned())?;
-    let mut run = vec![0xf9, b' ', 0xc0, b' ']; // RANDOMIZE USR
-    push_zx_basic_integer(&mut run, entry);
-    push_zx_basic_line(&mut loader, line, &run)?;
-
-    let loader_length = u16::try_from(loader.len())
-        .map_err(|_| "ZX Spectrum BASIC loader exceeds 65535 bytes".to_owned())?;
-    let name = zx_tap_name(settings, output_path);
-    let mut loader_header = Vec::with_capacity(17);
-    loader_header.push(0); // BASIC program header
-    loader_header.extend_from_slice(&name);
-    loader_header.extend_from_slice(&loader_length.to_le_bytes());
-    loader_header.extend_from_slice(&10u16.to_le_bytes()); // auto-start at line 10
-    loader_header.extend_from_slice(&loader_length.to_le_bytes());
-
-    let mut out = Vec::new();
-    push_zx_tap_block(&mut out, 0x00, &loader_header)?;
-    push_zx_tap_block(&mut out, 0xff, &loader)?;
-    push_zx_code_block(&mut out, name, load, code_length, code)?;
-    for (bank, payload) in banks.iter().zip(&bank_payloads) {
-        let length = u16::try_from(payload.len())
-            .map_err(|_| "ZX Spectrum RAM bank payload exceeds 65535 bytes".to_owned())?;
-        let name = zx_tap_name_for(
-            bank.name
-                .as_deref()
-                .unwrap_or(&format!("BANK{}", bank.page)),
-        );
-        push_zx_code_block(&mut out, name, ZX_128K_BANK_WINDOW, length, payload)?;
-    }
-    Ok(out)
-}
-
-fn push_zx_code_block(
-    out: &mut Vec<u8>,
-    name: [u8; 10],
-    load: u16,
-    length: u16,
-    payload: &[u8],
-) -> Result<(), String> {
-    let mut header = Vec::with_capacity(17);
-    header.push(3); // CODE header
-    header.extend_from_slice(&name);
-    header.extend_from_slice(&length.to_le_bytes());
-    header.extend_from_slice(&load.to_le_bytes());
-    header.extend_from_slice(&0u16.to_le_bytes());
-    push_zx_tap_block(out, 0x00, &header)?;
-    push_zx_tap_block(out, 0xff, payload)
-}
-
-fn push_zx_basic_integer(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(value.to_string().as_bytes());
-    out.push(0x0e); // numeric literal marker
-    out.extend_from_slice(&[0x00, 0x00, value as u8, (value >> 8) as u8, 0x00]);
-}
-
-fn push_zx_basic_line(out: &mut Vec<u8>, number: u16, body: &[u8]) -> Result<(), String> {
-    let length = body
-        .len()
-        .checked_add(1)
-        .and_then(|length| u16::try_from(length).ok())
-        .ok_or_else(|| "ZX Spectrum BASIC line exceeds 65535 bytes".to_owned())?;
-    out.extend_from_slice(&number.to_be_bytes());
-    out.extend_from_slice(&length.to_le_bytes());
-    out.extend_from_slice(body);
-    out.push(0x0d);
-    Ok(())
-}
-
-fn zx_tap_name(settings: &BuildSettings, output_path: Option<&Path>) -> [u8; 10] {
-    let raw = settings
-        .executable_name
-        .as_deref()
-        .or_else(|| {
-            output_path
-                .and_then(|path| path.file_stem())
-                .and_then(|stem| stem.to_str())
-        })
-        .unwrap_or("EZRA");
-    zx_tap_name_for(raw)
-}
-
-fn zx_tap_name_for(raw: &str) -> [u8; 10] {
-    let mut name = [b' '; 10];
-    for (slot, ch) in name.iter_mut().zip(raw.chars()) {
-        *slot = if ch.is_ascii_alphanumeric() || ch == '_' {
-            ch.to_ascii_uppercase() as u8
-        } else {
-            b'_'
-        };
-    }
-    name
-}
-
-fn push_zx_tap_block(out: &mut Vec<u8>, flag: u8, data: &[u8]) -> Result<(), String> {
-    let block_len = data
-        .len()
-        .checked_add(2)
-        .ok_or_else(|| "ZX Spectrum TAP block is too large".to_owned())?;
-    let block_len = u16::try_from(block_len)
-        .map_err(|_| "ZX Spectrum TAP block exceeds 65535 bytes".to_owned())?;
-    out.extend_from_slice(&block_len.to_le_bytes());
-    out.push(flag);
-    out.extend_from_slice(data);
-    let checksum = data.iter().fold(flag, |checksum, byte| checksum ^ byte);
-    out.push(checksum);
-    Ok(())
-}
-
-fn ti_app_bytes(
-    settings: &BuildSettings,
-    _output_path: Option<&Path>,
-    _code: &[u8],
-) -> Result<Vec<u8>, String> {
-    let format = match settings.output_format {
-        OutputFormat::Ti8ek => ".8ek",
-        OutputFormat::Ti8xk => ".8xk",
-        _ => unreachable!("non-app output format"),
-    };
-    Err(format!(
-        "TI flash application output `{format}` is not implemented; use `.8xp` protected-program output"
-    ))
-}
-
-fn ti8xp_payload_prefix(settings: &BuildSettings) -> Result<&'static [u8], String> {
-    if is_ti_ce_target(&settings.target.triple.value) {
-        Ok(&[0xEF, 0x7B])
-    } else if is_ti_z80_target(&settings.target.triple.value) {
-        Ok(&[0xBB, 0x6D])
-    } else {
-        Err(format!(
-            "target `{}` does not support TI .8xp output",
-            settings.target.triple.value
-        ))
-    }
-}
-
-fn ti8xp_variable_name(
-    settings: &BuildSettings,
-    output_path: Option<&Path>,
-) -> Result<[u8; 8], String> {
-    let raw = settings
-        .executable_name
-        .as_deref()
-        .or_else(|| {
-            output_path
-                .and_then(|path| path.file_stem())
-                .and_then(|stem| stem.to_str())
-        })
-        .unwrap_or("EZRA");
-    let mut out = [0u8; 8];
-    let mut len = 0;
-    for ch in raw.chars() {
-        if len == out.len() {
-            break;
-        }
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out[len] = ch.to_ascii_uppercase() as u8;
-            len += 1;
-        }
-    }
-    if len == 0 {
-        return Err(format!(
-            "TI .8xp variable name `{raw}` does not contain any ASCII letters, digits, or underscores"
-        ));
-    }
-    Ok(out)
-}
-
-fn push16_le(out: &mut Vec<u8>, value: u16) {
-    out.push(value as u8);
-    out.push((value >> 8) as u8);
-}
-
-fn intel_hex_bytes(base_addr: u32, code: &[u8]) -> Vec<u8> {
-    let mut out = String::new();
-    let mut current_upper = None;
-    for (offset, chunk) in code.chunks(16).enumerate() {
-        let addr = base_addr + (offset * 16) as u32;
-        let upper = (addr >> 16) as u16;
-        if current_upper != Some(upper) {
-            current_upper = Some(upper);
-            push_ihex_record(&mut out, 0, 0x04, &upper.to_be_bytes());
-        }
-        push_ihex_record(&mut out, (addr & 0xFFFF) as u16, 0x00, chunk);
-    }
-    push_ihex_record(&mut out, 0, 0x01, &[]);
-    out.into_bytes()
-}
-
-fn push_ihex_record(out: &mut String, address: u16, kind: u8, data: &[u8]) {
-    let len = data.len() as u8;
-    let mut sum = len
-        .wrapping_add((address >> 8) as u8)
-        .wrapping_add(address as u8)
-        .wrapping_add(kind);
-    out.push_str(&format!(":{len:02X}{address:04X}{kind:02X}"));
-    for byte in data {
-        sum = sum.wrapping_add(*byte);
-        out.push_str(&format!("{byte:02X}"));
-    }
-    out.push_str(&format!("{:02X}\n", (!sum).wrapping_add(1)));
-}
-
-fn build_agon_mos_executable(entry: u32, code: &[u8]) -> Result<Vec<u8>, String> {
-    if entry > Address24::MAX {
-        return Err(format!(
-            "Agon MOS entry address 0x{entry:X} is outside the 24-bit address space"
-        ));
-    }
-    let mut out = Vec::with_capacity(69 + code.len());
-    out.push(0xC3);
-    out.push((entry & 0xFF) as u8);
-    out.push(((entry >> 8) & 0xFF) as u8);
-    out.push(((entry >> 16) & 0xFF) as u8);
-    out.resize(64, 0);
-    out.extend_from_slice(b"MOS");
-    out.push(0);
-    out.push(1);
-    out.extend_from_slice(code);
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -3011,7 +1525,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
     ensure_source_codegen_supported(&settings)?;
     let assembly = emit_source_assembly(
         &program,
-        assembly_options_from_layout_and_program(
+        ezra::api::assembly_options_for_layout_and_program(
             &settings.layout,
             &program,
             settings.target.triple.cpu,
@@ -3019,7 +1533,8 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
             options.debug_comments,
             settings.default_sdk_symbols,
             settings.gameboy_banking,
-        )?,
+        )
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
     let run = ezra::vm::run_assembly_test_with_cpu_options_at(
@@ -3171,7 +1686,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
             let tbir = TbirProgram::lower(
                 &hir,
                 &program,
-                &assembly_options_from_layout_and_program(
+                &ezra::api::assembly_options_for_layout_and_program(
                     &settings.layout,
                     &program,
                     settings.target.triple.cpu,
@@ -3179,7 +1694,8 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
                     options.command.debug_comments,
                     settings.default_sdk_symbols,
                     settings.gameboy_banking,
-                )?,
+                )
+                .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
             print!("{}", tbir.dump_text());
@@ -3206,7 +1722,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     ensure_source_codegen_supported(&settings)?;
     let assembly = emit_source_assembly(
         &program,
-        assembly_options_from_layout_and_program(
+        ezra::api::assembly_options_for_layout_and_program(
             &settings.layout,
             &program,
             settings.target.triple.cpu,
@@ -3214,7 +1730,8 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
             options.debug_comments,
             settings.default_sdk_symbols,
             settings.gameboy_banking,
-        )?,
+        )
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| {
         error
@@ -3231,23 +1748,13 @@ fn validate_generated_assembly_for_command(
     settings: &BuildSettings,
     assembly: &str,
 ) -> Result<(), String> {
-    let assembled = ezra::vm::assemble_subset_with_options_at(
-        AssemblerCpu::from(settings.target.triple.cpu),
-        assembly,
-        settings.layout.entry.get(),
-        &assembly_source_options(source_path, &settings.layout),
-    )
-    .map_err(|error| {
-        error
-            .with_location_if_missing(source_location.clone())
-            .to_string()
-    })?;
-    validate_assembled_section_fit(
-        &settings.layout,
-        ".text",
-        settings.layout.entry.get(),
-        assembled.bytes.len(),
-    )
+    let build_request = shared_build_request(settings, source_path)?;
+    ezra::api::validate_generated_assembly_for_request(source_path, assembly, &build_request)
+        .map_err(|error| {
+            error
+                .with_location_if_missing(source_location.clone())
+                .to_string()
+        })
 }
 
 fn check(options: &CommandOptions) -> Result<(), String> {
@@ -3284,7 +1791,7 @@ fn check_source_with_layout(
     ensure_source_codegen_supported(&settings)?;
     let assembly = emit_source_assembly(
         &program,
-        assembly_options_from_layout_and_program(
+        ezra::api::assembly_options_for_layout_and_program(
             &settings.layout,
             &program,
             settings.target.triple.cpu,
@@ -3292,7 +1799,8 @@ fn check_source_with_layout(
             options.debug_comments,
             settings.default_sdk_symbols,
             settings.gameboy_banking,
-        )?,
+        )
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| {
         error
@@ -3701,66 +2209,6 @@ fn write_syntax_file(path: &Path, contents: &str) -> Result<(), String> {
     }
     fs::write(path, contents)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
-}
-
-fn assembly_options_from_layout(
-    layout: &Layout,
-    cpu: CpuFamily,
-    target: &str,
-    debug_comments: bool,
-    default_sdk_symbols: bool,
-) -> AssemblyOptions {
-    AssemblyOptions {
-        cpu,
-        debug_comments,
-        default_sdk_symbols,
-        dos_executable: target == ezra::target::MSDOS_COM_I8086_TARGET,
-        mos_executable: layout.name == "agon_light_mos",
-        c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
-        ti_os_executable: layout.name.starts_with("ti83-z80")
-            || layout.name.starts_with("ti83plus-z80")
-            || layout.name.starts_with("ti84-z80")
-            || layout.name.starts_with("ti84plus-z80")
-            || layout.name.starts_with("ti84plusce-ez80")
-            || layout.name.starts_with("ti83premiumce-ez80"),
-        arduboy_executable: target.starts_with("arduboy-"),
-        gameboy_banking: None,
-        load_addr: layout_symbol(layout, "EZRA_LOAD_ADDR").unwrap_or(layout.load),
-        entry_addr: layout_symbol(layout, "EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
-        code_base: layout_symbol(layout, "EZRA_CODE_BASE").unwrap_or(layout.entry),
-        stack_top: layout_symbol(layout, "EZRA_STACK_TOP").unwrap_or(layout.stack),
-        ram_base: layout_symbol(layout, "EZRA_RAM_BASE").unwrap_or(EZRA_RAM_BASE),
-        vram_base: layout_symbol(layout, "EZRA_VRAM_BASE").unwrap_or(EZRA_VRAM_BASE),
-        audio_base: layout_symbol(layout, "EZRA_AUDIO_BASE").unwrap_or(EZRA_AUDIO_BASE),
-        asset_base: layout_symbol(layout, "EZRA_ASSET_BASE").unwrap_or(EZRA_ASSET_BASE),
-        rodata_base: layout_symbol(layout, "EZRA_RODATA_BASE").unwrap_or(EZRA_RODATA_BASE),
-        section_bases: Vec::new(),
-    }
-}
-
-fn assembly_options_from_layout_and_program(
-    layout: &Layout,
-    program: &ezra::ast::Program,
-    cpu: CpuFamily,
-    target: &str,
-    debug_comments: bool,
-    default_sdk_symbols: bool,
-    gameboy_banking: Option<GameBoyBankingOptions>,
-) -> Result<AssemblyOptions, String> {
-    let mut options =
-        assembly_options_from_layout(layout, cpu, target, debug_comments, default_sdk_symbols);
-    options.gameboy_banking = gameboy_banking;
-    options.section_bases =
-        layout_section_bases(program, layout).map_err(|error| error.to_string())?;
-    Ok(options)
-}
-
-fn layout_symbol(layout: &Layout, name: &str) -> Option<Address24> {
-    layout
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == name)
-        .map(|symbol| symbol.value)
 }
 
 fn format_layout_errors(path: Option<&Path>, errors: Vec<ezra::diagnostic::Diagnostic>) -> String {
@@ -4278,6 +2726,7 @@ mod i8086_review_tests {
 #[cfg(test)]
 mod arduboy_package_tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn builds_a_schema_v2_arduboy_zip_with_stored_hex() {
@@ -4290,12 +2739,27 @@ mod arduboy_package_tests {
             genre: Some("Puzzle".to_owned()),
             source_url: Some("https://example.com/game".to_owned()),
         };
-        let info = arduboy_info_json(&config, "pocket-game.hex");
-        let zip = stored_zip_bytes(&[
-            ("info.json", info.as_bytes()),
-            ("pocket-game.hex", b":00000001FF\n"),
-        ])
-        .unwrap();
+        let request = ezra::package::PackageRequest {
+            target: "arduboy-avr".to_owned(),
+            output_format: OutputFormat::Arduboy,
+            load_addr: 0,
+            entry_addr: 0,
+            executable_name: Some("pocket-game".to_owned()),
+        };
+        let context = ezra::package::PackageContext {
+            executable_name: Some("pocket-game".to_owned()),
+            arduboy: Some(ezra::package::ArduboyPackageOptions {
+                title: config.title,
+                author: config.author,
+                version: config.version,
+                description: config.description,
+                date: config.date,
+                genre: config.genre,
+                source_url: config.source_url,
+            }),
+            ..ezra::package::PackageContext::new()
+        };
+        let zip = ezra::package::package_executable_with_context(&request, &context, &[]).unwrap();
         let entries = read_stored_zip_entries(&zip);
 
         assert_eq!(entries.len(), 2);
@@ -4344,7 +2808,7 @@ mod arduboy_package_tests {
                 .unwrap()
                 .to_owned();
             let data = zip[data_start..data_start + size].to_vec();
-            assert_eq!(read_u32(zip, offset + 14), zip_crc32(&data));
+            assert_eq!(read_u32(zip, offset + 14), crc32(&data));
             entries.insert(name, data);
             offset = data_start + size;
         }
@@ -4353,6 +2817,17 @@ mod arduboy_package_tests {
         assert_eq!(read_u32(zip, end_offset), END_OF_CENTRAL_DIRECTORY);
         assert_eq!(read_u16(zip, end_offset + 10) as usize, entries.len());
         entries
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (0u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
     }
 
     fn read_u16(bytes: &[u8], offset: usize) -> u16 {

@@ -143,7 +143,7 @@ assert_eq!(build.executable_extension, "com");
 // are all caller-owned in-memory artifacts.
 ```
 
-`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, and section-aware standalone assembly linking, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, or `link_assembly_program` from `ezra::api`. The CLI `build` command resolves flags and `Ezra.toml` into the same build/link/package pipeline; it does not own a separate compiler or packager.
+`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, section-aware standalone assembly, or explicit-base flat assembly, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, `link_assembly_program`, or `link_assembly_program_at` from `ezra::api`. Explicit layouts drive both source code generation and final linking. The CLI `build` and `assemble` commands resolve host configuration and files into these same library pipelines; they do not own separate compiler, linker, or packager implementations.
 
 `ezra::api`, `diagnostic`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
 
