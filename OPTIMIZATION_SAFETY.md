@@ -24,8 +24,17 @@ behavior, and emulator-backed test behavior.
   are assigned, and the pass does not rewrite calls inside existing loops.
 - Sibling tail calls between compatible register-ABI eZ80-family functions with
   matching return types and no interrupt, naked, argument-slot, or stack cleanup.
+- Immutable-local scalar propagation when the initializer contains only literals,
+  immutable locals or parameters, unary/binary operations, and casts. Calls,
+  ports, memory, addresses, pointers, and aggregate values are excluded.
+- Local common-subexpression cleanup inside straight-line blocks for pure scalar
+  expressions. Assignments, control-flow joins, loops, calls, ports, and inline
+  assembly clear the available-expression set.
+- Pure scalar loop-invariant initializer hoisting when every dependency is defined
+  outside and unchanged by the loop. Loops with exits and initializers involving
+  calls, ports, memory, pointers, aggregates, or inline assembly are rejected.
 
-Follow-up implementation issues: #15, #16.
+Follow-up implementation issue: #15.
 
 ## Rejected
 
@@ -43,7 +52,10 @@ Follow-up implementation issues: #15, #16.
 
 - General constant propagation across memory reads. This needs alias analysis and
   must treat volatile memory and memory-clobbering asm as barriers.
-- Copy propagation for locals that may alias through pointers.
+- Copy propagation for memory values or locals that may alias through pointers.
+  Pure immutable scalar locals are supported.
+- Memory-read loop-invariant code motion. Pure scalar initializer hoisting is
+  supported, but memory reads still need object provenance and alias analysis.
 - Automatic or cost-based function inlining. Explicitly marked straight-line
   functions are supported, but broader effect-aware policy still needs design.
 - Loop-invariant code motion. This needs explicit effect modeling and must not

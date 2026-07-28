@@ -116,6 +116,28 @@ fn propagates_immutable_scalars_and_rejects_assigned_or_effectful_values() {
 }
 
 #[test]
+fn simplifies_expressions_exposed_by_propagation() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn test() -> u8 { let one: u8 = 1 return one + 0 }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Function(function) if function.name == "test" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(matches!(test.body[1], Stmt::Return(Some(Expr::Int(1)))));
+    assert!(report.copy_propagations >= 1);
+    assert!(report.algebraic_simplifications >= 1);
+}
+
+#[test]
 fn performs_local_cse_and_clears_it_at_barriers() {
     let program = parse_program(Path::new("test.ezra"), "fn helper() {} fn test(a: u8, b: u8) { let first: u8 = a + b let second: u8 = a + b helper() let third: u8 = a + b }").unwrap();
     let (program, report) = optimize_program(&program, CpuFamily::Ez80);

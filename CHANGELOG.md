@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Moved explicit-inline, sibling-tail-call, and direct-tail-recursion decisions into target-aware TBIR passes. eZ80-family backends now inline only TBIR-approved functions, lower safe register-ABI tail calls to jumps, and rewrite direct tail recursion into loops with ordered temporary argument evaluation.
+- Added explicit TBIR passes for immutable-local propagation, local common-subexpression cleanup, strength reduction, and pure scalar loop-invariant hoisting. A second scalar pass folds expressions exposed by propagation, while calls, ports, MMIO, dereferences, inline assembly, and other memory operations remain conservative barriers.
 
 
 ## 0.1.31

@@ -16,8 +16,9 @@ pub fn optimize_program(program: &Program, cpu: CpuFamily) -> (Program, TbirOpti
     let mut report = TbirOptimizationReport::default();
     // Keep the stage order visible: later passes rely on the safety facts and
     // normalized expressions produced by earlier stages.
-    scalar_simplify_program(&mut program, &mut report);
+    scalar_simplify_program(&mut program, &mut report, true);
     local_propagation_and_cse_program(&mut program, &mut report);
+    scalar_simplify_program(&mut program, &mut report, false);
     hoist_pure_loop_invariants_program(&mut program, &mut report);
     decide_inline_functions(&program, &mut report);
     run_tail_passes(&mut program, cpu, &mut report);
@@ -964,18 +965,28 @@ fn unique_licm_temp_name(used_names: &mut HashSet<String>, next_temp: &mut usize
     }
 }
 
-fn scalar_simplify_program(program: &mut Program, report: &mut TbirOptimizationReport) {
+fn scalar_simplify_program(
+    program: &mut Program,
+    report: &mut TbirOptimizationReport,
+    count_dead_statements: bool,
+) {
     for declaration in &mut program.declarations {
-        optimize_declaration(declaration, report);
+        optimize_declaration(declaration, report, count_dead_statements);
     }
 }
 
-fn optimize_declaration(declaration: &mut Declaration, report: &mut TbirOptimizationReport) {
+fn optimize_declaration(
+    declaration: &mut Declaration,
+    report: &mut TbirOptimizationReport,
+    count_dead_statements: bool,
+) {
     match declaration {
         Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
-            optimize_declaration(declaration, report)
+            optimize_declaration(declaration, report, count_dead_statements)
         }
-        Declaration::Function(function) => optimize_function(function, report),
+        Declaration::Function(function) => {
+            optimize_function(function, report, count_dead_statements)
+        }
         Declaration::Const(decl) => {
             decl.value = optimize_expr(
                 core::mem::replace(&mut decl.value, Expr::Int(0)),
@@ -1012,23 +1023,33 @@ fn optimize_declaration(declaration: &mut Declaration, report: &mut TbirOptimiza
     }
 }
 
-fn optimize_function(function: &mut Function, report: &mut TbirOptimizationReport) {
+fn optimize_function(
+    function: &mut Function,
+    report: &mut TbirOptimizationReport,
+    count_dead_statements: bool,
+) {
     let mut constants = HashMap::new();
-    function.body = optimize_stmts(core::mem::take(&mut function.body), &mut constants, report);
+    function.body = optimize_stmts(
+        core::mem::take(&mut function.body),
+        &mut constants,
+        report,
+        count_dead_statements,
+    );
 }
 
 fn optimize_stmts(
     stmts: Vec<Stmt>,
     constants: &mut HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
+    count_dead_statements: bool,
 ) -> Vec<Stmt> {
     let mut output = Vec::with_capacity(stmts.len());
     let mut terminated = false;
     for stmt in stmts {
-        if terminated {
+        if terminated && count_dead_statements {
             report.dead_statements_marked += 1;
         }
-        let stmt = optimize_stmt(stmt, constants, report);
+        let stmt = optimize_stmt(stmt, constants, report, count_dead_statements);
         terminated |= terminates(&stmt);
         output.push(stmt);
     }
@@ -1039,6 +1060,7 @@ fn optimize_stmt(
     stmt: Stmt,
     constants: &mut HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
+    count_dead_statements: bool,
 ) -> Stmt {
     match stmt {
         Stmt::Let { name, ty, value } => {
@@ -1058,8 +1080,18 @@ fn optimize_stmt(
             let condition = optimize_expr(condition, constants, report);
             let mut then_constants = constants.clone();
             let mut else_constants = constants.clone();
-            let then_body = optimize_stmts(then_body, &mut then_constants, report);
-            let else_body = optimize_stmts(else_body, &mut else_constants, report);
+            let then_body = optimize_stmts(
+                then_body,
+                &mut then_constants,
+                report,
+                count_dead_statements,
+            );
+            let else_body = optimize_stmts(
+                else_body,
+                &mut else_constants,
+                report,
+                count_dead_statements,
+            );
             Stmt::If {
                 condition,
                 then_body,
@@ -1069,12 +1101,12 @@ fn optimize_stmt(
         Stmt::While { condition, body } => {
             let condition = optimize_expr(condition, constants, report);
             let mut body_constants = constants.clone();
-            let body = optimize_stmts(body, &mut body_constants, report);
+            let body = optimize_stmts(body, &mut body_constants, report, count_dead_statements);
             Stmt::While { condition, body }
         }
         Stmt::Loop { body } => {
             let mut body_constants = constants.clone();
-            let body = optimize_stmts(body, &mut body_constants, report);
+            let body = optimize_stmts(body, &mut body_constants, report, count_dead_statements);
             Stmt::Loop { body }
         }
         Stmt::Return(value) => {

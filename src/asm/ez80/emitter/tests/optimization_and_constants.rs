@@ -1,6 +1,67 @@
 use super::*;
 
 #[test]
+fn hoists_pure_loop_invariants_before_the_loop() {
+    let source = r#"
+            fn sum_scaled(base: u8, count: u8) -> u8 {
+                let index: u8 = 0
+                let total: u8 = 0
+                while index < count {
+                    let scaled: u8 = base + 3
+                    total += scaled
+                    index += 1
+                }
+                return total
+            }
+
+            fn main() {
+                test.assert_eq_u8(sum_scaled(4, 3), 21, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+    let run = run_assembly_test(&asm, 8_000).unwrap();
+    let preheader = asm.find("let __tbir_licm_").unwrap();
+    let loop_start = asm.find("source: while").unwrap();
+    let replacement = asm.find("let scaled: u8 = __tbir_licm_").unwrap();
+
+    assert!(preheader < loop_start, "{asm}");
+    assert!(replacement > loop_start, "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn keeps_port_reads_inside_loops() {
+    let source = r#"
+            port INPUT: u8 = 0x20
+
+            fn main() {
+                let count: u8 = 0
+                let total: u8 = 0
+                while count < 3 {
+                    let sample: u8 = in INPUT
+                    total += sample
+                    count += 1
+                }
+                test.assert_eq_u8(total, 0, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+    let run = run_assembly_test(&asm, 8_000).unwrap();
+    let loop_start = asm.find("source: while").unwrap();
+    let port_read = asm.find("let sample: u8 = in INPUT").unwrap();
+
+    assert!(port_read > loop_start, "{asm}");
+    assert!(!asm.contains("let __tbir_licm_"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn emits_and_runs_recursive_function_calls() {
     let source = r#"
             fn sum_to(value: u8) -> u8 {
