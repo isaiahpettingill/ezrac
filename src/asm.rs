@@ -1,6 +1,3 @@
-#[cfg(test)]
-mod arithmetic_corpus;
-
 #[cfg(any(feature = "std", feature = "avr"))]
 pub mod avr;
 #[cfg(feature = "avr")]
