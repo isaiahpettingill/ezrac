@@ -306,8 +306,10 @@ impl Emitter {
                     self.emit_expr(value, &ty)?;
                 } else {
                     self.load_place(target, &ty)?;
-                    self.line("    mov r0, r1");
+                    self.line("    dect r10");
+                    self.line("    mov r0, *r10");
                     self.emit_expr(value, &ty)?;
+                    self.line("    mov *r10+, r1");
                     self.emit_binary(assign_binary(*op), &ty)?;
                 }
                 self.store_place(target, &ty)?;
@@ -666,8 +668,11 @@ impl Emitter {
             return Ok(());
         }
 
+        let zero = self.next_label("shift_zero");
         let overflow = self.next_label("shift_overflow");
         let done = self.next_label("shift_done");
+        self.line("    ci r0, 0");
+        self.line(&format!("    jeq {zero}"));
         self.line("    ci r0, 15");
         self.line(&format!("    jh {overflow}"));
         // Per the TI TMS9900 Programmer's Guide, a zero instruction count takes
@@ -681,6 +686,9 @@ impl Emitter {
             "sla"
         };
         self.line(&format!("    {mnemonic} r1, 0"));
+        self.line("    mov r1, r0");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{zero}:"));
         self.line("    mov r1, r0");
         self.line(&format!("    b @{done}"));
         self.line(&format!("{overflow}:"));
@@ -733,6 +741,10 @@ impl Emitter {
         // DIV divides the unsigned R2:R3 dividend by its source, leaving the
         // quotient in R2 and remainder in R3. Expressions arrive as left in R1
         // and right in R0, so form a zero-extended 32-bit dividend first.
+        let zero = self.next_label("div_zero");
+        let done = self.next_label("div_done");
+        self.line("    ci r0, 0");
+        self.line(&format!("    jeq {zero}"));
         if signed {
             if byte {
                 self.line("    sla r1, 8");
@@ -787,6 +799,10 @@ impl Emitter {
                 "    mov r2, r0"
             });
         }
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{zero}:"));
+        self.line("    clr r0");
+        self.line(&format!("{done}:"));
     }
 
     fn emit_boolean_from_jump(&mut self, jump: &str) {

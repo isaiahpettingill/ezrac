@@ -67,8 +67,10 @@ behavior, and emulator-backed test behavior.
   escaped pointers, and unknown provenance remain conservative.
 - Cache-aware loop tiling and memory caching. Current targets expose cache facts,
   but no transform runs without a target benefit model and dependence proof.
-- Automatic or cost-based function inlining. Explicitly marked straight-line
-  functions are supported, but broader effect-aware policy still needs design.
+- General automatic or cost-based function inlining. Explicitly marked
+  source-shaped functions are handled by TBIR. MOS6502 and TMS9900 retain a
+  narrow target-specific size optimization for unannotated zero-argument compact
+  wrappers, but broader effect-aware policy still needs design.
 - Loop-invariant code motion. This needs explicit effect modeling and must not
   move reads from ports or volatile memory.
 - Stack traffic reduction around calls, interrupts, naked functions, and inline
