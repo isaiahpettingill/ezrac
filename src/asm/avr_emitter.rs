@@ -996,35 +996,67 @@ impl Emitter {
     }
 
     fn multiply(&mut self, width: u8, signed: bool) {
-        let loop_label = self.next_label("mul_loop");
-        let done = self.next_label("mul_done");
-        let multiplicand = self
+        let lhs = self
             .model
             .allocate(u32::from(width))
-            .expect("multiply scratch");
-        let multiplier = self
-            .model
-            .allocate(u32::from(width))
-            .expect("multiply scratch");
-        let negative = self.model.allocate(1).expect("multiply sign");
-        self.zero(negative);
-        if signed {
-            self.normalize_signed_operand(self.r0, width, negative, false);
-            self.normalize_signed_operand(self.r1, width, negative, true);
-        }
-        self.copy(self.r0, multiplicand, u32::from(width));
-        self.copy(self.r1, multiplier, u32::from(width));
+            .expect("multiply lhs scratch");
+        self.copy(self.r0, lhs, u32::from(width));
         self.zero(self.r0);
-        self.line(&format!("{loop_label}:"));
-        self.jump_storage_zero(multiplier, width, &done);
-        self.copy(multiplicand, self.r1, u32::from(width));
-        self.add(width);
-        self.decrement(multiplier, width);
-        self.line(&format!("    jmp {loop_label}"));
-        self.line(&format!("{done}:"));
-        if signed {
-            self.negate_if_flag(self.r0, width, negative);
+        self.line("    clr r20");
+
+        for lhs_offset in 0..width {
+            for rhs_offset in 0..(width - lhs_offset) {
+                let result_offset = lhs_offset + rhs_offset;
+                let lhs_signed = signed && lhs_offset == width - 1;
+                let rhs_signed = signed && rhs_offset == width - 1;
+                self.line(&format!(
+                    "    lds r18, {:04X}h",
+                    lhs.address + u32::from(lhs_offset)
+                ));
+                self.line(&format!(
+                    "    lds r19, {:04X}h",
+                    self.r1.address + u32::from(rhs_offset)
+                ));
+                match (lhs_signed, rhs_signed) {
+                    (true, true) => self.line("    muls r18, r19"),
+                    (true, false) => self.line("    mulsu r18, r19"),
+                    (false, true) => self.line("    mulsu r19, r18"),
+                    (false, false) => self.line("    mul r18, r19"),
+                }
+                self.line(&format!(
+                    "    lds r16, {:04X}h",
+                    self.r0.address + u32::from(result_offset)
+                ));
+                self.line("    add r16, r0");
+                self.line(&format!(
+                    "    sts {:04X}h, r16",
+                    self.r0.address + u32::from(result_offset)
+                ));
+                if result_offset + 1 < width {
+                    self.line(&format!(
+                        "    lds r16, {:04X}h",
+                        self.r0.address + u32::from(result_offset + 1)
+                    ));
+                    self.line("    adc r16, r1");
+                    self.line(&format!(
+                        "    sts {:04X}h, r16",
+                        self.r0.address + u32::from(result_offset + 1)
+                    ));
+                    for carry_offset in result_offset + 2..width {
+                        self.line(&format!(
+                            "    lds r16, {:04X}h",
+                            self.r0.address + u32::from(carry_offset)
+                        ));
+                        self.line("    adc r16, r20");
+                        self.line(&format!(
+                            "    sts {:04X}h, r16",
+                            self.r0.address + u32::from(carry_offset)
+                        ));
+                    }
+                }
+            }
         }
+        self.line("    clr r1");
     }
 
     fn divide(&mut self, width: u8, remainder: bool, signed: bool) {
@@ -1897,6 +1929,7 @@ fn translate_avr_line(line: &str) -> String {
         "eor" if arg.starts_with('#') => format!("    ldi r17, {}\n    eor r16, r17", hex(arg)),
         "eor" => two("eor", arg),
         "adc" if arg.starts_with('#') => format!("    ldi r17, {}\n    adc r16, r17", hex(arg)),
+        "adc" if arg.starts_with('r') => line.to_owned(),
         "adc" => two("adc", arg),
         "sbc" if arg.starts_with('#') => format!("    ldi r17, {}\n    sbc r16, r17", hex(arg)),
         "sbc" => two("sbc", arg),
@@ -2240,6 +2273,40 @@ mod tests {
         assert!(assembly.contains("asr r16"), "{assembly}");
         assert!(!assembly.contains("shift_loop"), "{assembly}");
         assert!(!assembly.contains("mul_loop"), "{assembly}");
+        assert!(!assembly.contains("    mul "), "{assembly}");
+        assert!(!assembly.contains("    muls "), "{assembly}");
+        assert!(!assembly.contains("    mulsu "), "{assembly}");
+    }
+
+    #[test]
+    fn emits_native_wrapping_multiplication_and_restores_abi_zero_register() {
+        let assembly = emit(
+            r#"
+            global u8_sink: u8 = 0
+            global i8_sink: i8 = 0
+            global i16_sink: i16 = 0
+            global i24_sink: i24 = 0
+            fn main() {
+                let u8_left: u8 = 200; let u8_right: u8 = 3
+                let i8_left: i8 = -100; let i8_right: i8 = 3
+                let i16_left: i16 = -300; let i16_right: i16 = 200
+                let i24_left: i24 = -70000; let i24_right: i24 = 40000
+                u8_sink = u8_left * u8_right
+                i8_sink = i8_left * i8_right
+                i16_sink = i16_left * i16_right
+                i24_sink = i24_left * i24_right
+            }
+        "#,
+        );
+        assert!(assembly.contains("    mul r18, r19"), "{assembly}");
+        assert!(assembly.contains("    muls r18, r19"), "{assembly}");
+        assert!(assembly.contains("    mulsu r18, r19"), "{assembly}");
+        assert!(!assembly.contains("mul_loop"), "{assembly}");
+        assert_eq!(
+            assembly.matches("    clr r1").count(),
+            5,
+            "each multiply and startup must restore r1:\n{assembly}"
+        );
     }
 
     #[test]

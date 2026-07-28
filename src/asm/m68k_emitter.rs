@@ -608,14 +608,18 @@ impl Emitter {
             )),
             BinaryOp::Mul => {
                 if size == "b" {
-                    return Err(Diagnostic::new(
-                        "M68k multiplication requires u16 or i16 values",
-                    ));
+                    if type_is_signed(ty) {
+                        self.line("    ext.w d0");
+                        self.line("    ext.w d2");
+                    } else {
+                        self.line("    andi.w #$FF,d0");
+                        self.line("    andi.w #$FF,d2");
+                    }
                 }
                 self.line(if type_is_signed(ty) {
-                    "    muls d2,d0"
+                    "    muls.w d2,d0"
                 } else {
-                    "    mulu d2,d0"
+                    "    mulu.w d2,d0"
                 });
             }
             BinaryOp::Div | BinaryOp::Mod => {
@@ -1602,6 +1606,51 @@ mod tests {
         assert!(assembly.contains("lsl.w d2,d0"), "{assembly}");
         assert!(assembly.contains("lsl.w #2,d0"), "{assembly}");
         assert!(!assembly.contains("lsl.w #0,d0"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn selects_native_multiply_for_eight_and_sixteen_bit_values() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            global u8_sink: u8 = 0
+            global i8_sink: i8 = 0
+            global u16_sink: u16 = 0
+            global i16_sink: i16 = 0
+            fn main() {
+                let u8_left: u8 = 200
+                let u8_right: u8 = 3
+                u8_sink = u8_left * u8_right
+                let i8_left: i8 = -100
+                let i8_right: i8 = 3
+                i8_sink = i8_left * i8_right
+                let u16_left: u16 = 40000
+                let u16_right: u16 = 3
+                u16_sink = u16_left * u16_right
+                let i16_left: i16 = -20000
+                let i16_right: i16 = 3
+                i16_sink = i16_left * i16_right
+                u16_sink = u16_left * 4
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(assembly.contains("andi.w #$FF,d0"), "{assembly}");
+        assert!(assembly.contains("andi.w #$FF,d2"), "{assembly}");
+        assert!(assembly.contains("ext.w d0"), "{assembly}");
+        assert!(assembly.contains("ext.w d2"), "{assembly}");
+        assert!(assembly.contains("mulu.w d2,d0"), "{assembly}");
+        assert!(assembly.contains("muls.w d2,d0"), "{assembly}");
+        assert!(assembly.contains("lsl.w #2,d0"), "{assembly}");
         assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
     }
 

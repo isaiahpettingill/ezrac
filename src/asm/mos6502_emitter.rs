@@ -290,6 +290,10 @@ impl Emitter {
                             type_is_signed(&ty),
                             count,
                         );
+                    } else if *op == AssignOp::Mul
+                        && let Ok(factor) = self.model.const_value(value)
+                        && self.multiply_constant(width, factor)
+                    {
                     } else {
                         let left = self.model.allocate(u32::from(width))?;
                         self.copy(self.r0, left, u32::from(width));
@@ -572,6 +576,12 @@ impl Emitter {
                         type_is_signed(&operand_ty),
                         count,
                     );
+                    return Ok(());
+                }
+                if *op == BinaryOp::Mul
+                    && let Ok(factor) = self.model.const_value(right)
+                    && self.multiply_constant(operand_width, factor)
+                {
                     return Ok(());
                 }
                 let left_storage = self.model.allocate(u32::from(operand_width))?;
@@ -979,6 +989,42 @@ impl Emitter {
             self.line(&format!("    sbc ${:04X}", self.r1.address + offset));
             self.sta(self.r0.address + offset);
         }
+    }
+
+    fn multiply_constant(&mut self, width: u8, factor: i64) -> bool {
+        let magnitude = factor.unsigned_abs();
+        match magnitude {
+            0 => self.zero(self.r0),
+            1 => {}
+            value if value.is_power_of_two() => {
+                self.shift_constant(width, false, false, value.trailing_zeros());
+            }
+            3 | 5 | 7 | 9 => {
+                let original = self
+                    .model
+                    .allocate(u32::from(width))
+                    .expect("constant multiply scratch");
+                self.copy(self.r0, original, u32::from(width));
+                let shift = if magnitude == 7 { 3 } else { magnitude.ilog2() };
+                self.shift_constant(width, false, false, shift);
+                self.copy(original, self.r1, u32::from(width));
+                if magnitude == 7 {
+                    self.sub(width);
+                } else {
+                    self.add(width);
+                }
+            }
+            6 | 10 => {
+                let optimized = self.multiply_constant(width, (magnitude / 2) as i64);
+                debug_assert!(optimized);
+                self.shift_constant(width, false, false, 1);
+            }
+            _ => return false,
+        }
+        if factor < 0 {
+            self.emit_unary(UnaryOp::Neg, width);
+        }
+        true
     }
 
     fn multiply(&mut self, width: u8, signed: bool) {
@@ -2222,6 +2268,37 @@ mod structural_tests {
     }
 
     #[test]
+    fn selects_shift_add_instructions_for_small_constant_multiplication() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let value: u16 = 0x1234
+                    let times_three: u16 = value * 3
+                    let times_seven: u16 = value * 7
+                    let times_eight: u16 = value * 8
+                    let times_ten: u16 = value * 10
+                    let signed: i16 = -1234
+                    let negative: i16 = signed * -7
+                    let compound: u16 = value
+                    compound *= 5
+                }
+            "#,
+        );
+
+        assert!(!assembly.contains(U16_MUL_HELPER), "{assembly}");
+        assert!(!assembly.contains("mul_loop"), "{assembly}");
+        assert!(assembly.contains("    adc $"), "{assembly}");
+        assert!(assembly.contains("    sbc $"), "{assembly}");
+        assert!(assembly.contains("    rol $"), "{assembly}");
+        crate::vm::assemble_subset_with_symbols_at(
+            crate::target::AssemblerCpu::Mos6502,
+            &assembly,
+            0x0200,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn selects_fixed_instructions_for_constant_shifts() {
         let assembly = emit(
             r#"
@@ -2576,6 +2653,36 @@ mod tests {
         assert_eq!(memory.byte(0xFF03), 24);
         assert_eq!(memory.byte(0xFF04), 0);
         assert_eq!(memory.byte(0xFF05), 0);
+    }
+
+    #[test]
+    fn executes_small_constant_multiplication_with_wrapping() {
+        let memory = run(
+            r#"
+                volatile mmio RESULT0: ptr<u8> = 0xFF00
+                volatile mmio RESULT1: ptr<u8> = 0xFF01
+                volatile mmio RESULT2: ptr<u8> = 0xFF02
+                volatile mmio RESULT3: ptr<u8> = 0xFF03
+                volatile mmio RESULT4: ptr<u8> = 0xFF04
+                fn main() {
+                    let byte: u8 = 250
+                    let word: u16 = 0xF123
+                    let compound: u8 = 51
+                    compound *= 5
+                    *(RESULT0) = byte * 3
+                    *(RESULT1) = cast<u8>(word * 7)
+                    *(RESULT2) = cast<u8>((word * 10) >> 8)
+                    *(RESULT3) = cast<u8>(word * 8)
+                    *(RESULT4) = compound
+                }
+            "#,
+            2_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 238);
+        assert_eq!(memory.byte(0xFF01), 0xF5);
+        assert_eq!(memory.byte(0xFF02), 0x6B);
+        assert_eq!(memory.byte(0xFF03), 0x18);
+        assert_eq!(memory.byte(0xFF04), 255);
     }
 
     #[test]

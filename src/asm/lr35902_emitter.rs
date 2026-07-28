@@ -831,6 +831,10 @@ impl Emitter {
                             type_is_signed(&ty),
                             count,
                         );
+                    } else if *op == AssignOp::Mul
+                        && let Ok(factor) = self.model.const_value(value)
+                        && self.multiply_constant(width, factor)
+                    {
                     } else {
                         let left = self.model.allocate(u32::from(width))?;
                         self.copy(self.r0, left, u32::from(width));
@@ -1115,6 +1119,12 @@ impl Emitter {
                     );
                     return Ok(());
                 }
+                if *op == BinaryOp::Mul
+                    && let Ok(factor) = self.model.const_value(right)
+                    && self.multiply_constant(operand_width, factor)
+                {
+                    return Ok(());
+                }
                 let left_storage = self.model.allocate(u32::from(operand_width))?;
                 self.copy(self.r0, left_storage, u32::from(operand_width));
                 self.emit_expr(right, &operand_ty)?;
@@ -1388,6 +1398,42 @@ impl Emitter {
             self.line(&format!("    sbc ${:04X}", self.r1.address + offset));
             self.sta(self.r0.address + offset);
         }
+    }
+
+    fn multiply_constant(&mut self, width: u8, factor: i64) -> bool {
+        let magnitude = factor.unsigned_abs();
+        match magnitude {
+            0 => self.zero(self.r0),
+            1 => {}
+            value if value.is_power_of_two() => {
+                self.shift_constant(width, false, false, value.trailing_zeros());
+            }
+            3 | 5 | 7 | 9 => {
+                let original = self
+                    .model
+                    .allocate(u32::from(width))
+                    .expect("constant multiply scratch");
+                self.copy(self.r0, original, u32::from(width));
+                self.shift_constant(width, false, false, magnitude.ilog2());
+                self.copy(original, self.r1, u32::from(width));
+                if magnitude == 7 {
+                    self.sub(width);
+                } else {
+                    self.add(width);
+                }
+            }
+            6 | 10 => {
+                let odd_factor = magnitude / 2;
+                let optimized = self.multiply_constant(width, odd_factor as i64);
+                debug_assert!(optimized);
+                self.shift_constant(width, false, false, 1);
+            }
+            _ => return false,
+        }
+        if factor < 0 {
+            self.emit_unary(UnaryOp::Neg, width);
+        }
+        true
     }
 
     fn multiply(&mut self, width: u8, signed: bool) {
@@ -2704,6 +2750,49 @@ mod tests {
         assert!(!assembly.contains("shift_done"), "{assembly}");
         assert!(assembly.matches("    rl a").count() >= 3, "{assembly}");
         assert!(assembly.contains("    xor b"), "{assembly}");
+    }
+
+    #[test]
+    fn small_constant_multiplication_uses_shift_add_sequences() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let value: u16 = 0x1234
+                    let times_three: u16 = value * 3
+                    let times_five: u16 = value * 5
+                    let times_six: u16 = value * 6
+                    let times_seven: u16 = value * 7
+                    let times_nine: u16 = value * 9
+                    let times_ten: u16 = value * 10
+                    let power_of_two: u16 = value * 8
+                    let signed: i16 = -1234
+                    let negative: i16 = signed * -7
+                }
+            "#,
+        );
+
+        assert!(!assembly.contains("mul_loop"), "{assembly}");
+        assert!(!assembly.contains("mul_done"), "{assembly}");
+        assert!(assembly.contains("    adc "), "{assembly}");
+        assert!(assembly.contains("    sbc "), "{assembly}");
+        assert!(assembly.contains("    rl a"), "{assembly}");
+        assert!(assembly.contains("    xor b"), "{assembly}");
+    }
+
+    #[test]
+    fn constant_compound_multiplication_uses_shift_add_sequence() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let value: u24 = 0x123456
+                    value *= 3
+                }
+            "#,
+        );
+
+        assert!(!assembly.contains("mul_loop"), "{assembly}");
+        assert!(assembly.contains("    adc "), "{assembly}");
+        assert!(assembly.contains("    rl a"), "{assembly}");
     }
 
     #[test]
