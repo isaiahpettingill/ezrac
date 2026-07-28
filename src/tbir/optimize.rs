@@ -30,7 +30,7 @@ pub fn optimize_program_with_context(
     scalar_simplify_program(&mut program, &mut report, false);
     hoist_pure_loop_invariants_program(&mut program, &mut report);
     hoist_named_memory_reads_program(&mut program, context, &mut report);
-    decide_inline_functions(&program, &mut report);
+    expand_inline_functions(&mut program, context, &mut report);
     run_tail_passes(&mut program, cpu, &mut report);
     (program, report)
 }
@@ -52,45 +52,515 @@ fn functions(program: &Program) -> Vec<&Function> {
     output
 }
 
-fn decide_inline_functions(program: &Program, report: &mut TbirOptimizationReport) {
-    let functions = functions(program);
+fn expand_inline_functions(
+    program: &mut Program,
+    context: &OptimizationContext,
+    report: &mut TbirOptimizationReport,
+) {
+    let all_functions = functions(program);
     let mut graph = HashMap::new();
-    for function in &functions {
+    for function in &all_functions {
         let mut calls = HashSet::new();
         collect_calls(&function.body, &mut calls);
         graph.insert(function.name.clone(), calls);
     }
-    for function in functions {
+
+    let mut approved = HashMap::new();
+    let mut rejected = Vec::new();
+    for function in all_functions {
         if !has_attr(function, "inline") {
             continue;
         }
-        let reason = if has_attr(function, "naked") {
-            Some("naked function")
-        } else if has_attr(function, "interrupt") {
-            Some("interrupt function")
-        } else if graph
-            .get(&function.name)
-            .is_some_and(|calls| calls.contains(&function.name))
-        {
-            Some("direct recursion")
-        } else if graph.get(&function.name).is_some_and(|calls| {
-            calls
-                .iter()
-                .any(|callee| reachable(callee, &function.name, &graph, &mut HashSet::new()))
-        }) {
-            Some("mutual recursion")
-        } else if inline_return_body(function).is_none() && inline_void_body(function).is_none() {
-            Some("unsupported body shape")
+        let reason = inline_rejection(function, &graph);
+        if let Some(reason) = reason {
+            rejected.push((function.name.clone(), reason));
         } else {
-            None
-        };
+            approved.insert(function.name.clone(), function.clone());
+        }
+    }
+    for (name, reason) in rejected {
         decision(
             report,
             TbirOptimizationKind::Inline,
             None,
-            &function.name,
-            reason,
+            &name,
+            Some(reason),
         );
+    }
+
+    let mut used_names = HashSet::new();
+    for function in functions(program) {
+        used_names.insert(function.name.clone());
+        for param in &function.params {
+            used_names.insert(param.name.clone());
+        }
+        collect_local_names(&function.body, &mut used_names);
+    }
+    let mut expander = InlineExpander {
+        approved: &approved,
+        used_names,
+        next_temp: 0,
+        counts: HashMap::new(),
+        active: Vec::new(),
+    };
+    expand_inline_declarations(&mut program.declarations, &mut expander);
+
+    let expanded_any = !expander.counts.is_empty();
+    let mut counts: Vec<_> = expander.counts.into_iter().collect();
+    counts.sort_by(|left, right| left.0.cmp(&right.0));
+    for (name, count) in counts {
+        decision(report, TbirOptimizationKind::Inline, None, &name, None);
+        if let Some(last) = report.decisions.last_mut() {
+            last.reason = format!("approved; transformed {count} call(s)");
+        }
+    }
+
+    if expanded_any {
+        let mut cleanup_report = TbirOptimizationReport::default();
+        scalar_simplify_program(program, &mut cleanup_report, false);
+        local_propagation_and_cse_program(program, context, &mut cleanup_report);
+        scalar_simplify_program(program, &mut cleanup_report, false);
+    }
+}
+
+fn inline_rejection<'a>(
+    function: &Function,
+    graph: &HashMap<String, HashSet<String>>,
+) -> Option<&'a str> {
+    if has_attr(function, "naked") {
+        Some("naked function")
+    } else if has_attr(function, "interrupt") {
+        Some("interrupt function")
+    } else if graph
+        .get(&function.name)
+        .is_some_and(|calls| calls.contains(&function.name))
+    {
+        Some("direct recursion")
+    } else if graph.get(&function.name).is_some_and(|calls| {
+        calls
+            .iter()
+            .any(|callee| reachable(callee, &function.name, graph, &mut HashSet::new()))
+    }) {
+        Some("mutual recursion")
+    } else if function.body.iter().any(stmt_has_inline_forbidden_control) {
+        Some("inline assembly or control exit")
+    } else if inline_return_body(function).is_none() && inline_void_body(function).is_none() {
+        Some("unsupported body shape")
+    } else {
+        None
+    }
+}
+
+fn stmt_has_inline_forbidden_control(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Asm { .. } | Stmt::Break | Stmt::Continue => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => then_body
+            .iter()
+            .chain(else_body)
+            .any(stmt_has_inline_forbidden_control),
+        Stmt::While { body, .. } | Stmt::Loop { body } => {
+            body.iter().any(stmt_has_inline_forbidden_control)
+        }
+        _ => false,
+    }
+}
+
+struct InlineExpander<'a> {
+    approved: &'a HashMap<String, Function>,
+    used_names: HashSet<String>,
+    next_temp: usize,
+    counts: HashMap<String, usize>,
+    active: Vec<String>,
+}
+
+fn expand_inline_declarations(declarations: &mut [Declaration], expander: &mut InlineExpander<'_>) {
+    for declaration in declarations {
+        match declaration {
+            Declaration::Function(function) => {
+                function.body = expander.expand_stmts(core::mem::take(&mut function.body));
+            }
+            Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                expand_inline_declarations(core::slice::from_mut(declaration), expander);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl InlineExpander<'_> {
+    fn unique(&mut self, kind: &str) -> String {
+        loop {
+            let name = format!("__tbir_inline_{kind}_{}", self.next_temp);
+            self.next_temp += 1;
+            if self.used_names.insert(name.clone()) {
+                return name;
+            }
+        }
+    }
+
+    fn expand_stmts(&mut self, stmts: Vec<Stmt>) -> Vec<Stmt> {
+        let mut output = Vec::new();
+        for stmt in stmts {
+            self.expand_stmt(stmt, &mut output);
+        }
+        output
+    }
+
+    fn expand_stmt(&mut self, stmt: Stmt, output: &mut Vec<Stmt>) {
+        match stmt {
+            Stmt::Let { name, ty, value } => {
+                let value = self.expand_expr(value, output);
+                output.push(Stmt::Let { name, ty, value });
+            }
+            Stmt::Assign { target, op, value } => {
+                let target = self.expand_place(target, output);
+                let value = self.expand_expr(value, output);
+                output.push(Stmt::Assign { target, op, value });
+            }
+            Stmt::Return(value) => {
+                let value = value.map(|value| self.expand_expr(value, output));
+                output.push(Stmt::Return(value));
+            }
+            Stmt::Out { port, value } => {
+                let value = self.expand_expr(value, output);
+                output.push(Stmt::Out { port, value });
+            }
+            Stmt::Expr(Expr::Call { path, args }) if self.is_approved_void(&path) => {
+                self.expand_void_call(path, args, output);
+            }
+            Stmt::Expr(value) => {
+                let value = self.expand_expr(value, output);
+                output.push(Stmt::Expr(value));
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let condition = self.expand_expr(condition, output);
+                output.push(Stmt::If {
+                    condition,
+                    then_body: self.expand_stmts(then_body),
+                    else_body: self.expand_stmts(else_body),
+                });
+            }
+            Stmt::While { condition, body } => output.push(Stmt::While {
+                condition,
+                body: self.expand_stmts(body),
+            }),
+            Stmt::Loop { body } => output.push(Stmt::Loop {
+                body: self.expand_stmts(body),
+            }),
+            stmt => output.push(stmt),
+        }
+    }
+
+    fn is_approved_void(&self, path: &[String]) -> bool {
+        path.last()
+            .and_then(|name| self.approved.get(name))
+            .is_some_and(|f| f.return_type.is_none())
+    }
+
+    fn expand_void_call(&mut self, path: Vec<String>, args: Vec<Expr>, output: &mut Vec<Stmt>) {
+        let Some(name) = path.last().cloned() else {
+            return;
+        };
+        let Some(function) = self.approved.get(&name).cloned() else {
+            output.push(Stmt::Expr(Expr::Call { path, args }));
+            return;
+        };
+        if self.active.contains(&name) || args.len() != function.params.len() {
+            output.push(Stmt::Expr(Expr::Call { path, args }));
+            return;
+        }
+        let (bindings, rename) = self.bind_arguments(&function, args, output);
+        output.extend(bindings);
+        let body = inline_void_body(&function).unwrap_or(&[]).to_vec();
+        self.active.push(name.clone());
+        output.extend(self.expand_stmts(rename_stmts(body, &rename)));
+        self.active.pop();
+        *self.counts.entry(name).or_default() += 1;
+    }
+
+    fn expand_expr(&mut self, expr: Expr, prefix: &mut Vec<Stmt>) -> Expr {
+        match expr {
+            Expr::Call { path, args } => {
+                let mut expanded_args = Vec::new();
+                for arg in args {
+                    expanded_args.push(self.expand_expr(arg, prefix));
+                }
+                let Some(name) = path.last().cloned() else {
+                    return Expr::Call {
+                        path,
+                        args: expanded_args,
+                    };
+                };
+                let Some(function) = self.approved.get(&name).cloned() else {
+                    return Expr::Call {
+                        path,
+                        args: expanded_args,
+                    };
+                };
+                let Some(return_ty) = function.return_type.clone() else {
+                    return Expr::Call {
+                        path,
+                        args: expanded_args,
+                    };
+                };
+                if self.active.contains(&name) || expanded_args.len() != function.params.len() {
+                    return Expr::Call {
+                        path,
+                        args: expanded_args,
+                    };
+                }
+                let (bindings, rename) = self.bind_arguments(&function, expanded_args, prefix);
+                prefix.extend(bindings);
+                let (body, result) = inline_return_body(&function).expect("approved value inline");
+                self.active.push(name.clone());
+                prefix.extend(self.expand_stmts(rename_stmts(body.to_vec(), &rename)));
+                let result = self.expand_expr(rename_expr(result, &rename), prefix);
+                self.active.pop();
+                let result_name = self.unique("result");
+                prefix.push(Stmt::Let {
+                    name: result_name.clone(),
+                    ty: return_ty,
+                    value: result,
+                });
+                *self.counts.entry(name).or_default() += 1;
+                Expr::Ident(result_name)
+            }
+            Expr::Array(values) => Expr::Array(
+                values
+                    .into_iter()
+                    .map(|v| self.expand_expr(v, prefix))
+                    .collect(),
+            ),
+            Expr::Index { name, index } => Expr::Index {
+                name,
+                index: Box::new(self.expand_expr(*index, prefix)),
+            },
+            Expr::AddressOfIndex { name, index } => Expr::AddressOfIndex {
+                name,
+                index: Box::new(self.expand_expr(*index, prefix)),
+            },
+            Expr::Deref(expr) => Expr::Deref(Box::new(self.expand_expr(*expr, prefix))),
+            Expr::BankedPointer { pointer, bank } => Expr::BankedPointer {
+                pointer: Box::new(self.expand_expr(*pointer, prefix)),
+                bank,
+            },
+            Expr::Unary { op, expr } => Expr::Unary {
+                op,
+                expr: Box::new(self.expand_expr(*expr, prefix)),
+            },
+            Expr::Cast { ty, expr } => Expr::Cast {
+                ty,
+                expr: Box::new(self.expand_expr(*expr, prefix)),
+            },
+            Expr::Binary { left, op, right } => {
+                let left = Box::new(self.expand_expr(*left, prefix));
+                let right = if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    right
+                } else {
+                    Box::new(self.expand_expr(*right, prefix))
+                };
+                Expr::Binary { left, op, right }
+            }
+            Expr::Access(path) => Expr::Access(self.expand_access(path, prefix)),
+            Expr::AddressOfAccess(path) => Expr::AddressOfAccess(self.expand_access(path, prefix)),
+            Expr::StructInit { ty, fields } => Expr::StructInit {
+                ty,
+                fields: fields
+                    .into_iter()
+                    .map(|(n, v)| (n, self.expand_expr(v, prefix)))
+                    .collect(),
+            },
+            expr => expr,
+        }
+    }
+
+    fn bind_arguments(
+        &mut self,
+        function: &Function,
+        args: Vec<Expr>,
+        prefix: &mut Vec<Stmt>,
+    ) -> (Vec<Stmt>, HashMap<String, String>) {
+        let mut bindings = Vec::new();
+        let mut rename = HashMap::new();
+        for (param, arg) in function.params.iter().zip(args) {
+            let arg_name = self.unique("arg");
+            prefix.push(Stmt::Let {
+                name: arg_name.clone(),
+                ty: param.ty.clone(),
+                value: arg,
+            });
+            let param_name = self.unique("param");
+            bindings.push(Stmt::Let {
+                name: param_name.clone(),
+                ty: param.ty.clone(),
+                value: Expr::Ident(arg_name),
+            });
+            rename.insert(param.name.clone(), param_name);
+        }
+        let mut locals = HashSet::new();
+        collect_local_names(&function.body, &mut locals);
+        for local in locals {
+            rename.entry(local).or_insert_with(|| self.unique("local"));
+        }
+        (bindings, rename)
+    }
+
+    fn expand_place(&mut self, place: Place, prefix: &mut Vec<Stmt>) -> Place {
+        match place {
+            Place::Index { name, index } => Place::Index {
+                name,
+                index: Box::new(self.expand_expr(*index, prefix)),
+            },
+            Place::Access(path) => Place::Access(self.expand_access(path, prefix)),
+            Place::Deref(expr) => Place::Deref(Box::new(self.expand_expr(*expr, prefix))),
+            place => place,
+        }
+    }
+
+    fn expand_access(&mut self, mut path: AccessPath, prefix: &mut Vec<Stmt>) -> AccessPath {
+        for segment in &mut path.segments {
+            if let AccessSegment::Index(index) = segment {
+                **index = self.expand_expr((**index).clone(), prefix);
+            }
+        }
+        path
+    }
+}
+
+fn renamed(name: String, names: &HashMap<String, String>) -> String {
+    names.get(&name).cloned().unwrap_or(name)
+}
+
+fn rename_stmts(stmts: Vec<Stmt>, names: &HashMap<String, String>) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            Stmt::Let { name, ty, value } => Stmt::Let {
+                name: renamed(name, names),
+                ty,
+                value: rename_expr(value, names),
+            },
+            Stmt::Assign { target, op, value } => Stmt::Assign {
+                target: rename_place(target, names),
+                op,
+                value: rename_expr(value, names),
+            },
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => Stmt::If {
+                condition: rename_expr(condition, names),
+                then_body: rename_stmts(then_body, names),
+                else_body: rename_stmts(else_body, names),
+            },
+            Stmt::While { condition, body } => Stmt::While {
+                condition: rename_expr(condition, names),
+                body: rename_stmts(body, names),
+            },
+            Stmt::Loop { body } => Stmt::Loop {
+                body: rename_stmts(body, names),
+            },
+            Stmt::Return(value) => Stmt::Return(value.map(|v| rename_expr(v, names))),
+            Stmt::Out { port, value } => Stmt::Out {
+                port,
+                value: rename_expr(value, names),
+            },
+            Stmt::Expr(value) => Stmt::Expr(rename_expr(value, names)),
+            stmt => stmt,
+        })
+        .collect()
+}
+
+fn rename_place(place: Place, names: &HashMap<String, String>) -> Place {
+    match place {
+        Place::Ident(name) => Place::Ident(renamed(name, names)),
+        Place::Index { name, index } => Place::Index {
+            name: renamed(name, names),
+            index: Box::new(rename_expr(*index, names)),
+        },
+        Place::Field { base, field } => Place::Field {
+            base: renamed(base, names),
+            field,
+        },
+        Place::Access(path) => Place::Access(rename_access(path, names)),
+        Place::Deref(expr) => Place::Deref(Box::new(rename_expr(*expr, names))),
+    }
+}
+
+fn rename_access(mut path: AccessPath, names: &HashMap<String, String>) -> AccessPath {
+    path.root = renamed(path.root, names);
+    for segment in &mut path.segments {
+        if let AccessSegment::Index(index) = segment {
+            **index = rename_expr((**index).clone(), names);
+        }
+    }
+    path
+}
+
+fn rename_expr(expr: Expr, names: &HashMap<String, String>) -> Expr {
+    match expr {
+        Expr::Ident(name) => Expr::Ident(renamed(name, names)),
+        Expr::Index { name, index } => Expr::Index {
+            name: renamed(name, names),
+            index: Box::new(rename_expr(*index, names)),
+        },
+        Expr::Field { base, field } => Expr::Field {
+            base: renamed(base, names),
+            field,
+        },
+        Expr::AddressOfIndex { name, index } => Expr::AddressOfIndex {
+            name: renamed(name, names),
+            index: Box::new(rename_expr(*index, names)),
+        },
+        Expr::AddressOfField { base, field } => Expr::AddressOfField {
+            base: renamed(base, names),
+            field,
+        },
+        Expr::Access(path) => Expr::Access(rename_access(path, names)),
+        Expr::AddressOfAccess(path) => Expr::AddressOfAccess(rename_access(path, names)),
+        Expr::AddressOf(name) => Expr::AddressOf(renamed(name, names)),
+        Expr::Array(values) => {
+            Expr::Array(values.into_iter().map(|v| rename_expr(v, names)).collect())
+        }
+        Expr::StructInit { ty, fields } => Expr::StructInit {
+            ty,
+            fields: fields
+                .into_iter()
+                .map(|(n, v)| (n, rename_expr(v, names)))
+                .collect(),
+        },
+        Expr::Deref(expr) => Expr::Deref(Box::new(rename_expr(*expr, names))),
+        Expr::BankedPointer { pointer, bank } => Expr::BankedPointer {
+            pointer: Box::new(rename_expr(*pointer, names)),
+            bank,
+        },
+        Expr::Call { path, args } => Expr::Call {
+            path,
+            args: args.into_iter().map(|v| rename_expr(v, names)).collect(),
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(rename_expr(*expr, names)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(rename_expr(*left, names)),
+            op,
+            right: Box::new(rename_expr(*right, names)),
+        },
+        Expr::Cast { ty, expr } => Expr::Cast {
+            ty,
+            expr: Box::new(rename_expr(*expr, names)),
+        },
+        expr => expr,
     }
 }
 
@@ -574,10 +1044,16 @@ fn collect_assigned_names(stmts: &[Stmt], assigned: &mut HashSet<String>) {
     }
 }
 
+#[derive(Clone)]
+struct PropagatedValue {
+    ty: Type,
+    expr: Expr,
+}
+
 fn propagate_block(
     stmts: Vec<Stmt>,
     assigned: &HashSet<String>,
-    values: &mut HashMap<String, Expr>,
+    values: &mut HashMap<String, PropagatedValue>,
     available: &mut Vec<(Expr, String)>,
     context: &OptimizationContext,
     report: &mut TbirOptimizationReport,
@@ -604,7 +1080,13 @@ fn propagate_block(
                     }
                 }
                 if !assigned.contains(&name) && is_pure_scalar(&value) && !references_memory {
-                    values.insert(name.clone(), value.clone());
+                    values.insert(
+                        name.clone(),
+                        PropagatedValue {
+                            ty: ty.clone(),
+                            expr: value.clone(),
+                        },
+                    );
                 }
                 Stmt::Let { name, ty, value }
             }
@@ -700,7 +1182,7 @@ fn propagate_block(
 
 fn substitute_place(
     place: Place,
-    values: &HashMap<String, Expr>,
+    values: &HashMap<String, PropagatedValue>,
     report: &mut TbirOptimizationReport,
 ) -> Place {
     match place {
@@ -723,7 +1205,7 @@ fn substitute_place(
 
 fn substitute_expr(
     expr: Expr,
-    values: &HashMap<String, Expr>,
+    values: &HashMap<String, PropagatedValue>,
     report: &mut TbirOptimizationReport,
 ) -> Expr {
     match expr {
@@ -731,7 +1213,7 @@ fn substitute_expr(
             if let Some(value) = values.get(&name) {
                 report.copy_propagations += 1;
                 if matches!(
-                    value,
+                    value.expr,
                     Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_)
                 ) {
                     report.constant_propagations += 1;
@@ -743,7 +1225,33 @@ fn substitute_expr(
                     &name,
                     None,
                 );
-                value.clone()
+                match &value.expr {
+                    Expr::Int(integer) | Expr::TypedInt(integer, _) => {
+                        Expr::TypedInt(*integer, value.ty.clone())
+                    }
+                    Expr::Unary {
+                        op: UnaryOp::Neg,
+                        expr,
+                    } => match expr.as_ref() {
+                        Expr::Int(integer) | Expr::TypedInt(integer, _) => {
+                            Expr::TypedInt(-*integer, value.ty.clone())
+                        }
+                        _ => Expr::Cast {
+                            ty: value.ty.clone(),
+                            expr: Box::new(value.expr.clone()),
+                        },
+                    },
+                    Expr::Bool(boolean) if value.ty == Type::Named("bool".to_owned()) => {
+                        Expr::Bool(*boolean)
+                    }
+                    Expr::Char(character) if value.ty == Type::Named("char".to_owned()) => {
+                        Expr::Char(*character)
+                    }
+                    _ => Expr::Cast {
+                        ty: value.ty.clone(),
+                        expr: Box::new(value.expr.clone()),
+                    },
+                }
             } else {
                 Expr::Ident(name)
             }

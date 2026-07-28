@@ -461,8 +461,14 @@ impl Emitter {
             Expr::Binary { left, op, right } => {
                 self.emit_expr(left, ty)?;
                 self.line("    mov r0, r1");
-                self.emit_expr(right, ty)?;
-                self.emit_binary(*op, ty)?;
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                    && let Some(count) = constant_shift_count(right)?
+                {
+                    self.emit_shift(*op, ty, Some(count))?;
+                } else {
+                    self.emit_expr(right, ty)?;
+                    self.emit_binary(*op, ty)?;
+                }
             }
             Expr::Cast { expr, .. } => self.emit_expr(expr, ty)?,
             Expr::Field { base, field } => self.load_ident(&format!("{base}.{field}"), ty)?,
@@ -578,11 +584,7 @@ impl Emitter {
                 self.line("    xor r0, r1");
                 self.line("    mov r1, r0");
             }
-            BinaryOp::Shl | BinaryOp::Shr => {
-                return Err(Diagnostic::new(
-                    "variable shifts are not implemented by the initial TMS9900 source backend",
-                ));
-            }
+            BinaryOp::Shl | BinaryOp::Shr => self.emit_shift(op, ty, None)?,
             BinaryOp::Eq
             | BinaryOp::Ne
             | BinaryOp::Lt
@@ -624,6 +626,71 @@ impl Emitter {
         if scalar_width(&self.model, ty)? == 1 {
             self.line("    andi r0, >00FF");
         }
+        Ok(())
+    }
+
+    fn emit_shift(
+        &mut self,
+        op: BinaryOp,
+        ty: &Type,
+        constant_count: Option<u16>,
+    ) -> Result<(), Diagnostic> {
+        let right = op == BinaryOp::Shr;
+        let signed = type_is_signed(ty);
+        let byte = scalar_width(&self.model, ty)? == 1;
+
+        if right && signed && byte {
+            self.line("    sla r1, 8");
+            self.line("    sra r1, 8");
+        }
+
+        if let Some(count) = constant_count {
+            if count == 0 {
+                self.line("    mov r1, r0");
+            } else if count < 16 {
+                let mnemonic = if right && signed {
+                    "sra"
+                } else if right {
+                    "srl"
+                } else {
+                    "sla"
+                };
+                self.line(&format!("    {mnemonic} r1, {count}"));
+                self.line("    mov r1, r0");
+            } else if right && signed {
+                self.line("    sra r1, 15");
+                self.line("    mov r1, r0");
+            } else {
+                self.line("    clr r0");
+            }
+            return Ok(());
+        }
+
+        let overflow = self.next_label("shift_overflow");
+        let done = self.next_label("shift_done");
+        self.line("    ci r0, 15");
+        self.line(&format!("    jh {overflow}"));
+        // Per the TI TMS9900 Programmer's Guide, a zero instruction count takes
+        // the count from the low four bits of R0. Expression evaluation already
+        // places the value in R1 and the runtime count in R0.
+        let mnemonic = if right && signed {
+            "sra"
+        } else if right {
+            "srl"
+        } else {
+            "sla"
+        };
+        self.line(&format!("    {mnemonic} r1, 0"));
+        self.line("    mov r1, r0");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{overflow}:"));
+        if right && signed {
+            self.line("    sra r1, 15");
+            self.line("    mov r1, r0");
+        } else {
+            self.line("    clr r0");
+        }
+        self.line(&format!("{done}:"));
         Ok(())
     }
 
@@ -1387,6 +1454,18 @@ fn type_is_signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name == "i8" || name == "i16")
 }
 
+fn constant_shift_count(expr: &Expr) -> Result<Option<u16>, Diagnostic> {
+    let value = match expr {
+        Expr::Int(value) | Expr::TypedInt(value, _) => *value,
+        _ => return Ok(None),
+    };
+    u16::try_from(value).map(Some).map_err(|_| {
+        Diagnostic::new(format!(
+            "TMS9900 shift count {value} is outside supported range 0..=65535"
+        ))
+    })
+}
+
 fn assign_binary(op: AssignOp) -> BinaryOp {
     match op {
         AssignOp::Set => unreachable!("set assignments bypass binary lowering"),
@@ -1484,6 +1563,106 @@ mod tests {
         }
 
         assert_eq!(ram.read_word(0xA000), 42);
+    }
+
+    #[test]
+    fn emits_native_constant_shifts_and_tbir_power_of_two_multiply() {
+        let assembly = emit(
+            r#"
+                global input: u16 = 7
+                global left: u16 = 0
+                global logical: u16 = 0
+                global arithmetic: i16 = 0
+                global product: u16 = 0
+                fn main() {
+                    left = input << 3
+                    logical = 0x8000 >> 4
+                    arithmetic = cast<i16>(0x8000) >> 4
+                    product = input * 8
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+
+        assert_eq!(assembly.matches("    sla r1, 3").count(), 2, "{assembly}");
+        assert!(assembly.contains("    srl r1, 4"), "{assembly}");
+        assert!(assembly.contains("    sra r1, 4"), "{assembly}");
+        assert!(!assembly.contains("    mpy "), "{assembly}");
+
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..250 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0xA002), 56);
+        assert_eq!(ram.read_word(0xA004), 0x0800);
+        assert_eq!(ram.read_word(0xA006), 0xF800);
+        assert_eq!(ram.read_word(0xA008), 56);
+    }
+
+    #[test]
+    fn executes_safe_variable_and_byte_shifts_on_libre99() {
+        let assembly = emit(
+            r#"
+                global left: u16 = 0
+                global logical: u16 = 0
+                global arithmetic: i16 = 0
+                global wide_count: u16 = 16
+                global signed_byte: i8 = 0
+                fn variable_left(value: u16, count: u16) -> u16 { return value << count }
+                fn variable_right(value: u16, count: u16) -> u16 { return value >> count }
+                fn variable_signed(value: i16, count: i16) -> i16 { return value >> count }
+                fn main() {
+                    left = variable_left(3, 4)
+                    logical = variable_right(0x8000, wide_count)
+                    arithmetic = variable_signed(cast<i16>(0x8000), wide_count)
+                    signed_byte = cast<i8>(0x80) >> 3
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                stack_top: crate::target::Address24::new(0xFFFE),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+
+        assert!(assembly.contains("    sla r1, 0"), "{assembly}");
+        assert!(assembly.contains("    srl r1, 0"), "{assembly}");
+        assert!(assembly.contains("    sra r1, 0"), "{assembly}");
+        assert!(assembly.contains("shift_overflow"), "{assembly}");
+
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap();
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..700 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0xA000), 48);
+        assert_eq!(ram.read_word(0xA002), 0);
+        assert_eq!(ram.read_word(0xA004), 0xFFFF);
+        assert_eq!(ram.read_byte(0xA008), 0xF0);
     }
 
     #[test]

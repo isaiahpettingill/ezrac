@@ -1,6 +1,12 @@
 use std::path::Path;
 
-use crate::{parser::parse_program, target::CpuFamily};
+use crate::{
+    asm::AssemblyOptions,
+    hir::HirProgram,
+    parser::parse_program,
+    target::{Address24, CpuFamily},
+    tbir::{TbirDeclaration, TbirProgram},
+};
 
 use super::*;
 
@@ -132,7 +138,10 @@ fn simplifies_expressions_exposed_by_propagation() {
         })
         .unwrap();
 
-    assert!(matches!(test.body[1], Stmt::Return(Some(Expr::Int(1)))));
+    assert!(matches!(
+        test.body[1],
+        Stmt::Return(Some(Expr::TypedInt(1, Type::Named(ref name)))) if name == "u8"
+    ));
     assert!(report.copy_propagations >= 1);
     assert!(report.algebraic_simplifications >= 1);
 }
@@ -452,7 +461,7 @@ fn rejects_unsafe_memory_object_classes_and_alias_barriers() {
 fn records_inline_approval_and_mutual_recursion_rejection() {
     let program = parse_program(
         Path::new("test.ezra"),
-        "inline fn leaf() -> u8 { return 1 } inline fn left() -> u8 { return right() } fn right() -> u8 { return left() }",
+        "inline fn leaf() -> u8 { return 1 } inline fn left() -> u8 { return right() } fn right() -> u8 { return left() } fn use_leaf() -> u8 { return leaf() }",
     )
     .unwrap();
     let (_, report) = optimize_program(&program, CpuFamily::Ez80);
@@ -464,6 +473,149 @@ fn records_inline_approval_and_mutual_recursion_rejection() {
             && decision.outcome == TbirOptimizationOutcome::Rejected
             && decision.reason == "mutual recursion"
     }));
+}
+
+fn function_named<'a>(program: &'a Program, name: &str) -> &'a Function {
+    program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Function(function) if function.name == name => Some(function),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn expands_value_void_nested_calls_and_alpha_renames_locals() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "inline fn one(x: u8) -> u8 { let local: u8 = x + 1 return local } inline fn two(x: u8) -> u8 { return one(x) + one(x) } inline fn sink(x: u8) { let local: u8 = x } fn test(local: u8) -> u8 { sink(local) return two(local) }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Dcpu);
+    let test = function_named(&program, "test");
+    let text = format!("{:?}", test.body);
+
+    assert!(!text.contains("Call"), "{text}");
+    assert!(text.contains("__tbir_inline_"), "{text}");
+    assert!(report.decisions.iter().any(|decision| {
+        decision.kind == TbirOptimizationKind::Inline
+            && decision.callee == "one"
+            && decision.reason.contains("transformed")
+    }));
+    assert!(report.inline_function_names().contains("sink"));
+}
+
+#[test]
+fn evaluates_inline_arguments_once_in_left_to_right_typed_temporaries() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn first() -> u8 { return 1 } fn second() -> u8 { return 2 } inline fn pair(a: u8, b: u8) -> u8 { return a + b } fn test() -> u8 { return pair(first(), second()) }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Dcpu);
+    let text = format!("{:?}", function_named(&program, "test").body);
+
+    assert_eq!(text.matches("first").count(), 1, "{text}");
+    assert_eq!(text.matches("second").count(), 1, "{text}");
+    assert!(
+        text.find("first").unwrap() < text.find("second").unwrap(),
+        "{text}"
+    );
+    assert!(text.contains("Named(\"u8\")"), "{text}");
+}
+
+#[test]
+fn preserves_inline_calls_in_short_circuit_rhs_and_while_conditions() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "inline fn yes() -> bool { return true } fn test(flag: bool) { let value: bool = flag && yes() while yes() { return } }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Dcpu);
+    let text = format!("{:?}", function_named(&program, "test").body);
+
+    assert_eq!(text.matches("yes").count(), 2, "{text}");
+    assert!(!report.inline_function_names().contains("yes"));
+}
+
+#[test]
+fn rejects_recursive_asm_and_control_exit_inline_functions() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "inline fn recurse() -> u8 { return recurse() } inline fn exits() -> u8 { loop { break } return 1 } inline fn raw() { asm { \"nop\" } } fn test() -> u8 { return recurse() }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Dcpu);
+
+    assert!(format!("{:?}", function_named(&program, "test").body).contains("recurse"));
+    assert!(
+        report
+            .decisions
+            .iter()
+            .any(|d| d.callee == "recurse" && d.reason == "direct recursion")
+    );
+    assert!(
+        report
+            .decisions
+            .iter()
+            .any(|d| d.callee == "exits" && d.reason == "inline assembly or control exit")
+    );
+    assert!(
+        report
+            .decisions
+            .iter()
+            .any(|d| d.callee == "raw" && d.reason == "inline assembly or control exit")
+    );
+}
+
+#[test]
+fn leaves_global_initializer_calls_unchanged() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "inline fn value() -> u8 { return 7 } global answer: u8 = value() fn test() -> u8 { return value() }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Dcpu);
+    let text = format!("{:?}", program.declarations);
+
+    assert!(text.contains("Global"));
+    assert!(text.contains("Call { path: [\"value\"]"), "{text}");
+    assert!(!format!("{:?}", function_named(&program, "test").body).contains("Call"));
+}
+
+#[test]
+fn rebuilds_dcpu_tbir_declarations_from_the_transformed_program() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "inline fn value(x: u16) -> u16 { return x + 1 } fn test() -> u16 { return value(2) }",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let options = AssemblyOptions {
+        cpu: CpuFamily::Dcpu,
+        load_addr: Address24::new(0x0100),
+        entry_addr: Address24::new(0x0100),
+        code_base: Address24::new(0x0100),
+        rodata_base: Address24::new(0x1000),
+        ram_base: Address24::new(0x2000),
+        vram_base: Address24::new(0x3000),
+        audio_base: Address24::new(0x4000),
+        asset_base: Address24::new(0x5000),
+        stack_top: Address24::new(0xff00),
+        ..AssemblyOptions::default()
+    };
+    let tbir = TbirProgram::lower(&hir, &program, &options).unwrap();
+    let lowered = format!("{:?}", function_named(&tbir.lowered_program, "test").body);
+    let declaration = tbir
+        .declarations
+        .iter()
+        .find(|declaration| matches!(declaration, TbirDeclaration::Function { name, .. } if name == "test"))
+        .unwrap();
+
+    assert!(!lowered.contains("Call"), "{lowered}");
+    assert!(!format!("{declaration:?}").contains("Call"));
 }
 
 #[test]

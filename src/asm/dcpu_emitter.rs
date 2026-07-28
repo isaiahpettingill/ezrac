@@ -33,6 +33,7 @@ pub fn emit_dcpu_assembly_with_options(
 struct Emitter {
     out: String,
     locals: HashMap<String, &'static str>,
+    local_types: HashMap<String, Type>,
     next_register: usize,
 }
 
@@ -41,6 +42,7 @@ impl Emitter {
         Self {
             out: String::new(),
             locals: HashMap::new(),
+            local_types: HashMap::new(),
             // I and J are reserved for expression temporaries.
             next_register: 0,
         }
@@ -103,6 +105,7 @@ impl Emitter {
             TbirStmt::Let { name, ty, value } => {
                 self.require_scalar_type(ty, &format!("local `{name}`"))?;
                 let register = self.allocate_local(name)?;
+                self.local_types.insert(name.clone(), ty.clone());
                 self.emit_expr(value, register)
             }
             TbirStmt::Assign { target, op, value } => {
@@ -118,7 +121,11 @@ impl Emitter {
                     self.line(&format!("    set push, {register}"));
                     self.emit_expr(value, register)?;
                     self.line("    set j, pop");
-                    self.line(&format!("    {} j, {register}", assign_opcode(*op)?));
+                    let signed = type_is_signed(self.local_type(name)?);
+                    self.line(&format!(
+                        "    {} j, {register}",
+                        assign_opcode(*op, signed)?
+                    ));
                     self.line(&format!("    set {register}, j"));
                     Ok(())
                 }
@@ -223,7 +230,11 @@ impl Emitter {
                         )));
                     }
                     _ => {
-                        self.line(&format!("    {} j, {destination}", binary_opcode(*op)?));
+                        let signed = type_is_signed(&self.expr_type(left)?);
+                        self.line(&format!(
+                            "    {} j, {destination}",
+                            binary_opcode(*op, signed)?
+                        ));
                         self.line(&format!("    set {destination}, j"));
                     }
                 }
@@ -251,6 +262,19 @@ impl Emitter {
         })?;
         self.line(&format!("    set {destination}, 0x{value:04x}"));
         Ok(())
+    }
+
+    fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
+        match expr {
+            Expr::TypedInt(_, ty) | Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::Ident(name) => Ok(self.local_type(name)?.clone()),
+            Expr::Binary { left, .. } | Expr::Unary { expr: left, .. } => self.expr_type(left),
+            Expr::Int(_) | Expr::Char(_) => Ok(Type::Named("u16".to_owned())),
+            Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
+            _ => Err(Diagnostic::new(format!(
+                "DCPU-16 emitter cannot determine the type of expression `{expr:?}`"
+            ))),
+        }
     }
 
     fn require_scalar_type(&self, ty: &Type, context: &str) -> Result<(), Diagnostic> {
@@ -284,20 +308,33 @@ impl Emitter {
             .ok_or_else(|| Diagnostic::new(format!("DCPU-16 local `{name}` is not available")))
     }
 
+    fn local_type(&self, name: &str) -> Result<&Type, Diagnostic> {
+        self.local_types
+            .get(name)
+            .ok_or_else(|| Diagnostic::new(format!("DCPU-16 local `{name}` has no type")))
+    }
+
     fn line(&mut self, line: &str) {
         self.out.push_str(line);
         self.out.push('\n');
     }
 }
 
-fn binary_opcode(op: BinaryOp) -> Result<&'static str, Diagnostic> {
+fn type_is_signed(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16"))
+}
+
+fn binary_opcode(op: BinaryOp, signed: bool) -> Result<&'static str, Diagnostic> {
     match op {
+        BinaryOp::Mul if signed => Ok("mli"),
         BinaryOp::Mul => Ok("mul"),
+        BinaryOp::Div if signed => Ok("dvi"),
         BinaryOp::Div => Ok("div"),
         BinaryOp::Mod => Ok("mod"),
         BinaryOp::Add => Ok("add"),
         BinaryOp::Sub => Ok("sub"),
         BinaryOp::Shl => Ok("shl"),
+        BinaryOp::Shr if signed => Ok("asr"),
         BinaryOp::Shr => Ok("shr"),
         BinaryOp::BitAnd => Ok("and"),
         BinaryOp::BitXor => Ok("xor"),
@@ -308,17 +345,20 @@ fn binary_opcode(op: BinaryOp) -> Result<&'static str, Diagnostic> {
     }
 }
 
-fn assign_opcode(op: AssignOp) -> Result<&'static str, Diagnostic> {
+fn assign_opcode(op: AssignOp, signed: bool) -> Result<&'static str, Diagnostic> {
     match op {
         AssignOp::Add => Ok("add"),
         AssignOp::Sub => Ok("sub"),
+        AssignOp::Mul if signed => Ok("mli"),
         AssignOp::Mul => Ok("mul"),
+        AssignOp::Div if signed => Ok("dvi"),
         AssignOp::Div => Ok("div"),
         AssignOp::Mod => Ok("mod"),
         AssignOp::BitAnd => Ok("and"),
         AssignOp::BitOr => Ok("bor"),
         AssignOp::BitXor => Ok("xor"),
         AssignOp::Shl => Ok("shl"),
+        AssignOp::Shr if signed => Ok("asr"),
         AssignOp::Shr => Ok("shr"),
         AssignOp::Set => Err(Diagnostic::new("internal DCPU-16 assignment error")),
     }
@@ -363,9 +403,48 @@ mod tests {
 
     #[test]
     fn scalar_arithmetic_assembles() {
-        let assembly =
-            emit("fn main() { let left: u16 = 0x10; let right: u16 = 2; left += right * 3 }");
+        let assembly = emit(
+            "fn main() { let left: u16 = 0x10; let right: u16 = 2; right += left; left += right * 3 }",
+        );
         assert!(assembly.contains("mul j, a"));
         assert!(assembly.contains("add j, a"));
+    }
+
+    #[test]
+    fn signed_arithmetic_emits_signed_opcodes() {
+        let assembly = emit(
+            "fn main() { let left: i16 = 15; let right: i16 = 3; left += right; let product: i16 = left * right; let quotient: i16 = left / right; let shifted: i16 = left >> right }",
+        );
+        assert!(assembly.contains("mli j, c"));
+        assert!(assembly.contains("dvi j, x"));
+        assert!(assembly.contains("asr j, y"));
+    }
+
+    #[test]
+    fn unsigned_arithmetic_emits_unsigned_opcodes() {
+        let assembly = emit(
+            "fn main() { let left: u16 = 15; let right: u16 = 3; left += right; let product: u16 = left * right; let quotient: u16 = left / right; let shifted: u16 = left >> right }",
+        );
+        assert!(assembly.contains("mul j, c"));
+        assert!(assembly.contains("div j, x"));
+        assert!(assembly.contains("shr j, y"));
+    }
+
+    #[test]
+    fn signed_compound_assignments_emit_signed_opcodes() {
+        let assembly = emit(
+            "fn main() { let value: i16 = 24; let amount: i16 = 3; value *= amount; value /= amount; value >>= amount }",
+        );
+        assert!(assembly.contains("mli j, a"));
+        assert!(assembly.contains("dvi j, a"));
+        assert!(assembly.contains("asr j, a"));
+    }
+
+    #[test]
+    fn multiply_by_power_of_two_keeps_shared_shift_rewrite() {
+        let assembly = emit("fn main() { let value: i16 = 7; let scaled: i16 = value * 8 }");
+        assert!(assembly.contains("shl j, b"));
+        assert!(!assembly.contains("mli j, b"));
+        assert!(!assembly.contains("mul j, b"));
     }
 }

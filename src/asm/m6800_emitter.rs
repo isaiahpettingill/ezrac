@@ -334,6 +334,13 @@ impl Emitter {
                     expected.clone()
                 };
                 self.require_scalar(&operand_ty, "binary operand")?;
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                    && let Some(count) = self.constant_shift_count(right)
+                {
+                    self.emit_expr(left, &operand_ty)?;
+                    self.emit_constant_shift(*op, count, &operand_ty)?;
+                    return Ok(());
+                }
                 self.emit_expr(left, &operand_ty)?;
                 self.line("    psha");
                 self.emit_expr(right, &operand_ty)?;
@@ -415,6 +422,37 @@ impl Emitter {
             AssignOp::BitAnd => BinaryOp::BitAnd, AssignOp::BitOr => BinaryOp::BitOr, AssignOp::BitXor => BinaryOp::BitXor,
             _ => return Err(Diagnostic::new("M6800 source emitter supports only +=, -=, &=, |=, and ^= compound assignments")),
         })
+    }
+
+    fn constant_shift_count(&self, expr: &Expr) -> Option<u32> {
+        match expr {
+            Expr::Int(value) | Expr::TypedInt(value, _) => u32::try_from(*value).ok(),
+            Expr::Ident(name) => self
+                .model
+                .constants
+                .get(name)
+                .and_then(|value| u32::try_from(*value).ok()),
+            Expr::Cast { expr, .. } => self.constant_shift_count(expr),
+            _ => None,
+        }
+    }
+
+    fn emit_constant_shift(
+        &mut self,
+        op: BinaryOp,
+        count: u32,
+        ty: &Type,
+    ) -> Result<(), Diagnostic> {
+        let instruction = match op {
+            BinaryOp::Shl => "    asla",
+            BinaryOp::Shr if self.type_is_signed(ty)? => "    asra",
+            BinaryOp::Shr => "    lsra",
+            _ => unreachable!("constant shift called for a non-shift operation"),
+        };
+        for _ in 0..count.min(8) {
+            self.line(instruction);
+        }
+        Ok(())
     }
 
     fn emit_binary(&mut self, op: BinaryOp) -> Result<(), Diagnostic> {
@@ -517,11 +555,18 @@ impl Emitter {
 
     fn require_scalar(&self, ty: &Type, context: &str) -> Result<(), Diagnostic> {
         match self.model.resolved_type(ty)? {
-            Type::Named(name) if name == "u8" || name == "bool" => Ok(()),
+            Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Ok(()),
             _ => Err(Diagnostic::new(format!(
-                "M6800 source emitter supports u8 and bool {context}s only"
+                "M6800 source emitter supports 8-bit integer and bool {context}s only"
             ))),
         }
+    }
+
+    fn type_is_signed(&self, ty: &Type) -> Result<bool, Diagnostic> {
+        Ok(matches!(
+            self.model.resolved_type(ty)?,
+            Type::Named(name) if name == "i8"
+        ))
     }
     fn bind(&mut self, name: String, storage: Storage, ty: Type) -> Result<(), Diagnostic> {
         if self
@@ -715,7 +760,10 @@ mod tests {
         asm::AssemblyOptions,
         parser::parse_program,
         target::{Address24, AssemblerCpu, CpuFamily},
-        vm::assemble_subset_with_symbols_at,
+        vm::{
+            TestImage, TestRunOptions, TestRunner, assemble_subset_at,
+            assemble_subset_with_symbols_at,
+        },
     };
 
     fn m6800_options() -> AssemblyOptions {
@@ -753,6 +801,76 @@ mod tests {
     }
 
     #[test]
+    fn emits_original_m6800_constant_shift_instructions_and_strength_reduces_multiply() {
+        let program = parse_program(
+            Path::new("m6800_shift_test.ezra"),
+            r#"
+                fn left(value: u8) -> u8 { return value << 2 }
+                fn unsigned_right(value: u8) -> u8 { return value >> 3 }
+                fn signed_right(value: i8) -> i8 { return value >> 2 }
+                fn times_eight(value: u8) -> u8 { return value * 8 }
+                fn main() {}
+            "#,
+        )
+        .unwrap();
+        let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+
+        assert_eq!(assembly.matches("    asla\n").count(), 5, "{assembly}");
+        assert_eq!(assembly.matches("    lsra\n").count(), 3, "{assembly}");
+        assert_eq!(assembly.matches("    asra\n").count(), 2, "{assembly}");
+        assert!(!assembly.contains("    mul"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    }
+
+    fn run_main_result(source: &str) -> u8 {
+        let program = parse_program(Path::new("m6800_shift_runtime.ezra"), source).unwrap();
+        let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+        let assembly = assembly.replace(
+            "__ezra_exit:\n    bra __ezra_exit\n",
+            "__ezra_exit:\n    staa >FFF1h\n    ldaa #01h\n    staa >FFF2h\n",
+        );
+        let bytes = assemble_subset_at(CpuFamily::M6800, &assembly, 0).unwrap();
+        let run = TestRunner::default()
+            .run(
+                &TestImage {
+                    cpu_family: CpuFamily::M6800,
+                    base_addr: 0,
+                    bytes,
+                },
+                &TestRunOptions {
+                    instruction_budget: 200,
+                    initial_ports: Vec::new(),
+                    initial_memory: Vec::new(),
+                    stack_top: 0x01ff,
+                },
+            )
+            .unwrap();
+        assert!(run.halted, "{assembly}");
+        run.result_code
+    }
+
+    #[test]
+    fn executes_constant_shifts_and_multiply_strength_reduction() {
+        assert_eq!(
+            run_main_result("global value: u8 = 0x23 fn main() -> u8 { return value << 3 }"),
+            0x18
+        );
+        assert_eq!(
+            run_main_result("global value: u8 = 0x90 fn main() -> u8 { return value >> 3 }"),
+            0x12
+        );
+        assert_eq!(
+            run_main_result("global value: i8 = -64 fn main() -> i8 { return value >> 3 }"),
+            0xf8
+        );
+        assert_eq!(
+            run_main_result("global value: u8 = 0x23 fn main() -> u8 { return value * 8 }"),
+            0x18
+        );
+    }
+
+    #[test]
     fn rejects_wide_scalar_storage() {
         let program = parse_program(
             Path::new("m6800_test.ezra"),
@@ -760,6 +878,6 @@ mod tests {
         )
         .unwrap();
         let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();
-        assert!(error.message.contains("u8 and bool"));
+        assert!(error.message.contains("8-bit integer and bool"));
     }
 }

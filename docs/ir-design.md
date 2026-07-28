@@ -20,7 +20,7 @@ source
   -> final artifact
 ```
 
-HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions plus typed global/MMIO/embed object provenance, applies scalar simplification, immutable-local propagation, local common-subexpression cleanup, pure scalar loop-invariant hoisting, and named global-read LICM, decides explicit inlining and safe tail calls, rewrites supported direct tail recursion into loops, and supplies the lowered program to the source emitters. It is not yet a fully lowered basic-block or register-allocation IR.
+HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions plus typed global/MMIO/embed object provenance, applies scalar simplification, typed immutable-local propagation, local common-subexpression cleanup, pure scalar loop-invariant hoisting, and named global-read LICM, expands approved explicit-inline calls, decides safe tail calls, rewrites supported direct tail recursion into loops, and supplies the transformed program to every source emitter. Target emitters then select native arithmetic and shift instructions for their CPU. TBIR is not yet a fully lowered basic-block or register-allocation IR.
 
 The remaining sections use design language (`should`, `must`, and planned examples) to define the intended direction. HIR and TBIR are Rust structs in memory today; textual dumps are provided for debugging and tests, not as a stable serialized IR format.
 

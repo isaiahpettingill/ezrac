@@ -16,17 +16,22 @@ behavior, and emulator-backed test behavior.
   memory, port, call, or inline-asm effects.
 - Target-specific multiply lowering when the selected CPU supports the emitted
   instruction sequence and emulator tests cover the result.
-- Explicit function inlining when TBIR approves a straight-line body outside
-  direct or mutual recursion, naked functions, and interrupt functions. Argument
-  expressions are evaluated once before the body is expanded.
-- Direct tail-recursion conversion for register-ABI eZ80-family functions. New
-  argument values are evaluated left to right into temporaries before parameters
-  are assigned, and the pass does not rewrite calls inside existing loops.
+- Explicit function inlining in TBIR when it approves a source-shaped body outside
+  direct or mutual recursion, naked functions, interrupt functions, inline assembly,
+  and unsupported control exits. Typed argument temporaries evaluate expressions
+  once from left to right; parameters and locals are renamed. Calls in short-circuit
+  right-hand sides and `while` conditions stay as calls when moving their prefix
+  statements would change conditional evaluation.
+- Direct tail-recursion conversion in TBIR. New argument values are evaluated left
+  to right into typed temporaries before parameters are assigned, and the pass does
+  not rewrite calls inside existing loops.
 - Sibling tail calls between compatible register-ABI eZ80-family functions with
   matching return types and no interrupt, naked, argument-slot, or stack cleanup.
 - Immutable-local scalar propagation when the initializer contains only literals,
-  immutable locals or parameters, unary/binary operations, and casts. Calls,
-  ports, memory, addresses, pointers, and aggregate values are excluded.
+  immutable locals or parameters, unary/binary operations, and casts. Substitutions
+  retain the local's declared type so width, signedness, and aliases still drive
+  validation and instruction selection. Calls, ports, memory, addresses, pointers,
+  and aggregate values are excluded.
 - Local common-subexpression cleanup inside straight-line blocks for pure scalar
   expressions. Assignments, control-flow joins, loops, calls, ports, and inline
   assembly clear the available-expression set.

@@ -2,8 +2,11 @@
 
 ## Unreleased
 
-- Moved explicit-inline, sibling-tail-call, and direct-tail-recursion decisions into target-aware TBIR passes. eZ80-family backends now inline only TBIR-approved functions, lower safe register-ABI tail calls to jumps, and rewrite direct tail recursion into loops with ordered temporary argument evaluation.
-- Added explicit TBIR passes for immutable-local propagation, local common-subexpression cleanup, strength reduction, pure scalar loop-invariant hoisting, and named global-read LICM. TBIR now retains typed global, MMIO, and embed object provenance with address, size, region, access, and volatility; calls, ports, MMIO, embeds, read-only or volatile regions, dereferences, addresses, inline assembly, unknown writes, and same-object writes remain conservative barriers.
+- Standardized tracked Rust crates on edition 2024 and pinned development to `nightly-2026-07-27` with Rustfmt and Clippy components.
+
+- Moved explicit function inlining and safe direct-tail-recursion rewriting into TBIR so every source backend receives the same transformed program. Inline expansion preserves typed, left-to-right, exactly-once argument evaluation, renames parameters and locals, supports nested approved calls, and leaves conditionally evaluated calls in short-circuit and loop conditions unchanged. eZ80-family backends also lower compatible register-ABI sibling tail calls to jumps.
+- Added explicit TBIR passes for immutable-local propagation, local common-subexpression cleanup, strength reduction, pure scalar loop-invariant hoisting, and named global-read LICM. Propagated values retain their declared width, signedness, and aliases. TBIR now retains typed global, MMIO, and embed object provenance with address, size, region, access, and volatility; calls, ports, MMIO, embeds, read-only or volatile regions, dereferences, addresses, inline assembly, unknown writes, and same-object writes remain conservative barriers.
+- Added target instruction selection for common arithmetic: 8086 uses native `MUL`/`IMUL` and strict one-bit shift forms, MC6800 uses `ASLA`/`LSRA`/`ASRA`, TMS9900 uses guarded `SLA`/`SRL`/`SRA` forms, and DCPU-16 selects signed `MLI`/`DVI`/`ASR`. Shared power-of-two multiplication strength reduction feeds shifts to every backend.
 
 
 ## 0.1.31

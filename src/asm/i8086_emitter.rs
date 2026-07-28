@@ -513,7 +513,10 @@ impl Emitter {
                     self.emit_expr(value, &ty)?;
                     self.copy(self.r0, self.r1, u32::from(width));
                     self.copy(left, self.r0, u32::from(width));
-                    self.binary(assign_binary(*op), width, self.type_is_signed(&ty)?)?;
+                    let op = assign_binary(*op);
+                    let shift_by_one = matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                        && self.model.const_value(value).is_ok_and(|value| value == 1);
+                    self.binary(op, width, self.type_is_signed(&ty)?, shift_by_one)?;
                 }
                 let result = self.model.allocate(u32::from(width))?;
                 self.copy(self.r0, result, u32::from(width));
@@ -790,7 +793,14 @@ impl Emitter {
                 {
                     self.scale(self.r1, operand_width, self.model.type_size(&inner)?)?;
                 }
-                self.binary(*op, operand_width, self.type_is_signed(&operand_ty)?)?;
+                let shift_by_one = matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                    && self.model.const_value(right).is_ok_and(|value| value == 1);
+                self.binary(
+                    *op,
+                    operand_width,
+                    self.type_is_signed(&operand_ty)?,
+                    shift_by_one,
+                )?;
                 if is_comparison(*op) {
                     self.extend_result(1, width, false);
                 }
@@ -997,7 +1007,13 @@ impl Emitter {
         }
     }
 
-    fn binary(&mut self, op: BinaryOp, width: u8, signed: bool) -> Result<(), Diagnostic> {
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        width: u8,
+        signed: bool,
+        shift_by_one: bool,
+    ) -> Result<(), Diagnostic> {
         match op {
             BinaryOp::Add => self.add(width),
             BinaryOp::Sub => self.sub(width),
@@ -1018,7 +1034,9 @@ impl Emitter {
             }
             BinaryOp::Mul => self.multiply(width, signed)?,
             BinaryOp::Div | BinaryOp::Mod => self.divide(width, op == BinaryOp::Mod, signed)?,
-            BinaryOp::Shl | BinaryOp::Shr => self.shift(width, op == BinaryOp::Shr, signed),
+            BinaryOp::Shl | BinaryOp::Shr => {
+                self.shift(width, op == BinaryOp::Shr, signed, shift_by_one)
+            }
             BinaryOp::And | BinaryOp::Or => unreachable!("short-circuited"),
             op if is_comparison(op) => self.compare(op, width, signed),
             _ => return Err(Diagnostic::new("unsupported i8086 binary operation")),
@@ -1045,6 +1063,22 @@ impl Emitter {
     }
 
     fn multiply(&mut self, width: u8, signed: bool) -> Result<(), Diagnostic> {
+        if width <= 2 {
+            let mnemonic = if signed { "imul" } else { "mul" };
+            if width == 1 {
+                self.load_al(self.r0.address);
+                self.line(&format!("    mov bl,{}", mem(self.r1.address)));
+                self.line(&format!("    {mnemonic} bl"));
+                self.store_al(self.r0.address);
+            } else {
+                self.load_ax(self.r0.address);
+                self.load_bx(self.r1.address);
+                self.line(&format!("    {mnemonic} bx"));
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+            }
+            return Ok(());
+        }
+
         let multiplicand = self.model.allocate(u32::from(width))?;
         let multiplier = self.model.allocate(u32::from(width))?;
         let negative = self.model.allocate(1)?;
@@ -1119,13 +1153,25 @@ impl Emitter {
         Ok(())
     }
 
-    fn shift(&mut self, width: u8, right: bool, signed: bool) {
+    fn shift(&mut self, width: u8, right: bool, signed: bool, by_one: bool) {
+        if by_one {
+            self.shift_once(width, right, signed);
+            return;
+        }
+
         let loop_label = self.next_label("shift_loop");
         let done = self.next_label("shift_done");
         self.load_cl(self.r1.address);
         self.line(&format!("{loop_label}:"));
         self.line("    or cl,cl");
         self.branch_long("jz", &done);
+        self.shift_once(width, right, signed);
+        self.line("    dec cl");
+        self.line(&format!("    jmp near {loop_label}"));
+        self.line(&format!("{done}:"));
+    }
+
+    fn shift_once(&mut self, width: u8, right: bool, signed: bool) {
         if right {
             let top = self.r0.address + u32::from(width - 1);
             self.load_al(top);
@@ -1150,9 +1196,6 @@ impl Emitter {
                 self.store_al(self.r0.address + offset);
             }
         }
-        self.line("    dec cl");
-        self.line(&format!("    jmp near {loop_label}"));
-        self.line(&format!("{done}:"));
     }
 
     fn short_circuit(&mut self, left: &Expr, op: BinaryOp, right: &Expr) -> Result<(), Diagnostic> {
@@ -2898,6 +2941,74 @@ mod tests {
     }
 
     #[test]
+    fn uses_native_wrapping_multiply_for_bytes_and_words() {
+        let assembly = emit_and_assemble(
+            r#"
+            fn unsigned_byte(left: u8, right: u8) -> u8 { return left * right }
+            fn signed_byte(left: i8, right: i8) -> i8 { return left * right }
+            fn unsigned_word(left: u16, right: u16) -> u16 { return left * right }
+            fn signed_word(left: i16, right: i16) -> i16 { return left * right }
+            fn main() {
+                let ub: u8 = unsigned_byte(255, 2)
+                let sb: i8 = signed_byte(-128, 2)
+                let uw: u16 = unsigned_word(65535, 2)
+                let sw: i16 = signed_word(-32768, 2)
+            }
+        "#,
+        );
+
+        assert!(assembly.contains("    mul bl\n"), "{assembly}");
+        assert!(assembly.contains("    imul bl\n"), "{assembly}");
+        assert!(assembly.contains("    mul bx\n"), "{assembly}");
+        assert!(assembly.contains("    imul bx\n"), "{assembly}");
+        assert!(!assembly.contains("multiply_loop"), "{assembly}");
+    }
+
+    #[test]
+    fn specializes_one_bit_shifts_and_power_of_two_multiplication() {
+        let assembly = emit_and_assemble(
+            r#"
+            fn left_one(value: u16) -> u16 { return value << 1 }
+            fn right_one(value: i16) -> i16 { return value >> 1 }
+            fn times_eight(value: u16) -> u16 { return value * 8 }
+            fn main() {
+                let left: u16 = left_one(3)
+                let right: i16 = right_one(-4)
+                let product: u16 = times_eight(7)
+            }
+        "#,
+        );
+
+        let left_one = assembly
+            .split("_left_one:")
+            .nth(1)
+            .unwrap()
+            .split("ret")
+            .next()
+            .unwrap();
+        let right_one = assembly
+            .split("_right_one:")
+            .nth(1)
+            .unwrap()
+            .split("ret")
+            .next()
+            .unwrap();
+        let times_eight = assembly
+            .split("_times_eight:")
+            .nth(1)
+            .unwrap()
+            .split("ret")
+            .next()
+            .unwrap();
+        assert!(left_one.contains("shl al,1"), "{left_one}");
+        assert!(!left_one.contains("shift_loop"), "{left_one}");
+        assert!(right_one.contains("sar al,1"), "{right_one}");
+        assert!(!right_one.contains("shift_loop"), "{right_one}");
+        assert!(times_eight.contains("shl al,1"), "{times_eight}");
+        assert!(!times_eight.contains("mul "), "{times_eight}");
+    }
+
+    #[test]
     fn assembles_aggregates_pointers_access_and_memory_helpers() {
         let assembly = emit_and_assemble(
             r#"
@@ -3257,25 +3368,28 @@ mod tests {
 
     #[test]
     fn operation_scratch_allocation_failures_are_diagnostics_not_panics() {
-        for source in [
+        let options = AssemblyOptions {
+            cpu: CpuFamily::I8086,
+            ram_base: Address24::new(0xffdf),
+            rodata_base: Address24::new(0),
+            asset_base: Address24::new(0),
+            stack_top: Address24::new(0xfffe),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        };
+        let multiply = parse_program(
+            Path::new("operation-scratch.ezra"),
             "fn main() { let a: u16 = 2 let b: u16 = 3 let value: u16 = a * b }",
+        )
+        .unwrap();
+        emit_i8086_assembly_with_options(&multiply, options.clone()).unwrap();
+
+        for source in [
             "fn main() { let a: u16 = 6 let b: u16 = 3 let value: u16 = a / b }",
             "fn main() { let p: ptr<u16> = cast<ptr<u16>>(0x1000) let n: u16 = 1 let q: ptr<u16> = p + n }",
         ] {
             let program = parse_program(Path::new("operation-scratch.ezra"), source).unwrap();
-            let error = emit_i8086_assembly_with_options(
-                &program,
-                AssemblyOptions {
-                    cpu: CpuFamily::I8086,
-                    ram_base: Address24::new(0xffdf),
-                    rodata_base: Address24::new(0),
-                    asset_base: Address24::new(0),
-                    stack_top: Address24::new(0xfffe),
-                    default_sdk_symbols: false,
-                    ..AssemblyOptions::default()
-                },
-            )
-            .unwrap_err();
+            let error = emit_i8086_assembly_with_options(&program, options.clone()).unwrap_err();
             assert!(
                 error
                     .message
