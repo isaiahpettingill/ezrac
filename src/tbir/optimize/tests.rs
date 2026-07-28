@@ -15,7 +15,7 @@ fn folds_simplifies_and_marks_dead_statements_without_skipping_validation() {
     let main = program.main_function().unwrap();
 
     assert_eq!(report.constant_folds, 1);
-    assert_eq!(report.constant_propagations, 0);
+    assert_eq!(report.constant_propagations, 1);
     assert_eq!(report.dead_statements_marked, 1);
     assert!(matches!(
         main.body[0],
@@ -27,7 +27,7 @@ fn folds_simplifies_and_marks_dead_statements_without_skipping_validation() {
     assert!(matches!(
         main.body[1],
         Stmt::Let {
-            value: Expr::Ident(_),
+            value: Expr::Bool(true),
             ..
         }
     ));
@@ -86,6 +86,128 @@ fn simplifies_identity_operations_on_runtime_values() {
             ..
         }
     ));
+}
+
+#[test]
+fn propagates_immutable_scalars_and_rejects_assigned_or_effectful_values() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn helper() -> u8 { return 7 } fn test(p: ptr<u8>, a: u8) -> u8 { let copy: u8 = a let constant: u8 = 3 let changed: u8 = a changed = 4 let call: u8 = helper() let memory: u8 = *p return copy + constant + changed + call + memory }",
+    ).unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            Declaration::Function(f) if f.name == "test" => Some(f),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(value)) = test.body.last().unwrap() else {
+        panic!("missing return")
+    };
+    let text = format!("{value:?}");
+    assert!(!text.contains("copy"));
+    assert!(!text.contains("constant"));
+    assert!(text.contains("changed"));
+    assert!(text.contains("call"));
+    assert!(text.contains("memory"));
+    assert!(report.copy_propagations >= 2);
+}
+
+#[test]
+fn performs_local_cse_and_clears_it_at_barriers() {
+    let program = parse_program(Path::new("test.ezra"), "fn helper() {} fn test(a: u8, b: u8) { let first: u8 = a + b let second: u8 = a + b helper() let third: u8 = a + b }").unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            Declaration::Function(f) if f.name == "test" => Some(f),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(&test.body[1], Stmt::Let { value: Expr::Ident(name), .. } if name == "first"));
+    assert!(matches!(
+        &test.body[3],
+        Stmt::Let {
+            value: Expr::Binary { .. },
+            ..
+        }
+    ));
+    assert_eq!(report.common_subexpressions, 1);
+}
+
+#[test]
+fn hoists_pure_loop_invariants_but_not_assigned_dependencies_or_effects() {
+    let program = parse_program(Path::new("test.ezra"), "fn helper() -> u8 { return 1 } fn test(p: ptr<u8>, limit: u8) { let i: u8 = 0 while i < limit { let invariant: u8 = limit + 1 let changing: u8 = i + 1 let call: u8 = helper() let memory: u8 = *p i += 1 } }").unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            Declaration::Function(f) if f.name == "test" => Some(f),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(&test.body[1], Stmt::Let { name, .. } if name.starts_with("__tbir_licm_")));
+    let Stmt::While { body, .. } = &test.body[2] else {
+        panic!("missing loop")
+    };
+    assert!(
+        matches!(&body[0], Stmt::Let { value: Expr::Ident(name), .. } if name.starts_with("__tbir_licm_"))
+    );
+    assert!(matches!(
+        &body[1],
+        Stmt::Let {
+            value: Expr::Binary { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &body[2],
+        Stmt::Let {
+            value: Expr::Call { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &body[3],
+        Stmt::Let {
+            value: Expr::Deref(_),
+            ..
+        }
+    ));
+    assert_eq!(report.loop_invariants_hoisted, 1);
+    assert!(
+        report
+            .decisions
+            .iter()
+            .any(|d| d.kind == TbirOptimizationKind::LoopInvariantCodeMotion
+                && d.outcome == TbirOptimizationOutcome::Rejected
+                && d.reason == "dependency assigned in loop")
+    );
+}
+
+#[test]
+fn licm_temp_names_do_not_collide() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn test(a: u8) { let __tbir_licm_0: u8 = 0 loop { let invariant: u8 = a + 1 } }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Ez80);
+    let test = program.main_function().unwrap_or_else(|| {
+        program
+            .declarations
+            .iter()
+            .find_map(|d| match d {
+                Declaration::Function(f) => Some(f),
+                _ => None,
+            })
+            .unwrap()
+    });
+    assert!(matches!(&test.body[1], Stmt::Let { name, .. } if name == "__tbir_licm_1"));
 }
 
 #[test]

@@ -144,6 +144,10 @@ pub enum TbirEffect {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TbirOptimizationKind {
+    StrengthReduction,
+    CopyPropagation,
+    CommonSubexpression,
+    LoopInvariantCodeMotion,
     Inline,
     TailCall,
     TailRecursion,
@@ -168,7 +172,11 @@ pub struct TbirOptimizationDecision {
 pub struct TbirOptimizationReport {
     pub constant_folds: usize,
     pub algebraic_simplifications: usize,
+    pub strength_reductions: usize,
     pub constant_propagations: usize,
+    pub copy_propagations: usize,
+    pub common_subexpressions: usize,
+    pub loop_invariants_hoisted: usize,
     pub dead_statements_marked: usize,
     pub decisions: Vec<TbirOptimizationDecision>,
 }

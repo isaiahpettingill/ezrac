@@ -144,6 +144,10 @@ fn tbir_reports_optimization_markers_and_dump() {
     assert!(dump.contains("TBIR"), "{dump}");
     assert!(dump.contains("target: ez80-adl"), "{dump}");
     assert!(dump.contains("optimizations:"), "{dump}");
+    assert!(dump.contains("strength_reductions="), "{dump}");
+    assert!(dump.contains("copy_propagations="), "{dump}");
+    assert!(dump.contains("common_subexpressions="), "{dump}");
+    assert!(dump.contains("loop_invariants_hoisted="), "{dump}");
 }
 
 #[test]
@@ -175,7 +179,8 @@ fn tbir_simplifies_power_of_two_multiplication_and_zero_division() {
         })
     ));
     assert!(matches!(return_expr(&tbir, "zero"), Some(Expr::Int(0))));
-    assert!(tbir.optimizations.algebraic_simplifications >= 2);
+    assert!(tbir.optimizations.algebraic_simplifications >= 1);
+    assert!(tbir.optimizations.strength_reductions >= 1);
 }
 
 fn return_expr<'a>(tbir: &'a TbirProgram, name: &str) -> Option<&'a Expr> {

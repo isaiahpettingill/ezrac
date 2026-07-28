@@ -14,11 +14,13 @@ use super::{
 pub fn optimize_program(program: &Program, cpu: CpuFamily) -> (Program, TbirOptimizationReport) {
     let mut program = program.clone();
     let mut report = TbirOptimizationReport::default();
-    for declaration in &mut program.declarations {
-        optimize_declaration(declaration, &mut report);
-    }
+    // Keep the stage order visible: later passes rely on the safety facts and
+    // normalized expressions produced by earlier stages.
+    scalar_simplify_program(&mut program, &mut report);
+    local_propagation_and_cse_program(&mut program, &mut report);
+    hoist_pure_loop_invariants_program(&mut program, &mut report);
     decide_inline_functions(&program, &mut report);
-    decide_and_rewrite_tail_calls(&mut program, cpu, &mut report);
+    run_tail_passes(&mut program, cpu, &mut report);
     (program, report)
 }
 
@@ -174,11 +176,7 @@ struct FunctionFacts {
     return_type: Option<Type>,
 }
 
-fn decide_and_rewrite_tail_calls(
-    program: &mut Program,
-    cpu: CpuFamily,
-    report: &mut TbirOptimizationReport,
-) {
+fn run_tail_passes(program: &mut Program, cpu: CpuFamily, report: &mut TbirOptimizationReport) {
     let facts: HashMap<String, FunctionFacts> = functions(program)
         .into_iter()
         .map(|function| {
@@ -504,6 +502,474 @@ fn stmt_contains_return(stmt: &Stmt) -> bool {
     }
 }
 
+fn local_propagation_and_cse_program(program: &mut Program, report: &mut TbirOptimizationReport) {
+    fn visit(declarations: &mut [Declaration], report: &mut TbirOptimizationReport) {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Function(function) => {
+                    let mut assigned = HashSet::new();
+                    collect_assigned_names(&function.body, &mut assigned);
+                    let mut values = HashMap::new();
+                    let mut available = Vec::new();
+                    function.body = propagate_block(
+                        core::mem::take(&mut function.body),
+                        &assigned,
+                        &mut values,
+                        &mut available,
+                        report,
+                    );
+                }
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    visit(core::slice::from_mut(declaration), report)
+                }
+                _ => {}
+            }
+        }
+    }
+    visit(&mut program.declarations, report);
+}
+
+fn collect_assigned_names(stmts: &[Stmt], assigned: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign {
+                target: Place::Ident(name),
+                ..
+            } => {
+                assigned.insert(name.clone());
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_assigned_names(then_body, assigned);
+                collect_assigned_names(else_body, assigned);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_assigned_names(body, assigned)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn propagate_block(
+    stmts: Vec<Stmt>,
+    assigned: &HashSet<String>,
+    values: &mut HashMap<String, Expr>,
+    available: &mut Vec<(Expr, String)>,
+    report: &mut TbirOptimizationReport,
+) -> Vec<Stmt> {
+    let mut output = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let stmt = match stmt {
+            Stmt::Let { name, ty, value } => {
+                let mut value = substitute_expr(value, values, report);
+                if is_cse_candidate(&value) {
+                    if let Some((_, prior)) = available.iter().find(|(expr, _)| expr == &value) {
+                        value = Expr::Ident(prior.clone());
+                        report.common_subexpressions += 1;
+                        decision(
+                            report,
+                            TbirOptimizationKind::CommonSubexpression,
+                            None,
+                            &name,
+                            None,
+                        );
+                    } else if !assigned.contains(&name) {
+                        available.push((value.clone(), name.clone()));
+                    }
+                }
+                if !assigned.contains(&name) && is_pure_scalar(&value) {
+                    values.insert(name.clone(), value.clone());
+                }
+                Stmt::Let { name, ty, value }
+            }
+            Stmt::Assign { target, op, value } => {
+                let target = substitute_place(target, values, report);
+                let value = substitute_expr(value, values, report);
+                available.clear();
+                Stmt::Assign { target, op, value }
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let condition = substitute_expr(condition, values, report);
+                let mut then_values = values.clone();
+                let mut else_values = values.clone();
+                let then_body = propagate_block(
+                    then_body,
+                    assigned,
+                    &mut then_values,
+                    &mut Vec::new(),
+                    report,
+                );
+                let else_body = propagate_block(
+                    else_body,
+                    assigned,
+                    &mut else_values,
+                    &mut Vec::new(),
+                    report,
+                );
+                available.clear();
+                Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                }
+            }
+            Stmt::While { condition, body } => {
+                let condition = substitute_expr(condition, values, report);
+                let mut body_values = values.clone();
+                let body =
+                    propagate_block(body, assigned, &mut body_values, &mut Vec::new(), report);
+                available.clear();
+                Stmt::While { condition, body }
+            }
+            Stmt::Loop { body } => {
+                let mut body_values = values.clone();
+                let body =
+                    propagate_block(body, assigned, &mut body_values, &mut Vec::new(), report);
+                available.clear();
+                Stmt::Loop { body }
+            }
+            Stmt::Return(value) => Stmt::Return(value.map(|v| substitute_expr(v, values, report))),
+            Stmt::Out { port, value } => {
+                available.clear();
+                Stmt::Out {
+                    port,
+                    value: substitute_expr(value, values, report),
+                }
+            }
+            Stmt::Expr(value) => {
+                let value = substitute_expr(value, values, report);
+                if !is_pure_scalar(&value) {
+                    available.clear();
+                }
+                Stmt::Expr(value)
+            }
+            Stmt::Asm { .. } => {
+                available.clear();
+                stmt
+            }
+            Stmt::Break | Stmt::Continue => stmt,
+        };
+        output.push(stmt);
+    }
+    output
+}
+
+fn substitute_place(
+    place: Place,
+    values: &HashMap<String, Expr>,
+    report: &mut TbirOptimizationReport,
+) -> Place {
+    match place {
+        Place::Index { name, index } => Place::Index {
+            name,
+            index: Box::new(substitute_expr(*index, values, report)),
+        },
+        Place::Access(mut path) => {
+            for segment in &mut path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    **index = substitute_expr((**index).clone(), values, report);
+                }
+            }
+            Place::Access(path)
+        }
+        Place::Deref(expr) => Place::Deref(Box::new(substitute_expr(*expr, values, report))),
+        other => other,
+    }
+}
+
+fn substitute_expr(
+    expr: Expr,
+    values: &HashMap<String, Expr>,
+    report: &mut TbirOptimizationReport,
+) -> Expr {
+    match expr {
+        Expr::Ident(name) => {
+            if let Some(value) = values.get(&name) {
+                report.copy_propagations += 1;
+                if matches!(
+                    value,
+                    Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_)
+                ) {
+                    report.constant_propagations += 1;
+                }
+                decision(
+                    report,
+                    TbirOptimizationKind::CopyPropagation,
+                    None,
+                    &name,
+                    None,
+                );
+                value.clone()
+            } else {
+                Expr::Ident(name)
+            }
+        }
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(substitute_expr(*expr, values, report)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(substitute_expr(*left, values, report)),
+            op,
+            right: Box::new(substitute_expr(*right, values, report)),
+        },
+        Expr::Cast { ty, expr } => Expr::Cast {
+            ty,
+            expr: Box::new(substitute_expr(*expr, values, report)),
+        },
+        Expr::Array(values_) => Expr::Array(
+            values_
+                .into_iter()
+                .map(|v| substitute_expr(v, values, report))
+                .collect(),
+        ),
+        Expr::StructInit { ty, fields } => Expr::StructInit {
+            ty,
+            fields: fields
+                .into_iter()
+                .map(|(n, v)| (n, substitute_expr(v, values, report)))
+                .collect(),
+        },
+        Expr::Index { name, index } => Expr::Index {
+            name,
+            index: Box::new(substitute_expr(*index, values, report)),
+        },
+        Expr::AddressOfIndex { name, index } => Expr::AddressOfIndex {
+            name,
+            index: Box::new(substitute_expr(*index, values, report)),
+        },
+        Expr::Deref(expr) => Expr::Deref(Box::new(substitute_expr(*expr, values, report))),
+        Expr::BankedPointer { pointer, bank } => Expr::BankedPointer {
+            pointer: Box::new(substitute_expr(*pointer, values, report)),
+            bank,
+        },
+        Expr::Call { path, args } => Expr::Call {
+            path,
+            args: args
+                .into_iter()
+                .map(|v| substitute_expr(v, values, report))
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn is_pure_scalar(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_) => {
+            true
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => is_pure_scalar(expr),
+        Expr::Binary { left, right, .. } => is_pure_scalar(left) && is_pure_scalar(right),
+        _ => false,
+    }
+}
+
+fn is_cse_candidate(expr: &Expr) -> bool {
+    is_pure_scalar(expr)
+        && !matches!(
+            expr,
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_)
+        )
+}
+
+fn hoist_pure_loop_invariants_program(program: &mut Program, report: &mut TbirOptimizationReport) {
+    fn visit(declarations: &mut [Declaration], report: &mut TbirOptimizationReport) {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Function(function) => {
+                    let mut names: HashSet<String> =
+                        function.params.iter().map(|p| p.name.clone()).collect();
+                    collect_local_names(&function.body, &mut names);
+                    let mut next_temp = 0;
+                    let external: HashSet<String> =
+                        function.params.iter().map(|p| p.name.clone()).collect();
+                    function.body = licm_block(
+                        core::mem::take(&mut function.body),
+                        &external,
+                        &mut names,
+                        &mut next_temp,
+                        report,
+                    );
+                }
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    visit(core::slice::from_mut(declaration), report)
+                }
+                _ => {}
+            }
+        }
+    }
+    visit(&mut program.declarations, report);
+}
+
+fn licm_block(
+    stmts: Vec<Stmt>,
+    external: &HashSet<String>,
+    used_names: &mut HashSet<String>,
+    next_temp: &mut usize,
+    report: &mut TbirOptimizationReport,
+) -> Vec<Stmt> {
+    let mut output = Vec::new();
+    let mut visible = external.clone();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, ty, value } => {
+                visible.insert(name.clone());
+                output.push(Stmt::Let { name, ty, value });
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let then_body = licm_block(then_body, &visible, used_names, next_temp, report);
+                let else_body = licm_block(else_body, &visible, used_names, next_temp, report);
+                output.push(Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                });
+            }
+            Stmt::While { condition, body } => {
+                let (preheader, body) =
+                    hoist_loop_body(body, &visible, used_names, next_temp, report);
+                output.extend(preheader);
+                output.push(Stmt::While { condition, body });
+            }
+            Stmt::Loop { body } => {
+                let (preheader, body) =
+                    hoist_loop_body(body, &visible, used_names, next_temp, report);
+                output.extend(preheader);
+                output.push(Stmt::Loop { body });
+            }
+            other => output.push(other),
+        }
+    }
+    output
+}
+
+fn hoist_loop_body(
+    mut body: Vec<Stmt>,
+    external: &HashSet<String>,
+    used_names: &mut HashSet<String>,
+    next_temp: &mut usize,
+    report: &mut TbirOptimizationReport,
+) -> (Vec<Stmt>, Vec<Stmt>) {
+    let has_exit = body.iter().any(stmt_contains_loop_exit);
+    let mut assigned = HashSet::new();
+    collect_assigned_names(&body, &mut assigned);
+    let mut declared = HashSet::new();
+    collect_local_names(&body, &mut declared);
+    let mut preheader = Vec::new();
+    for stmt in &mut body {
+        let Stmt::Let { name, ty, value } = stmt else {
+            continue;
+        };
+        if !is_cse_candidate(value) {
+            continue;
+        }
+        let mut deps = HashSet::new();
+        collect_scalar_dependencies(value, &mut deps);
+        let rejection = if has_exit {
+            Some("loop contains return, break, or continue")
+        } else if deps.iter().any(|dep| assigned.contains(dep)) {
+            Some("dependency assigned in loop")
+        } else if deps
+            .iter()
+            .any(|dep| declared.contains(dep) || !external.contains(dep))
+        {
+            Some("dependency declared in loop")
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            decision(
+                report,
+                TbirOptimizationKind::LoopInvariantCodeMotion,
+                None,
+                name,
+                Some(reason),
+            );
+            continue;
+        }
+        let temp = unique_licm_temp_name(used_names, next_temp);
+        preheader.push(Stmt::Let {
+            name: temp.clone(),
+            ty: ty.clone(),
+            value: value.clone(),
+        });
+        *value = Expr::Ident(temp);
+        report.loop_invariants_hoisted += 1;
+        decision(
+            report,
+            TbirOptimizationKind::LoopInvariantCodeMotion,
+            None,
+            name,
+            None,
+        );
+    }
+    let mut nested_external = external.clone();
+    nested_external.extend(declared);
+    body = licm_block(body, &nested_external, used_names, next_temp, report);
+    (preheader, body)
+}
+
+fn stmt_contains_loop_exit(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            then_body.iter().any(stmt_contains_loop_exit)
+                || else_body.iter().any(stmt_contains_loop_exit)
+        }
+        Stmt::While { body, .. } | Stmt::Loop { body } => body.iter().any(stmt_contains_loop_exit),
+        _ => false,
+    }
+}
+
+fn collect_scalar_dependencies(expr: &Expr, deps: &mut HashSet<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            deps.insert(name.clone());
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            collect_scalar_dependencies(expr, deps)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_scalar_dependencies(left, deps);
+            collect_scalar_dependencies(right, deps);
+        }
+        _ => {}
+    }
+}
+
+fn unique_licm_temp_name(used_names: &mut HashSet<String>, next_temp: &mut usize) -> String {
+    loop {
+        let name = format!("__tbir_licm_{}", *next_temp);
+        *next_temp += 1;
+        if used_names.insert(name.clone()) {
+            return name;
+        }
+    }
+}
+
+fn scalar_simplify_program(program: &mut Program, report: &mut TbirOptimizationReport) {
+    for declaration in &mut program.declarations {
+        optimize_declaration(declaration, report);
+    }
+}
+
 fn optimize_declaration(declaration: &mut Declaration, report: &mut TbirOptimizationReport) {
     match declaration {
         Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
@@ -577,15 +1043,11 @@ fn optimize_stmt(
     match stmt {
         Stmt::Let { name, ty, value } => {
             let value = optimize_expr(value, constants, report);
-            // Locals can be mutated indirectly or by a loop body. Substitution needs
-            // alias and control-flow analysis, so only fold the initializer for now.
-            constants.remove(&name);
             Stmt::Let { name, ty, value }
         }
         Stmt::Assign { target, op, value } => {
             let target = optimize_place(target, constants, report);
             let value = optimize_expr(value, constants, report);
-            constants.clear();
             Stmt::Assign { target, op, value }
         }
         Stmt::If {
@@ -598,7 +1060,6 @@ fn optimize_stmt(
             let mut else_constants = constants.clone();
             let then_body = optimize_stmts(then_body, &mut then_constants, report);
             let else_body = optimize_stmts(else_body, &mut else_constants, report);
-            constants.clear();
             Stmt::If {
                 condition,
                 then_body,
@@ -609,13 +1070,11 @@ fn optimize_stmt(
             let condition = optimize_expr(condition, constants, report);
             let mut body_constants = constants.clone();
             let body = optimize_stmts(body, &mut body_constants, report);
-            constants.clear();
             Stmt::While { condition, body }
         }
         Stmt::Loop { body } => {
             let mut body_constants = constants.clone();
             let body = optimize_stmts(body, &mut body_constants, report);
-            constants.clear();
             Stmt::Loop { body }
         }
         Stmt::Return(value) => {
@@ -627,15 +1086,9 @@ fn optimize_stmt(
         },
         Stmt::Expr(value) => {
             let value = optimize_expr(value, constants, report);
-            if expr_can_mutate(&value) {
-                constants.clear();
-            }
             Stmt::Expr(value)
         }
-        Stmt::Asm { .. } => {
-            constants.clear();
-            stmt
-        }
+        Stmt::Asm { .. } => stmt,
         Stmt::Break | Stmt::Continue => stmt,
     }
 }
@@ -718,8 +1171,19 @@ fn optimize_expr(
             if let Some(value) = fold_binary(&left, op, &right) {
                 report.constant_folds += 1;
                 value
-            } else if let Some(value) = simplify_binary(&left, op, &right) {
-                report.algebraic_simplifications += 1;
+            } else if let Some((value, strength_reduction)) = simplify_binary(&left, op, &right) {
+                if strength_reduction {
+                    report.strength_reductions += 1;
+                    decision(
+                        report,
+                        TbirOptimizationKind::StrengthReduction,
+                        None,
+                        "binary expression",
+                        None,
+                    );
+                } else {
+                    report.algebraic_simplifications += 1;
+                }
                 value
             } else {
                 Expr::Binary {
@@ -764,7 +1228,9 @@ fn optimize_access(
     path
 }
 
-fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
+fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<(Expr, bool)> {
+    let algebraic = |expr| Some((expr, false));
+    let strength = |expr| Some((expr, true));
     match (left, op, right) {
         (
             value,
@@ -775,23 +1241,33 @@ fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
             | BinaryOp::Shl
             | BinaryOp::Shr,
             value_expr,
-        ) if int_value(value_expr) == Some(0) => Some(value.clone()),
+        ) if int_value(value_expr) == Some(0) => algebraic(value.clone()),
         (value, BinaryOp::Mul | BinaryOp::Div, value_expr) if int_value(value_expr) == Some(1) => {
-            Some(value.clone())
+            algebraic(value.clone())
         }
         (_, BinaryOp::Div | BinaryOp::Mod, value_expr) if int_value(value_expr) == Some(0) => {
-            Some(Expr::Int(0))
+            algebraic(Expr::Int(0))
+        }
+        (_, BinaryOp::Mul | BinaryOp::BitAnd, value)
+            if int_value(value) == Some(0) && is_pure_scalar(left) =>
+        {
+            algebraic(Expr::Int(0))
+        }
+        (value, BinaryOp::Mul | BinaryOp::BitAnd, _)
+            if int_value(value) == Some(0) && is_pure_scalar(right) =>
+        {
+            algebraic(Expr::Int(0))
         }
         (value_expr, BinaryOp::Mul, value) if power_of_two_shift(value_expr).is_some() => {
             power_of_two_shift(value_expr)
-                .map(|shift| shift_expr(value.clone(), BinaryOp::Shl, shift))
+                .and_then(|shift| strength(shift_expr(value.clone(), BinaryOp::Shl, shift)))
         }
         (value, BinaryOp::Mul, value_expr) => power_of_two_shift(value_expr)
-            .map(|shift| shift_expr(value.clone(), BinaryOp::Shl, shift)),
+            .and_then(|shift| strength(shift_expr(value.clone(), BinaryOp::Shl, shift))),
         (value_expr, BinaryOp::Add | BinaryOp::BitOr | BinaryOp::BitXor, value)
             if int_value(value_expr) == Some(0) =>
         {
-            Some(value.clone())
+            algebraic(value.clone())
         }
         _ => None,
     }
@@ -839,10 +1315,6 @@ fn fold_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
         },
         _ => None,
     }
-}
-
-fn expr_can_mutate(expr: &Expr) -> bool {
-    matches!(expr, Expr::Call { .. })
 }
 
 fn terminates(stmt: &Stmt) -> bool {
