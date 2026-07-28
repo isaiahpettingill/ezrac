@@ -1872,6 +1872,62 @@ mod tests {
     }
 
     #[test]
+    fn explicit_inline_arguments_execute_once_left_to_right_and_keep_nested_helpers_reachable() {
+        let assembly = emit(
+            r#"
+                global trace: u16 = 0
+                global result: u16 = 0
+                global guarded_calls: u16 = 0
+                fn first() -> u16 { trace = trace * 10 + 1; return 3 }
+                fn second() -> u16 { trace = trace * 10 + 2; return 4 }
+                fn add_one(value: u16) -> u16 { return value + 1 }
+                inline fn nested(value: u16) -> u16 { return add_one(value) }
+                inline fn pair(left: u16, right: u16) -> u16 {
+                    return nested(left) * 10 + right
+                }
+                inline fn guarded(value: bool) -> bool {
+                    guarded_calls += 1
+                    return value
+                }
+                fn main() {
+                    result = pair(first(), second())
+                    let flag: bool = false
+                    let skipped: bool = flag && guarded(true)
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                stack_top: crate::target::Address24::new(0xFFFE),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+
+        assert!(!assembly.contains("_nested:"), "{assembly}");
+        assert!(!assembly.contains("_pair:"), "{assembly}");
+        assert!(assembly.contains("_add_one:"), "{assembly}");
+        assert!(assembly.contains("_guarded:"), "{assembly}");
+        assert!(assembly.contains("    bl @_guarded"), "{assembly}");
+
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..1_500 {
+            cpu.step(&mut ram);
+        }
+
+        assert_eq!(ram.read_word(0xA000), 12);
+        assert_eq!(ram.read_word(0xA002), 44);
+    }
+
+    #[test]
     fn omits_unreachable_functions_and_inlines_small_wrappers() {
         let assembly = emit(
             r#"

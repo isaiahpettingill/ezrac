@@ -2362,6 +2362,37 @@ mod structural_tests {
     }
 
     #[test]
+    fn explicit_inline_calls_preserve_unsafe_conditional_calls_and_omit_inline_labels() {
+        let assembly = emit(
+            r#"
+                global calls: u8 = 0
+                inline fn approved(value: u8) -> u8 { return value + 1 }
+                inline fn nested(value: u8) -> u8 { return approved(value) }
+                inline fn conditional(value: bool) -> bool {
+                    calls += 1
+                    return value
+                }
+                fn main() {
+                    let result: u8 = nested(4)
+                    let flag: bool = false
+                    let guarded: bool = flag && conditional(true)
+                }
+            "#,
+        );
+
+        assert!(!assembly.contains("_approved:"), "{assembly}");
+        assert!(!assembly.contains("_nested:"), "{assembly}");
+        assert!(assembly.contains("_conditional:"), "{assembly}");
+        assert!(assembly.contains("    jsr _conditional"), "{assembly}");
+        crate::vm::assemble_subset_with_symbols_at(
+            crate::target::AssemblerCpu::Mos6502,
+            &assembly,
+            0x0200,
+        )
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    }
+
+    #[test]
     fn honors_explicit_and_cost_based_wrapper_inlining() {
         let assembly = emit(
             r#"
@@ -2480,6 +2511,38 @@ mod tests {
             "6502 execution exceeded {instruction_budget} instructions at ${:04X}\n{assembly}",
             cpu.registers.program_counter
         );
+    }
+
+    #[test]
+    fn explicit_inline_arguments_execute_once_left_to_right_with_typed_temps_and_nested_helpers() {
+        let bus = run(
+            r#"
+                global trace: u8 = 0
+                global result: u8 = 0
+                global guarded_calls: u8 = 0
+                fn first() -> u8 { trace = trace * 10 + 1; return 3 }
+                fn second() -> u8 { trace = trace * 10 + 2; return 4 }
+                fn add_one(value: u8) -> u8 { return value + 1 }
+                inline fn nested(value: u8) -> u8 { return add_one(value) }
+                inline fn pair(left: u8, right: u8) -> u8 {
+                    return nested(left) * 10 + right
+                }
+                inline fn guarded(value: bool) -> bool {
+                    guarded_calls += 1
+                    return value
+                }
+                fn main() {
+                    result = pair(first(), second())
+                    let flag: bool = false
+                    let skipped: bool = flag && guarded(true)
+                }
+            "#,
+            2_000,
+        );
+
+        assert_eq!(bus.byte(0xA000), 12);
+        assert_eq!(bus.byte(0xA001), 44);
+        assert_eq!(bus.byte(0xA002), 0);
     }
 
     #[test]

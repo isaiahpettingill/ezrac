@@ -3056,6 +3056,43 @@ mod tests {
     }
 
     #[test]
+    fn explicit_inline_assembles_typed_arguments_nested_helpers_and_safe_fallbacks() {
+        let assembly = emit_and_assemble(
+            r#"
+            global sequence: u8 = 0
+            fn next() -> u8 { sequence += 1 return sequence }
+            inline fn decimal_pair(first: u8, second: u8) -> u8 {
+                return first * 10 + second
+            }
+            inline fn nested_pair(first: u8, second: u8) -> u8 {
+                return decimal_pair(first, second)
+            }
+            inline fn ready() -> bool {
+                sequence += 1
+                return sequence < 5
+            }
+            fn main() {
+                let pair: u8 = nested_pair(next(), next())
+                let short_circuit: bool = false && ready()
+                while ready() { sequence += pair }
+            }
+        "#,
+        );
+
+        assert_eq!(assembly.matches("call near _next").count(), 2, "{assembly}");
+        assert!(!assembly.contains("call near _decimal_pair"), "{assembly}");
+        assert!(!assembly.contains("call near _nested_pair"), "{assembly}");
+        assert!(!assembly.contains("_decimal_pair:"), "{assembly}");
+        assert!(!assembly.contains("_nested_pair:"), "{assembly}");
+        assert!(assembly.contains("_ready:"), "{assembly}");
+        assert_eq!(
+            assembly.matches("call near _ready").count(),
+            2,
+            "{assembly}"
+        );
+    }
+
+    #[test]
     fn recursive_calls_save_static_frames() {
         let assembly = emit_and_assemble(
             r#"

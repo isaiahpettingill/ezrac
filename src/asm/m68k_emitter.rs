@@ -1715,6 +1715,47 @@ mod tests {
     }
 
     #[test]
+    fn explicit_inline_calls_preserve_argument_and_unsafe_call_semantics() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            fn first() -> u8 { return 1 }
+            fn second() -> u16 { return 2 }
+            @inline fn bump(value: u16) -> u16 { return value + 1 }
+            @inline fn pair(left: u8, right: u16) -> u16 {
+                return bump(cast<u16>(left) + right)
+            }
+            @inline fn yes() -> bool { return true }
+            fn main(flag: bool) {
+                let value: u16 = pair(first(), second())
+                let short: bool = flag && yes()
+                while yes() { return }
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(assembly.matches("jsr _first").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("jsr _second").count(), 1, "{assembly}");
+        assert!(
+            assembly.find("jsr _first").unwrap() < assembly.find("jsr _second").unwrap(),
+            "{assembly}"
+        );
+        assert!(!assembly.contains("jsr _pair"), "{assembly}");
+        assert!(!assembly.contains("jsr _bump"), "{assembly}");
+        assert_eq!(assembly.matches("jsr _yes").count(), 2, "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
     fn preserves_static_locals_across_recursive_calls() {
         let program = parse_program(
             Path::new("test.ezra"),

@@ -543,6 +543,70 @@ fn void_inline_functions_keep_helper_calls_reachable() {
 }
 
 #[test]
+fn explicit_inline_preserves_typed_argument_order_and_inlines_nested_helpers() {
+    let source = r#"
+            global sequence: u8 = 0
+
+            fn next() -> u8 {
+                sequence += 1
+                return sequence
+            }
+
+            inline fn decimal_pair(first: u8, second: u8) -> u8 {
+                return first * 10 + second
+            }
+
+            inline fn nested_pair(first: u8, second: u8) -> u8 {
+                return decimal_pair(first, second)
+            }
+
+            fn main() {
+                test.assert_eq_u8(nested_pair(next(), next()), 12, 1)
+                test.assert_eq_u8(sequence, 2, 2)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 6_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+    assert_eq!(asm.matches("call _next").count(), 2, "{asm}");
+    assert!(!asm.contains("call _decimal_pair"), "{asm}");
+    assert!(!asm.contains("call _nested_pair"), "{asm}");
+    assert!(!asm.contains("_decimal_pair:"), "{asm}");
+    assert!(!asm.contains("_nested_pair:"), "{asm}");
+}
+
+#[test]
+fn unsafe_condition_inline_calls_remain_calls() {
+    let source = r#"
+            global checks: u8 = 0
+
+            inline fn ready() -> bool {
+                checks += 1
+                return checks < 3
+            }
+
+            fn main() {
+                let short_circuit: bool = false && ready()
+                while ready() {}
+                test.assert_eq_u8(checks, 3, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 6_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+    assert!(asm.contains("_ready:"), "{asm}");
+    assert_eq!(asm.matches("call _ready").count(), 2, "{asm}");
+}
+
+#[test]
 fn recursive_inline_functions_fall_back_to_calls() {
     let source = r#"
             inline fn self_call(value: u8) -> u8 {

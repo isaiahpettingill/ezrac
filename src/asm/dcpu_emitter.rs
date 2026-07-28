@@ -50,6 +50,7 @@ impl Emitter {
 
     fn emit(mut self, program: &TbirProgram) -> Result<String, Diagnostic> {
         let mut main = None;
+        let inline_functions = program.optimizations.inline_function_names();
         for declaration in &program.declarations {
             match declaration {
                 TbirDeclaration::Function {
@@ -66,6 +67,7 @@ impl Emitter {
                     }
                     main = Some(body.as_slice());
                 }
+                TbirDeclaration::Function { name, .. } if inline_functions.contains(name) => {}
                 TbirDeclaration::Function { name, .. } => {
                     return Err(Diagnostic::new(format!(
                         "DCPU-16 emitter currently supports only `main`; function `{name}` is unsupported"
@@ -373,16 +375,20 @@ mod tests {
     };
     use std::path::Path;
 
-    fn emit(source: &str) -> String {
+    fn emit_result(source: &str) -> Result<String, Diagnostic> {
         let program = parse_program(Path::new("dcpu.ezra"), source).unwrap();
-        let assembly = emit_dcpu_assembly_with_options(
+        emit_dcpu_assembly_with_options(
             &program,
             AssemblyOptions {
                 cpu: CpuFamily::Dcpu,
+                ram_base: crate::target::Address24::new(0x8000),
                 ..AssemblyOptions::default()
             },
         )
-        .unwrap();
+    }
+
+    fn emit(source: &str) -> String {
+        let assembly = emit_result(source).unwrap();
         assemble_subset_with_symbols_at(CpuFamily::Dcpu.into(), &assembly, 0)
             .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
         assembly
@@ -438,6 +444,46 @@ mod tests {
         assert!(assembly.contains("mli j, a"));
         assert!(assembly.contains("dvi j, a"));
         assert!(assembly.contains("asr j, a"));
+    }
+
+    #[test]
+    fn explicit_inline_arguments_lower_once_left_to_right_with_typed_temps_and_nested_calls() {
+        let typed_arguments = emit(
+            r#"
+                inline fn pair(left: u8, right: u16) {}
+                fn main() { pair(3, 4) }
+            "#,
+        );
+        assert!(!typed_arguments.contains("_pair:"), "{typed_arguments}");
+
+        let nested = emit(
+            r#"
+                inline fn leaf() {}
+                inline fn nested() { leaf() }
+                fn main() { nested() }
+            "#,
+        );
+        assert!(!nested.contains("_leaf:"), "{nested}");
+        assert!(!nested.contains("_nested:"), "{nested}");
+    }
+
+    #[test]
+    fn unsafe_conditionally_evaluated_inline_call_remains_for_backend_validation() {
+        let error = emit_result(
+            r#"
+                inline fn guarded(value: bool) -> bool { return value }
+                fn main() {
+                    let flag: bool = false
+                    let result: bool = flag && guarded(true)
+                }
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.message.contains("function `guarded` is unsupported"),
+            "{error}"
+        );
     }
 
     #[test]

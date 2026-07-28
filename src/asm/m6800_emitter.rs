@@ -871,6 +871,53 @@ mod tests {
     }
 
     #[test]
+    fn explicit_inline_assembles_typed_arguments_nested_helpers_and_safe_fallbacks() {
+        let source = r#"
+            global sequence: u8 = 0
+            global first_seen: u8 = 0
+            global second_seen: u8 = 0
+
+            fn next() -> u8 {
+                sequence += 1
+                return sequence
+            }
+
+            inline fn record_pair(first: u8, second: u8) {
+                first_seen = first
+                second_seen = second
+            }
+
+            inline fn nested_pair(first: u8, second: u8) {
+                record_pair(first, second)
+            }
+
+            inline fn ready() -> bool {
+                sequence += 1
+                return sequence < 5
+            }
+
+            fn main() -> u8 {
+                nested_pair(next(), next())
+                let short_circuit: bool = false && ready()
+                while ready() {}
+                return second_seen
+            }
+        "#;
+        let program = parse_program(Path::new("m6800_inline_test.ezra"), source).unwrap();
+        let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+
+        assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        assert_eq!(assembly.matches("jsr _next").count(), 2, "{assembly}");
+        assert!(!assembly.contains("jsr _record_pair"), "{assembly}");
+        assert!(!assembly.contains("jsr _nested_pair"), "{assembly}");
+        assert!(assembly.contains("_record_pair:"), "{assembly}");
+        assert!(assembly.contains("_nested_pair:"), "{assembly}");
+        assert!(assembly.contains("_ready:"), "{assembly}");
+        assert_eq!(assembly.matches("jsr _ready").count(), 2, "{assembly}");
+    }
+
+    #[test]
     fn rejects_wide_scalar_storage() {
         let program = parse_program(
             Path::new("m6800_test.ezra"),

@@ -2340,6 +2340,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_inline_calls_preserve_argument_and_unsafe_call_semantics() {
+        let assembly = emit(
+            r#"
+            fn first() -> u8 { return 1 }
+            fn second() -> u16 { return 2 }
+            @inline fn bump(value: u16) -> u16 { return value + 1 }
+            @inline fn pair(left: u8, right: u16) -> u16 {
+                return bump(cast<u16>(left) + right)
+            }
+            @inline fn yes() -> bool { return true }
+            fn main(flag: bool) {
+                let value: u16 = pair(first(), second())
+                let short: bool = flag && yes()
+                while yes() { return }
+            }
+        "#,
+        );
+
+        assert_eq!(assembly.matches("call _first").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("call _second").count(), 1, "{assembly}");
+        assert!(
+            assembly.find("call _first").unwrap() < assembly.find("call _second").unwrap(),
+            "{assembly}"
+        );
+        assert!(!assembly.contains("call _pair"), "{assembly}");
+        assert!(!assembly.contains("call _bump"), "{assembly}");
+        assert_eq!(assembly.matches("call _yes").count(), 2, "{assembly}");
+        assert!(assembly.contains("_yes:"), "{assembly}");
+    }
+
+    #[test]
     fn interrupt_and_naked_functions_assemble() {
         let assembly = emit(
             r#"
