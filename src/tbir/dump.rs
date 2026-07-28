@@ -15,14 +15,19 @@ pub fn text(program: &TbirProgram) -> String {
         program.target.has_cache
     ));
     out.push_str(&format!(
-        "optimizations: constant_folds={} algebraic_simplifications={} constant_propagations={} dead_removed={} inline_candidates={:?} tail_calls={:?}\n",
+        "optimizations: constant_folds={} algebraic_simplifications={} constant_propagations={} dead_removed={} decisions={}\n",
         program.optimizations.constant_folds,
         program.optimizations.algebraic_simplifications,
         program.optimizations.constant_propagations,
         program.optimizations.dead_statements_marked,
-        program.optimizations.inline_candidates,
-        program.optimizations.tail_call_candidates
+        program.optimizations.decisions.len()
     ));
+    for decision in &program.optimizations.decisions {
+        out.push_str(&format!(
+            "optimization kind={:?} outcome={:?} caller={:?} callee={} reason={}\n",
+            decision.kind, decision.outcome, decision.caller, decision.callee, decision.reason
+        ));
+    }
     for region in &program.memory.regions {
         out.push_str(&format!(
             "region {} start=0x{:06X} size=0x{:X} access={:?} volatile={} executable={}\n",

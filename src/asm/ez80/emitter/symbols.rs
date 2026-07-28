@@ -15,10 +15,10 @@ use super::{
     collect_const_address_roots, collect_const_dependency_names, const_access_name,
     const_shl_or_zero, const_shr_or_zero, declaration_name, expr_is_untyped_literal,
     find_const_declaration, function_declaration_name, function_label, has_attr, int_value_type,
-    is_comparison, is_inlinable_function, is_raw_address_type, module_alias_original_name,
-    ptr_u8_type, read_embed_file, reserved_function_label, scalar_var, sdk_constant_types,
-    sdk_constants, sdk_ports, section_cursor, trunc_div_or_zero, trunc_mod_or_zero, type_display,
-    type_is_bool, type_is_signed, validate_comparison_types, validate_integer_unary_operand_type,
+    is_comparison, is_raw_address_type, module_alias_original_name, ptr_u8_type, read_embed_file,
+    reserved_function_label, scalar_var, sdk_constant_types, sdk_constants, sdk_ports,
+    section_cursor, trunc_div_or_zero, trunc_mod_or_zero, type_display, type_is_bool,
+    type_is_signed, validate_comparison_types, validate_integer_unary_operand_type,
     validate_shift_count_integer_type, validate_shift_operand_type,
 };
 
@@ -129,6 +129,7 @@ impl Symbols {
     pub(super) fn from_program(
         program: &Program,
         options: AssemblyOptions,
+        approved_inline_functions: &HashSet<String>,
     ) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
             constants: sdk_constants(&options),
@@ -297,7 +298,7 @@ impl Symbols {
                 },
             );
             if let Declaration::Function(function) = declaration
-                && is_inlinable_function(function)
+                && approved_inline_functions.contains(&function.name)
             {
                 symbols
                     .inline_functions

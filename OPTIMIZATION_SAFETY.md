@@ -16,8 +16,16 @@ behavior, and emulator-backed test behavior.
   memory, port, call, or inline-asm effects.
 - Target-specific multiply lowering when the selected CPU supports the emitted
   instruction sequence and emulator tests cover the result.
+- Explicit function inlining when TBIR approves a straight-line body outside
+  direct or mutual recursion, naked functions, and interrupt functions. Argument
+  expressions are evaluated once before the body is expanded.
+- Direct tail-recursion conversion for register-ABI eZ80-family functions. New
+  argument values are evaluated left to right into temporaries before parameters
+  are assigned, and the pass does not rewrite calls inside existing loops.
+- Sibling tail calls between compatible register-ABI eZ80-family functions with
+  matching return types and no interrupt, naked, argument-slot, or stack cleanup.
 
-Follow-up implementation issues: #14, #15, #16.
+Follow-up implementation issues: #15, #16.
 
 ## Rejected
 
@@ -36,7 +44,8 @@ Follow-up implementation issues: #14, #15, #16.
 - General constant propagation across memory reads. This needs alias analysis and
   must treat volatile memory and memory-clobbering asm as barriers.
 - Copy propagation for locals that may alias through pointers.
-- Function inlining across calls with port/volatile/asm effects.
+- Automatic or cost-based function inlining. Explicitly marked straight-line
+  functions are supported, but broader effect-aware policy still needs design.
 - Loop-invariant code motion. This needs explicit effect modeling and must not
   move reads from ports or volatile memory.
 - Stack traffic reduction around calls, interrupts, naked functions, and inline

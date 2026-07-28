@@ -21,22 +21,13 @@ pub fn lower(
     let memory = memory_model(options)?;
     let capabilities = options.cpu.capabilities();
     let pointer_width_bits = capabilities.memory.pointer_width_bits as u8;
-    let (lowered_program, mut optimizations) = optimize::optimize_program(lowered_program);
+    let (lowered_program, optimizations) = optimize::optimize_program(lowered_program, options.cpu);
     let declarations = hir
         .declarations
         .iter()
         .map(|declaration| lower_declaration(declaration, &lowered_program))
         .collect();
-    optimizations.tail_call_candidates = hir
-        .declarations
-        .iter()
-        .filter_map(|declaration| match declaration {
-            HirDeclaration::Function(function) => Some(&function.analysis.tail_call_candidates),
-            _ => None,
-        })
-        .flatten()
-        .cloned()
-        .collect();
+
     Ok(TbirProgram {
         source: hir.source_path.clone(),
         target: TbirTarget {

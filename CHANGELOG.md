@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Moved explicit-inline, sibling-tail-call, and direct-tail-recursion decisions into target-aware TBIR passes. eZ80-family backends now inline only TBIR-approved functions, lower safe register-ABI tail calls to jumps, and rewrite direct tail recursion into loops with ordered temporary argument evaluation.
+
+
 ## 0.1.31
 
 - Added generic Intel 8086 source code generation for scalar arithmetic and recursion, pointers, aggregate storage, control flow, memory and port I/O, constrained interrupt handlers, and typed inline assembly, plus alloc-only API support. Aggregate parameters and returns are explicitly rejected in favor of pass-by-pointer APIs.

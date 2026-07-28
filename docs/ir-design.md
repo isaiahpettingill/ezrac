@@ -20,7 +20,7 @@ source
   -> final artifact
 ```
 
-HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions and coarse effects, applies the implemented simplification passes, and supplies the lowered program to the source emitters. It is not yet a fully lowered basic-block or register-allocation IR.
+HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions and coarse effects, applies simplification passes, decides explicit inlining and safe tail calls, rewrites supported direct tail recursion into loops, and supplies the lowered program to the source emitters. It is not yet a fully lowered basic-block or register-allocation IR.
 
 The remaining sections use design language (`should`, `must`, and planned examples) to define the intended direction. HIR and TBIR are Rust structs in memory today; textual dumps are provided for debugging and tests, not as a stable serialized IR format.
 
@@ -254,6 +254,10 @@ Tail-call optimization is legal when:
 
 Tail recursion can usually be rewritten into a loop even when general sibling-call optimization is not supported. The rewrite must preserve arithmetic behavior, effects, and source diagnostics.
 
+The implemented eZ80-family pass rewrites direct self calls in tail position when all arguments use the register ABI. It evaluates arguments once from left to right into temporary locals before assigning parameters, so dependent arguments behave as simultaneous assignments. Calls in existing nested loops, interrupt or naked functions, argument-slot ABIs, and calls with more than three parameters keep the normal call path.
+
+TBIR also approves sibling tail calls when caller and callee are normal eZ80-family functions with matching return types and register-only arguments. The eZ80 emitter treats that approval as a lowering instruction and emits a jump after normal ordered argument evaluation. Rejected calls remain ordinary calls.
+
 ## Loop Optimizations
 
 HIR marks loop candidates and may remove loops with constant false conditions. TBIR performs target-aware loop optimizations.
@@ -292,6 +296,8 @@ Inlining inputs:
 - recursion and tail-call interactions
 
 Inlining must preserve diagnostics and source locations. It must not hide target diagnostics caused by the inlined body.
+
+The implemented pass supports explicitly marked straight-line value and void functions. TBIR rejects unsupported return shapes, naked and interrupt functions, and functions in direct or mutual recursion cycles. Dumps record each applied or rejected decision and its reason. The eZ80 emitter expands only the functions approved by TBIR; it no longer makes inline policy decisions.
 
 ## Integer Optimization and Legalization
 

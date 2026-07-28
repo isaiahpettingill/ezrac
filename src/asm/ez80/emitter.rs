@@ -127,7 +127,7 @@ pub fn collect_ez80_semantic_diagnostics(
     program: &Program,
     options: AssemblyOptions,
 ) -> Vec<Diagnostic> {
-    let symbols = match Symbols::from_program(program, options.clone()) {
+    let symbols = match Symbols::from_program(program, options.clone(), &HashSet::new()) {
         Ok(symbols) => symbols,
         Err(error) => return vec![error],
     };
@@ -147,6 +147,7 @@ pub fn collect_ez80_semantic_diagnostics(
             symbols.clone(),
             options.clone(),
             recursive_call_edges(program, &symbols.functions),
+            HashSet::new(),
         );
         emitter.disable_dead_code_elimination();
         if let Err(error) = emitter.emit_function(function) {
@@ -245,7 +246,9 @@ pub fn emit_ez80_assembly_from_checked(
 ) -> Result<String, Diagnostic> {
     let program = &checked.tbir.lowered_program;
     debug_assert_eq!(checked.hir.source_path, program.source_path);
-    let symbols = Symbols::from_program(program, options.clone())?;
+    let approved_inline_functions = checked.tbir.optimizations.inline_function_names();
+    let tail_call_edges = checked.tbir.optimizations.tail_call_edges();
+    let symbols = Symbols::from_program(program, options.clone(), &approved_inline_functions)?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
@@ -257,11 +260,17 @@ pub fn emit_ez80_assembly_from_checked(
         symbols.clone(),
         options.clone(),
         recursive_call_edges.clone(),
+        tail_call_edges.clone(),
     )?;
     let emitted_functions = reachable_function_names(program, &symbols);
     let cpu = options.cpu;
 
-    let mut emitter = Emitter::new(symbols, options.clone(), recursive_call_edges);
+    let mut emitter = Emitter::new(
+        symbols,
+        options.clone(),
+        recursive_call_edges,
+        tail_call_edges,
+    );
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
     emitter.emit_string_literal_initializers();
@@ -358,6 +367,7 @@ struct Emitter {
     function_storage_stack: Vec<Vec<Variable>>,
     assigned_names_stack: Vec<HashSet<String>>,
     recursive_call_edges: HashSet<(String, String)>,
+    tail_call_edges: HashSet<(String, String)>,
     inline_expansion_stack: Vec<String>,
     debug_comments: bool,
     cpu: CpuFamily,
@@ -372,6 +382,7 @@ impl Emitter {
         symbols: Symbols,
         options: AssemblyOptions,
         recursive_call_edges: HashSet<(String, String)>,
+        tail_call_edges: HashSet<(String, String)>,
     ) -> Self {
         let string_literals = symbols.string_literals.clone();
         Self {
@@ -393,6 +404,7 @@ impl Emitter {
             function_storage_stack: Vec::new(),
             assigned_names_stack: Vec::new(),
             recursive_call_edges,
+            tail_call_edges,
             inline_expansion_stack: Vec::new(),
             debug_comments: options.debug_comments,
             cpu: options.cpu,
@@ -1269,6 +1281,11 @@ impl Emitter {
                 }
             }
             Stmt::Return(Some(expr)) => {
+                if let Expr::Call { path, args } = expr
+                    && self.emit_approved_tail_call(&path_text(path), args)?
+                {
+                    return Ok(());
+                }
                 if !self.current_function_requires_return_value() {
                     return Err(Diagnostic::new(format!(
                         "void function `{}` cannot return a value",
@@ -2382,6 +2399,58 @@ impl Emitter {
         self.line("    add a, c");
         self.line(&format!("{end_label}:"));
         self.emit_out_a(0x0C);
+    }
+
+    fn emit_approved_tail_call(&mut self, name: &str, args: &[Expr]) -> Result<bool, Diagnostic> {
+        let edge = (self.current_function_name().to_owned(), name.to_owned());
+        if !self.tail_call_edges.contains(&edge) {
+            return Ok(false);
+        }
+        let sig = self
+            .symbols
+            .functions
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if sig.arity != args.len() || sig.uses_arg_slots || sig.stack_arg_bytes != 0 {
+            return Ok(false);
+        }
+
+        let mut temps = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let width = sig.params[index];
+            let ty = &sig.param_types[index];
+            let temp = self.alloc_var(width.bytes());
+            self.emit_expr_to_type(arg, ty)?;
+            self.emit_store_width(temp);
+            temps.push(temp);
+        }
+        if let Some(temp) = temps.get(2).copied() {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld c, a");
+            } else if sig.params.get(1).is_some_and(|width| width.bytes() != 1) {
+                self.emit_load_width(temp);
+                self.line("    push hl");
+                self.line("    pop bc");
+            } else {
+                return Ok(false);
+            }
+        }
+        if let Some(temp) = temps.get(1).copied() {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld b, a");
+            } else {
+                self.emit_load_width(temp);
+                self.line("    ex de, hl");
+            }
+        }
+        if let Some(temp) = temps.first().copied() {
+            self.emit_load_width(temp);
+        }
+        self.line(&format!("    jp {}", function_label(name)));
+        Ok(true)
     }
 
     fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
@@ -6392,8 +6461,14 @@ fn validate_all_function_bodies(
     symbols: Symbols,
     options: AssemblyOptions,
     recursive_call_edges: HashSet<(String, String)>,
+    tail_call_edges: HashSet<(String, String)>,
 ) -> Result<(), Diagnostic> {
-    let mut emitter = Emitter::new(symbols, options.clone(), recursive_call_edges);
+    let mut emitter = Emitter::new(
+        symbols,
+        options.clone(),
+        recursive_call_edges,
+        tail_call_edges,
+    );
     emitter.disable_dead_code_elimination();
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;
@@ -6693,11 +6768,6 @@ fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
         _ if !function.body.iter().any(stmt_contains_return) => Some(&function.body),
         _ => None,
     }
-}
-
-fn is_inlinable_function(function: &Function) -> bool {
-    has_attr(function, "inline")
-        && (inline_return_body(function).is_some() || inline_void_body(function).is_some())
 }
 
 fn stmt_contains_return(stmt: &Stmt) -> bool {
@@ -7192,11 +7262,9 @@ fn stmt_guarantees_value_return(stmt: &Stmt, symbols: &Symbols) -> bool {
             block_guarantees_value_return(then_body, symbols)
                 && block_guarantees_value_return(else_body, symbols)
         }
-        Stmt::Loop { body } => {
-            !block_can_break_current_loop(body) && block_guarantees_value_return(body, symbols)
-        }
+        Stmt::Loop { body } => !block_can_break_current_loop(body),
         Stmt::While { condition, body } if condition_is_const_true(condition, symbols) => {
-            !block_can_break_current_loop(body) && block_guarantees_value_return(body, symbols)
+            !block_can_break_current_loop(body)
         }
         _ => false,
     }

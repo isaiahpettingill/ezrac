@@ -38,7 +38,7 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 | 37. Runtime helpers | Implemented | Arithmetic, memcpy, memset, signed operations, debug, and test helpers execute in VM tests. | Future backends need helper ABIs. |
 | 38. Assembly output | Partial | Generated/standalone assembly, CPU modes, global section linking, includes, maps, and formats are tested. | Exhaustive UM0077 enumeration remains #4. |
 | 39. Test runner | Partial | The architecture-selectable runner supports eZ80, Z80, Z80N, Z180, i8080, and i8085 through the `ez80` backend, with budgets, memory, ports, traps, stacks, CP/M BDOS basics, and CI status. | Add emulator backends for non-`ez80` CPU families as targets are implemented. |
-| 40. Compiler pipeline | Partial | AST → HIR → TBIR → assembly → assembler → layout is explicit and dumpable; MOS 6502 and AVR source compilation use the HIR/TBIR path. Safe TBIR optimization tests cover the implemented subset. | Advanced passes remain #14–#16. |
+| 40. Compiler pipeline | Partial | AST → HIR → TBIR → assembly → assembler → layout is explicit and dumpable; MOS 6502 and AVR source compilation use the HIR/TBIR path. Safe TBIR optimization tests cover simplification, explicit inlining, direct tail-recursion conversion, and compatible eZ80-family sibling tail calls. | Advanced loop, memory-region, and lowering passes remain #15–#16. |
 | 41. Diagnostics | Partial | Structured spans, UTF-16 LSP ranges, cross-file multi-reference errors, import/include provenance, and CLI locations are tested. | AST-native semantic spans and full multi-error type checking remain. |
 | 42. Grammar sketch | Implemented | `src/ezra.pest` is the executable grammar with parser tests. | Prose must follow grammar changes. |
 | 43. Design rules | Partial | Explicit widths, target profiles, strict casts, SDK ownership, readable assembly, and deterministic tests are enforced. | Future backends and broader SDKs remain incomplete. |
@@ -49,6 +49,6 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 2. Keep LSP import, project-configuration, and layout invalidation covered as workspace behavior expands.
 3. Finish exhaustive eZ80 generated-form enumeration in #4.
 4. Add non-`ez80` emulator backends as their CPU targets are implemented.
-5. Move inlining, tail calls, and advanced loop/memory optimization into TBIR passes (#14–#16).
+5. Move advanced loop and memory optimization into TBIR passes (#15–#16).
 
 Untested behavior remains incomplete. Validate changes with `cargo test --all-features` and `cargo clippy --all-targets --all-features -- -D warnings` before changing a row to **Implemented**.

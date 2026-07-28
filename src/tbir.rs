@@ -142,14 +142,64 @@ pub enum TbirEffect {
     Call,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TbirOptimizationKind {
+    Inline,
+    TailCall,
+    TailRecursion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TbirOptimizationOutcome {
+    Applied,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TbirOptimizationDecision {
+    pub kind: TbirOptimizationKind,
+    pub caller: Option<String>,
+    pub callee: String,
+    pub outcome: TbirOptimizationOutcome,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TbirOptimizationReport {
     pub constant_folds: usize,
     pub algebraic_simplifications: usize,
     pub constant_propagations: usize,
     pub dead_statements_marked: usize,
-    pub inline_candidates: Vec<String>,
-    pub tail_call_candidates: Vec<String>,
+    pub decisions: Vec<TbirOptimizationDecision>,
+}
+
+impl TbirOptimizationReport {
+    pub fn inline_function_names(&self) -> HashSet<String> {
+        self.decisions
+            .iter()
+            .filter(|decision| {
+                decision.kind == TbirOptimizationKind::Inline
+                    && decision.outcome == TbirOptimizationOutcome::Applied
+            })
+            .map(|decision| decision.callee.clone())
+            .collect()
+    }
+
+    pub fn tail_call_edges(&self) -> HashSet<(String, String)> {
+        self.decisions
+            .iter()
+            .filter(|decision| {
+                decision.kind == TbirOptimizationKind::TailCall
+                    && decision.outcome == TbirOptimizationOutcome::Applied
+            })
+            .filter_map(|decision| {
+                decision
+                    .caller
+                    .as_ref()
+                    .map(|caller| (caller.clone(), decision.callee.clone()))
+            })
+            .collect()
+    }
 }
 
 impl TbirProgram {

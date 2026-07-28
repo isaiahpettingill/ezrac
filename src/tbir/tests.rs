@@ -41,7 +41,7 @@ fn tbir_uses_cpu_capabilities_for_target_metadata() {
         .unwrap();
         assert_eq!(tbir.target.name, name);
         assert_eq!(tbir.target.pointer_width_bits, pointer_width);
-        assert_eq!(tbir.target.supports_port_io, true);
+        assert!(tbir.target.supports_port_io);
     }
 }
 
@@ -134,7 +134,13 @@ fn tbir_reports_optimization_markers_and_dump() {
     let dump = tbir.dump_text();
 
     assert!(tbir.optimizations.constant_folds >= 1);
-    assert_eq!(tbir.optimizations.inline_candidates, ["helper"]);
+    assert!(
+        tbir.optimizations
+            .inline_function_names()
+            .contains("helper")
+    );
+    assert!(dump.contains("kind=Inline outcome=Applied"), "{dump}");
+    assert!(dump.contains("callee=helper reason=approved"), "{dump}");
     assert!(dump.contains("TBIR"), "{dump}");
     assert!(dump.contains("target: ez80-adl"), "{dump}");
     assert!(dump.contains("optimizations:"), "{dump}");

@@ -566,7 +566,7 @@ fn recursive_inline_functions_fall_back_to_calls() {
 }
 
 #[test]
-fn recursive_inline_wrappers_run_with_normal_call_fallback() {
+fn recursive_inline_wrappers_reject_inlining_but_use_safe_tail_calls() {
     let source = r#"
             inline fn count_down(value: u8) -> u8 {
                 return count_down_impl(value)
@@ -591,13 +591,9 @@ fn recursive_inline_wrappers_run_with_normal_call_fallback() {
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
     assert!(asm.contains("_count_down_impl:"), "{asm}");
-    assert!(asm.contains("call _count_down_impl"), "{asm}");
-    assert!(!asm.contains("_count_down:"), "{asm}");
-    assert!(
-        !asm.lines()
-            .any(|line| line.trim_start() == "call _count_down"),
-        "{asm}"
-    );
+    assert!(asm.contains("_count_down:"), "{asm}");
+    assert!(asm.contains("jp _count_down_impl"), "{asm}");
+    assert!(asm.contains("call _count_down"), "{asm}");
 }
 
 #[test]
@@ -626,6 +622,57 @@ fn inline_return_functions_keep_helper_calls_reachable() {
     assert!(asm.contains("call _add_one"), "{asm}");
     assert!(!asm.contains("_add_two:"), "{asm}");
     assert!(!asm.contains("call _add_two"), "{asm}");
+}
+
+#[test]
+fn rewrites_and_runs_direct_tail_recursion_as_a_loop() {
+    let source = r#"
+            fn count(value: u8, total: u8) -> u8 {
+                if value == 0 {
+                    return total
+                }
+                return count(value - 1, total + 1)
+            }
+
+            fn main() {
+                test.assert_eq_u8(count(40, 2), 42, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 20_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+    assert!(asm.contains("_count:"), "{asm}");
+    assert_eq!(asm.matches("call _count").count(), 1, "{asm}");
+}
+
+#[test]
+fn emits_and_runs_tbir_approved_sibling_tail_call() {
+    let source = r#"
+            fn finish(first: u8, second: u8) -> u8 {
+                return first * 10 + second
+            }
+
+            fn swap(first: u8, second: u8) -> u8 {
+                return finish(second, first)
+            }
+
+            fn main() {
+                test.assert_eq_u8(swap(1, 2), 21, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 5_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+    assert!(asm.contains("jp _finish"), "{asm}");
+    assert!(!asm.contains("call _finish"), "{asm}");
 }
 
 #[test]
