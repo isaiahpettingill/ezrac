@@ -7,6 +7,46 @@ use crate::target::EZRA_LOAD_ADDR;
 use super::*;
 
 #[test]
+fn u32_and_i32_have_four_byte_storage_and_wrap_constants() {
+    let aliases = HashMap::new();
+    let structs = HashMap::new();
+    let constants = HashMap::new();
+
+    assert_eq!(
+        cart_type_size(
+            &Type::Named("u32".to_owned()),
+            &aliases,
+            &structs,
+            &constants
+        )
+        .unwrap(),
+        4
+    );
+    assert_eq!(
+        cart_type_size(
+            &Type::Named("i32".to_owned()),
+            &aliases,
+            &structs,
+            &constants
+        )
+        .unwrap(),
+        4
+    );
+    assert_eq!(
+        wrap_embed_const_value(0x1_0000_0001, &Type::Named("u32".to_owned()), &aliases).unwrap(),
+        1
+    );
+    assert_eq!(
+        wrap_embed_const_value(0xFFFF_FFFF, &Type::Named("i32".to_owned()), &aliases).unwrap(),
+        -1
+    );
+    assert!(embed_expr_is_signed(
+        &Expr::TypedInt(1, Type::Named("i32".to_owned())),
+        &aliases
+    ));
+}
+
+#[test]
 fn default_header_matches_spec_offsets() {
     let bytes = CartridgeHeader::default().serialize();
 

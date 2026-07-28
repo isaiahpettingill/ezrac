@@ -433,7 +433,8 @@ impl Server {
                         .as_ref()
                         .map(|span| span.file.clone())
                         .unwrap_or_else(|| path.clone());
-                    (diagnostic_path, diagnostic, multi_target)
+                    let warning = multi_target || diagnostic.is_warning();
+                    (diagnostic_path, diagnostic, warning)
                 }));
             }
             if !is_bundled_sdk && !is_library {
@@ -2019,7 +2020,9 @@ const KEYWORDS: &[&str] = &[
     "clobber",
 ];
 
-const PRIMITIVE_TYPES: &[&str] = &["u8", "i8", "u16", "i16", "u24", "i24", "ptr", "bytes"];
+const PRIMITIVE_TYPES: &[&str] = &[
+    "u8", "i8", "u16", "i16", "u24", "i24", "u32", "i32", "ptr", "bytes",
+];
 
 const CFG_PREDICATES: &[&str] = &[
     "target",
@@ -2090,7 +2093,12 @@ fn diagnostic_to_lsp(document: &OpenDocument, error: &Diagnostic) -> LspDiagnost
 
 #[cfg(test)]
 fn diagnostic_to_lsp_source(source: &str, path: &Path, error: &Diagnostic) -> LspDiagnostic {
-    diagnostic_to_lsp_source_with_severity(source, path, error, 1)
+    diagnostic_to_lsp_source_with_severity(
+        source,
+        path,
+        error,
+        if error.is_warning() { 2 } else { 1 },
+    )
 }
 
 fn diagnostic_to_lsp_source_with_severity(

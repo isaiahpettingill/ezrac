@@ -2,7 +2,17 @@ use std::path::Path;
 
 use crate::{asm::AssemblyOptions, ast::BinaryOp, hir::HirProgram, parser::parse_program};
 
+use super::model::SemanticModel;
 use super::*;
+
+#[test]
+fn semantic_model_uses_four_byte_u32_and_i32_widths() {
+    let program = parse_program(Path::new("test.ezra"), "fn main() {}").unwrap();
+    let model = SemanticModel::from_program(&program, 24, 0x040000, 0x020000, 0x100000).unwrap();
+
+    assert_eq!(model.type_width(&Type::Named("u32".to_owned())).unwrap(), 4);
+    assert_eq!(model.type_width(&Type::Named("i32".to_owned())).unwrap(), 4);
+}
 
 #[test]
 fn tbir_binds_ez80_memory_model() {

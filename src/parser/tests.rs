@@ -500,6 +500,29 @@ fn rejects_multibyte_character_literals() {
 }
 
 #[test]
+fn parses_u32_and_i32_types_and_literal_suffixes() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        "const HIGH: u32 = 4294967295u32\nconst LOW: i32 = 2147483648i32\nfn main() {}",
+    )
+    .unwrap();
+
+    for (declaration, name, value) in [
+        (&program.declarations[0], "u32", 4_294_967_295),
+        (&program.declarations[1], "i32", 2_147_483_648),
+    ] {
+        let Declaration::Const(declaration) = declaration else {
+            panic!("expected const declaration");
+        };
+        assert_eq!(declaration.ty, Type::Named(name.to_owned()));
+        assert_eq!(
+            declaration.value,
+            Expr::TypedInt(value, Type::Named(name.to_owned()))
+        );
+    }
+}
+
+#[test]
 fn rejects_incompatible_inline_asm_input_classes() {
     let error = parse_program(
         Path::new("game.ezra"),

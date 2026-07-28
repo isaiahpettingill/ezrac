@@ -588,11 +588,11 @@ impl Emitter {
 
     fn emit_binary(&mut self, op: BinaryOp, ty: &Type) -> Result<(), Diagnostic> {
         let size = size_suffix(ty)?;
-        if scalar_width(ty)? == 3 && matches!(op, BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) {
+        if scalar_width(ty)? >= 3 && matches!(op, BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod) {
             return if op == BinaryOp::Mul {
-                self.emit_wide_multiply(type_is_signed(ty))
+                self.emit_wide_multiply(ty)
             } else {
-                self.emit_wide_divide(op == BinaryOp::Mod, type_is_signed(ty))
+                self.emit_wide_divide(op == BinaryOp::Mod, ty)
             };
         }
         match op {
@@ -652,13 +652,15 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_wide_multiply(&mut self, signed: bool) -> Result<(), Diagnostic> {
-        let loop_label = self.next_label("mul_u24_loop");
-        let skip = self.next_label("mul_u24_skip");
-        let done = self.next_label("mul_u24_done");
-        let positive_left = self.next_label("mul_u24_left_positive");
-        let positive_right = self.next_label("mul_u24_right_positive");
-        let positive_result = self.next_label("mul_u24_result_positive");
+    fn emit_wide_multiply(&mut self, ty: &Type) -> Result<(), Diagnostic> {
+        let signed = type_is_signed(ty);
+        let width = scalar_width(ty)? * 8;
+        let loop_label = self.next_label(&format!("mul_u{width}_loop"));
+        let skip = self.next_label(&format!("mul_u{width}_skip"));
+        let done = self.next_label(&format!("mul_u{width}_done"));
+        let positive_left = self.next_label(&format!("mul_u{width}_left_positive"));
+        let positive_right = self.next_label(&format!("mul_u{width}_right_positive"));
+        let positive_result = self.next_label(&format!("mul_u{width}_result_positive"));
         self.line("    moveq #0,d5");
         if signed {
             self.line("    tst.l d0");
@@ -694,16 +696,18 @@ impl Emitter {
             self.line("    neg.l d0");
             self.line(&format!("{positive_result}:"));
         }
-        self.normalize_d0(&Type::Named(if signed { "i24" } else { "u24" }.to_owned()))
+        self.normalize_d0(ty)
     }
 
-    fn emit_wide_divide(&mut self, remainder: bool, signed: bool) -> Result<(), Diagnostic> {
-        let divisor_zero = self.next_label("div_u24_zero");
-        let loop_label = self.next_label("div_u24_loop");
-        let done = self.next_label("div_u24_done");
-        let positive_left = self.next_label("div_u24_left_positive");
-        let positive_right = self.next_label("div_u24_right_positive");
-        let positive_result = self.next_label("div_u24_result_positive");
+    fn emit_wide_divide(&mut self, remainder: bool, ty: &Type) -> Result<(), Diagnostic> {
+        let signed = type_is_signed(ty);
+        let width = scalar_width(ty)? * 8;
+        let divisor_zero = self.next_label(&format!("div_u{width}_zero"));
+        let loop_label = self.next_label(&format!("div_u{width}_loop"));
+        let done = self.next_label(&format!("div_u{width}_done"));
+        let positive_left = self.next_label(&format!("div_u{width}_left_positive"));
+        let positive_right = self.next_label(&format!("div_u{width}_right_positive"));
+        let positive_result = self.next_label(&format!("div_u{width}_result_positive"));
         self.line("    moveq #0,d5");
         if signed {
             self.line("    tst.l d0");
@@ -739,7 +743,7 @@ impl Emitter {
             self.line("    neg.l d0");
             self.line(&format!("{positive_result}:"));
         }
-        self.normalize_d0(&Type::Named(if signed { "i24" } else { "u24" }.to_owned()))
+        self.normalize_d0(ty)
     }
 
     fn emit_logical(&mut self, left: &Expr, op: BinaryOp, right: &Expr) -> Result<(), Diagnostic> {
@@ -1282,10 +1286,11 @@ impl Emitter {
     }
 
     fn load_constant(&mut self, value: i64, ty: &Type) -> Result<(), Diagnostic> {
-        let (size, mask) = match size_suffix(ty)? {
-            "b" => ("b", 0xFF),
-            "w" => ("w", 0xFFFF),
-            "l" => ("l", 0xFF_FFFF),
+        let (size, mask) = match scalar_width(ty)? {
+            1 => ("b", 0xFF),
+            2 => ("w", 0xFFFF),
+            3 => ("l", 0xFF_FFFF),
+            4 => ("l", 0xFFFF_FFFF),
             _ => unreachable!(),
         };
         self.line(&format!("    move.{size} #${:X},d0", (value as u64) & mask));
@@ -1429,19 +1434,23 @@ fn size_suffix(ty: &Type) -> Result<&'static str, Diagnostic> {
     match ty {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => Ok("b"),
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok("w"),
-        Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => Ok("l"),
+        Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24" | "u32" | "i32") => {
+            Ok("l")
+        }
         Type::Ptr(_) => Ok("l"),
         _ => Err(Diagnostic::new("unsupported M68k scalar type")),
     }
 }
 
 fn scalar_width(ty: &Type) -> Result<u8, Diagnostic> {
-    Ok(match size_suffix(ty)? {
-        "b" => 1,
-        "w" => 2,
-        "l" => 3,
-        _ => unreachable!(),
-    })
+    match ty {
+        Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => Ok(1),
+        Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok(2),
+        Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => Ok(3),
+        Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Ok(4),
+        Type::Ptr(_) => Ok(3),
+        _ => Err(Diagnostic::new("unsupported M68k scalar type")),
+    }
 }
 
 fn element_type(ty: &Type) -> Result<Type, Diagnostic> {
@@ -1682,6 +1691,66 @@ mod tests {
         .unwrap();
         assert!(assembly.contains("__ezra_mul_u24_loop"), "{assembly}");
         assert!(assembly.contains("__ezra_div_u24_loop"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn emits_and_assembles_u32_and_i32_arithmetic() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            global unsigned_sink: u32 = 0
+            global signed_sink: i32 = 0
+            fn main() {
+                let left: u32 = 0x12345678
+                let right: u32 = 3
+                unsigned_sink = ((left + right) - 1) & 0xFFFFFFFF
+                unsigned_sink = unsigned_sink | (left ^ right)
+                unsigned_sink = unsigned_sink << right
+                unsigned_sink = unsigned_sink >> 2
+                unsigned_sink = left * right
+                unsigned_sink = unsigned_sink / right
+                unsigned_sink = unsigned_sink % right
+                let unsigned_less: bool = left < right
+                let signed_left: i32 = -9
+                let signed_right: i32 = 2
+                signed_sink = signed_left >> 1
+                signed_sink = signed_left * signed_right
+                signed_sink = signed_left / signed_right
+                let signed_less: bool = signed_left < signed_right
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        for instruction in [
+            "move.l",
+            "add.l d2,d0",
+            "sub.l d2,d0",
+            "and.l d2,d0",
+            "or.l d2,d0",
+            "eor.l d2,d0",
+            "lsl.l #3,d0",
+            "lsr.l #2,d0",
+            "asr.l #1,d0",
+            "cmp.l d2,d0",
+        ] {
+            assert!(
+                assembly.contains(instruction),
+                "missing {instruction}:\n{assembly}"
+            );
+        }
+        assert!(assembly.contains("move.l #$FFFFFFFF,d0"), "{assembly}");
+        assert!(assembly.contains("__ezra_mul_u32_loop"), "{assembly}");
+        assert!(assembly.contains("__ezra_div_u32_loop"), "{assembly}");
+        assert!(!assembly.contains("andi.l #$FFFFFF,d0"), "{assembly}");
         assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
     }
 

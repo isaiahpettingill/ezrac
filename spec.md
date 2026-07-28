@@ -671,6 +671,8 @@ u16    unsigned 16-bit integer
 i16    signed 16-bit integer
 u24    unsigned 24-bit integer
 i24    signed 24-bit integer
+u32    unsigned 32-bit integer
+i32    signed 32-bit integer
 bool   boolean
 ptr24  raw 24-bit address
 ```
@@ -687,17 +689,13 @@ ptr<Entity>
 Unsupported:
 
 ```text
-u32
-i32
 u64
 i64
 float
 double
 ```
 
-`u32` and `i32` are intentionally not part of the language.
-
-Large math is done with explicit helper functions or assembly routines.
+The compiler warns about 32-bit integer operations on targets where they are especially costly: MOS 6502, 65C02, 65C816, Ricoh 2A03, M6800, and TMS9900. AVR and targets with useful 16-bit or 32-bit register operations do not produce this warning. MOS 6502 and Ricoh 2A03 also warn for 24-bit integer operations; 65C02 and 65C816 do not.
 
 ---
 
@@ -712,6 +710,9 @@ i16:   -32,768 to 32,767
 
 u24:   0 to 16,777,215
 i24:   -8,388,608 to 8,388,607
+
+u32:   0 to 4,294,967,295
+i32:   -2,147,483,648 to 2,147,483,647
 ```
 
 Unsigned arithmetic wraps modulo the type width.
@@ -1039,6 +1040,7 @@ Struct layout:
 - alignment is 1 byte
 - u16 occupies 2 bytes
 - u24 and ptr24 occupy 3 bytes
+- u32 and i32 occupy 4 bytes
 ```
 
 Example:
@@ -2514,7 +2516,7 @@ ty            = primitive_ty
               | "[" ty ";" expr "]"
               | path
 
-primitive_ty  = "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "bool" | "ptr24"
+primitive_ty  = "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "u32" | "i32" | "bool" | "ptr24"
 
 expr          = logical_or
 ```
@@ -2528,8 +2530,7 @@ Function modifiers may appear in any order before `fn`, but each modifier may ap
 EZRA follows these rules:
 
 ```text
-- 24-bit is normal.
-- u32 does not exist.
+- Integer widths are explicit.
 - ports are not memory.
 - volatile means real hardware access.
 - embedded bytes are first-class cartridge assets.

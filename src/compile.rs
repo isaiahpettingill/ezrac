@@ -25,7 +25,7 @@ use crate::{
         AccessPath, AccessSegment, CfgPredicate, Declaration, EmbedSource, Expr, Function, Place,
         Program, Stmt, Type,
     },
-    diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
+    diagnostic::{Diagnostic, SourceLocation, diagnostic_span, source_token_spans},
     layout::{Layout, default_layout_for_target},
     parser::parse_program,
     target::{
@@ -149,6 +149,7 @@ fn check_diagnostics_with_sdk_and_overrides(
         .and_then(|target| parse_target_triple(target).ok())
         .map(|target| target.cpu)
         .unwrap_or(CpuFamily::Ez80);
+    diagnostics.extend(inefficient_integer_warnings(&resolved, cpu));
     if matches!(
         cpu,
         CpuFamily::Ez80
@@ -201,6 +202,45 @@ fn check_diagnostics_with_sdk_and_overrides(
         diagnostics.push(error);
     }
     diagnostics
+}
+
+fn inefficient_integer_warnings(program: &Program, cpu: CpuFamily) -> Vec<Diagnostic> {
+    let warn_32 = matches!(
+        cpu,
+        CpuFamily::Mos6502
+            | CpuFamily::Cmos65C02
+            | CpuFamily::Wdc65C816
+            | CpuFamily::Ricoh2A03
+            | CpuFamily::M6800
+            | CpuFamily::Tms9900
+    );
+    let warn_24 = matches!(cpu, CpuFamily::Mos6502 | CpuFamily::Ricoh2A03);
+    let mut warnings = Vec::new();
+
+    for unit in &program.source_units {
+        for (width, names, enabled) in
+            [(32, ["u32", "i32"], warn_32), (24, ["u24", "i24"], warn_24)]
+        {
+            if !enabled {
+                continue;
+            }
+            let span = names.iter().find_map(|name| {
+                source_token_spans(&unit.path, &unit.text, name)
+                    .into_iter()
+                    .next()
+            });
+            if let Some(span) = span {
+                warnings.push(
+                    Diagnostic::warning(format!(
+                        "{width}-bit integer operations are highly inefficient on {}; consider a smaller integer size, such as 16-bit",
+                        cpu.as_str()
+                    ))
+                    .with_span_if_missing(span),
+                );
+            }
+        }
+    }
+    warnings
 }
 
 fn diagnostic_assembly_options(

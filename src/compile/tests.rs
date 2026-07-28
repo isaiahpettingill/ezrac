@@ -1,5 +1,58 @@
 use super::*;
 
+#[test]
+fn warns_for_costly_wide_integer_targets() {
+    let program = parse_program(
+        Path::new("wide.ezra"),
+        "fn main() { let wide: u32 = 1; let medium: i24 = 1 }",
+    )
+    .unwrap();
+
+    for cpu in [
+        CpuFamily::Mos6502,
+        CpuFamily::Ricoh2A03,
+        CpuFamily::M6800,
+        CpuFamily::Tms9900,
+    ] {
+        let warnings = inefficient_integer_warnings(&program, cpu);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.message.contains("32-bit")),
+            "{cpu:?}: {warnings:#?}"
+        );
+    }
+    let mos = inefficient_integer_warnings(&program, CpuFamily::Mos6502);
+    assert!(mos.iter().any(|warning| warning.message.contains("24-bit")));
+    assert!(mos.iter().all(Diagnostic::is_warning));
+}
+
+#[test]
+fn skips_wide_integer_warnings_on_exempt_targets() {
+    let program = parse_program(
+        Path::new("wide.ezra"),
+        "fn main() { let wide: u32 = 1; let medium: i24 = 1 }",
+    )
+    .unwrap();
+
+    for cpu in [
+        CpuFamily::M68k,
+        CpuFamily::Avr,
+        CpuFamily::Z80,
+        CpuFamily::Lr35902,
+    ] {
+        assert!(
+            inefficient_integer_warnings(&program, cpu).is_empty(),
+            "{cpu:?}"
+        );
+    }
+    assert!(
+        inefficient_integer_warnings(&program, CpuFamily::Cmos65C02)
+            .iter()
+            .all(|warning| !warning.message.contains("24-bit"))
+    );
+}
+
 fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "ezra_compile_{name}_{}_{}",

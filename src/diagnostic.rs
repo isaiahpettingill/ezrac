@@ -24,10 +24,17 @@ pub struct SourceSpan {
     pub end: SourcePosition,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
     pub span: Option<SourceSpan>,
     pub message: String,
+    pub severity: DiagnosticSeverity,
 }
 
 impl Diagnostic {
@@ -35,6 +42,7 @@ impl Diagnostic {
         Self {
             span: None,
             message: message.into(),
+            severity: DiagnosticSeverity::Error,
         }
     }
 
@@ -53,6 +61,7 @@ impl Diagnostic {
                 },
             }),
             message: message.into(),
+            severity: DiagnosticSeverity::Error,
         }
     }
 
@@ -60,7 +69,20 @@ impl Diagnostic {
         Self {
             span: Some(span),
             message: message.into(),
+            severity: DiagnosticSeverity::Error,
         }
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            span: None,
+            message: message.into(),
+            severity: DiagnosticSeverity::Warning,
+        }
+    }
+
+    pub fn is_warning(&self) -> bool {
+        self.severity == DiagnosticSeverity::Warning
     }
 
     pub fn with_location_if_missing(mut self, location: SourceLocation) -> Self {
@@ -196,7 +218,9 @@ pub fn source_token_spans(file: &SourcePath, source: &str, text: &str) -> Vec<So
 
 fn source_integer_value(text: &str) -> Option<i64> {
     let text = text
-        .strip_suffix("u24")
+        .strip_suffix("u32")
+        .or_else(|| text.strip_suffix("i32"))
+        .or_else(|| text.strip_suffix("u24"))
         .or_else(|| text.strip_suffix("i24"))
         .or_else(|| text.strip_suffix("u16"))
         .or_else(|| text.strip_suffix("i16"))

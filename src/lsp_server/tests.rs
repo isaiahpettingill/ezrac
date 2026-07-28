@@ -6,6 +6,18 @@ fn repository_path(relative: &str) -> PathBuf {
 }
 
 #[test]
+fn standard_completion_includes_u32_and_i32_primitives() {
+    let items = standard_completion_items();
+
+    for ty in ["u32", "i32"] {
+        assert!(items.iter().any(|item| {
+            item.get("label").and_then(Value::as_str) == Some(ty)
+                && item.get("detail").and_then(Value::as_str) == Some("primitive type")
+        }));
+    }
+}
+
+#[test]
 fn built_in_completion_modules_follow_project_target() {
     let sdk = SdkResolver {
         target: Some("ez180n-ez80".to_owned()),

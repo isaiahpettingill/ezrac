@@ -1093,7 +1093,7 @@ fn validate_asm_operand_class(ty: &Type, class: &str) -> Result<(), Diagnostic> 
             Type::Named(name)
                 if !matches!(
                     name.as_str(),
-                    "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr24"
+                    "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr24" | "u32" | "i32"
                 ) =>
             {
                 true
@@ -1120,6 +1120,7 @@ fn type_storage_size(ty: &Type) -> Option<u8> {
         Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Some(1),
         Type::Named(name) if name == "u16" || name == "i16" => Some(2),
         Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => Some(3),
+        Type::Named(name) if name == "u32" || name == "i32" => Some(4),
         Type::Ptr(_) => Some(3),
         Type::Named(_) | Type::Array { .. } => None,
     }
@@ -1198,7 +1199,7 @@ fn build_int_lit(text: &str) -> Result<Expr, Diagnostic> {
 }
 
 fn strip_int_suffix(text: &str) -> (&str, Option<&str>) {
-    for suffix in ["u24", "i24", "u16", "i16", "u8", "i8"] {
+    for suffix in ["u32", "i32", "u24", "i24", "u16", "i16", "u8", "i8"] {
         if let Some(digits) = text.strip_suffix(suffix) {
             return (digits, Some(suffix));
         }
