@@ -62,7 +62,6 @@ struct Emitter {
     needs_u16_mul_helper: bool,
     needs_u16_divmod_helper: bool,
     functions: HashMap<String, Function>,
-    inline_stack: Vec<String>,
     r0: Storage,
     r1: Storage,
     r2: Storage,
@@ -88,7 +87,6 @@ impl Emitter {
             needs_u16_mul_helper: false,
             needs_u16_divmod_helper: false,
             functions: HashMap::new(),
-            inline_stack: Vec::new(),
             r0,
             r1,
             r2,
@@ -127,7 +125,7 @@ impl Emitter {
             if let Declaration::Function(function) = unwrapped_declaration(declaration)
                 && emitted_functions.contains(&function.name)
                 && (function.name == "main"
-                    || !mos_inline_candidate(function)
+                    || !mos6502_small_wrapper_candidate(function)
                     || self.function_is_recursive(&function.name))
             {
                 self.emit_function(function)?;
@@ -649,7 +647,7 @@ impl Emitter {
         }
         let resolved_name = resolve_called_function(path, &self.model)
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
-        if args.is_empty() && self.try_emit_inline_call(&resolved_name)? {
+        if args.is_empty() && self.try_emit_small_wrapper(&resolved_name)? {
             self.zero(self.r0);
             return Ok(());
         }
@@ -721,24 +719,18 @@ impl Emitter {
         Ok(())
     }
 
-    fn try_emit_inline_call(&mut self, name: &str) -> Result<bool, Diagnostic> {
+    fn try_emit_small_wrapper(&mut self, name: &str) -> Result<bool, Diagnostic> {
         let Some(function) = self.functions.get(name).cloned() else {
             return Ok(false);
         };
         let Some(body) = inline_void_body(&function) else {
             return Ok(false);
         };
-        if !mos_inline_candidate(&function)
-            || self.function_is_recursive(name)
-            || self.inline_stack.iter().any(|active| active == name)
-        {
+        if !mos6502_small_wrapper_candidate(&function) || self.function_is_recursive(name) {
             return Ok(false);
         }
 
-        self.inline_stack.push(name.to_owned());
-        let result = self.emit_block(body);
-        self.inline_stack.pop();
-        result?;
+        self.emit_block(body)?;
         Ok(true)
     }
 
@@ -2164,12 +2156,14 @@ fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
         .then_some(body)
 }
 
-fn mos_inline_candidate(function: &Function) -> bool {
+fn mos6502_small_wrapper_candidate(function: &Function) -> bool {
+    if !function.attrs.is_empty() {
+        return false;
+    }
     let Some(body) = inline_void_body(function) else {
         return false;
     };
-    function.attrs.iter().any(|attr| attr == "inline")
-        || body.is_empty()
+    body.is_empty()
         || matches!(
             body,
             [Stmt::Expr(Expr::Call { args, .. })] if args.is_empty()
@@ -2393,7 +2387,7 @@ mod structural_tests {
     }
 
     #[test]
-    fn honors_explicit_and_cost_based_wrapper_inlining() {
+    fn keeps_automatic_small_wrapper_inlining_separate_from_explicit_inlining() {
         let assembly = emit(
             r#"
                 fn sink() {}
@@ -2414,7 +2408,12 @@ mod structural_tests {
         assert!(!assembly.contains("_automatic_wrapper:"), "{assembly}");
         assert!(!assembly.contains("_explicit_wrapper:"), "{assembly}");
         assert!(assembly.contains("_retained_wrapper:"), "{assembly}");
+        assert!(assembly.contains("    jsr _retained_wrapper"), "{assembly}");
         assert!(assembly.contains("_recursive_wrapper:"), "{assembly}");
+        assert!(
+            assembly.contains("    jsr _recursive_wrapper"),
+            "{assembly}"
+        );
     }
 }
 

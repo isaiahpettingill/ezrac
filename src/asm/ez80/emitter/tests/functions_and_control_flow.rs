@@ -1,5 +1,21 @@
 use super::*;
 
+fn lowered_function_calls(checked: &CheckedEz80Program, function_name: &str) -> Vec<String> {
+    let function = checked
+        .tbir
+        .lowered_program
+        .declarations
+        .iter()
+        .find_map(|declaration| match unwrapped_declaration(declaration) {
+            Declaration::Function(function) if function.name == function_name => Some(function),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing lowered function `{function_name}`"));
+    let mut calls = Vec::new();
+    collect_stmt_calls(&function.body, &mut calls);
+    calls
+}
+
 #[test]
 fn rejects_missing_return_value_in_non_void_function() {
     let cases = [
@@ -413,7 +429,7 @@ fn emits_and_runs_user_function_with_u8_parameters() {
 }
 
 #[test]
-fn emits_and_runs_simple_inline_return_functions() {
+fn emits_and_runs_tbir_expanded_return_functions() {
     let source = r#"
             inline fn pressed(pad: u16, button: u16) -> bool {
                 return (pad & button) != 0
@@ -427,7 +443,10 @@ fn emits_and_runs_simple_inline_return_functions() {
             }
         "#;
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
-    let asm = emit_ez80_assembly(&program).unwrap();
+    let options = AssemblyOptions::default();
+    let checked = CheckedEz80Program::from_program(&program, &options).unwrap();
+    assert!(!lowered_function_calls(&checked, "main").contains(&"pressed".to_owned()));
+    let asm = emit_ez80_assembly_from_checked(&program, &checked, options).unwrap();
     let run = run_assembly_test(&asm, 3_000).unwrap();
 
     assert!(run.halted, "{asm}");
@@ -580,7 +599,7 @@ fn explicit_inline_preserves_typed_argument_order_and_inlines_nested_helpers() {
 }
 
 #[test]
-fn unsafe_condition_inline_calls_remain_calls() {
+fn tbir_preserves_unsafe_condition_inline_calls_as_calls() {
     let source = r#"
             global checks: u8 = 0
 
@@ -597,7 +616,16 @@ fn unsafe_condition_inline_calls_remain_calls() {
             }
         "#;
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
-    let asm = emit_ez80_assembly(&program).unwrap();
+    let options = AssemblyOptions::default();
+    let checked = CheckedEz80Program::from_program(&program, &options).unwrap();
+    assert_eq!(
+        lowered_function_calls(&checked, "main")
+            .iter()
+            .filter(|name| name.as_str() == "ready")
+            .count(),
+        2
+    );
+    let asm = emit_ez80_assembly_from_checked(&program, &checked, options).unwrap();
     let run = run_assembly_test(&asm, 6_000).unwrap();
 
     assert!(run.halted, "{asm}");
@@ -630,7 +658,7 @@ fn recursive_inline_functions_fall_back_to_calls() {
 }
 
 #[test]
-fn recursive_inline_wrappers_reject_inlining_but_use_safe_tail_calls() {
+fn tbir_rejects_recursive_inline_wrappers_but_keeps_safe_tail_calls() {
     let source = r#"
             inline fn count_down(value: u8) -> u8 {
                 return count_down_impl(value)
@@ -649,7 +677,11 @@ fn recursive_inline_wrappers_reject_inlining_but_use_safe_tail_calls() {
             }
         "#;
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
-    let asm = emit_ez80_assembly(&program).unwrap();
+    let options = AssemblyOptions::default();
+    let checked = CheckedEz80Program::from_program(&program, &options).unwrap();
+    assert!(lowered_function_calls(&checked, "main").contains(&"count_down".to_owned()));
+    assert!(lowered_function_calls(&checked, "count_down").contains(&"count_down_impl".to_owned()));
+    let asm = emit_ez80_assembly_from_checked(&program, &checked, options).unwrap();
     let run = run_assembly_test(&asm, 20_000).unwrap();
 
     assert!(run.halted, "{asm}");
@@ -730,7 +762,10 @@ fn emits_and_runs_tbir_approved_sibling_tail_call() {
             }
         "#;
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
-    let asm = emit_ez80_assembly(&program).unwrap();
+    let options = AssemblyOptions::default();
+    let checked = CheckedEz80Program::from_program(&program, &options).unwrap();
+    assert!(lowered_function_calls(&checked, "swap").contains(&"finish".to_owned()));
+    let asm = emit_ez80_assembly_from_checked(&program, &checked, options).unwrap();
     let run = run_assembly_test(&asm, 5_000).unwrap();
 
     assert!(run.halted, "{asm}");

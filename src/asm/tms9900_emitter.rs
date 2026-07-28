@@ -136,7 +136,7 @@ impl Emitter {
                 && !function.name.contains('.')
                 && reachable.contains(&function.name)
                 && (function.name == "main"
-                    || !tms_inline_candidate(function)
+                    || !tms_compact_wrapper_candidate(function)
                     || self.recursive_functions.contains(&function.name))
             {
                 // Imported qualified names are semantic aliases of the same
@@ -547,7 +547,7 @@ impl Emitter {
         let Some(body) = inline_void_body(&function) else {
             return Ok(false);
         };
-        if !tms_inline_candidate(&function)
+        if !tms_compact_wrapper_candidate(&function)
             || self.recursive_functions.contains(name)
             || self.inline_stack.iter().any(|active| active == name)
         {
@@ -1502,12 +1502,11 @@ fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
         .then_some(body)
 }
 
-fn tms_inline_candidate(function: &Function) -> bool {
+fn tms_compact_wrapper_candidate(function: &Function) -> bool {
     let Some(body) = inline_void_body(function) else {
         return false;
     };
-    function.attrs.iter().any(|attr| attr == "inline")
-        || body.is_empty()
+    body.is_empty()
         || matches!(
             body,
             [Stmt::Expr(Expr::Call { args, .. })] if args.is_empty()
@@ -1928,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_unreachable_functions_and_inlines_small_wrappers() {
+    fn omits_unreachable_functions_and_inlines_compact_wrappers() {
         let assembly = emit(
             r#"
                 naked fn unused_sdk_wrapper() {
@@ -1938,11 +1937,13 @@ mod tests {
                 fn sink() {}
                 fn automatic_wrapper() { sink() }
                 @inline fn explicit_wrapper() { sink(); sink() }
+                fn retained_wrapper() { sink(); sink() }
                 @inline fn recursive_wrapper() { recursive_wrapper() }
                 fn main() {
                     let value: u16 = used()
                     automatic_wrapper()
                     explicit_wrapper()
+                    retained_wrapper()
                     recursive_wrapper()
                 }
             "#,
@@ -1961,7 +1962,13 @@ mod tests {
         assert!(!assembly.contains("_sink:"), "{assembly}");
         assert!(!assembly.contains("_automatic_wrapper:"), "{assembly}");
         assert!(!assembly.contains("_explicit_wrapper:"), "{assembly}");
+        assert!(assembly.contains("_retained_wrapper:"), "{assembly}");
+        assert!(assembly.contains("    bl @_retained_wrapper"), "{assembly}");
         assert!(assembly.contains("_recursive_wrapper:"), "{assembly}");
+        assert!(
+            assembly.contains("    bl @_recursive_wrapper"),
+            "{assembly}"
+        );
     }
 
     #[test]

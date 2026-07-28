@@ -2,8 +2,8 @@ use crate::compat::{SourcePath, prelude::*};
 
 use crate::{
     ast::{
-        AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl, Function,
-        Program, Type, UnaryOp,
+        AccessPath, AccessSegment, BinaryOp, Declaration, EmbedSource, Expr, FieldDecl, Program,
+        Type, UnaryOp,
     },
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
@@ -85,7 +85,6 @@ pub(super) struct Symbols {
     pub(super) global_types: HashMap<String, Type>,
     pub(super) readonly_global_pointer_aliases: HashMap<String, u32>,
     pub(super) functions: HashMap<String, FunctionSig>,
-    pub(super) inline_functions: HashMap<String, Function>,
     next_addr: u32,
     asset_next_addr: u32,
     rodata_next_addr: u32,
@@ -129,7 +128,6 @@ impl Symbols {
     pub(super) fn from_program(
         program: &Program,
         options: AssemblyOptions,
-        approved_inline_functions: &HashSet<String>,
     ) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
             constants: sdk_constants(&options),
@@ -144,7 +142,6 @@ impl Symbols {
             global_types: HashMap::new(),
             readonly_global_pointer_aliases: HashMap::new(),
             functions: HashMap::new(),
-            inline_functions: HashMap::new(),
             next_addr: options.ram_base.get(),
             asset_next_addr: options.asset_base.get(),
             rodata_next_addr: options.rodata_base.get(),
@@ -297,13 +294,6 @@ impl Symbols {
                     is_interrupt,
                 },
             );
-            if let Declaration::Function(function) = declaration
-                && approved_inline_functions.contains(&function.name)
-            {
-                symbols
-                    .inline_functions
-                    .insert(function.name.clone(), function.clone());
-            }
         }
 
         for declaration in &program.declarations {

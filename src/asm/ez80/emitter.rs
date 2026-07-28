@@ -127,7 +127,7 @@ pub fn collect_ez80_semantic_diagnostics(
     program: &Program,
     options: AssemblyOptions,
 ) -> Vec<Diagnostic> {
-    let symbols = match Symbols::from_program(program, options.clone(), &HashSet::new()) {
+    let symbols = match Symbols::from_program(program, options.clone()) {
         Ok(symbols) => symbols,
         Err(error) => return vec![error],
     };
@@ -246,9 +246,8 @@ pub fn emit_ez80_assembly_from_checked(
 ) -> Result<String, Diagnostic> {
     let program = &checked.tbir.lowered_program;
     debug_assert_eq!(checked.hir.source_path, program.source_path);
-    let approved_inline_functions = checked.tbir.optimizations.inline_function_names();
     let tail_call_edges = checked.tbir.optimizations.tail_call_edges();
-    let symbols = Symbols::from_program(program, options.clone(), &approved_inline_functions)?;
+    let symbols = Symbols::from_program(program, options.clone())?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
@@ -368,7 +367,7 @@ struct Emitter {
     assigned_names_stack: Vec<HashSet<String>>,
     recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
-    inline_expansion_stack: Vec<String>,
+
     debug_comments: bool,
     cpu: CpuFamily,
     mos_executable: bool,
@@ -405,7 +404,7 @@ impl Emitter {
             assigned_names_stack: Vec::new(),
             recursive_call_edges,
             tail_call_edges,
-            inline_expansion_stack: Vec::new(),
+
             debug_comments: options.debug_comments,
             cpu: options.cpu,
             mos_executable: options.mos_executable,
@@ -2484,24 +2483,6 @@ impl Emitter {
             temps.push(temp);
         }
 
-        if let Some(function) = self.symbols.inline_functions.get(name).cloned()
-            && !self
-                .inline_expansion_stack
-                .iter()
-                .any(|inline| inline == name)
-        {
-            self.inline_expansion_stack.push(name.to_owned());
-            let inlined = (|| {
-                if self.emit_inline_return_call(&function, &temps)? {
-                    return Ok(true);
-                }
-                self.emit_inline_void_call(&function, &temps)
-            })();
-            self.inline_expansion_stack.pop();
-            if inlined? {
-                return Ok(());
-            }
-        }
         let saved_variables = self.recursive_call_saved_variables(name);
         let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
             None
@@ -2616,91 +2597,6 @@ impl Emitter {
         if let Some(return_temp) = return_temp {
             self.emit_load_width(return_temp);
         }
-    }
-
-    fn emit_inline_return_call(
-        &mut self,
-        function: &Function,
-        temps: &[Variable],
-    ) -> Result<bool, Diagnostic> {
-        let Some((prefix, expr)) = inline_return_body(function) else {
-            return Ok(false);
-        };
-        let Some(return_type) = &function.return_type else {
-            return Ok(false);
-        };
-
-        self.scopes.push(HashMap::new());
-        self.scope_types.push(HashMap::new());
-        self.local_constants.push(HashMap::new());
-        self.readonly_pointer_aliases.push(HashMap::new());
-        self.assigned_names_stack
-            .push(assigned_names_in_block(prefix));
-        for (param, temp) in function.params.iter().zip(temps.iter().copied()) {
-            self.current_scope_mut().insert(param.name.clone(), temp);
-            self.current_scope_types_mut()
-                .insert(param.name.clone(), param.ty.clone());
-        }
-        for stmt in prefix {
-            self.emit_inline_prefix_stmt(stmt)?;
-        }
-        let result = self.emit_expr_to_type(&expr, return_type);
-        self.assigned_names_stack.pop();
-        self.readonly_pointer_aliases.pop();
-        self.local_constants.pop();
-        self.scope_types.pop();
-        self.scopes.pop();
-        result?;
-        Ok(true)
-    }
-
-    fn emit_inline_void_call(
-        &mut self,
-        function: &Function,
-        temps: &[Variable],
-    ) -> Result<bool, Diagnostic> {
-        let Some(body) = inline_void_body(function) else {
-            return Ok(false);
-        };
-
-        self.scopes.push(HashMap::new());
-        self.scope_types.push(HashMap::new());
-        self.local_constants.push(HashMap::new());
-        self.readonly_pointer_aliases.push(HashMap::new());
-        self.assigned_names_stack
-            .push(assigned_names_in_block(body));
-        for (param, temp) in function.params.iter().zip(temps.iter().copied()) {
-            self.current_scope_mut().insert(param.name.clone(), temp);
-            self.current_scope_types_mut()
-                .insert(param.name.clone(), param.ty.clone());
-        }
-        let result = self.emit_block(body);
-        self.assigned_names_stack.pop();
-        self.readonly_pointer_aliases.pop();
-        self.local_constants.pop();
-        self.scope_types.pop();
-        self.scopes.pop();
-        result?;
-        Ok(true)
-    }
-
-    fn emit_inline_prefix_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
-        let Stmt::Let { name, ty, value } = stmt else {
-            return self.emit_stmt(stmt);
-        };
-        if self.current_scope_types_mut().contains_key(name) {
-            return Err(Diagnostic::new(format!(
-                "local `{name}` shadows an existing name"
-            )));
-        }
-        let variable = self.alloc_storage(ty)?;
-        self.current_scope_mut().insert(name.clone(), variable);
-        self.current_scope_types_mut()
-            .insert(name.clone(), ty.clone());
-        self.emit_storage_initializer(variable, ty, value)?;
-        self.record_local_constant(name, ty, value);
-        self.record_readonly_pointer_alias(name, value);
-        Ok(())
     }
 
     fn emit_expr_to_width(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
@@ -6746,51 +6642,6 @@ fn builtin_arity_error(name: &str) -> String {
     }
 }
 
-fn inline_return_body(function: &Function) -> Option<(&[Stmt], Expr)> {
-    let (last, prefix) = function.body.split_last()?;
-    if prefix.iter().any(stmt_contains_return) {
-        return None;
-    }
-    match last {
-        Stmt::Return(Some(expr)) => Some((prefix, expr.clone())),
-        _ => None,
-    }
-}
-
-fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
-    if function.return_type.is_some() {
-        return None;
-    }
-    match function.body.split_last() {
-        Some((Stmt::Return(None), prefix)) if !prefix.iter().any(stmt_contains_return) => {
-            Some(prefix)
-        }
-        _ if !function.body.iter().any(stmt_contains_return) => Some(&function.body),
-        _ => None,
-    }
-}
-
-fn stmt_contains_return(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Return(_) => true,
-        Stmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            then_body.iter().any(stmt_contains_return) || else_body.iter().any(stmt_contains_return)
-        }
-        Stmt::While { body, .. } | Stmt::Loop { body } => body.iter().any(stmt_contains_return),
-        Stmt::Let { .. }
-        | Stmt::Assign { .. }
-        | Stmt::Break
-        | Stmt::Continue
-        | Stmt::Asm { .. }
-        | Stmt::Out { .. }
-        | Stmt::Expr(_) => false,
-    }
-}
-
 fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<String> {
     let mut graph = HashMap::new();
     let mut seeds = Vec::new();
@@ -6798,7 +6649,9 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
         let Declaration::Function(function) = declaration else {
             continue;
         };
-        let calls = reachable_calls_for_body(&function.body, symbols);
+        let mut calls = Vec::new();
+        collect_reachable_stmt_calls(&function.body, &mut calls, symbols);
+        calls.retain(|name| symbols.functions.contains_key(name));
         graph.insert(function.name.clone(), calls);
         if function.name == "main" || has_attr(function, "naked") || has_attr(function, "interrupt")
         {
@@ -6817,41 +6670,6 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
         }
     }
     reachable
-}
-
-fn reachable_calls_for_body(stmts: &[Stmt], symbols: &Symbols) -> Vec<String> {
-    reachable_calls_for_body_with_inline_stack(stmts, symbols, &mut Vec::new())
-}
-
-fn reachable_calls_for_body_with_inline_stack(
-    stmts: &[Stmt],
-    symbols: &Symbols,
-    inline_stack: &mut Vec<String>,
-) -> Vec<String> {
-    let mut raw_calls = Vec::new();
-    collect_reachable_stmt_calls(stmts, &mut raw_calls, symbols);
-    let mut calls = Vec::new();
-    for name in raw_calls {
-        if !symbols.functions.contains_key(&name) {
-            continue;
-        }
-        if let Some(inline) = symbols.inline_functions.get(&name) {
-            if inline_stack.iter().any(|inline_name| inline_name == &name) {
-                calls.push(name);
-            } else {
-                inline_stack.push(name);
-                calls.extend(reachable_calls_for_body_with_inline_stack(
-                    &inline.body,
-                    symbols,
-                    inline_stack,
-                ));
-                inline_stack.pop();
-            }
-        } else {
-            calls.push(name);
-        }
-    }
-    calls
 }
 
 fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
