@@ -946,6 +946,7 @@ mod tests {
             "lea (a0),a1",
             "link a0,#-4",
             "lsl.w #1,d0",
+            "lsr.l #8,d0",
             "lsr (a0)",
             "move.w d0,d1",
             "movea.w d0,a1",

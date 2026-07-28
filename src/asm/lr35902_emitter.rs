@@ -821,12 +821,24 @@ impl Emitter {
                     self.emit_expr(value, &ty)?;
                 } else {
                     self.emit_load_place(target, width)?;
-                    let left = self.model.allocate(u32::from(width))?;
-                    self.copy(self.r0, left, u32::from(width));
-                    self.emit_expr(value, &ty)?;
-                    self.copy(self.r0, self.r1, u32::from(width));
-                    self.copy(left, self.r0, u32::from(width));
-                    self.emit_binary_op(assign_binary(*op), width, false)?;
+                    if matches!(op, AssignOp::Shl | AssignOp::Shr)
+                        && let Ok(count) = self.model.const_value(value)
+                        && let Ok(count) = u32::try_from(count)
+                    {
+                        self.shift_constant(
+                            width,
+                            *op == AssignOp::Shr,
+                            type_is_signed(&ty),
+                            count,
+                        );
+                    } else {
+                        let left = self.model.allocate(u32::from(width))?;
+                        self.copy(self.r0, left, u32::from(width));
+                        self.emit_expr(value, &ty)?;
+                        self.copy(self.r0, self.r1, u32::from(width));
+                        self.copy(left, self.r0, u32::from(width));
+                        self.emit_binary_op(assign_binary(*op), width, type_is_signed(&ty))?;
+                    }
                 }
                 self.emit_store_place(target, width)?;
             }
@@ -1091,6 +1103,18 @@ impl Emitter {
                 };
                 let operand_width = self.model.type_width(&operand_ty)?;
                 self.emit_expr(left, &operand_ty)?;
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                    && let Ok(count) = self.model.const_value(right)
+                    && let Ok(count) = u32::try_from(count)
+                {
+                    self.shift_constant(
+                        operand_width,
+                        *op == BinaryOp::Shr,
+                        type_is_signed(&operand_ty),
+                        count,
+                    );
+                    return Ok(());
+                }
                 let left_storage = self.model.allocate(u32::from(operand_width))?;
                 self.copy(self.r0, left_storage, u32::from(operand_width));
                 self.emit_expr(right, &operand_ty)?;
@@ -1443,11 +1467,53 @@ impl Emitter {
         }
     }
 
-    fn shift(&mut self, width: u8, right: bool, signed: bool) {
-        let loop_label = self.next_label("shift_loop");
-        let done = self.next_label("shift_done");
-        self.line(&format!("{loop_label}:"));
-        self.jump_if_zero(self.r1.address, &done);
+    fn shift_constant(&mut self, width: u8, right: bool, signed: bool, count: u32) {
+        let bits = u32::from(width) * 8;
+        let count = count.min(bits);
+        let byte_count = count / 8;
+        let bit_count = count % 8;
+
+        if byte_count != 0 {
+            if right {
+                if signed && byte_count == u32::from(width) {
+                    self.lda(self.r0.address + u32::from(width - 1));
+                }
+                for offset in 0..u32::from(width) - byte_count {
+                    self.lda(self.r0.address + offset + byte_count);
+                    self.sta(self.r0.address + offset);
+                }
+                if signed {
+                    if byte_count != u32::from(width) {
+                        self.lda(self.r0.address + u32::from(width) - byte_count - 1);
+                    }
+                    self.line("    asl a");
+                    self.line("    lda #$00");
+                    self.line("    sbc #$00");
+                    self.line("    eor #$FF");
+                } else {
+                    self.lda_imm(0);
+                }
+                for offset in u32::from(width) - byte_count..u32::from(width) {
+                    self.sta(self.r0.address + offset);
+                }
+            } else {
+                for offset in (byte_count..u32::from(width)).rev() {
+                    self.lda(self.r0.address + offset - byte_count);
+                    self.sta(self.r0.address + offset);
+                }
+                self.lda_imm(0);
+                for offset in 0..byte_count {
+                    self.sta(self.r0.address + offset);
+                }
+            }
+        }
+
+        for _ in 0..bit_count {
+            self.shift_once(width, right, signed);
+        }
+    }
+
+    fn shift_once(&mut self, width: u8, right: bool, signed: bool) {
         if right {
             if signed {
                 self.lda(self.r0.address + u32::from(width - 1));
@@ -1464,6 +1530,14 @@ impl Emitter {
                 self.line(&format!("    rol ${:04X}", self.r0.address + offset));
             }
         }
+    }
+
+    fn shift(&mut self, width: u8, right: bool, signed: bool) {
+        let loop_label = self.next_label("shift_loop");
+        let done = self.next_label("shift_done");
+        self.line(&format!("{loop_label}:"));
+        self.jump_if_zero(self.r1.address, &done);
+        self.shift_once(width, right, signed);
         self.line(&format!("    dec ${:04X}", self.r1.address));
         self.line(&format!("    jmp {loop_label}"));
         self.line(&format!("{done}:"));
@@ -2314,7 +2388,12 @@ fn translate_lr35902_line(line: &str, indirect_offset: u8) -> String {
         "inc" | "dec" | "rol" | "ror" | "asl" => format!(
             "    ld a, ({})\n    {} a\n    ld ({}), a",
             direct(arg),
-            if op == "asl" { "sla" } else { op },
+            match op {
+                "asl" => "sla",
+                "rol" => "rl",
+                "ror" => "rr",
+                _ => op,
+            },
             direct(arg)
         ),
         "beq" => format!("{indent}jp z, {arg}"),
@@ -2605,6 +2684,26 @@ mod tests {
         );
         assert!(assembly.contains("call _fib"));
         assert!(!assembly.contains("6502"));
+    }
+
+    #[test]
+    fn constant_shifts_use_fixed_lr35902_instructions() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let value: u24 = 0x123456
+                    let left: u24 = value << 12
+                    let right: u24 = value >> 16
+                    let signed: i16 = -2
+                    let sign_fill: i16 = signed >> 16
+                }
+            "#,
+        );
+
+        assert!(!assembly.contains("shift_loop"), "{assembly}");
+        assert!(!assembly.contains("shift_done"), "{assembly}");
+        assert!(assembly.matches("    rl a").count() >= 3, "{assembly}");
+        assert!(assembly.contains("    xor b"), "{assembly}");
     }
 
     #[test]

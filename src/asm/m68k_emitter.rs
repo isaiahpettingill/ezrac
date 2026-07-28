@@ -501,6 +501,15 @@ impl Emitter {
                     expected.clone()
                 };
                 self.emit_expr(left, &operand_ty)?;
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                    && let Some(count) = self.constant_shift_count(right)
+                    && count <= 8
+                {
+                    if count != 0 {
+                        self.emit_immediate_shift(*op, &operand_ty, count)?;
+                    }
+                    return Ok(());
+                }
                 self.line(&format!("    move.{} d0,d1", size_suffix(&operand_ty)?));
                 self.emit_expr(right, &operand_ty)?;
                 self.line(&format!("    move.{} d0,d2", size_suffix(&operand_ty)?));
@@ -542,6 +551,38 @@ impl Emitter {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn constant_shift_count(&self, expr: &Expr) -> Option<u32> {
+        match expr {
+            Expr::Int(value) | Expr::TypedInt(value, _) => u32::try_from(*value).ok(),
+            Expr::Ident(name) => self
+                .model
+                .constants
+                .get(name)
+                .and_then(|value| u32::try_from(*value).ok()),
+            Expr::Cast { expr, .. } => self.constant_shift_count(expr),
+            _ => None,
+        }
+    }
+
+    fn emit_immediate_shift(
+        &mut self,
+        op: BinaryOp,
+        ty: &Type,
+        count: u32,
+    ) -> Result<(), Diagnostic> {
+        let instruction = match op {
+            BinaryOp::Shl => "lsl",
+            BinaryOp::Shr if type_is_signed(ty) => "asr",
+            BinaryOp::Shr => "lsr",
+            _ => unreachable!("immediate shift called for a non-shift operation"),
+        };
+        self.line(&format!(
+            "    {instruction}.{} #{count},d0",
+            size_suffix(ty)?
+        ));
         Ok(())
     }
 
@@ -1523,7 +1564,44 @@ mod tests {
         )
         .unwrap();
         assert!(assembly.contains("eor.b d2,d0"), "{assembly}");
-        assert!(assembly.contains("lsl.b d2,d0"), "{assembly}");
+        assert!(assembly.contains("lsl.b #1,d0"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn selects_legal_immediate_constant_shifts() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            global sink: u16 = 0
+            global signed_sink: i16 = 0
+            fn main() {
+                let value: u16 = 3
+                sink = value << 3
+                sink = sink >> 8
+                let signed: i16 = -16
+                signed_sink = signed >> 2
+                sink = value << 0
+                sink = value << 9
+                sink = value * 4
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(assembly.contains("lsl.w #3,d0"), "{assembly}");
+        assert!(assembly.contains("lsr.w #8,d0"), "{assembly}");
+        assert!(assembly.contains("asr.w #2,d0"), "{assembly}");
+        assert!(assembly.contains("lsl.w d2,d0"), "{assembly}");
+        assert!(assembly.contains("lsl.w #2,d0"), "{assembly}");
+        assert!(!assembly.contains("lsl.w #0,d0"), "{assembly}");
         assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
     }
 

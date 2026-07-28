@@ -1,6 +1,89 @@
 use super::*;
 
 #[test]
+fn emits_target_specific_constant_shifts_and_reduces_power_of_two_multiply() {
+    let source = r#"
+            fn left_byte(value: u8) -> u8 {
+                return value << 3
+            }
+
+            fn logical_byte(value: u8) -> u8 {
+                return value >> 2
+            }
+
+            fn arithmetic_byte(value: i8) -> i8 {
+                return value >> 2
+            }
+
+            fn left_word(value: u16) -> u16 {
+                return value << 2
+            }
+
+            fn times_eight(value: u16) -> u16 {
+                return value * 8
+            }
+
+            fn main() {
+                test.assert_eq_u8(left_byte(3), 24, 1)
+                test.assert_eq_u8(logical_byte(0x80), 0x20, 2)
+                test.assert_eq_u8(cast<u8>(arithmetic_byte(-8)), 0xFE, 3)
+                test.assert_eq_u16(left_word(0x1234), 0x48D0, 4)
+                test.assert_eq_u16(times_eight(7), 56, 5)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 12_000).unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+
+    let left_byte = body("left_byte");
+    assert_eq!(left_byte.matches("    add a, a").count(), 3, "{left_byte}");
+    assert!(!left_byte.contains("shift_loop"), "{left_byte}");
+
+    let logical_byte = body("logical_byte");
+    assert_eq!(
+        logical_byte.matches("    srl a").count(),
+        2,
+        "{logical_byte}"
+    );
+    assert!(!logical_byte.contains("shift_loop"), "{logical_byte}");
+
+    let arithmetic_byte = body("arithmetic_byte");
+    assert_eq!(
+        arithmetic_byte.matches("    sra a").count(),
+        2,
+        "{arithmetic_byte}"
+    );
+    assert!(!arithmetic_byte.contains("shift_loop"), "{arithmetic_byte}");
+
+    let left_word = body("left_word");
+    assert_eq!(left_word.matches("    add a, a").count(), 2, "{left_word}");
+    assert_eq!(left_word.matches("    rl a").count(), 2, "{left_word}");
+    assert!(!left_word.contains("shift_loop"), "{left_word}");
+
+    let times_eight = body("times_eight");
+    assert_eq!(
+        times_eight.matches("    add a, a").count(),
+        3,
+        "{times_eight}"
+    );
+    assert_eq!(times_eight.matches("    rl a").count(), 3, "{times_eight}");
+    assert!(!times_eight.contains("__ezra_mul"), "{times_eight}");
+    assert!(!times_eight.contains("shift_loop"), "{times_eight}");
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn hoists_pure_loop_invariants_before_the_loop() {
     let source = r#"
             fn sum_scaled(base: u8, count: u8) -> u8 {

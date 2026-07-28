@@ -690,6 +690,18 @@ impl Emitter {
                     expected.clone()
                 };
                 let operand_width = self.model.type_width(&operand_ty)?;
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                    && let Some(count) = self.constant_shift_count(right)
+                {
+                    self.emit_expr(left, &operand_ty)?;
+                    self.constant_shift(
+                        operand_width,
+                        *op == BinaryOp::Shr,
+                        type_is_signed(&operand_ty),
+                        count,
+                    );
+                    return Ok(());
+                }
                 self.emit_expr(left, &operand_ty)?;
                 let left_storage = self.model.allocate(u32::from(operand_width))?;
                 self.copy(self.r0, left_storage, u32::from(operand_width));
@@ -1057,6 +1069,41 @@ impl Emitter {
                     quotient_negative
                 },
             );
+        }
+    }
+
+    fn constant_shift_count(&self, expr: &Expr) -> Option<u8> {
+        match expr {
+            Expr::Int(value) | Expr::TypedInt(value, _) => Some(*value as u8),
+            Expr::Ident(name) => self.model.constants.get(name).map(|value| *value as u8),
+            Expr::Cast { expr, .. } => self.constant_shift_count(expr),
+            _ => None,
+        }
+    }
+
+    fn constant_shift(&mut self, width: u8, right: bool, signed: bool, count: u8) {
+        for _ in 0..count {
+            if right {
+                for offset in (0..u32::from(width)).rev() {
+                    self.lda(self.r0.address + offset);
+                    self.line(if offset == u32::from(width - 1) {
+                        if signed { "    asr r16" } else { "    lsr r16" }
+                    } else {
+                        "    ror r16"
+                    });
+                    self.sta(self.r0.address + offset);
+                }
+            } else {
+                for offset in 0..u32::from(width) {
+                    self.lda(self.r0.address + offset);
+                    self.line(if offset == 0 {
+                        "    lsl r16"
+                    } else {
+                        "    rol r16"
+                    });
+                    self.sta(self.r0.address + offset);
+                }
+            }
         }
     }
 
@@ -1855,6 +1902,7 @@ fn translate_avr_line(line: &str) -> String {
         "sbc" => two("sbc", arg),
         "cmp" => two("cp", arg),
         "asl" if arg == "a" => "    lsl r16".to_owned(),
+        "rol" | "ror" if arg == "r16" => line.to_owned(),
         "inc" | "dec" | "rol" | "ror" | "asl" => format!("    lds r16, {}\n    {} r16\n    sts {}, r16", direct(arg), if op == "asl" { "lsl" } else { op }, direct(arg)),
         "beq" => format!("{indent}breq {arg}"),
         "bne" => format!("{indent}brne {arg}"),
@@ -2168,6 +2216,30 @@ mod tests {
         assert!(assembly.contains("lds r30, 0100h"));
         assert!(!assembly.contains("00F0h"));
         assert!(assembly.contains("ld r16, z\n    tst r16"));
+    }
+
+    #[test]
+    fn unrolls_constant_shifts_and_power_of_two_multiplication() {
+        let assembly = emit(
+            r#"
+            global sink: u16 = 0
+            fn main() {
+                let left: u16 = 3
+                sink = left << 2
+                sink = sink >> 1
+                let signed: i16 = -8
+                sink = cast<u16>(signed >> 1)
+                sink = left * 8
+            }
+        "#,
+        );
+        assert!(assembly.contains("lsl r16"), "{assembly}");
+        assert!(assembly.contains("rol r16"), "{assembly}");
+        assert!(assembly.contains("lsr r16"), "{assembly}");
+        assert!(assembly.contains("ror r16"), "{assembly}");
+        assert!(assembly.contains("asr r16"), "{assembly}");
+        assert!(!assembly.contains("shift_loop"), "{assembly}");
+        assert!(!assembly.contains("mul_loop"), "{assembly}");
     }
 
     #[test]
