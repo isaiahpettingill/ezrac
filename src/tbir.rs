@@ -11,12 +11,14 @@ pub mod dump;
 pub mod ez80;
 pub mod model;
 pub mod optimize;
+pub mod provenance;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TbirProgram {
     pub source: SourcePathBuf,
     pub target: TbirTarget,
     pub memory: TbirMemoryModel,
+    pub objects: Vec<TbirMemoryObject>,
     pub declarations: Vec<TbirDeclaration>,
     pub optimizations: TbirOptimizationReport,
     pub lowered_program: Program,
@@ -52,6 +54,18 @@ pub struct TbirMemoryRegion {
 pub enum TbirAccess {
     ReadOnly,
     ReadWrite,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TbirMemoryObject {
+    pub name: String,
+    pub kind: TbirObjectKind,
+    pub ty: Type,
+    pub address: u32,
+    pub size: u32,
+    pub region: Option<String>,
+    pub access: TbirAccess,
+    pub volatile: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +162,7 @@ pub enum TbirOptimizationKind {
     CopyPropagation,
     CommonSubexpression,
     LoopInvariantCodeMotion,
+    MemoryReadLicm,
     Inline,
     TailCall,
     TailRecursion,
@@ -177,6 +192,7 @@ pub struct TbirOptimizationReport {
     pub copy_propagations: usize,
     pub common_subexpressions: usize,
     pub loop_invariants_hoisted: usize,
+    pub named_memory_reads_hoisted: usize,
     pub dead_statements_marked: usize,
     pub decisions: Vec<TbirOptimizationDecision>,
 }

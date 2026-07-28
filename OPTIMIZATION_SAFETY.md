@@ -32,9 +32,12 @@ behavior, and emulator-backed test behavior.
   assembly clear the available-expression set.
 - Pure scalar loop-invariant initializer hoisting when every dependency is defined
   outside and unchanged by the loop. Loops with exits and initializers involving
-  calls, ports, memory, pointers, aggregates, or inline assembly are rejected.
-
-Follow-up implementation issue: #15.
+  calls, ports, pointers, aggregates, or inline assembly are rejected.
+- Named global-read loop-invariant hoisting when TBIR proves the object is in a
+  known writable, nonvolatile region and the loop has no same-object write or
+  unknown alias barrier. Alias checks are conservative at whole-object granularity.
+  MMIO, embeds, read-only or volatile regions, calls, ports, dereferences,
+  address-taking, banked pointers, inline assembly, and unknown writes block it.
 
 ## Rejected
 
@@ -54,8 +57,11 @@ Follow-up implementation issue: #15.
   must treat volatile memory and memory-clobbering asm as barriers.
 - Copy propagation for memory values or locals that may alias through pointers.
   Pure immutable scalar locals are supported.
-- Memory-read loop-invariant code motion. Pure scalar initializer hoisting is
-  supported, but memory reads still need object provenance and alias analysis.
+- Pointer-derived and range-sensitive memory LICM. Named global reads use typed
+  object provenance and whole-object alias checks; field/element range overlap,
+  escaped pointers, and unknown provenance remain conservative.
+- Cache-aware loop tiling and memory caching. Current targets expose cache facts,
+  but no transform runs without a target benefit model and dependence proof.
 - Automatic or cost-based function inlining. Explicitly marked straight-line
   functions are supported, but broader effect-aware policy still needs design.
 - Loop-invariant code motion. This needs explicit effect modeling and must not

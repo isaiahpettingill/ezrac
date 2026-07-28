@@ -15,7 +15,7 @@ pub fn text(program: &TbirProgram) -> String {
         program.target.has_cache
     ));
     out.push_str(&format!(
-        "optimizations: constant_folds={} algebraic_simplifications={} strength_reductions={} constant_propagations={} copy_propagations={} common_subexpressions={} loop_invariants_hoisted={} dead_removed={} decisions={}\n",
+        "optimizations: constant_folds={} algebraic_simplifications={} strength_reductions={} constant_propagations={} copy_propagations={} common_subexpressions={} loop_invariants_hoisted={} named_memory_reads_hoisted={} dead_removed={} decisions={}\n",
         program.optimizations.constant_folds,
         program.optimizations.algebraic_simplifications,
         program.optimizations.strength_reductions,
@@ -23,6 +23,7 @@ pub fn text(program: &TbirProgram) -> String {
         program.optimizations.copy_propagations,
         program.optimizations.common_subexpressions,
         program.optimizations.loop_invariants_hoisted,
+        program.optimizations.named_memory_reads_hoisted,
         program.optimizations.dead_statements_marked,
         program.optimizations.decisions.len()
     ));
@@ -41,6 +42,19 @@ pub fn text(program: &TbirProgram) -> String {
             region.access,
             region.volatile,
             region.executable
+        ));
+    }
+    for object in &program.objects {
+        out.push_str(&format!(
+            "memory_object {} kind={:?} type={:?} address=0x{:06X} size=0x{:X} region={:?} access={:?} volatile={}\n",
+            object.name,
+            object.kind,
+            object.ty,
+            object.address,
+            object.size,
+            object.region,
+            object.access,
+            object.volatile
         ));
     }
     for declaration in &program.declarations {

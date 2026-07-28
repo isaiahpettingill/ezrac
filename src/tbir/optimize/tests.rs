@@ -232,6 +232,222 @@ fn licm_temp_names_do_not_collide() {
     assert!(matches!(&test.body[1], Stmt::Let { name, .. } if name == "__tbir_licm_1"));
 }
 
+fn memory_context() -> OptimizationContext {
+    use crate::tbir::{TbirAccess, TbirMemoryObject, TbirObjectKind};
+    let array_type = Type::Array {
+        element: Box::new(Type::Named("u8".to_owned())),
+        len: Box::new(Expr::Int(8)),
+    };
+    let mut objects = vec![
+        TbirMemoryObject {
+            name: "first".to_owned(),
+            kind: TbirObjectKind::Global,
+            ty: array_type.clone(),
+            address: 0x40000,
+            size: 8,
+            region: Some("ram".to_owned()),
+            access: TbirAccess::ReadWrite,
+            volatile: false,
+        },
+        TbirMemoryObject {
+            name: "second".to_owned(),
+            kind: TbirObjectKind::Global,
+            ty: array_type.clone(),
+            address: 0x40008,
+            size: 8,
+            region: Some("ram".to_owned()),
+            access: TbirAccess::ReadWrite,
+            volatile: false,
+        },
+    ];
+    for (name, kind, access, volatile, region) in [
+        (
+            "STATUS",
+            TbirObjectKind::Mmio,
+            TbirAccess::ReadWrite,
+            true,
+            Some("vram"),
+        ),
+        (
+            "PLAIN_MMIO",
+            TbirObjectKind::Mmio,
+            TbirAccess::ReadWrite,
+            false,
+            Some("ram"),
+        ),
+        (
+            "blob",
+            TbirObjectKind::Embed,
+            TbirAccess::ReadOnly,
+            false,
+            Some("assets"),
+        ),
+        (
+            "readonly",
+            TbirObjectKind::Global,
+            TbirAccess::ReadOnly,
+            false,
+            Some("rom"),
+        ),
+        (
+            "volatile_global",
+            TbirObjectKind::Global,
+            TbirAccess::ReadWrite,
+            true,
+            Some("vram"),
+        ),
+        (
+            "unplaced",
+            TbirObjectKind::Global,
+            TbirAccess::ReadWrite,
+            false,
+            None,
+        ),
+    ] {
+        objects.push(TbirMemoryObject {
+            name: name.to_owned(),
+            kind,
+            ty: array_type.clone(),
+            address: 0,
+            size: 8,
+            region: region.map(str::to_owned),
+            access,
+            volatile,
+        });
+    }
+    OptimizationContext::from_objects(&objects)
+}
+
+fn optimize_memory(source: &str) -> (Program, TbirOptimizationReport) {
+    let program = parse_program(Path::new("test.ezra"), source).unwrap();
+    optimize_program_with_context(&program, CpuFamily::Ez80, &memory_context())
+}
+
+#[test]
+fn hoists_named_global_reads_and_preserves_order_and_temp_names() {
+    let (program, report) = optimize_memory(
+        "fn test(i: u8) { let __tbir_mem_licm_0: u8 = 0 loop { let scalar: u8 = first let indexed: u8 = first[2] let arithmetic: u8 = first[i] + 1 } }",
+    );
+    let function = program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Declaration::Function(value) => Some(value),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(&function.body[1], Stmt::Let { name, .. } if name == "__tbir_mem_licm_1"));
+    assert!(matches!(&function.body[2], Stmt::Let { name, .. } if name == "__tbir_mem_licm_2"));
+    assert!(matches!(&function.body[3], Stmt::Let { name, .. } if name == "__tbir_mem_licm_3"));
+    assert_eq!(report.named_memory_reads_hoisted, 3);
+}
+
+#[test]
+fn named_write_blocks_only_reads_from_the_same_global() {
+    let (same, same_report) =
+        optimize_memory("fn test() { loop { let value: u8 = first[0] first[1] = 2 } }");
+    assert_eq!(same_report.named_memory_reads_hoisted, 0);
+    assert!(same_report.decisions.iter().any(|decision| decision.kind
+        == TbirOptimizationKind::MemoryReadLicm
+        && decision.reason == "same named object written in loop"));
+    let (_, different_report) =
+        optimize_memory("fn test() { loop { let value: u8 = first[0] second[1] = 2 } }");
+    assert_eq!(different_report.named_memory_reads_hoisted, 1);
+    let _ = same;
+}
+
+#[test]
+fn rejects_loop_varying_indexes_and_memory_barriers() {
+    let cases = [
+        (
+            "fn helper() {} fn test() { loop { let value: u8 = first[0] helper() } }",
+            "loop contains call",
+        ),
+        (
+            "port P: u8 = 1 fn test() { loop { let value: u8 = first[0] out P, 1 } }",
+            "loop contains port I/O",
+        ),
+        (
+            "fn test(p: ptr<u8>) { loop { let value: u8 = first[0] let other: u8 = *p } }",
+            "loop contains pointer dereference",
+        ),
+        (
+            "fn test() { loop { let value: u8 = first[0] let address: ptr<u8> = &first } }",
+            "loop contains address-taking",
+        ),
+    ];
+    for (source, reason) in cases {
+        let (_, report) = optimize_memory(source);
+        assert_eq!(report.named_memory_reads_hoisted, 0, "{source}");
+        assert!(
+            report
+                .decisions
+                .iter()
+                .any(|decision| decision.reason == reason),
+            "{source}"
+        );
+    }
+    let (_, report) =
+        optimize_memory("fn test() { let i: u8 = 0 loop { let value: u8 = first[i] i += 1 } }");
+    assert_eq!(report.named_memory_reads_hoisted, 0);
+    assert!(
+        report
+            .decisions
+            .iter()
+            .any(|decision| decision.reason == "scalar dependency assigned in loop")
+    );
+}
+
+#[test]
+fn rejects_unsafe_memory_object_classes_and_alias_barriers() {
+    let cases = [
+        (
+            "fn test() { loop { let value: u8 = STATUS[0] } }",
+            "MMIO object",
+        ),
+        (
+            "fn test() { loop { let value: u8 = PLAIN_MMIO[0] } }",
+            "MMIO object",
+        ),
+        (
+            "fn test() { loop { let value: u8 = blob[0] } }",
+            "embedded or read-only object",
+        ),
+        (
+            "fn test() { loop { let value: u8 = readonly[0] } }",
+            "object or region is read-only",
+        ),
+        (
+            "fn test() { loop { let value: u8 = volatile_global[0] } }",
+            "object or region is volatile",
+        ),
+        (
+            "fn test() { loop { let value: u8 = unplaced[0] } }",
+            "object has no known region",
+        ),
+        (
+            "fn helper() {} fn test() { loop { let value: u8 = first[0] helper() } }",
+            "loop contains call",
+        ),
+        (
+            "fn test(p: ptr<u8>) { loop { let value: u8 = first[0]; *p = 1 } }",
+            "loop contains pointer dereference",
+        ),
+    ];
+
+    for (source, reason) in cases {
+        let (_, report) = optimize_memory(source);
+        assert_eq!(report.named_memory_reads_hoisted, 0, "{source}");
+        assert!(
+            report.decisions.iter().any(|decision| decision.kind
+                == TbirOptimizationKind::MemoryReadLicm
+                && decision.outcome == TbirOptimizationOutcome::Rejected
+                && decision.reason == reason),
+            "{source}: {report:?}"
+        );
+    }
+}
+
 #[test]
 fn records_inline_approval_and_mutual_recursion_rejection() {
     let program = parse_program(

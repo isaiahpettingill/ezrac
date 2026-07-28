@@ -8,18 +8,28 @@ use crate::{
 };
 
 use super::{
-    TbirOptimizationDecision, TbirOptimizationKind, TbirOptimizationOutcome, TbirOptimizationReport,
+    TbirAccess, TbirObjectKind, TbirOptimizationDecision, TbirOptimizationKind,
+    TbirOptimizationOutcome, TbirOptimizationReport, provenance::OptimizationContext,
 };
 
 pub fn optimize_program(program: &Program, cpu: CpuFamily) -> (Program, TbirOptimizationReport) {
+    optimize_program_with_context(program, cpu, &OptimizationContext::default())
+}
+
+pub fn optimize_program_with_context(
+    program: &Program,
+    cpu: CpuFamily,
+    context: &OptimizationContext,
+) -> (Program, TbirOptimizationReport) {
     let mut program = program.clone();
     let mut report = TbirOptimizationReport::default();
     // Keep the stage order visible: later passes rely on the safety facts and
     // normalized expressions produced by earlier stages.
     scalar_simplify_program(&mut program, &mut report, true);
-    local_propagation_and_cse_program(&mut program, &mut report);
+    local_propagation_and_cse_program(&mut program, context, &mut report);
     scalar_simplify_program(&mut program, &mut report, false);
     hoist_pure_loop_invariants_program(&mut program, &mut report);
+    hoist_named_memory_reads_program(&mut program, context, &mut report);
     decide_inline_functions(&program, &mut report);
     run_tail_passes(&mut program, cpu, &mut report);
     (program, report)
@@ -503,8 +513,16 @@ fn stmt_contains_return(stmt: &Stmt) -> bool {
     }
 }
 
-fn local_propagation_and_cse_program(program: &mut Program, report: &mut TbirOptimizationReport) {
-    fn visit(declarations: &mut [Declaration], report: &mut TbirOptimizationReport) {
+fn local_propagation_and_cse_program(
+    program: &mut Program,
+    context: &OptimizationContext,
+    report: &mut TbirOptimizationReport,
+) {
+    fn visit(
+        declarations: &mut [Declaration],
+        context: &OptimizationContext,
+        report: &mut TbirOptimizationReport,
+    ) {
         for declaration in declarations {
             match declaration {
                 Declaration::Function(function) => {
@@ -517,17 +535,18 @@ fn local_propagation_and_cse_program(program: &mut Program, report: &mut TbirOpt
                         &assigned,
                         &mut values,
                         &mut available,
+                        context,
                         report,
                     );
                 }
                 Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
-                    visit(core::slice::from_mut(declaration), report)
+                    visit(core::slice::from_mut(declaration), context, report)
                 }
                 _ => {}
             }
         }
     }
-    visit(&mut program.declarations, report);
+    visit(&mut program.declarations, context, report);
 }
 
 fn collect_assigned_names(stmts: &[Stmt], assigned: &mut HashSet<String>) {
@@ -560,6 +579,7 @@ fn propagate_block(
     assigned: &HashSet<String>,
     values: &mut HashMap<String, Expr>,
     available: &mut Vec<(Expr, String)>,
+    context: &OptimizationContext,
     report: &mut TbirOptimizationReport,
 ) -> Vec<Stmt> {
     let mut output = Vec::with_capacity(stmts.len());
@@ -567,7 +587,8 @@ fn propagate_block(
         let stmt = match stmt {
             Stmt::Let { name, ty, value } => {
                 let mut value = substitute_expr(value, values, report);
-                if is_cse_candidate(&value) {
+                let references_memory = expr_references_memory_object(&value, context);
+                if is_cse_candidate(&value) && !references_memory {
                     if let Some((_, prior)) = available.iter().find(|(expr, _)| expr == &value) {
                         value = Expr::Ident(prior.clone());
                         report.common_subexpressions += 1;
@@ -582,7 +603,7 @@ fn propagate_block(
                         available.push((value.clone(), name.clone()));
                     }
                 }
-                if !assigned.contains(&name) && is_pure_scalar(&value) {
+                if !assigned.contains(&name) && is_pure_scalar(&value) && !references_memory {
                     values.insert(name.clone(), value.clone());
                 }
                 Stmt::Let { name, ty, value }
@@ -606,6 +627,7 @@ fn propagate_block(
                     assigned,
                     &mut then_values,
                     &mut Vec::new(),
+                    context,
                     report,
                 );
                 let else_body = propagate_block(
@@ -613,6 +635,7 @@ fn propagate_block(
                     assigned,
                     &mut else_values,
                     &mut Vec::new(),
+                    context,
                     report,
                 );
                 available.clear();
@@ -625,15 +648,27 @@ fn propagate_block(
             Stmt::While { condition, body } => {
                 let condition = substitute_expr(condition, values, report);
                 let mut body_values = values.clone();
-                let body =
-                    propagate_block(body, assigned, &mut body_values, &mut Vec::new(), report);
+                let body = propagate_block(
+                    body,
+                    assigned,
+                    &mut body_values,
+                    &mut Vec::new(),
+                    context,
+                    report,
+                );
                 available.clear();
                 Stmt::While { condition, body }
             }
             Stmt::Loop { body } => {
                 let mut body_values = values.clone();
-                let body =
-                    propagate_block(body, assigned, &mut body_values, &mut Vec::new(), report);
+                let body = propagate_block(
+                    body,
+                    assigned,
+                    &mut body_values,
+                    &mut Vec::new(),
+                    context,
+                    report,
+                );
                 available.clear();
                 Stmt::Loop { body }
             }
@@ -771,6 +806,48 @@ fn is_pure_scalar(expr: &Expr) -> bool {
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => is_pure_scalar(expr),
         Expr::Binary { left, right, .. } => is_pure_scalar(left) && is_pure_scalar(right),
         _ => false,
+    }
+}
+
+fn expr_references_memory_object(expr: &Expr, context: &OptimizationContext) -> bool {
+    match expr {
+        Expr::Ident(name)
+        | Expr::Index { name, .. }
+        | Expr::AddressOfIndex { name, .. }
+        | Expr::AddressOf(name) => context.objects.contains_key(name),
+        Expr::Field { base, .. } | Expr::AddressOfField { base, .. } => {
+            context.objects.contains_key(base)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            context.objects.contains_key(&path.root)
+                || path.segments.iter().any(|segment| match segment {
+                    AccessSegment::Index(index) => expr_references_memory_object(index, context),
+                    AccessSegment::Field(_) => false,
+                })
+        }
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Deref(expr)
+        | Expr::BankedPointer { pointer: expr, .. } => expr_references_memory_object(expr, context),
+        Expr::Binary { left, right, .. } => {
+            expr_references_memory_object(left, context)
+                || expr_references_memory_object(right, context)
+        }
+        Expr::Array(values) => values
+            .iter()
+            .any(|value| expr_references_memory_object(value, context)),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| expr_references_memory_object(value, context)),
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_memory_object(arg, context)),
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::In(_) => false,
     }
 }
 
@@ -963,6 +1040,425 @@ fn unique_licm_temp_name(used_names: &mut HashSet<String>, next_temp: &mut usize
             return name;
         }
     }
+}
+
+fn hoist_named_memory_reads_program(
+    program: &mut Program,
+    context: &OptimizationContext,
+    report: &mut TbirOptimizationReport,
+) {
+    fn visit(
+        declarations: &mut [Declaration],
+        context: &OptimizationContext,
+        report: &mut TbirOptimizationReport,
+    ) {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Function(function) => {
+                    let mut names: HashSet<String> = function
+                        .params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect();
+                    collect_local_names(&function.body, &mut names);
+                    let mut next_temp = 0;
+                    let external = function
+                        .params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect();
+                    function.body = memory_licm_block(
+                        core::mem::take(&mut function.body),
+                        &external,
+                        &mut names,
+                        &mut next_temp,
+                        context,
+                        report,
+                    );
+                }
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    visit(core::slice::from_mut(declaration), context, report)
+                }
+                _ => {}
+            }
+        }
+    }
+    visit(&mut program.declarations, context, report);
+}
+
+fn memory_licm_block(
+    stmts: Vec<Stmt>,
+    external: &HashSet<String>,
+    used_names: &mut HashSet<String>,
+    next_temp: &mut usize,
+    context: &OptimizationContext,
+    report: &mut TbirOptimizationReport,
+) -> Vec<Stmt> {
+    let mut output = Vec::new();
+    let mut visible = external.clone();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, ty, value } => {
+                visible.insert(name.clone());
+                output.push(Stmt::Let { name, ty, value });
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => output.push(Stmt::If {
+                condition,
+                then_body: memory_licm_block(
+                    then_body, &visible, used_names, next_temp, context, report,
+                ),
+                else_body: memory_licm_block(
+                    else_body, &visible, used_names, next_temp, context, report,
+                ),
+            }),
+            Stmt::While { condition, body } => {
+                let (preheader, body) =
+                    hoist_memory_loop_body(body, &visible, used_names, next_temp, context, report);
+                output.extend(preheader);
+                output.push(Stmt::While { condition, body });
+            }
+            Stmt::Loop { body } => {
+                let (preheader, body) =
+                    hoist_memory_loop_body(body, &visible, used_names, next_temp, context, report);
+                output.extend(preheader);
+                output.push(Stmt::Loop { body });
+            }
+            other => output.push(other),
+        }
+    }
+    output
+}
+
+fn hoist_memory_loop_body(
+    mut body: Vec<Stmt>,
+    external: &HashSet<String>,
+    used_names: &mut HashSet<String>,
+    next_temp: &mut usize,
+    context: &OptimizationContext,
+    report: &mut TbirOptimizationReport,
+) -> (Vec<Stmt>, Vec<Stmt>) {
+    let mut assigned = HashSet::new();
+    collect_assigned_names(&body, &mut assigned);
+    let mut declared = HashSet::new();
+    collect_local_names(&body, &mut declared);
+    let barrier = memory_loop_barrier(&body, context);
+    let mut named_writes = HashSet::new();
+    collect_named_writes(&body, &mut named_writes);
+    let mut preheader = Vec::new();
+    for stmt in &mut body {
+        let Stmt::Let { name, ty, value } = stmt else {
+            continue;
+        };
+        let analysis = analyze_memory_initializer(value, context);
+        if !analysis.memory_like {
+            continue;
+        }
+        let reason = analysis
+            .rejection
+            .or_else(|| barrier.clone())
+            .or_else(|| {
+                analysis
+                    .scalar_deps
+                    .iter()
+                    .any(|dep| assigned.contains(dep))
+                    .then(|| "scalar dependency assigned in loop".to_owned())
+            })
+            .or_else(|| {
+                analysis
+                    .scalar_deps
+                    .iter()
+                    .any(|dep| declared.contains(dep) || !external.contains(dep))
+                    .then(|| "scalar dependency declared in loop".to_owned())
+            })
+            .or_else(|| {
+                analysis
+                    .roots
+                    .iter()
+                    .any(|root| named_writes.contains(root))
+                    .then(|| "same named object written in loop".to_owned())
+            });
+        if let Some(reason) = reason {
+            decision(
+                report,
+                TbirOptimizationKind::MemoryReadLicm,
+                None,
+                name,
+                Some(&reason),
+            );
+            continue;
+        }
+        let temp = unique_memory_licm_temp_name(used_names, next_temp);
+        preheader.push(Stmt::Let {
+            name: temp.clone(),
+            ty: ty.clone(),
+            value: value.clone(),
+        });
+        *value = Expr::Ident(temp);
+        report.named_memory_reads_hoisted += 1;
+        decision(
+            report,
+            TbirOptimizationKind::MemoryReadLicm,
+            None,
+            name,
+            None,
+        );
+    }
+    let mut nested_external = external.clone();
+    nested_external.extend(declared);
+    body = memory_licm_block(
+        body,
+        &nested_external,
+        used_names,
+        next_temp,
+        context,
+        report,
+    );
+    (preheader, body)
+}
+
+#[derive(Default)]
+struct MemoryInitializerAnalysis {
+    memory_like: bool,
+    roots: HashSet<String>,
+    scalar_deps: HashSet<String>,
+    rejection: Option<String>,
+}
+
+fn analyze_memory_initializer(
+    expr: &Expr,
+    context: &OptimizationContext,
+) -> MemoryInitializerAnalysis {
+    fn reject(analysis: &mut MemoryInitializerAnalysis, reason: &str) {
+        if analysis.rejection.is_none() {
+            analysis.rejection = Some(reason.to_owned());
+        }
+    }
+    fn root(name: &str, analysis: &mut MemoryInitializerAnalysis, context: &OptimizationContext) {
+        analysis.memory_like = true;
+        let Some(object) = context.objects.get(name) else {
+            reject(analysis, "unknown named memory object");
+            return;
+        };
+        if object.kind != TbirObjectKind::Global {
+            reject(
+                analysis,
+                match object.kind {
+                    TbirObjectKind::Mmio => "MMIO object",
+                    TbirObjectKind::Embed => "embedded or read-only object",
+                    _ => "non-global named object",
+                },
+            );
+        } else if object.region.is_none() {
+            reject(analysis, "object has no known region");
+        } else if object.access != TbirAccess::ReadWrite {
+            reject(analysis, "object or region is read-only");
+        } else if object.volatile {
+            reject(analysis, "object or region is volatile");
+        } else {
+            analysis.roots.insert(name.to_owned());
+        }
+    }
+    fn walk(expr: &Expr, analysis: &mut MemoryInitializerAnalysis, context: &OptimizationContext) {
+        match expr {
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) => {}
+            Expr::Ident(name) if context.objects.contains_key(name) => {
+                root(name, analysis, context)
+            }
+            Expr::Ident(name) => {
+                analysis.scalar_deps.insert(name.clone());
+            }
+            Expr::Index { name, index } => {
+                root(name, analysis, context);
+                walk(index, analysis, context);
+            }
+            Expr::Field { base, .. } => root(base, analysis, context),
+            Expr::Access(path) => {
+                root(&path.root, analysis, context);
+                for segment in &path.segments {
+                    if let AccessSegment::Index(index) = segment {
+                        walk(index, analysis, context);
+                    }
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => walk(expr, analysis, context),
+            Expr::Binary { left, right, .. } => {
+                walk(left, analysis, context);
+                walk(right, analysis, context);
+            }
+            Expr::AddressOf(_)
+            | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_) => {
+                analysis.memory_like = true;
+                reject(analysis, "address-taking expression");
+            }
+            Expr::Deref(_) => {
+                analysis.memory_like = true;
+                reject(analysis, "pointer dereference");
+            }
+            Expr::BankedPointer { .. } => {
+                analysis.memory_like = true;
+                reject(analysis, "banked pointer expression");
+            }
+            Expr::Call { .. } | Expr::In(_) => {
+                analysis.memory_like = true;
+                reject(analysis, "effectful expression");
+            }
+            Expr::String(_) | Expr::Array(_) | Expr::StructInit { .. } => {
+                analysis.memory_like = true;
+                reject(analysis, "aggregate expression");
+            }
+        }
+    }
+    let mut analysis = MemoryInitializerAnalysis::default();
+    walk(expr, &mut analysis, context);
+    analysis
+}
+
+fn unique_memory_licm_temp_name(used_names: &mut HashSet<String>, next: &mut usize) -> String {
+    loop {
+        let name = format!("__tbir_mem_licm_{}", *next);
+        *next += 1;
+        if used_names.insert(name.clone()) {
+            return name;
+        }
+    }
+}
+
+fn collect_named_writes(stmts: &[Stmt], roots: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign { target, .. } => {
+                let root = match target {
+                    Place::Ident(name) | Place::Index { name, .. } => Some(name),
+                    Place::Field { base, .. } => Some(base),
+                    Place::Access(path) => Some(&path.root),
+                    Place::Deref(_) => None,
+                };
+                if let Some(root) = root {
+                    roots.insert(root.clone());
+                }
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_named_writes(then_body, roots);
+                collect_named_writes(else_body, roots);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => collect_named_writes(body, roots),
+            _ => {}
+        }
+    }
+}
+
+fn memory_loop_barrier(stmts: &[Stmt], context: &OptimizationContext) -> Option<String> {
+    for stmt in stmts {
+        let reason = match stmt {
+            Stmt::Return(_) | Stmt::Break | Stmt::Continue => Some("loop contains explicit exit"),
+            Stmt::Asm { .. } => Some("loop contains inline assembly"),
+            Stmt::Out { .. } => Some("loop contains port I/O"),
+            Stmt::Assign {
+                target: Place::Deref(_),
+                ..
+            } => Some("loop contains pointer dereference"),
+            Stmt::Assign { target, .. } if place_is_unknown_write(target, context) => {
+                Some("loop contains unknown write")
+            }
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            return Some(reason.to_owned());
+        }
+        let expressions: Vec<&Expr> = match stmt {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::Expr(value)
+            | Stmt::Out { value, .. } => vec![value],
+            Stmt::Return(Some(value)) => vec![value],
+            Stmt::If { condition, .. } | Stmt::While { condition, .. } => vec![condition],
+            _ => Vec::new(),
+        };
+        for expr in expressions {
+            if let Some(reason) = memory_expr_barrier(expr, context) {
+                return Some(reason);
+            }
+        }
+        match stmt {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                if let Some(reason) = memory_loop_barrier(then_body, context)
+                    .or_else(|| memory_loop_barrier(else_body, context))
+                {
+                    return Some(reason);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                if let Some(reason) = memory_loop_barrier(body, context) {
+                    return Some(reason);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn place_is_unknown_write(place: &Place, context: &OptimizationContext) -> bool {
+    match place {
+        Place::Ident(_) => false,
+        Place::Index { name, .. } | Place::Field { base: name, .. } => {
+            !context.objects.contains_key(name)
+        }
+        Place::Access(path) => !context.objects.contains_key(&path.root),
+        Place::Deref(_) => true,
+    }
+}
+
+fn memory_expr_barrier(expr: &Expr, context: &OptimizationContext) -> Option<String> {
+    match expr {
+        Expr::Call { .. } => Some("loop contains call".to_owned()),
+        Expr::In(_) => Some("loop contains port I/O".to_owned()),
+        Expr::Deref(_) => Some("loop contains pointer dereference".to_owned()),
+        Expr::AddressOf(_)
+        | Expr::AddressOfIndex { .. }
+        | Expr::AddressOfField { .. }
+        | Expr::AddressOfAccess(_) => Some("loop contains address-taking".to_owned()),
+        Expr::BankedPointer { .. } => Some("loop contains banked pointer".to_owned()),
+        Expr::Ident(name) | Expr::Index { name, .. } => object_access_barrier(name, context),
+        Expr::Field { base, .. } => object_access_barrier(base, context),
+        Expr::Access(path) => object_access_barrier(&path.root, context),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => memory_expr_barrier(expr, context),
+        Expr::Binary { left, right, .. } => {
+            memory_expr_barrier(left, context).or_else(|| memory_expr_barrier(right, context))
+        }
+        Expr::Array(values) => values
+            .iter()
+            .find_map(|value| memory_expr_barrier(value, context)),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .find_map(|(_, value)| memory_expr_barrier(value, context)),
+        _ => None,
+    }
+}
+
+fn object_access_barrier(name: &str, context: &OptimizationContext) -> Option<String> {
+    context
+        .objects
+        .get(name)
+        .and_then(|object| match object.kind {
+            TbirObjectKind::Mmio => Some("loop accesses MMIO".to_owned()),
+            TbirObjectKind::Embed => Some("loop accesses embedded data".to_owned()),
+            _ => None,
+        })
 }
 
 fn scalar_simplify_program(

@@ -9,7 +9,8 @@ use crate::{
 
 use super::{
     TbirAccess, TbirDeclaration, TbirEffect, TbirMemoryModel, TbirMemoryRegion, TbirObjectKind,
-    TbirParam, TbirProgram, TbirStmt, TbirTarget, diagnostics, optimize,
+    TbirParam, TbirProgram, TbirStmt, TbirTarget, diagnostics, model::SemanticModel, optimize,
+    provenance,
 };
 
 pub fn lower(
@@ -21,7 +22,17 @@ pub fn lower(
     let memory = memory_model(options)?;
     let capabilities = options.cpu.capabilities();
     let pointer_width_bits = capabilities.memory.pointer_width_bits as u8;
-    let (lowered_program, optimizations) = optimize::optimize_program(lowered_program, options.cpu);
+    let semantic = SemanticModel::from_program(
+        lowered_program,
+        u16::from(pointer_width_bits),
+        options.ram_base.get(),
+        options.rodata_base.get(),
+        options.asset_base.get(),
+    )?;
+    let objects = provenance::memory_objects(lowered_program, &semantic, &memory);
+    let context = provenance::OptimizationContext::from_objects(&objects);
+    let (lowered_program, optimizations) =
+        optimize::optimize_program_with_context(lowered_program, options.cpu, &context);
     let declarations = hir
         .declarations
         .iter()
@@ -39,6 +50,7 @@ pub fn lower(
             supports_port_io: capabilities.supports_port_io,
         },
         memory,
+        objects,
         declarations,
         optimizations,
         lowered_program,
@@ -297,9 +309,10 @@ fn collect_effects(stmts: &[Stmt], effects: &mut Vec<TbirEffect>) {
             Stmt::Out { .. } => Some(TbirEffect::PortIo),
             Stmt::Asm { .. } => Some(TbirEffect::InlineAsm),
             Stmt::Expr(crate::ast::Expr::Call { .. }) => Some(TbirEffect::Call),
-            Stmt::Assign { target, .. } if matches!(target, crate::ast::Place::Deref(_)) => {
-                Some(TbirEffect::VolatileMemory)
-            }
+            Stmt::Assign {
+                target: crate::ast::Place::Deref(_),
+                ..
+            } => Some(TbirEffect::VolatileMemory),
             _ => None,
         };
         if let Some(effect) = effect

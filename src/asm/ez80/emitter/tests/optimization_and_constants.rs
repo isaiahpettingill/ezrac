@@ -33,6 +33,74 @@ fn hoists_pure_loop_invariants_before_the_loop() {
 }
 
 #[test]
+fn hoists_nonvolatile_global_reads_before_the_loop() {
+    let source = r#"
+            global factor: u8 = 7
+
+            fn sum_factor(count: u8) -> u8 {
+                let index: u8 = 0
+                let total: u8 = 0
+                while index < count {
+                    let sampled: u8 = factor
+                    total += sampled
+                    index += 1
+                }
+                return total
+            }
+
+            fn main() {
+                test.assert_eq_u8(sum_factor(3), 21, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+    let run = run_assembly_test(&asm, 8_000).unwrap();
+    let preheader = asm.find("let __tbir_mem_licm_").unwrap();
+    let loop_start = asm.find("source: while").unwrap();
+    let replacement = asm.find("let sampled: u8 = __tbir_mem_licm_").unwrap();
+
+    assert!(preheader < loop_start, "{asm}");
+    assert!(replacement > loop_start, "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn pointer_writes_block_global_read_hoisting() {
+    let source = r#"
+            global value: u8 = 1
+
+            fn sample_three() -> u8 {
+                let pointer: ptr<u8> = &value
+                let index: u8 = 0
+                let total: u8 = 0
+                while index < 3 {
+                    let sampled: u8 = value
+                    if index == 1 {
+                        *pointer = 5
+                    }
+                    total += sampled
+                    index += 1
+                }
+                return total
+            }
+
+            fn main() {
+                test.assert_eq_u8(sample_three(), 7, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+    let run = run_assembly_test(&asm, 10_000).unwrap();
+
+    assert!(!asm.contains("let __tbir_mem_licm_"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn keeps_port_reads_inside_loops() {
     let source = r#"
             port INPUT: u8 = 0x20

@@ -20,7 +20,7 @@ source
   -> final artifact
 ```
 
-HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions and coarse effects, applies scalar simplification, immutable-local propagation, local common-subexpression cleanup, and pure scalar loop-invariant hoisting, decides explicit inlining and safe tail calls, rewrites supported direct tail recursion into loops, and supplies the lowered program to the source emitters. It is not yet a fully lowered basic-block or register-allocation IR.
+HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions plus typed global/MMIO/embed object provenance, applies scalar simplification, immutable-local propagation, local common-subexpression cleanup, pure scalar loop-invariant hoisting, and named global-read LICM, decides explicit inlining and safe tail calls, rewrites supported direct tail recursion into loops, and supplies the lowered program to the source emitters. It is not yet a fully lowered basic-block or register-allocation IR.
 
 The remaining sections use design language (`should`, `must`, and planned examples) to define the intended direction. HIR and TBIR are Rust structs in memory today; textual dumps are provided for debugging and tests, not as a stable serialized IR format.
 
@@ -262,7 +262,7 @@ TBIR also approves sibling tail calls when caller and callee are normal eZ80-fam
 
 HIR marks loop candidates and may remove loops with constant false conditions. TBIR performs target-aware loop optimizations.
 
-The implemented loop pass hoists nontrivial pure scalar local initializers into a loop preheader when all dependencies are defined outside and unchanged by the loop. It rejects loops with explicit exits and expressions involving calls, ports, memory, dereferences, addresses, banked pointers, aggregates, or inline assembly. Memory-read hoisting, caching, unrolling, and locality transforms remain deferred until TBIR tracks typed object provenance and alias effects.
+The scalar loop pass hoists nontrivial pure scalar local initializers into a loop preheader when all dependencies are defined outside and unchanged by the loop. The memory pass can also hoist expressions rooted in named globals when the object has a known writable, nonvolatile region and the loop contains no same-object write or unknown alias barrier. TBIR records each object’s type, address, size, region, access, and volatility. Alias checks are deliberately whole-object: any write to the same global blocks all reads from it. Calls, ports, MMIO, embeds, read-only or volatile regions, dereferences, address-taking, banked pointers, inline assembly, unknown writes, and loops with explicit exits remain barriers. Pointer-range analysis, caching, unrolling, tiling, and locality transforms remain deferred.
 
 Supported optimization families:
 

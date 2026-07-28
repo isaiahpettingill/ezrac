@@ -336,6 +336,69 @@ fn semantic_model_resolves_forward_constants_in_layouts() {
     assert_eq!(model.globals["values"].size, 3);
 }
 
+#[test]
+fn tbir_retains_typed_memory_object_facts() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "global counter: u16 = 0\nvolatile mmio VIDEO: ptr<u8> = 0x080000\nembed blob: bytes = bytes [1, 2, 3]\nfn main() {}",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+
+    let global = tbir
+        .objects
+        .iter()
+        .find(|object| object.name == "counter")
+        .unwrap();
+    assert_eq!(global.kind, TbirObjectKind::Global);
+    assert_eq!(global.region.as_deref(), Some("ram"));
+    assert_eq!(global.access, TbirAccess::ReadWrite);
+    assert!(!global.volatile);
+
+    let mmio = tbir
+        .objects
+        .iter()
+        .find(|object| object.name == "VIDEO")
+        .unwrap();
+    assert_eq!(mmio.kind, TbirObjectKind::Mmio);
+    assert_eq!(mmio.region.as_deref(), Some("vram"));
+    assert!(mmio.volatile);
+    assert_eq!(mmio.size, 3);
+
+    let embed = tbir
+        .objects
+        .iter()
+        .find(|object| object.name == "blob")
+        .unwrap();
+    assert_eq!(embed.kind, TbirObjectKind::Embed);
+    assert_eq!(embed.region.as_deref(), Some("assets"));
+    assert_eq!(embed.access, TbirAccess::ReadOnly);
+    assert!(tbir.dump_text().contains("named_memory_reads_hoisted="));
+    assert!(tbir.dump_text().contains("memory_object counter"));
+}
+
+#[test]
+fn memory_objects_inherit_read_only_region_access() {
+    let program =
+        parse_program(Path::new("test.ezra"), "global fixed: u8 = 1\nfn main() {}").unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let options = AssemblyOptions {
+        ram_base: crate::target::Address24::new(0x020040),
+        ..AssemblyOptions::default()
+    };
+    let tbir = TbirProgram::for_ez80(&hir, &program, &options).unwrap();
+    let fixed = tbir
+        .objects
+        .iter()
+        .find(|object| object.name == "fixed")
+        .unwrap();
+
+    assert_eq!(fixed.region.as_deref(), Some("rodata"));
+    assert_eq!(fixed.access, TbirAccess::ReadOnly);
+    assert_eq!(tbir.optimizations.named_memory_reads_hoisted, 0);
+}
+
 fn object_kind(tbir: &TbirProgram, name: &str) -> Option<TbirObjectKind> {
     tbir.declarations.iter().find_map(|decl| match decl {
         TbirDeclaration::Object {
