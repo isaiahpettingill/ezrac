@@ -355,7 +355,10 @@ impl Emitter {
         if matches!(
             self.model.resolved_type(ty)?,
             Type::Named(ref name)
-                if matches!(name.as_str(), "u8" | "i8" | "u16" | "i16" | "u24" | "i24")
+                if matches!(
+                    name.as_str(),
+                    "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "u32" | "i32"
+                )
         ) {
             Ok(())
         } else {
@@ -508,15 +511,26 @@ impl Emitter {
                     self.emit_expr(value, &ty)?;
                 } else {
                     self.load_materialized_place(place, width);
-                    let left = self.model.allocate(u32::from(width))?;
-                    self.copy(self.r0, left, u32::from(width));
-                    self.emit_expr(value, &ty)?;
-                    self.copy(self.r0, self.r1, u32::from(width));
-                    self.copy(left, self.r0, u32::from(width));
                     let op = assign_binary(*op);
-                    let shift_by_one = matches!(op, BinaryOp::Shl | BinaryOp::Shr)
-                        && self.model.const_value(value).is_ok_and(|value| value == 1);
-                    self.binary(op, width, self.type_is_signed(&ty)?, shift_by_one)?;
+                    let signed = self.type_is_signed(&ty)?;
+                    let constant = self.model.const_value(value).ok();
+                    let immediate = if width == 4 {
+                        if let Some(value) = constant {
+                            self.binary_immediate(op, value, signed)?
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !immediate {
+                        let left = self.model.allocate(u32::from(width))?;
+                        self.copy(self.r0, left, u32::from(width));
+                        self.emit_expr(value, &ty)?;
+                        self.copy(self.r0, self.r1, u32::from(width));
+                        self.copy(left, self.r0, u32::from(width));
+                        self.binary(op, width, signed, constant)?;
+                    }
                 }
                 let result = self.model.allocate(u32::from(width))?;
                 self.copy(self.r0, result, u32::from(width));
@@ -782,25 +796,29 @@ impl Emitter {
                     expected.clone()
                 };
                 let operand_width = self.scalar_width(&operand_ty)?;
+                let signed = self.type_is_signed(&operand_ty)?;
+                let constant = self.model.const_value(right).ok();
                 self.emit_expr(left, &operand_ty)?;
-                let left_value = self.model.allocate(u32::from(operand_width))?;
-                self.copy(self.r0, left_value, u32::from(operand_width));
-                self.emit_expr(right, &operand_ty)?;
-                self.copy(self.r0, self.r1, u32::from(operand_width));
-                self.copy(left_value, self.r0, u32::from(operand_width));
-                if matches!(op, BinaryOp::Add | BinaryOp::Sub)
-                    && let Type::Ptr(inner) = self.model.resolved_type(&operand_ty)?
-                {
-                    self.scale(self.r1, operand_width, self.model.type_size(&inner)?)?;
+                let immediate = operand_width == 4
+                    && !matches!(self.model.resolved_type(&operand_ty)?, Type::Ptr(_))
+                    && if let Some(value) = constant {
+                        self.binary_immediate(*op, value, signed)?
+                    } else {
+                        false
+                    };
+                if !immediate {
+                    let left_value = self.model.allocate(u32::from(operand_width))?;
+                    self.copy(self.r0, left_value, u32::from(operand_width));
+                    self.emit_expr(right, &operand_ty)?;
+                    self.copy(self.r0, self.r1, u32::from(operand_width));
+                    self.copy(left_value, self.r0, u32::from(operand_width));
+                    if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                        && let Type::Ptr(inner) = self.model.resolved_type(&operand_ty)?
+                    {
+                        self.scale(self.r1, operand_width, self.model.type_size(&inner)?)?;
+                    }
+                    self.binary(*op, operand_width, signed, constant)?;
                 }
-                let shift_by_one = matches!(op, BinaryOp::Shl | BinaryOp::Shr)
-                    && self.model.const_value(right).is_ok_and(|value| value == 1);
-                self.binary(
-                    *op,
-                    operand_width,
-                    self.type_is_signed(&operand_ty)?,
-                    shift_by_one,
-                )?;
                 if is_comparison(*op) {
                     self.extend_result(1, width, false);
                 }
@@ -1012,30 +1030,47 @@ impl Emitter {
         op: BinaryOp,
         width: u8,
         signed: bool,
-        shift_by_one: bool,
+        constant: Option<i64>,
     ) -> Result<(), Diagnostic> {
+        if width == 4
+            && let Some(value) = constant
+            && self.binary_immediate(op, value, signed)?
+        {
+            return Ok(());
+        }
         match op {
             BinaryOp::Add => self.add(width),
             BinaryOp::Sub => self.sub(width),
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                for offset in 0..u32::from(width) {
-                    self.load_al(self.r0.address + offset);
-                    let mnemonic = match op {
-                        BinaryOp::BitAnd => "and",
-                        BinaryOp::BitOr => "or",
-                        _ => "xor",
-                    };
-                    self.line(&format!(
-                        "    {mnemonic} al,{}",
-                        mem(self.r1.address + offset)
-                    ));
-                    self.store_al(self.r0.address + offset);
+                let mnemonic = match op {
+                    BinaryOp::BitAnd => "and",
+                    BinaryOp::BitOr => "or",
+                    _ => "xor",
+                };
+                if width == 4 {
+                    for offset in [0, 2] {
+                        self.load_ax(self.r0.address + offset);
+                        self.line(&format!(
+                            "    {mnemonic} ax,{}",
+                            mem(self.r1.address + offset)
+                        ));
+                        self.line(&format!("    mov {},ax", mem(self.r0.address + offset)));
+                    }
+                } else {
+                    for offset in 0..u32::from(width) {
+                        self.load_al(self.r0.address + offset);
+                        self.line(&format!(
+                            "    {mnemonic} al,{}",
+                            mem(self.r1.address + offset)
+                        ));
+                        self.store_al(self.r0.address + offset);
+                    }
                 }
             }
             BinaryOp::Mul => self.multiply(width, signed)?,
             BinaryOp::Div | BinaryOp::Mod => self.divide(width, op == BinaryOp::Mod, signed)?,
             BinaryOp::Shl | BinaryOp::Shr => {
-                self.shift(width, op == BinaryOp::Shr, signed, shift_by_one)
+                self.shift(width, op == BinaryOp::Shr, signed, constant)
             }
             BinaryOp::And | BinaryOp::Or => unreachable!("short-circuited"),
             op if is_comparison(op) => self.compare(op, width, signed),
@@ -1044,21 +1079,244 @@ impl Emitter {
         Ok(())
     }
 
-    fn add(&mut self, width: u8) {
-        self.line("    clc");
-        for offset in 0..u32::from(width) {
-            self.load_al(self.r0.address + offset);
-            self.line(&format!("    adc al,{}", mem(self.r1.address + offset)));
-            self.store_al(self.r0.address + offset);
+    fn binary_immediate(
+        &mut self,
+        op: BinaryOp,
+        value: i64,
+        signed: bool,
+    ) -> Result<bool, Diagnostic> {
+        let value = value as u32;
+        match op {
+            BinaryOp::Add | BinaryOp::Sub if value == 0 => return Ok(true),
+            BinaryOp::BitOr | BinaryOp::BitXor if value == 0 => return Ok(true),
+            BinaryOp::BitAnd if value == u32::MAX => return Ok(true),
+            BinaryOp::Mul if value == 0 => {
+                self.zero(self.r0);
+                return Ok(true);
+            }
+            BinaryOp::Mul if value == 1 => return Ok(true),
+            BinaryOp::Mul if value == u32::MAX => {
+                self.negate(self.r0, 4);
+                return Ok(true);
+            }
+            BinaryOp::Div if value == 1 => return Ok(true),
+            BinaryOp::Div if signed && value == u32::MAX => {
+                self.negate(self.r0, 4);
+                return Ok(true);
+            }
+            BinaryOp::Mod if value == 1 || (signed && value == u32::MAX) => {
+                self.zero(self.r0);
+                return Ok(true);
+            }
+            BinaryOp::Shl | BinaryOp::Shr => {
+                self.shift_fixed(op == BinaryOp::Shr, signed, value);
+                return Ok(true);
+            }
+            BinaryOp::Div | BinaryOp::Mod
+                if value.is_power_of_two() && (!signed || value <= i32::MAX as u32) =>
+            {
+                self.divide_power_of_two(value.trailing_zeros(), op == BinaryOp::Mod, signed)?;
+                return Ok(true);
+            }
+            BinaryOp::Add | BinaryOp::Sub => {
+                self.word_immediate_arithmetic(op, value);
+                return Ok(true);
+            }
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                self.word_immediate_bitwise(op, value);
+                return Ok(true);
+            }
+            op if is_comparison(op) => {
+                self.compare_immediate(op, value, signed);
+                return Ok(true);
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn word_immediate_arithmetic(&mut self, op: BinaryOp, value: u32) {
+        let (low_op, high_op) = if op == BinaryOp::Add {
+            ("add", "adc")
+        } else {
+            ("sub", "sbb")
+        };
+        self.load_ax(self.r0.address);
+        self.line(&format!("    {low_op} ax,{}", imm(value & 0xffff)));
+        self.line(&format!("    mov {},ax", mem(self.r0.address)));
+        self.load_ax(self.r0.address + 2);
+        self.line(&format!("    {high_op} ax,{}", imm(value >> 16)));
+        self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+    }
+
+    fn divide_power_of_two(
+        &mut self,
+        shift: u32,
+        remainder: bool,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
+        if !signed {
+            if remainder {
+                self.word_immediate_bitwise(BinaryOp::BitAnd, (1u32 << shift) - 1);
+            } else {
+                self.shift_fixed(true, false, shift);
+            }
+            return Ok(());
+        }
+
+        let original = self.model.allocate(4)?;
+        self.copy(self.r0, original, 4);
+        let nonnegative = self.next_label("signed_power_two_nonnegative");
+        self.load_ax(self.r0.address + 2);
+        self.line("    test ax,8000h");
+        self.branch_long("jz", &nonnegative);
+        self.word_immediate_arithmetic(BinaryOp::Add, (1u32 << shift) - 1);
+        self.line(&format!("{nonnegative}:"));
+        self.shift_fixed(true, true, shift);
+        if remainder {
+            let quotient = self.model.allocate(4)?;
+            self.copy(self.r0, quotient, 4);
+            for _ in 0..shift {
+                self.shift_storage_once(quotient, 4, false, false);
+            }
+            self.copy(original, self.r0, 4);
+            self.sub_storage(self.r0, quotient, 4);
+        }
+        Ok(())
+    }
+
+    fn word_immediate_bitwise(&mut self, op: BinaryOp, value: u32) {
+        let mnemonic = match op {
+            BinaryOp::BitAnd => "and",
+            BinaryOp::BitOr => "or",
+            BinaryOp::BitXor => "xor",
+            _ => unreachable!(),
+        };
+        for (offset, word) in [(0, value & 0xffff), (2, value >> 16)] {
+            self.load_ax(self.r0.address + offset);
+            self.line(&format!("    {mnemonic} ax,{}", imm(word)));
+            self.line(&format!("    mov {},ax", mem(self.r0.address + offset)));
         }
     }
 
+    fn compare_immediate(&mut self, op: BinaryOp, value: u32, signed: bool) {
+        let yes = self.next_label("compare_immediate_true");
+        let no = self.next_label("compare_immediate_false");
+        let done = self.next_label("compare_immediate_done");
+        let low = value & 0xffff;
+        let high = value >> 16;
+        match op {
+            BinaryOp::Eq | BinaryOp::Ne => {
+                self.load_ax(self.r0.address + 2);
+                self.line(&format!("    cmp ax,{}", imm(high)));
+                self.branch_long("jne", if op == BinaryOp::Ne { &yes } else { &no });
+                self.load_ax(self.r0.address);
+                self.line(&format!("    cmp ax,{}", imm(low)));
+                self.branch_long("jne", if op == BinaryOp::Ne { &yes } else { &no });
+                self.line(&format!(
+                    "    jmp near {}",
+                    if op == BinaryOp::Eq { &yes } else { &no }
+                ));
+            }
+            _ => {
+                self.load_ax(self.r0.address + 2);
+                let ordered_high = if signed { high ^ 0x8000 } else { high };
+                if signed {
+                    self.line("    xor ax,8000h");
+                }
+                self.line(&format!("    cmp ax,{}", imm(ordered_high)));
+                match op {
+                    BinaryOp::Lt | BinaryOp::Le => {
+                        self.branch_long("jb", &yes);
+                        self.branch_long("jne", &no);
+                    }
+                    BinaryOp::Gt | BinaryOp::Ge => {
+                        self.branch_long("jb", &no);
+                        self.branch_long("jne", &yes);
+                    }
+                    _ => unreachable!(),
+                }
+                self.load_ax(self.r0.address);
+                self.line(&format!("    cmp ax,{}", imm(low)));
+                let condition = match op {
+                    BinaryOp::Lt => "jb",
+                    BinaryOp::Le => "jbe",
+                    BinaryOp::Gt => "ja",
+                    BinaryOp::Ge => "jae",
+                    _ => unreachable!(),
+                };
+                self.branch_long(condition, &yes);
+                self.line(&format!("    jmp near {no}"));
+            }
+        }
+        self.line(&format!("{yes}:"));
+        self.load_constant(1, 1);
+        self.line(&format!("    jmp near {done}"));
+        self.line(&format!("{no}:"));
+        self.load_constant(0, 1);
+        self.line(&format!("{done}:"));
+    }
+
+    fn add(&mut self, width: u8) {
+        if width == 4 {
+            self.load_ax(self.r0.address);
+            self.line(&format!("    add ax,{}", mem(self.r1.address)));
+            self.line(&format!("    mov {},ax", mem(self.r0.address)));
+            self.load_ax(self.r0.address + 2);
+            self.line(&format!("    adc ax,{}", mem(self.r1.address + 2)));
+            self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+            return;
+        }
+        self.add_storage(self.r0, self.r1, width);
+    }
+
     fn sub(&mut self, width: u8) {
+        if width == 4 {
+            self.load_ax(self.r0.address);
+            self.line(&format!("    sub ax,{}", mem(self.r1.address)));
+            self.line(&format!("    mov {},ax", mem(self.r0.address)));
+            self.load_ax(self.r0.address + 2);
+            self.line(&format!("    sbb ax,{}", mem(self.r1.address + 2)));
+            self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+            return;
+        }
+        self.sub_storage(self.r0, self.r1, width);
+    }
+
+    fn add_storage(&mut self, target: Storage, source: Storage, width: u8) {
         self.line("    clc");
-        for offset in 0..u32::from(width) {
-            self.load_al(self.r0.address + offset);
-            self.line(&format!("    sbb al,{}", mem(self.r1.address + offset)));
-            self.store_al(self.r0.address + offset);
+        if width == 4 {
+            for (offset, mnemonic) in [(0, "adc"), (2, "adc")] {
+                self.load_ax(target.address + offset);
+                self.line(&format!(
+                    "    {mnemonic} ax,{}",
+                    mem(source.address + offset)
+                ));
+                self.line(&format!("    mov {},ax", mem(target.address + offset)));
+            }
+        } else {
+            for offset in 0..u32::from(width) {
+                self.load_al(target.address + offset);
+                self.line(&format!("    adc al,{}", mem(source.address + offset)));
+                self.store_al(target.address + offset);
+            }
+        }
+    }
+
+    fn sub_storage(&mut self, target: Storage, source: Storage, width: u8) {
+        self.line("    clc");
+        if width == 4 {
+            for offset in [0, 2] {
+                self.load_ax(target.address + offset);
+                self.line(&format!("    sbb ax,{}", mem(source.address + offset)));
+                self.line(&format!("    mov {},ax", mem(target.address + offset)));
+            }
+        } else {
+            for offset in 0..u32::from(width) {
+                self.load_al(target.address + offset);
+                self.line(&format!("    sbb al,{}", mem(source.address + offset)));
+                self.store_al(target.address + offset);
+            }
         }
     }
 
@@ -1079,33 +1337,65 @@ impl Emitter {
             return Ok(());
         }
 
-        let multiplicand = self.model.allocate(u32::from(width))?;
-        let multiplier = self.model.allocate(u32::from(width))?;
-        let negative = self.model.allocate(1)?;
-        self.zero(negative);
-        if signed {
-            self.normalize_signed(self.r0, width, negative, false);
-            self.normalize_signed(self.r1, width, negative, true);
-        }
-        self.copy(self.r0, multiplicand, u32::from(width));
-        self.copy(self.r1, multiplier, u32::from(width));
-        self.zero(self.r0);
-        let loop_label = self.next_label("multiply_loop");
-        let done = self.next_label("multiply_done");
-        self.line(&format!("{loop_label}:"));
-        self.jump_storage_zero(multiplier, width, &done);
-        self.copy(multiplicand, self.r1, u32::from(width));
-        self.add(width);
-        self.decrement(multiplier, width);
-        self.line(&format!("    jmp near {loop_label}"));
-        self.line(&format!("{done}:"));
-        if signed {
-            self.negate_if(negative, self.r0, width);
-        }
+        debug_assert_eq!(width, 4);
+        // Low 32 bits: a0*b0 + ((a0*b1 + a1*b0) << 16). Signedness does
+        // not affect the low half of a two's-complement product.
+        let _ = signed;
+        self.load_ax(self.r0.address);
+        self.line("    mov cx,ax");
+        self.load_si(self.r0.address + 2);
+        self.load_bx(self.r1.address);
+        self.line("    mul bx");
+        self.line(&format!("    mov {},ax", mem(self.r0.address)));
+        self.line(&format!("    mov {},dx", mem(self.r0.address + 2)));
+        self.line("    mov ax,cx");
+        self.load_bx(self.r1.address + 2);
+        self.line("    mul bx");
+        self.line(&format!("    add {},ax", mem(self.r0.address + 2)));
+        self.line("    mov ax,si");
+        self.load_bx(self.r1.address);
+        self.line("    mul bx");
+        self.line(&format!("    add {},ax", mem(self.r0.address + 2)));
         Ok(())
     }
 
     fn divide(&mut self, width: u8, remainder: bool, signed: bool) -> Result<(), Diagnostic> {
+        let generic = if width == 4 && !signed {
+            let generic = self.next_label("divide_u32_generic");
+            let done = self.next_label("divide_u32_fast_done");
+            self.load_ax(self.r1.address + 2);
+            self.line("    or ax,ax");
+            self.branch_long("jnz", &generic);
+            self.load_bx(self.r1.address);
+            self.line("    or bx,bx");
+            let zero = self.next_label("divide_u32_fast_zero");
+            self.branch_long("jz", &zero);
+            self.line("    xor dx,dx");
+            self.load_ax(self.r0.address + 2);
+            self.line("    div bx");
+            if !remainder {
+                self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+            }
+            self.load_ax(self.r0.address);
+            self.line("    div bx");
+            if remainder {
+                self.line(&format!("    mov {},dx", mem(self.r0.address)));
+                self.line("    xor ax,ax");
+                self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+            } else {
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+            }
+            self.line(&format!("    jmp near {done}"));
+            self.line(&format!("{zero}:"));
+            self.zero(self.r0);
+            self.line(&format!("{done}:"));
+            let finish = self.next_label("divide_u32_fast_return");
+            self.line(&format!("    jmp near {finish}"));
+            self.line(&format!("{generic}:"));
+            Some(finish)
+        } else {
+            None
+        };
         let quotient = self.r2;
         let quotient_negative = self.model.allocate(1)?;
         let remainder_negative = self.model.allocate(1)?;
@@ -1122,23 +1412,36 @@ impl Emitter {
             self.line(&format!("{positive}:"));
             self.normalize_signed(self.r1, width, quotient_negative, true);
         }
-        self.zero(quotient);
+        let divisor = self.model.allocate(u32::from(width))?;
+        let remainder_value = self.model.allocate(u32::from(width))?;
+        self.copy(self.r1, divisor, u32::from(width));
+        self.copy(self.r0, quotient, u32::from(width));
+        self.zero(remainder_value);
         let zero = self.next_label("divide_zero");
-        let loop_label = self.next_label("divide_loop");
-        let done = self.next_label("divide_done");
-        self.jump_storage_zero(self.r1, width, &zero);
-        self.line(&format!("{loop_label}:"));
-        self.jump_less(self.r0, self.r1, width, &done);
-        self.sub(width);
-        self.increment(quotient, width);
-        self.line(&format!("    jmp near {loop_label}"));
-        self.line(&format!("{zero}:"));
-        self.zero(self.r0);
-        self.line(&format!("    jmp near {done}"));
-        self.line(&format!("{done}:"));
-        if !remainder {
+        let finish = self.next_label("divide_finish");
+        self.jump_storage_zero(divisor, width, &zero);
+
+        // Restoring division shifts one dividend bit into the remainder per
+        // iteration. Runtime is bounded by the scalar width instead of its value.
+        for _ in 0..u32::from(width) * 8 {
+            self.shift_dividend_bit_into_remainder(quotient, remainder_value, width);
+            let less = self.next_label("divide_less");
+            self.jump_less(remainder_value, divisor, width, &less);
+            self.sub_storage(remainder_value, divisor, width);
+            self.load_al(quotient.address);
+            self.line("    or al,1");
+            self.store_al(quotient.address);
+            self.line(&format!("{less}:"));
+        }
+        if remainder {
+            self.copy(remainder_value, self.r0, u32::from(width));
+        } else {
             self.copy(quotient, self.r0, u32::from(width));
         }
+        self.line(&format!("    jmp near {finish}"));
+        self.line(&format!("{zero}:"));
+        self.zero(self.r0);
+        self.line(&format!("{finish}:"));
         if signed {
             self.negate_if(
                 if remainder {
@@ -1150,12 +1453,21 @@ impl Emitter {
                 width,
             );
         }
+        if let Some(finish) = generic {
+            self.line(&format!("{finish}:"));
+        }
         Ok(())
     }
 
-    fn shift(&mut self, width: u8, right: bool, signed: bool, by_one: bool) {
-        if by_one {
-            self.shift_once(width, right, signed);
+    fn shift(&mut self, width: u8, right: bool, signed: bool, constant: Option<i64>) {
+        if let Some(count) = constant {
+            if width == 4 {
+                self.shift_fixed(right, signed, count as u32);
+            } else {
+                for _ in 0..(count as u32).min(u32::from(width) * 8) {
+                    self.shift_once(width, right, signed);
+                }
+            }
             return;
         }
 
@@ -1171,9 +1483,105 @@ impl Emitter {
         self.line(&format!("{done}:"));
     }
 
+    fn shift_fixed(&mut self, right: bool, signed: bool, count: u32) {
+        if count == 0 {
+            return;
+        }
+        if count >= 32 {
+            if right && signed {
+                self.load_ax(self.r0.address + 2);
+                for _ in 0..15 {
+                    self.line("    sar ax,1");
+                }
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+                self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+            } else {
+                self.zero(self.r0);
+            }
+            return;
+        }
+        if count == 16 {
+            if right {
+                self.load_ax(self.r0.address + 2);
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+                if signed {
+                    for _ in 0..15 {
+                        self.line("    sar ax,1");
+                    }
+                    self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+                } else {
+                    self.line("    xor ax,ax");
+                    self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+                }
+            } else {
+                self.load_ax(self.r0.address);
+                self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+                self.line("    xor ax,ax");
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+            }
+            return;
+        }
+        if count > 16 {
+            self.shift_fixed(right, signed, 16);
+            self.shift_fixed(right, signed, count - 16);
+            return;
+        }
+        for _ in 0..count {
+            self.shift_once(4, right, signed);
+        }
+    }
+
     fn shift_once(&mut self, width: u8, right: bool, signed: bool) {
+        if width == 4 {
+            if right {
+                self.load_ax(self.r0.address + 2);
+                self.line(if signed {
+                    "    sar ax,1"
+                } else {
+                    "    shr ax,1"
+                });
+                self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+                self.load_ax(self.r0.address);
+                self.line("    rcr ax,1");
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+            } else {
+                self.load_ax(self.r0.address);
+                self.line("    shl ax,1");
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+                self.load_ax(self.r0.address + 2);
+                self.line("    rcl ax,1");
+                self.line(&format!("    mov {},ax", mem(self.r0.address + 2)));
+            }
+        } else {
+            self.shift_storage_once(self.r0, width, right, signed);
+        }
+    }
+
+    fn shift_storage_once(&mut self, storage: Storage, width: u8, right: bool, signed: bool) {
+        if width == 4 {
+            if right {
+                self.load_ax(storage.address + 2);
+                self.line(if signed {
+                    "    sar ax,1"
+                } else {
+                    "    shr ax,1"
+                });
+                self.line(&format!("    mov {},ax", mem(storage.address + 2)));
+                self.load_ax(storage.address);
+                self.line("    rcr ax,1");
+                self.line(&format!("    mov {},ax", mem(storage.address)));
+            } else {
+                self.load_ax(storage.address);
+                self.line("    shl ax,1");
+                self.line(&format!("    mov {},ax", mem(storage.address)));
+                self.load_ax(storage.address + 2);
+                self.line("    rcl ax,1");
+                self.line(&format!("    mov {},ax", mem(storage.address + 2)));
+            }
+            return;
+        }
         if right {
-            let top = self.r0.address + u32::from(width - 1);
+            let top = storage.address + u32::from(width - 1);
             self.load_al(top);
             self.line(if signed {
                 "    sar al,1"
@@ -1182,19 +1590,40 @@ impl Emitter {
             });
             self.store_al(top);
             for offset in (0..u32::from(width - 1)).rev() {
-                self.load_al(self.r0.address + offset);
+                self.load_al(storage.address + offset);
                 self.line("    rcr al,1");
-                self.store_al(self.r0.address + offset);
+                self.store_al(storage.address + offset);
             }
         } else {
-            self.load_al(self.r0.address);
+            self.load_al(storage.address);
             self.line("    shl al,1");
-            self.store_al(self.r0.address);
+            self.store_al(storage.address);
             for offset in 1..u32::from(width) {
-                self.load_al(self.r0.address + offset);
+                self.load_al(storage.address + offset);
                 self.line("    rcl al,1");
-                self.store_al(self.r0.address + offset);
+                self.store_al(storage.address + offset);
             }
+        }
+    }
+
+    fn shift_dividend_bit_into_remainder(
+        &mut self,
+        dividend: Storage,
+        remainder: Storage,
+        width: u8,
+    ) {
+        self.load_al(dividend.address);
+        self.line("    shl al,1");
+        self.store_al(dividend.address);
+        for offset in 1..u32::from(width) {
+            self.load_al(dividend.address + offset);
+            self.line("    rcl al,1");
+            self.store_al(dividend.address + offset);
+        }
+        for offset in 0..u32::from(width) {
+            self.load_al(remainder.address + offset);
+            self.line("    rcl al,1");
+            self.store_al(remainder.address + offset);
         }
     }
 
@@ -1231,10 +1660,18 @@ impl Emitter {
         match op {
             BinaryOp::Eq | BinaryOp::Ne => {
                 let unequal = if op == BinaryOp::Ne { &yes } else { &no };
-                for offset in 0..u32::from(width) {
-                    self.load_al(self.r0.address + offset);
-                    self.line(&format!("    cmp al,{}", mem(self.r1.address + offset)));
-                    self.branch_long("jne", unequal);
+                if width == 4 {
+                    for offset in [0, 2] {
+                        self.load_ax(self.r0.address + offset);
+                        self.line(&format!("    cmp ax,{}", mem(self.r1.address + offset)));
+                        self.branch_long("jne", unequal);
+                    }
+                } else {
+                    for offset in 0..u32::from(width) {
+                        self.load_al(self.r0.address + offset);
+                        self.line(&format!("    cmp al,{}", mem(self.r1.address + offset)));
+                        self.branch_long("jne", unequal);
+                    }
                 }
                 self.line(&format!(
                     "    jmp near {}",
@@ -1621,6 +2058,8 @@ impl Emitter {
                 "i16" => (i16::MIN as i64..=i16::MAX as i64).contains(&value),
                 "u24" | "ptr24" => (0..=0xFF_FFFF).contains(&value),
                 "i24" => (-0x80_0000..=0x7F_FFFF).contains(&value),
+                "u32" => (0..=u32::MAX as i64).contains(&value),
+                "i32" => (i32::MIN as i64..=i32::MAX as i64).contains(&value),
                 _ => false,
             },
             _ => false,
@@ -1638,19 +2077,13 @@ impl Emitter {
     fn type_is_signed(&self, ty: &Type) -> Result<bool, Diagnostic> {
         Ok(matches!(
             self.model.resolved_type(ty)?,
-            Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24")
+            Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24" | "i32")
         ))
     }
 
     fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
         match expr {
-            Expr::Int(value) => Ok(if (0..=0xff).contains(value) {
-                Type::Named("u8".to_owned())
-            } else if (0..=0xffff).contains(value) {
-                Type::Named("u16".to_owned())
-            } else {
-                Type::Named("u24".to_owned())
-            }),
+            Expr::Int(value) => Ok(integer_value_type(*value)),
             Expr::TypedInt(_, ty) | Expr::Cast { ty, .. } => Ok(ty.clone()),
             Expr::Bool(_) => Ok(bool_ty()),
             Expr::Char(_) | Expr::In(_) => Ok(Type::Named("u8".to_owned())),
@@ -2095,26 +2528,46 @@ impl Emitter {
     }
 
     fn copy(&mut self, source: Storage, target: Storage, size: u32) {
-        for offset in 0..size {
-            self.load_al(source.address + offset);
-            self.store_al(target.address + offset);
+        let words = size / 2;
+        for word in 0..words {
+            let offset = word * 2;
+            self.load_ax(source.address + offset);
+            self.line(&format!("    mov {},ax", mem(target.address + offset)));
+        }
+        if size % 2 != 0 {
+            self.load_al(source.address + size - 1);
+            self.store_al(target.address + size - 1);
         }
     }
 
     fn zero(&mut self, storage: Storage) {
-        self.line("    xor al,al");
-        for offset in 0..storage.size {
-            self.store_al(storage.address + offset);
+        self.line("    xor ax,ax");
+        let words = storage.size / 2;
+        for word in 0..words {
+            self.line(&format!("    mov {},ax", mem(storage.address + word * 2)));
+        }
+        if storage.size % 2 != 0 {
+            self.store_al(storage.address + storage.size - 1);
         }
     }
 
     fn load_constant(&mut self, value: i64, width: u8) {
-        for offset in 0..u32::from(width) {
-            self.line(&format!(
-                "    mov al,{}",
-                imm(((value as u64 >> (offset * 8)) & 0xff) as u32)
-            ));
-            self.store_al(self.r0.address + offset);
+        let value = value as u64;
+        for offset in (0..u32::from(width)).step_by(2) {
+            let bytes = u32::from(width) - offset;
+            if bytes >= 2 {
+                self.line(&format!(
+                    "    mov ax,{}",
+                    imm(((value >> (offset * 8)) & 0xffff) as u32)
+                ));
+                self.line(&format!("    mov {},ax", mem(self.r0.address + offset)));
+            } else {
+                self.line(&format!(
+                    "    mov al,{}",
+                    imm(((value >> (offset * 8)) & 0xff) as u32)
+                ));
+                self.store_al(self.r0.address + offset);
+            }
         }
     }
 
@@ -2158,6 +2611,22 @@ impl Emitter {
     }
 
     fn negate(&mut self, storage: Storage, width: u8) {
+        if width == 4 {
+            let low_nonzero = self.next_label("negate_low_nonzero");
+            let done = self.next_label("negate_done");
+            self.load_ax(storage.address);
+            self.line("    neg ax");
+            self.line(&format!("    mov {},ax", mem(storage.address)));
+            self.load_ax(storage.address + 2);
+            self.branch_long("jnz", &low_nonzero);
+            self.line("    neg ax");
+            self.line(&format!("    jmp near {done}"));
+            self.line(&format!("{low_nonzero}:"));
+            self.line("    not ax");
+            self.line(&format!("{done}:"));
+            self.line(&format!("    mov {},ax", mem(storage.address + 2)));
+            return;
+        }
         for offset in 0..u32::from(width) {
             self.load_al(storage.address + offset);
             self.line("    not al");
@@ -2198,54 +2667,51 @@ impl Emitter {
         self.store_al(storage.address);
     }
 
-    fn increment(&mut self, storage: Storage, width: u8) {
-        let done = self.next_label("increment_done");
-        for offset in 0..u32::from(width) {
-            self.load_al(storage.address + offset);
-            self.line("    add al,1");
-            self.store_al(storage.address + offset);
-            self.branch_long("jne", &done);
-        }
-        self.line(&format!("{done}:"));
-    }
-
-    fn decrement(&mut self, storage: Storage, width: u8) {
-        self.line("    clc");
-        for offset in 0..u32::from(width) {
-            self.load_al(storage.address + offset);
-            self.line(&format!(
-                "    sbb al,{}",
-                if offset == 0 { "1" } else { "0" }
-            ));
-            self.store_al(storage.address + offset);
-        }
-    }
-
     fn jump_storage_zero(&mut self, storage: Storage, width: u8, target: &str) {
         let nonzero = self.next_label("nonzero");
-        for offset in 0..u32::from(width) {
-            self.load_al(storage.address + offset);
-            self.line("    or al,al");
+        if width == 4 {
+            self.load_ax(storage.address);
+            self.line(&format!("    or ax,{}", mem(storage.address + 2)));
             self.branch_long("jne", &nonzero);
+        } else {
+            for offset in 0..u32::from(width) {
+                self.load_al(storage.address + offset);
+                self.line("    or al,al");
+                self.branch_long("jne", &nonzero);
+            }
         }
         self.line(&format!("    jmp near {target}"));
         self.line(&format!("{nonzero}:"));
     }
 
     fn jump_storage_nonzero(&mut self, storage: Storage, width: u8, target: &str) {
-        for offset in 0..u32::from(width) {
-            self.load_al(storage.address + offset);
-            self.line("    or al,al");
+        if width == 4 {
+            self.load_ax(storage.address);
+            self.line(&format!("    or ax,{}", mem(storage.address + 2)));
             self.branch_long("jne", target);
+        } else {
+            for offset in 0..u32::from(width) {
+                self.load_al(storage.address + offset);
+                self.line("    or al,al");
+                self.branch_long("jne", target);
+            }
         }
     }
 
     fn jump_equal(&mut self, left: Storage, right: Storage, width: u8, target: &str) {
         let different = self.next_label("different");
-        for offset in 0..u32::from(width) {
-            self.load_al(left.address + offset);
-            self.line(&format!("    cmp al,{}", mem(right.address + offset)));
-            self.branch_long("jne", &different);
+        if width == 4 {
+            for offset in [0, 2] {
+                self.load_ax(left.address + offset);
+                self.line(&format!("    cmp ax,{}", mem(right.address + offset)));
+                self.branch_long("jne", &different);
+            }
+        } else {
+            for offset in 0..u32::from(width) {
+                self.load_al(left.address + offset);
+                self.line(&format!("    cmp al,{}", mem(right.address + offset)));
+                self.branch_long("jne", &different);
+            }
         }
         self.line(&format!("    jmp near {target}"));
         self.line(&format!("{different}:"));
@@ -2253,11 +2719,20 @@ impl Emitter {
 
     fn jump_less(&mut self, left: Storage, right: Storage, width: u8, target: &str) {
         let done = self.next_label("ordered");
-        for offset in (0..u32::from(width)).rev() {
-            self.load_al(left.address + offset);
-            self.line(&format!("    cmp al,{}", mem(right.address + offset)));
-            self.branch_long("jb", target);
-            self.branch_long("jne", &done);
+        if width == 4 {
+            for offset in [2, 0] {
+                self.load_ax(left.address + offset);
+                self.line(&format!("    cmp ax,{}", mem(right.address + offset)));
+                self.branch_long("jb", target);
+                self.branch_long("jne", &done);
+            }
+        } else {
+            for offset in (0..u32::from(width)).rev() {
+                self.load_al(left.address + offset);
+                self.line(&format!("    cmp al,{}", mem(right.address + offset)));
+                self.branch_long("jb", target);
+                self.branch_long("jne", &done);
+            }
         }
         self.line(&format!("{done}:"));
     }
@@ -2270,6 +2745,8 @@ impl Emitter {
             "je" => "jne",
             "jne" => "je",
             "jb" => "jae",
+            "jbe" => "ja",
+            "ja" => "jbe",
             "jae" => "jb",
             "js" => "jns",
             "jns" => "js",
@@ -2379,15 +2856,19 @@ fn integer_value_type(value: i64) -> Type {
             Type::Named("i8".to_owned())
         } else if value >= i16::MIN as i64 {
             Type::Named("i16".to_owned())
-        } else {
+        } else if value >= -0x80_0000 {
             Type::Named("i24".to_owned())
+        } else {
+            Type::Named("i32".to_owned())
         }
     } else if value <= u8::MAX as i64 {
         Type::Named("u8".to_owned())
     } else if value <= u16::MAX as i64 {
         Type::Named("u16".to_owned())
-    } else {
+    } else if value <= 0xFF_FFFF {
         Type::Named("u24".to_owned())
+    } else {
+        Type::Named("u32".to_owned())
     }
 }
 
@@ -2399,15 +2880,19 @@ fn common_literal_type(left: i64, right: i64) -> Type {
             Type::Named("i8".to_owned())
         } else if minimum >= i16::MIN as i64 && maximum <= i16::MAX as i64 {
             Type::Named("i16".to_owned())
-        } else {
+        } else if minimum >= -0x80_0000 && maximum <= 0x7F_FFFF {
             Type::Named("i24".to_owned())
+        } else {
+            Type::Named("i32".to_owned())
         }
     } else if maximum <= u8::MAX as i64 {
         Type::Named("u8".to_owned())
     } else if maximum <= u16::MAX as i64 {
         Type::Named("u16".to_owned())
-    } else {
+    } else if maximum <= 0xFF_FFFF {
         Type::Named("u24".to_owned())
+    } else {
+        Type::Named("u32".to_owned())
     }
 }
 
@@ -2841,6 +3326,16 @@ mod tests {
         assembly
     }
 
+    fn function_assembly<'a>(assembly: &'a str, name: &str) -> &'a str {
+        assembly
+            .split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("missing function `{name}`\n{assembly}"))
+            .split("    ret\n")
+            .next()
+            .unwrap()
+    }
+
     #[test]
     fn emits_strict_dos_com_startup_and_return_termination_at_0100h() {
         let program = parse_program(
@@ -3006,6 +3501,205 @@ mod tests {
         assert!(!right_one.contains("shift_loop"), "{right_one}");
         assert!(times_eight.contains("shl al,1"), "{times_eight}");
         assert!(!times_eight.contains("mul "), "{times_eight}");
+    }
+
+    #[test]
+    fn assembles_complete_u32_i32_scalar_support_as_little_endian_word_pairs() {
+        let assembly = emit_and_assemble(
+            r#"
+            global ULEFT: u32 = 0xFEDCBA98u32
+            global URIGHT: u32 = 0x12345678u32
+            global SLEFT: i32 = -2147483648i32
+            global SRIGHT: i32 = -3i32
+            global URESULT: u32 = 0
+            global SRESULT: i32 = 0
+            fn round_trip(value: u32, signed: i32) -> u32 {
+                let local: u32 = value
+                let converted: i32 = cast<i32>(local)
+                SRESULT = signed + converted
+                return cast<u32>(SRESULT)
+            }
+            fn main() {
+                URESULT = round_trip(ULEFT, SRIGHT)
+                URESULT = ULEFT + URIGHT
+                URESULT = ULEFT - URIGHT
+                URESULT = ULEFT * URIGHT
+                URESULT = ULEFT / URIGHT
+                URESULT = ULEFT % URIGHT
+                URESULT = ULEFT & URIGHT | (ULEFT ^ URIGHT)
+                URESULT = ULEFT << 17
+                URESULT = ULEFT >> 17
+                SRESULT = SLEFT / SRIGHT
+                SRESULT = SLEFT % SRIGHT
+                SRESULT = SLEFT >> 31
+                let ucmp: bool = ULEFT > URIGHT
+                let scmp: bool = SLEFT < SRIGHT
+                URESULT += 1u32
+                URESULT -= 1u32
+                URESULT *= 3u32
+                URESULT /= 3u32
+                URESULT %= 5u32
+                URESULT = ULEFT / 0u32
+                URESULT = ULEFT % 0u32
+            }
+        "#,
+        );
+
+        assert!(assembly.contains("    mov [040"), "{assembly}");
+        assert!(assembly.contains("    add ax,"), "{assembly}");
+        assert!(assembly.contains("    adc ax,"), "{assembly}");
+        assert!(assembly.contains("    sub ax,"), "{assembly}");
+        assert!(assembly.contains("    sbb ax,"), "{assembly}");
+        assert!(assembly.contains("    and ax,"), "{assembly}");
+        assert!(assembly.contains("    mul bx\n"), "{assembly}");
+        assert!(assembly.contains("divide_less"), "{assembly}");
+        assert!(assembly.contains("xor al,80h"), "{assembly}");
+        assert!(assembly.contains("sar ax,1"), "{assembly}");
+    }
+
+    #[test]
+    fn infers_32_bit_integer_literals_and_preserves_bit_patterns() {
+        let assembly = emit_and_assemble(
+            "fn main() { let u: u32 = 4294967295 let i: i32 = 2147483648i32 let negative: i32 = -2147483648 let same: bool = u == 4294967295 }",
+        );
+
+        assert!(assembly.contains("    mov ax,0FFFFh"), "{assembly}");
+        assert!(assembly.contains("    mov ax,08000h"), "{assembly}");
+    }
+
+    #[test]
+    fn optimizes_u32_immediates_identities_and_compound_assignments() {
+        let assembly = emit_and_assemble(
+            r#"
+            fn immediate(value: u32) -> bool {
+                let work: u32 = value + 0x12345678u32
+                work -= 1u32
+                work &= 0xFF00FF00u32
+                work |= 0x00010001u32
+                work ^= 0x80000000u32
+                return work >= 0x10203040u32
+            }
+            fn identities(value: u32) -> u32 {
+                let work: u32 = value + 0u32
+                work = work * 1u32
+                work = work | 0u32
+                work = work & 0xFFFFFFFFu32
+                return work
+            }
+            fn main() { let result: bool = immediate(7) let same: u32 = identities(9) }
+        "#,
+        );
+        let immediate = function_assembly(&assembly, "immediate");
+        assert!(immediate.contains("add ax,05678h"), "{immediate}");
+        assert!(immediate.contains("adc ax,01234h"), "{immediate}");
+        assert!(immediate.contains("sbb ax,00h"), "{immediate}");
+        assert!(immediate.contains("and ax,0FF00h"), "{immediate}");
+        assert!(immediate.contains("cmp ax,01020h"), "{immediate}");
+        let identities = function_assembly(&assembly, "identities");
+        assert!(!identities.contains(" mul "), "{identities}");
+        assert!(!identities.contains("add ax,00h"), "{identities}");
+    }
+
+    #[test]
+    fn optimizes_all_fixed_u32_shift_ranges_with_word_pairs() {
+        let assembly = emit_and_assemble(
+            r#"
+            fn s0(v: u32) -> u32 { return v << 0 }
+            fn s1(v: u32) -> u32 { return v << 1 }
+            fn s15(v: u32) -> u32 { return v >> 15 }
+            fn s16(v: u32) -> u32 { return v << 16 }
+            fn s17(v: u32) -> u32 { return v >> 17 }
+            fn s31(v: i32) -> i32 { return v >> 31 }
+            fn s32(v: u32) -> u32 { return v << 32 }
+            fn s40(v: i32) -> i32 { return v >> 40 }
+            fn main() { let x: u32 = s0(1) + s1(1) + s15(1) + s16(1) + s17(1) + cast<u32>(s31(-1)) + s32(1) + cast<u32>(s40(-1)) }
+        "#,
+        );
+        assert!(!function_assembly(&assembly, "s0").contains("shift_loop"));
+        assert!(function_assembly(&assembly, "s1").contains("shl ax,1"));
+        assert!(function_assembly(&assembly, "s15").contains("rcr ax,1"));
+        assert!(!function_assembly(&assembly, "s16").contains("shl ax,1"));
+        assert!(function_assembly(&assembly, "s17").contains("shr ax,1"));
+        assert!(function_assembly(&assembly, "s31").contains("sar ax,1"));
+        assert!(function_assembly(&assembly, "s32").contains("xor ax,ax"));
+        assert!(function_assembly(&assembly, "s40").contains("sar ax,1"));
+    }
+
+    #[test]
+    fn negates_u32_word_pairs_with_the_correct_low_word_carry_rule() {
+        let assembly = emit_and_assemble(
+            r#"
+            global LOW_NONZERO: i32 = 0x00000001i32
+            global LOW_ZERO: i32 = 0x00010000i32
+            global MINIMUM: i32 = 0x80000000i32
+            fn main() {
+                LOW_NONZERO = -LOW_NONZERO
+                LOW_ZERO = -LOW_ZERO
+                MINIMUM = -MINIMUM
+            }
+        "#,
+        );
+
+        let main = function_assembly(&assembly, "main");
+        assert_eq!(main.matches("negate_low_nonzero").count(), 6, "{main}");
+        assert_eq!(main.matches("    neg ax\n").count(), 6, "{main}");
+        assert_eq!(main.matches("    not ax\n").count(), 3, "{main}");
+        assert!(!main.contains("    adc ax,0\n"), "{main}");
+        assert_eq!(0x0000_0001u32.wrapping_neg(), 0xffff_ffff);
+        assert_eq!(0x0001_0000u32.wrapping_neg(), 0xffff_0000);
+        assert_eq!(0x8000_0000u32.wrapping_neg(), 0x8000_0000);
+    }
+
+    #[test]
+    fn negative_signed_power_of_two_divisors_use_general_division() {
+        let assembly = emit_and_assemble(
+            r#"
+            fn divide_min(value: i32) -> i32 { return value / 0x80000000i32 }
+            fn modulo_min(value: i32) -> i32 { return value % 0x80000000i32 }
+            fn main() {
+                let min_by_min: i32 = divide_min(0x80000000i32)
+                let positive_by_min: i32 = divide_min(7i32)
+                let min_mod_min: i32 = modulo_min(0x80000000i32)
+                let positive_mod_min: i32 = modulo_min(7i32)
+            }
+        "#,
+        );
+
+        let divide = function_assembly(&assembly, "divide_min");
+        let modulo = function_assembly(&assembly, "modulo_min");
+        for function in [divide, modulo] {
+            assert!(
+                !function.contains("signed_power_two_nonnegative"),
+                "{function}"
+            );
+            assert!(function.contains("divide_less"), "{function}");
+            assert!(function.contains("test al,80h"), "{function}");
+        }
+    }
+
+    #[test]
+    fn optimizes_u32_multiply_and_constant_and_u16_division() {
+        let assembly = emit_and_assemble(
+            r#"
+            fn product(a: u32, b: u32) -> u32 { return a * b }
+            fn unsigned_pow2(v: u32) -> u32 { return v / 16u32 + v % 16u32 }
+            fn signed_pow2(v: i32) -> i32 { return v / 8i32 + v % 8i32 }
+            fn narrow_divisor(v: u32, d: u32) -> u32 { return v / d + v % d }
+            fn main() { let x: u32 = product(3, 5) + unsigned_pow2(33) + cast<u32>(signed_pow2(-33)) + narrow_divisor(100, 7) }
+        "#,
+        );
+        let product = function_assembly(&assembly, "product");
+        assert_eq!(product.matches("mul bx").count(), 3, "{product}");
+        assert!(!product.contains("multiply_skip_add"), "{product}");
+        let unsigned = function_assembly(&assembly, "unsigned_pow2");
+        assert!(unsigned.contains("shr ax,1"), "{unsigned}");
+        assert!(unsigned.contains("and ax,0Fh"), "{unsigned}");
+        let signed = function_assembly(&assembly, "signed_pow2");
+        assert!(signed.contains("signed_power_two_nonnegative"), "{signed}");
+        assert!(signed.contains("add ax,07h"), "{signed}");
+        let narrow = function_assembly(&assembly, "narrow_divisor");
+        assert!(narrow.contains("divide_u32_generic"), "{narrow}");
+        assert!(narrow.contains("div bx"), "{narrow}");
     }
 
     #[test]
