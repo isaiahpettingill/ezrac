@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Standardized tracked Rust crates on edition 2024 and pinned development to `nightly-2026-07-27` with Rustfmt and Clippy components.
+- Standardized tracked Rust crates on edition 2024 and set development to the latest nightly toolchain with Rustfmt and Clippy components.
 
 - Moved explicit function inlining and safe direct-tail-recursion rewriting into TBIR so every source backend receives the same transformed program. Inline expansion preserves typed, left-to-right, exactly-once argument evaluation, renames parameters and locals, supports nested approved calls, and leaves conditionally evaluated calls in short-circuit and loop conditions unchanged. eZ80-family backends also lower compatible register-ABI sibling tail calls to jumps.
 - Added explicit TBIR passes for immutable-local propagation, local common-subexpression cleanup, strength reduction, pure scalar loop-invariant hoisting, and named global-read LICM. Propagated values retain their declared width, signedness, and aliases. TBIR now retains typed global, MMIO, and embed object provenance with address, size, region, access, and volatility; calls, ports, MMIO, embeds, read-only or volatile regions, dereferences, addresses, inline assembly, unknown writes, and same-object writes remain conservative barriers.
