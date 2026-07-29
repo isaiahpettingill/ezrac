@@ -41,6 +41,35 @@ fn folds_simplifies_and_marks_dead_statements_without_skipping_validation() {
 }
 
 #[test]
+fn inline_asm_outputs_invalidate_propagated_locals() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+            fn read() -> u8 {
+                let result: u8 = 0
+                asm volatile(out result: u8 as mem, clobber memory) { "mov {result},al" }
+                return result
+            }
+            fn main() {}
+        "#,
+    )
+    .unwrap();
+    let (program, _report) = optimize_program(&program, CpuFamily::I8086);
+    let read = program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Function(function) if function.name == "read" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(read.body.last(), Some(Stmt::Return(Some(Expr::Ident(name)))) if name == "result")
+    );
+}
+
+#[test]
 fn folds_constant_branches_without_hiding_validation() {
     let program = parse_program(
         Path::new("test.ezra"),

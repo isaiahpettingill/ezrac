@@ -930,8 +930,6 @@ impl Emitter {
                 self.scalar_width(expected)?,
                 self.type_is_signed(signature.return_type.as_ref().unwrap())?,
             );
-        } else {
-            self.zero(self.r0);
         }
         Ok(())
     }
@@ -3334,6 +3332,30 @@ mod tests {
             .split("    ret\n")
             .next()
             .unwrap()
+    }
+
+    #[test]
+    fn preserves_value_returns_across_void_calls() {
+        let assembly = emit_and_assemble(
+            r#"
+                fn clear() {}
+                fn read() -> u8 {
+                    let key: u8 = 13
+                    clear()
+                    return key
+                }
+                fn main() { let key: u8 = read() }
+            "#,
+        );
+        let read = function_assembly(&assembly, "read");
+        let call = read.find("call near _clear").expect("missing clear call");
+        let returned = read[call..]
+            .find("mov [04000h],al")
+            .expect("missing return value store");
+        assert!(
+            !read[call..call + returned].contains("mov [04000h],ax"),
+            "void call must not clear r0 before the enclosing value return:\n{read}"
+        );
     }
 
     #[test]

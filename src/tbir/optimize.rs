@@ -1169,8 +1169,11 @@ fn propagate_block(
                 }
                 Stmt::Expr(value)
             }
-            Stmt::Asm { .. } => {
+            Stmt::Asm { ref outputs, .. } => {
                 available.clear();
+                for output in outputs {
+                    values.remove(&output.name);
+                }
                 stmt
             }
             Stmt::Break | Stmt::Continue => stmt,
