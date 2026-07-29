@@ -176,6 +176,14 @@ pub fn buffered_data(buffer: ptr<u8>) -> ptr<u8> {
     return buffer + 2
 }
 
+// Converts a DOS buffered-input line into a `$`-terminated string and prints it.
+// The caller must reserve one byte beyond the configured input capacity.
+pub fn print_buffered_dollar(buffer: ptr<u8>) {
+    let text: ptr<u8> = buffered_data(buffer)
+    text[buffered_count(buffer)] = '$'
+    print_dollar(text)
+}
+
 // AH=0Bh: returns 00h or FFh.
 pub fn input_status() -> u8 {
     let result: u8 = 0
