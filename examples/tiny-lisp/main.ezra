@@ -40,12 +40,6 @@ global has_lookahead: u8 = 0
 global parse_error: u8 = 0
 global overflow_error: u8 = 0
 
-@cfg(target("msdos-com-i8086"))
-global dos_input: [u8; 32] = [30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-
-@cfg(target("msdos-com-i8086"))
-global dos_input_index: u8 = 0
-
 @cfg(target("ti99-4a-tms9900"))
 global ti_cursor: u16 = 0
 
@@ -147,8 +141,7 @@ fn platform_read() -> u8 {
 
 @cfg(target("msdos-com-i8086"))
 fn platform_read() -> u8 {
-    // DOS buffered input handles backspace editing before the parser sees a line.
-    return console.read_raw()
+    return console.read_echo()
 }
 
 @cfg(target("zxspectrum-z80"))
@@ -170,61 +163,7 @@ fn lisp_newline() {
     platform_write(LISP_LF)
 }
 
-@cfg(target("msdos-com-i8086"))
-fn prepare_input() {
-    dos_input[0] = 30
-    dos_input[1] = 0
-    console.read_buffered(&dos_input[0])
-    dos_input_index = 0
-}
 
-@cfg(target("msdos-com-i8086"))
-fn read_input_character() -> u8 {
-    if dos_input_index < dos_input[1] {
-        let ch: u8 = dos_input[dos_input_index + 2]
-        dos_input_index += 1
-        return ch
-    }
-    return LISP_CR
-}
-
-@cfg(target("msdos-com-i8086"))
-fn finish_input_line() {
-    lisp_newline()
-}
-
-@cfg(target("agonlight-mos-ez80"))
-fn prepare_input() {}
-@cfg(target("commodore64-6502"))
-fn prepare_input() {}
-@cfg(target("cpm-2.2-z80"))
-fn prepare_input() {}
-@cfg(target("zxspectrum-z80"))
-fn prepare_input() {}
-@cfg(target("ti99-4a-tms9900"))
-fn prepare_input() {}
-
-@cfg(target("agonlight-mos-ez80"))
-fn read_input_character() -> u8 { return platform_read() }
-@cfg(target("commodore64-6502"))
-fn read_input_character() -> u8 { return platform_read() }
-@cfg(target("cpm-2.2-z80"))
-fn read_input_character() -> u8 { return platform_read() }
-@cfg(target("zxspectrum-z80"))
-fn read_input_character() -> u8 { return platform_read() }
-@cfg(target("ti99-4a-tms9900"))
-fn read_input_character() -> u8 { return platform_read() }
-
-@cfg(target("agonlight-mos-ez80"))
-fn finish_input_line() { lisp_newline() }
-@cfg(target("commodore64-6502"))
-fn finish_input_line() { lisp_newline() }
-@cfg(target("cpm-2.2-z80"))
-fn finish_input_line() { lisp_newline() }
-@cfg(target("zxspectrum-z80"))
-fn finish_input_line() { lisp_newline() }
-@cfg(target("ti99-4a-tms9900"))
-fn finish_input_line() { lisp_newline() }
 
 fn write_text(text: ptr<u8>) {
     let ch: u8 = *text
@@ -279,7 +218,7 @@ fn stream_char() -> u8 {
         has_lookahead = 0
         return lookahead
     }
-    return read_input_character()
+    return platform_read()
 }
 
 fn unread(ch: u8) {
@@ -374,7 +313,6 @@ fn main() {
         overflow_error = 0
         has_lookahead = 0
         write_prompt()
-        prepare_input()
         let first: u8 = read_non_space()
         if first == 'q' || first == 'Q' {
             return
@@ -383,7 +321,7 @@ fn main() {
 
         let value: u16 = parse_expr()
         discard_line()
-        finish_input_line()
+        lisp_newline()
         if parse_error != 0 {
             write_error()
         } else {
