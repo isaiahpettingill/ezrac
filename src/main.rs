@@ -1894,7 +1894,7 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
         &root.join("Ezra.toml"),
         options.force,
         &format!(
-            "[project]\nname = \"{project_name}\"\n\n[build]\ninput = \"src/main.ezra\"\ntarget = \"{}\"\noutput = \"{}\"\nexecutable = \"{project_name}\"\n\n[sdk]\npaths = [\"sdk\"]\n",
+            "[project]\nname = \"{project_name}\"\n\n[build]\ninput = \"src/main.ezra\"\ntarget = \"{}\"\noutput = \"{}\"\nexecutable = \"{project_name}\"\n",
             options.target,
             resolve_target_profile(Some(&options.target))?
                 .output_format
@@ -1910,11 +1910,8 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
     )?;
     fs::create_dir_all(root.join("src"))
         .map_err(|error| format!("failed to create {}/src: {error}", root.display()))?;
-    fs::create_dir_all(root.join("sdk"))
-        .map_err(|error| format!("failed to create {}/sdk: {error}", root.display()))?;
     fs::create_dir_all(root.join("assets"))
         .map_err(|error| format!("failed to create {}/assets: {error}", root.display()))?;
-    write_scaffold_file(&root.join("sdk/.gitkeep"), options.force, "")?;
     write_scaffold_file(&root.join("assets/.gitkeep"), options.force, "")?;
     write_scaffold_file(
         &root.join("src/main.ezra"),

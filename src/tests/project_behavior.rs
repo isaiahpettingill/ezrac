@@ -23,6 +23,9 @@ fn init_project_writes_default_scaffold() {
     assert!(main.contains("import agon.console"), "{main}");
     assert!(main.contains("console.print_line"), "{main}");
     assert!(gitignore.contains("target/"), "{gitignore}");
+    assert!(!config.contains("[sdk]"), "{config}");
+    assert!(!root.join("sdk").exists());
+    assert!(root.join("assets/.gitkeep").is_file());
 
     let error = init_project(&InitOptions {
         path: root.clone(),
