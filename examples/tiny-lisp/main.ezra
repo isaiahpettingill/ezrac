@@ -34,11 +34,21 @@ const LISP_SPACE: u8 = ' '
 const LISP_TAB: u8 = '\t'
 const LISP_CR: u8 = 13
 const LISP_LF: u8 = '\n'
+const LISP_BACKSPACE: u8 = 8
 
 global lookahead: u8 = 0
 global has_lookahead: u8 = 0
 global parse_error: u8 = 0
 global overflow_error: u8 = 0
+
+@cfg(target("msdos-com-i8086"))
+global dos_input: [u8; 32] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+@cfg(target("msdos-com-i8086"))
+global dos_input_length: u8 = 0
+
+@cfg(target("msdos-com-i8086"))
+global dos_input_index: u8 = 0
 
 @cfg(target("ti99-4a-tms9900"))
 global ti_cursor: u16 = 0
@@ -163,7 +173,80 @@ fn lisp_newline() {
     platform_write(LISP_LF)
 }
 
+@cfg(target("msdos-com-i8086"))
+fn prepare_input() {
+    dos_input_length = 0
+    dos_input_index = 0
+    loop {
+        let ch: u8 = console.read_raw()
+        if ch == LISP_CR || ch == LISP_LF {
+            lisp_newline()
+            return
+        }
+        if ch == LISP_BACKSPACE {
+            if dos_input_length != 0 {
+                dos_input_length -= 1
+                platform_write(LISP_BACKSPACE)
+                platform_write(LISP_SPACE)
+                platform_write(LISP_BACKSPACE)
+            }
+        } else if ch >= LISP_SPACE {
+            if dos_input_length < 32 {
+                dos_input[dos_input_length] = ch
+                dos_input_length += 1
+                platform_write(ch)
+            } else {
+                platform_write(7)
+            }
+        }
+    }
+}
 
+@cfg(target("msdos-com-i8086"))
+fn read_input_character() -> u8 {
+    if dos_input_index < dos_input_length {
+        let ch: u8 = dos_input[dos_input_index]
+        dos_input_index += 1
+        return ch
+    }
+    return LISP_CR
+}
+
+@cfg(target("msdos-com-i8086"))
+fn finish_input_line() {}
+
+@cfg(target("agonlight-mos-ez80"))
+fn prepare_input() {}
+@cfg(target("commodore64-6502"))
+fn prepare_input() {}
+@cfg(target("cpm-2.2-z80"))
+fn prepare_input() {}
+@cfg(target("zxspectrum-z80"))
+fn prepare_input() {}
+@cfg(target("ti99-4a-tms9900"))
+fn prepare_input() {}
+
+@cfg(target("agonlight-mos-ez80"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("commodore64-6502"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("cpm-2.2-z80"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("zxspectrum-z80"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("ti99-4a-tms9900"))
+fn read_input_character() -> u8 { return platform_read() }
+
+@cfg(target("agonlight-mos-ez80"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("commodore64-6502"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("cpm-2.2-z80"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("zxspectrum-z80"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("ti99-4a-tms9900"))
+fn finish_input_line() { lisp_newline() }
 
 fn write_text(text: ptr<u8>) {
     let ch: u8 = *text
@@ -218,7 +301,7 @@ fn stream_char() -> u8 {
         has_lookahead = 0
         return lookahead
     }
-    return platform_read()
+    return read_input_character()
 }
 
 fn unread(ch: u8) {
@@ -313,6 +396,7 @@ fn main() {
         overflow_error = 0
         has_lookahead = 0
         write_prompt()
+        prepare_input()
         let first: u8 = read_non_space()
         if first == 'q' || first == 'Q' {
             return
@@ -321,7 +405,7 @@ fn main() {
 
         let value: u16 = parse_expr()
         discard_line()
-        lisp_newline()
+        finish_input_line()
         if parse_error != 0 {
             write_error()
         } else {
