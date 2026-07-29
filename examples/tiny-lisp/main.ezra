@@ -189,7 +189,9 @@ fn read_input_character() -> u8 {
 }
 
 @cfg(target("msdos-com-i8086"))
-fn finish_input_line() {}
+fn finish_input_line() {
+    lisp_newline()
+}
 
 @cfg(target("agonlight-mos-ez80"))
 fn prepare_input() {}
