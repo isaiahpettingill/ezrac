@@ -137,6 +137,19 @@ impl SemanticModel {
             }
             Type::Named(_) => Ok(ty.clone()),
             Type::Ptr(inner) => Ok(Type::Ptr(Box::new(self.resolve_type(inner, seen)?))),
+            Type::Function {
+                params,
+                return_type,
+            } => Ok(Type::Function {
+                params: params
+                    .iter()
+                    .map(|param| self.resolve_type(param, seen))
+                    .collect::<Result<Vec<_>, _>>()?,
+                return_type: return_type
+                    .as_ref()
+                    .map(|ty| self.resolve_type(ty, seen).map(Box::new))
+                    .transpose()?,
+            }),
             Type::Array { element, len } => Ok(Type::Array {
                 element: Box::new(self.resolve_type(element, seen)?),
                 len: len.clone(),
@@ -150,7 +163,7 @@ impl SemanticModel {
             Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok(2),
             Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => Ok(3),
             Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Ok(4),
-            Type::Ptr(_) => Ok(self.pointer_bytes),
+            Type::Ptr(_) | Type::Function { .. } => Ok(self.pointer_bytes),
             Type::Named(name) if self.structs.contains_key(&name) => Err(Diagnostic::new(format!(
                 "struct `{name}` cannot be used as a scalar value"
             ))),

@@ -349,7 +349,14 @@ pub enum BinaryOp {
 pub enum Type {
     Named(String),
     Ptr(Box<Type>),
-    Array { element: Box<Type>, len: Box<Expr> },
+    Function {
+        params: Vec<Type>,
+        return_type: Option<Box<Type>>,
+    },
+    Array {
+        element: Box<Type>,
+        len: Box<Expr>,
+    },
 }
 
 impl Program {

@@ -1,8 +1,8 @@
-use crate::compat::{prelude::*, source_path_owned, SourcePath};
+use crate::compat::{SourcePath, prelude::*, source_path_owned};
 #[cfg(all(feature = "std", test))]
 use std::path::Path;
 
-use pest::{iterators::Pair, Parser};
+use pest::{Parser, iterators::Pair};
 use pest_derive::Parser;
 
 use crate::{
@@ -795,6 +795,26 @@ fn build_type(pair: Pair<'_, Rule>) -> Result<Type, Diagnostic> {
         Rule::ptr_ty => Ok(Type::Ptr(Box::new(build_type(
             inner.into_inner().next().unwrap(),
         )?))),
+        Rule::function_ty => {
+            let mut params = Vec::new();
+            let mut return_type = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::function_ty_params => {
+                        params = part
+                            .into_inner()
+                            .map(build_type)
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
+                    Rule::ty => return_type = Some(Box::new(build_type(part)?)),
+                    _ => unreachable!("unexpected function type part {:?}", part.as_rule()),
+                }
+            }
+            Ok(Type::Function {
+                params,
+                return_type,
+            })
+        }
         Rule::array_ty => {
             let mut parts = inner.into_inner();
             Ok(Type::Array {
@@ -1099,7 +1119,9 @@ fn validate_asm_operand_class(ty: &Type, class: &str) -> Result<(), Diagnostic> 
             {
                 true
             }
-            Type::Ptr(_) => matches!(class, "reg16" | "reg24" | "mem" | "imm"),
+            Type::Ptr(_) | Type::Function { .. } => {
+                matches!(class, "reg16" | "reg24" | "mem" | "imm")
+            }
             _ => match class {
                 "reg8" => type_storage_size(ty) == Some(1),
                 "reg16" => type_storage_size(ty) == Some(2),
@@ -1122,7 +1144,7 @@ fn type_storage_size(ty: &Type) -> Option<u8> {
         Type::Named(name) if name == "u16" || name == "i16" => Some(2),
         Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => Some(3),
         Type::Named(name) if name == "u32" || name == "i32" => Some(4),
-        Type::Ptr(_) => Some(3),
+        Type::Ptr(_) | Type::Function { .. } => Some(3),
         Type::Named(_) | Type::Array { .. } => None,
     }
 }

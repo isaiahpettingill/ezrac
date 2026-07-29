@@ -18,6 +18,16 @@ fn standard_completion_includes_u32_and_i32_primitives() {
 }
 
 #[test]
+fn function_pointer_types_appear_in_lsp_details() {
+    let ty = Type::Ptr(Box::new(Type::Function {
+        params: vec![Type::Named("u8".to_owned()), Type::Named("u8".to_owned())],
+        return_type: Some(Box::new(Type::Named("u8".to_owned()))),
+    }));
+
+    assert_eq!(type_text(&ty), "ptr<fn(u8, u8)u8>");
+}
+
+#[test]
 fn built_in_completion_modules_follow_project_target() {
     let sdk = SdkResolver {
         target: Some("ez180n-ez80".to_owned()),

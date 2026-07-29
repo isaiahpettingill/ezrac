@@ -850,7 +850,7 @@ fn cart_type_size(
             "u32" | "i32" => Ok(4),
             _ => Err(Diagnostic::new(format!("unknown storage type `{name}`"))),
         },
-        Type::Ptr(_) => Ok(3),
+        Type::Ptr(_) | Type::Function { .. } => Ok(3),
     }
 }
 
@@ -1017,8 +1017,10 @@ fn err_embed_alignment_not_integer(name: &str) -> Result<(), Diagnostic> {
 }
 
 fn type_is_non_integer_alignment(ty: &Type) -> bool {
-    matches!(ty, Type::Ptr(_) | Type::Array { .. })
-        || matches!(ty, Type::Named(name) if name == "bool")
+    matches!(
+        ty,
+        Type::Ptr(_) | Type::Function { .. } | Type::Array { .. }
+    ) || matches!(ty, Type::Named(name) if name == "bool")
 }
 
 fn is_bool_result_op(op: BinaryOp) -> bool {
@@ -1376,7 +1378,7 @@ fn wrap_embed_const_value(
                 Ok(unsigned as i64)
             }
         }
-        Type::Ptr(_) => {
+        Type::Ptr(_) | Type::Function { .. } => {
             let mask = (1_i128 << 24) - 1;
             Ok(((value as i128) & mask) as i64)
         }
@@ -1396,6 +1398,19 @@ fn resolve_embed_const_type(
         Type::Ptr(inner) => Ok(Type::Ptr(Box::new(resolve_embed_const_type(
             inner, aliases,
         )?))),
+        Type::Function {
+            params,
+            return_type,
+        } => Ok(Type::Function {
+            params: params
+                .iter()
+                .map(|param| resolve_embed_const_type(param, aliases))
+                .collect::<Result<Vec<_>, _>>()?,
+            return_type: return_type
+                .as_ref()
+                .map(|return_type| resolve_embed_const_type(return_type, aliases).map(Box::new))
+                .transpose()?,
+        }),
         Type::Array { element, len } => Ok(Type::Array {
             element: Box::new(resolve_embed_const_type(element, aliases)?),
             len: len.clone(),

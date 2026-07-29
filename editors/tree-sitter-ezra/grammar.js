@@ -167,9 +167,11 @@ module.exports = grammar({
     ),
     embed_options: $ => repeat1(choice(seq('section', $.section_name), seq('align', $._expression))),
 
-    type: $ => choice($.primitive_type, $.pointer_type, $.array_type, $.path),
+    type: $ => choice($.primitive_type, $.pointer_type, $.function_type, $.array_type, $.path),
     primitive_type: _ => choice('u8', 'i8', 'u16', 'i16', 'u24', 'i24', 'bytes'),
     pointer_type: $ => seq('ptr', '<', $.type, '>'),
+    function_type: $ => seq('fn', '(', optional($.function_type_parameters), ')', optional($.type)),
+    function_type_parameters: $ => seq($.type, repeat(seq(',', $.type)), optional(',')),
     array_type: $ => seq('[', $.type, ';', $._expression, ']'),
 
     path: $ => seq($.identifier, repeat(seq('.', $.identifier))),

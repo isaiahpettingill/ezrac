@@ -1955,7 +1955,7 @@ impl Emitter {
         }
         match self.symbols.resolved_type(ty)? {
             Type::Ptr(_) if matches!(op, AssignOp::Add | AssignOp::Sub) => Ok(()),
-            Type::Ptr(_) => Err(Diagnostic::new("type mismatch")),
+            Type::Ptr(_) | Type::Function { .. } => Err(Diagnostic::new("type mismatch")),
             Type::Array { .. } => Err(Diagnostic::new("type mismatch")),
             Type::Named(name) if name == "bool" || self.symbols.structs.contains_key(&name) => {
                 Err(Diagnostic::new("type mismatch"))
@@ -2993,7 +2993,7 @@ impl Emitter {
 
     fn ensure_pointer_offset_expr(&self, expr: &Expr) -> Result<(), Diagnostic> {
         let ty = self.symbols.resolved_type(&self.expr_type(expr)?)?;
-        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_)) {
+        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_) | Type::Function { .. }) {
             return Err(Diagnostic::new(
                 "pointer arithmetic offset must be an integer",
             ));
@@ -5503,6 +5503,10 @@ impl Emitter {
         if matches!(left_type, Type::Array { .. }) || matches!(right_type, Type::Array { .. }) {
             return Err(Diagnostic::new("array value cannot be used as a scalar"));
         }
+        if matches!(left_type, Type::Function { .. }) || matches!(right_type, Type::Function { .. })
+        {
+            return Err(Diagnostic::new("type mismatch"));
+        }
         if type_is_bool(&left_type) || type_is_bool(&right_type) {
             return Err(Diagnostic::new("type mismatch"));
         }
@@ -5592,7 +5596,7 @@ impl Emitter {
         if allow_bool && type_is_bool(&ty) {
             return Ok(());
         }
-        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_)) {
+        if type_is_bool(&ty) || matches!(ty, Type::Ptr(_) | Type::Function { .. }) {
             return Err(Diagnostic::new("type mismatch"));
         }
         let actual = self.symbols.type_width(&ty)?;
@@ -5645,7 +5649,9 @@ impl Emitter {
         if type_is_bool(&source_type) || type_is_bool(&target_type) {
             return Err(Diagnostic::new("type mismatch"));
         }
-        if matches!(source_type, Type::Ptr(_)) || matches!(target_type, Type::Ptr(_)) {
+        if matches!(source_type, Type::Ptr(_) | Type::Function { .. })
+            || matches!(target_type, Type::Ptr(_) | Type::Function { .. })
+        {
             return Err(Diagnostic::new("type mismatch"));
         }
 
@@ -7352,6 +7358,20 @@ fn type_display(ty: &Type) -> String {
     match ty {
         Type::Named(name) => name.clone(),
         Type::Ptr(inner) => format!("ptr<{}>", type_display(inner)),
+        Type::Function {
+            params,
+            return_type,
+        } => {
+            let params = params
+                .iter()
+                .map(type_display)
+                .collect::<Vec<_>>()
+                .join(", ");
+            match return_type {
+                Some(ty) => format!("fn({params}){}", type_display(ty)),
+                None => format!("fn({params})"),
+            }
+        }
         Type::Array { element, len } => {
             format!("[{}; {}]", type_display(element), expr_summary(len))
         }
@@ -7412,7 +7432,9 @@ fn validate_integer_unary_operand_type(ty: &Type) -> Result<(), Diagnostic> {
         }
         Type::Named(name) => Err(Diagnostic::new(format!("unknown type `{name}`"))),
         Type::Array { .. } => Err(Diagnostic::new("unary operand must be an integer")),
-        Type::Ptr(_) => Err(Diagnostic::new("unary operand must be an integer")),
+        Type::Ptr(_) | Type::Function { .. } => {
+            Err(Diagnostic::new("unary operand must be an integer"))
+        }
     }
 }
 
@@ -7436,7 +7458,9 @@ fn validate_shift_operand_type(ty: &Type) -> Result<(), Diagnostic> {
         }
         Type::Named(name) => Err(Diagnostic::new(format!("unknown type `{name}`"))),
         Type::Array { .. } => Err(Diagnostic::new("shift operand must be an integer")),
-        Type::Ptr(_) => Err(Diagnostic::new("shift operand must be an integer")),
+        Type::Ptr(_) | Type::Function { .. } => {
+            Err(Diagnostic::new("shift operand must be an integer"))
+        }
     }
 }
 
@@ -7460,7 +7484,9 @@ fn validate_shift_count_integer_type(ty: &Type) -> Result<(), Diagnostic> {
         }
         Type::Named(name) => Err(Diagnostic::new(format!("unknown type `{name}`"))),
         Type::Array { .. } => Err(Diagnostic::new("shift count must be an integer")),
-        Type::Ptr(_) => Err(Diagnostic::new("shift count must be an integer")),
+        Type::Ptr(_) | Type::Function { .. } => {
+            Err(Diagnostic::new("shift count must be an integer"))
+        }
     }
 }
 
@@ -7507,8 +7533,8 @@ where
         return Err(Diagnostic::new("type mismatch"));
     }
 
-    let left_is_ptr = matches!(left_type, Type::Ptr(_));
-    let right_is_ptr = matches!(right_type, Type::Ptr(_));
+    let left_is_ptr = matches!(left_type, Type::Ptr(_) | Type::Function { .. });
+    let right_is_ptr = matches!(right_type, Type::Ptr(_) | Type::Function { .. });
     if left_is_ptr || right_is_ptr {
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && left_type == right_type {
             return Ok(());

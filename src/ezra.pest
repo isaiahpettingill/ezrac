@@ -148,8 +148,10 @@ add_op = { "+" | "-" }
 mul_op = { "*" | "/" | "%" }
 unary_op = { "-" | "~" | "!" }
 
-ty = { ptr_ty | array_ty | named_ty }
+ty = { ptr_ty | function_ty | array_ty | named_ty }
 ptr_ty = { "ptr" ~ "<" ~ ty ~ ">" }
+function_ty = { "fn" ~ "(" ~ function_ty_params? ~ ")" ~ ty? }
+function_ty_params = { ty ~ ("," ~ ty)* ~ ","? }
 array_ty = { "[" ~ ty ~ ";" ~ expr ~ "]" }
 named_ty = { path }
 

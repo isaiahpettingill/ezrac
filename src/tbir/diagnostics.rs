@@ -183,6 +183,19 @@ fn validate_inline_asm_operand_classes(program: &crate::ast::Program) -> Result<
                 resolved
             }
             Type::Ptr(inner) => Ok(Type::Ptr(Box::new(resolved_type(inner, aliases, seen)?))),
+            Type::Function {
+                params,
+                return_type,
+            } => Ok(Type::Function {
+                params: params
+                    .iter()
+                    .map(|param| resolved_type(param, aliases, seen))
+                    .collect::<Result<Vec<_>, _>>()?,
+                return_type: return_type
+                    .as_ref()
+                    .map(|return_type| resolved_type(return_type, aliases, seen).map(Box::new))
+                    .transpose()?,
+            }),
             Type::Array { element, len } => Ok(Type::Array {
                 element: Box::new(resolved_type(element, aliases, seen)?),
                 len: len.clone(),
@@ -207,7 +220,9 @@ fn validate_inline_asm_operand_classes(program: &crate::ast::Program) -> Result<
             Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => {
                 matches!(class, "reg24" | "mem" | "imm")
             }
-            Type::Ptr(_) => matches!(class, "reg16" | "reg24" | "mem" | "imm"),
+            Type::Ptr(_) | Type::Function { .. } => {
+                matches!(class, "reg16" | "reg24" | "mem" | "imm")
+            }
             Type::Named(_) | Type::Array { .. } => matches!(class, "mem" | "imm"),
         };
         if valid {

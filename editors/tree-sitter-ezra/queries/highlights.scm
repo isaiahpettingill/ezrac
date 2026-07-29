@@ -44,6 +44,8 @@
 (integer_literal) @number
 (boolean_literal) @boolean
 (primitive_type) @type.builtin
+(pointer_type "ptr" @type.builtin)
+(function_type "fn" @type.builtin)
 (function_item name: (identifier) @function)
 (call_expression function: (path (identifier) @function))
 (struct_item name: (identifier) @type)

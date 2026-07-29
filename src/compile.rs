@@ -867,7 +867,9 @@ fn collect_expr_references(
             }
         }
         Expr::Call { path, args } => {
-            push_unknown_reference(&path.join("."), true, names, default_sdk_symbols, output);
+            if path.len() != 1 || !names.contains(&path[0]) {
+                push_unknown_reference(&path.join("."), true, names, default_sdk_symbols, output);
+            }
             for arg in args {
                 collect_expr_references(arg, names, default_sdk_symbols, output);
             }
@@ -2258,6 +2260,18 @@ fn validate_type_private_import_access(
     match ty {
         Type::Named(name) => reject_private_import_type_name(name, private_imports),
         Type::Ptr(inner) => validate_type_private_import_access(inner, private_imports),
+        Type::Function {
+            params,
+            return_type,
+        } => {
+            for param in params {
+                validate_type_private_import_access(param, private_imports)?;
+            }
+            if let Some(return_type) = return_type {
+                validate_type_private_import_access(return_type, private_imports)?;
+            }
+            Ok(())
+        }
         Type::Array { element, len } => {
             validate_type_private_import_access(element, private_imports)?;
             validate_expr_private_import_access(len, private_imports, &HashSet::new())

@@ -1865,6 +1865,16 @@ fn type_text(ty: &Type) -> String {
     match ty {
         Type::Named(name) => name.clone(),
         Type::Ptr(inner) => format!("ptr<{}>", type_text(inner)),
+        Type::Function {
+            params,
+            return_type,
+        } => {
+            let params = params.iter().map(type_text).collect::<Vec<_>>().join(", ");
+            match return_type {
+                Some(ty) => format!("fn({params}){}", type_text(ty)),
+                None => format!("fn({params})"),
+            }
+        }
         Type::Array { element, len } => format!("[{}; {}]", type_text(element), expr_text(len)),
     }
 }

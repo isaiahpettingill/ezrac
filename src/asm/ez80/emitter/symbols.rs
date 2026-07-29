@@ -7,7 +7,7 @@ use crate::{
     },
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
-    target::Address24,
+    target::{Address24, memory_model_for_cpu},
 };
 
 use super::{
@@ -85,6 +85,7 @@ pub(super) struct Symbols {
     pub(super) global_types: HashMap<String, Type>,
     pub(super) readonly_global_pointer_aliases: HashMap<String, u32>,
     pub(super) functions: HashMap<String, FunctionSig>,
+    function_pointer_width: ValueWidth,
     next_addr: u32,
     asset_next_addr: u32,
     rodata_next_addr: u32,
@@ -142,6 +143,14 @@ impl Symbols {
             global_types: HashMap::new(),
             readonly_global_pointer_aliases: HashMap::new(),
             functions: HashMap::new(),
+            function_pointer_width: match memory_model_for_cpu(options.cpu)
+                .map(|memory| memory.pointer_width_bits)
+                .unwrap_or(24)
+            {
+                0..=8 => ValueWidth::U8,
+                9..=16 => ValueWidth::U16,
+                _ => ValueWidth::U24,
+            },
             next_addr: options.ram_base.get(),
             asset_next_addr: options.asset_base.get(),
             rodata_next_addr: options.rodata_base.get(),
@@ -709,6 +718,18 @@ impl Symbols {
     ) -> Result<(), Diagnostic> {
         match ty {
             Type::Ptr(inner) => self.ensure_type_const_dependencies_evaluated(inner, program),
+            Type::Function {
+                params,
+                return_type,
+            } => {
+                for param in params {
+                    self.ensure_type_const_dependencies_evaluated(param, program)?;
+                }
+                if let Some(return_type) = return_type {
+                    self.ensure_type_const_dependencies_evaluated(return_type, program)?;
+                }
+                Ok(())
+            }
             Type::Array { element, len } => {
                 self.ensure_type_const_dependencies_evaluated(element, program)?;
                 self.ensure_const_dependencies_evaluated(len, program)
@@ -846,6 +867,7 @@ impl Symbols {
                 self.type_width(alias)
             }
             Type::Ptr(_) => Ok(ValueWidth::U24),
+            Type::Function { .. } => Ok(self.function_pointer_width),
             Type::Array { .. } => Err(Diagnostic::new("array value cannot be used as a scalar")),
         }
     }
@@ -873,6 +895,18 @@ impl Symbols {
                 }
             }
             Type::Ptr(inner) => self.validate_type_names(inner),
+            Type::Function {
+                params,
+                return_type,
+            } => {
+                for param in params {
+                    self.validate_type_names(param)?;
+                }
+                if let Some(return_type) = return_type {
+                    self.validate_type_names(return_type)?;
+                }
+                Ok(())
+            }
             Type::Array { element, .. } => self.validate_type_names(element),
         }
     }
@@ -946,6 +980,19 @@ impl Symbols {
                 }
             }
             Type::Ptr(inner) => Ok(Type::Ptr(Box::new(self.resolved_type(inner)?))),
+            Type::Function {
+                params,
+                return_type,
+            } => Ok(Type::Function {
+                params: params
+                    .iter()
+                    .map(|param| self.resolved_type(param))
+                    .collect::<Result<Vec<_>, _>>()?,
+                return_type: return_type
+                    .as_ref()
+                    .map(|return_type| self.resolved_type(return_type).map(Box::new))
+                    .transpose()?,
+            }),
             Type::Array { element, len } => Ok(Type::Array {
                 element: Box::new(self.resolved_type(element)?),
                 len: len.clone(),

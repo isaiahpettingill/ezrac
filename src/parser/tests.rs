@@ -179,6 +179,36 @@ fn parses_module_qualified_types_and_struct_literals() {
 }
 
 #[test]
+fn parses_function_pointer_types() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            global value: ptr<fn(u8, u8)u8> = &add
+            global notify: ptr<fn(u8)> = &log
+            global done: ptr<fn()> = &finish
+            fn add(left: u8, right: u8) -> u8 { return left + right }
+            fn log(value: u8) {}
+            fn finish() {}
+            fn main() {}
+        "#,
+    )
+    .unwrap();
+
+    let Declaration::Global(value) = &program.declarations[0] else {
+        panic!("expected global declaration");
+    };
+    assert!(matches!(
+        &value.ty,
+        Type::Ptr(inner) if matches!(
+            inner.as_ref(),
+            Type::Function { params, return_type }
+                if params == &vec![Type::Named("u8".to_owned()), Type::Named("u8".to_owned())]
+                    && return_type.as_deref() == Some(&Type::Named("u8".to_owned()))
+        )
+    ));
+}
+
+#[test]
 fn parses_array_literal_index_and_address_of_index() {
     let program = parse_program(
             Path::new("game.ezra"),
