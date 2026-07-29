@@ -462,6 +462,16 @@ impl Emitter {
         }
         for declaration in &program.declarations {
             if let Declaration::Global(global) = declaration {
+                let resolved_type = self.model.resolved_type(&global.ty)?;
+                if matches!(global.value, Expr::Array(_))
+                    && !matches!(resolved_type, Type::Array { .. })
+                {
+                    return Err(Diagnostic::new(format!(
+                        "global `{}` is declared `{}`, but its initializer is an array; use an array type such as `[ptr<u8>; 4]` for these values",
+                        global.name,
+                        type_display(&global.ty)
+                    )));
+                }
                 let storage = self.model.globals[&global.name];
                 self.emit_initializer(storage, &global.ty, &global.value)?;
             }
@@ -3594,6 +3604,21 @@ mod tests {
             .split("    ret\n")
             .next()
             .unwrap()
+    }
+
+    #[test]
+    fn rejects_array_initializer_for_scalar_global_with_a_specific_message() {
+        let error = emit_error(
+            r#"
+                global race_string: ptr<ptr<u8>> = ["NA", "HUMAN"]
+                fn main() {}
+            "#,
+        );
+
+        assert_eq!(
+            error,
+            "global `race_string` is declared `ptr<ptr<u8>>`, but its initializer is an array; use an array type such as `[ptr<u8>; 4]` for these values"
+        );
     }
 
     #[test]

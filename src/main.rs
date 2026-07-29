@@ -13,7 +13,7 @@ use ezra::{
     ast::Program,
     cart::CartridgeHeader,
     compile::{SdkResolver, load_program_with_sdk},
-    diagnostic::SourceLocation,
+    diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
     hir::HirProgram,
     layout::{Layout, parse_layout},
     parser::parse_program,
@@ -1250,6 +1250,8 @@ fn build_ezra_source(
     settings: &BuildSettings,
     options: &BuildCommandOptions,
 ) -> Result<BuildOutputs, String> {
+    let source = fs::read_to_string(source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let mut program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
@@ -1270,11 +1272,7 @@ fn build_ezra_source(
         )
         .map_err(|error| error.to_string())?,
     )
-    .map_err(|error| {
-        error
-            .with_location_if_missing(source_location.clone())
-            .to_string()
-    })?;
+    .map_err(|error| command_diagnostic(error, source_path, &source, &source_location))?;
 
     write_build_artifacts(source_path, source_location, settings, &program, &assembly)
 }
@@ -1706,6 +1704,8 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
 
 fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String, String> {
     let source_path = PathBuf::from(&options.path);
+    let source = fs::read_to_string(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let source_location = command_source_start_location(&source_path);
     let settings = resolve_build_settings(options, &source_path)?;
     let mut program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
@@ -1733,13 +1733,23 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         )
         .map_err(|error| error.to_string())?,
     )
-    .map_err(|error| {
-        error
-            .with_location_if_missing(source_location.clone())
-            .to_string()
-    })?;
+    .map_err(|error| command_diagnostic(error, &source_path, &source, &source_location))?;
     validate_generated_assembly_for_command(&source_path, &source_location, &settings, &assembly)?;
     Ok(assembly)
+}
+
+fn command_diagnostic(
+    error: Diagnostic,
+    source_path: &Path,
+    source: &str,
+    fallback: &SourceLocation,
+) -> String {
+    let error = if let Some(span) = diagnostic_span(source_path, source, &error.message) {
+        error.with_span_if_missing(span)
+    } else {
+        error
+    };
+    error.with_location_if_missing(fallback.clone()).to_string()
 }
 
 fn validate_generated_assembly_for_command(
@@ -1802,11 +1812,7 @@ fn check_source_with_layout(
         )
         .map_err(|error| error.to_string())?,
     )
-    .map_err(|error| {
-        error
-            .with_location_if_missing(source_location.clone())
-            .to_string()
-    })?;
+    .map_err(|error| command_diagnostic(error, source_path, source, &source_location))?;
     validate_generated_assembly_for_command(source_path, &source_location, &settings, &assembly)?;
 
     println!(
