@@ -13,4 +13,4 @@ args = ["lsp"]
 
 [[grammar]]
 name = "ezra"
-source = { path = "../tree-sitter-ezra" }
+source = { git = "https://github.com/isaiahpettingill/ezrac", rev = "0c06c384db3c2a156eeca42348109534a25b62ae", subpath = "editors/tree-sitter-ezra" }
