@@ -2096,7 +2096,11 @@ fn install_nano_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
 }
 
 fn install_helix_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
-    let root = config_home()?.join(".config/helix");
+    let root = if cfg!(windows) {
+        appdata_home()?.join("helix")
+    } else {
+        config_home()?.join(".config/helix")
+    };
     let files = [
         (
             "languages.toml",
