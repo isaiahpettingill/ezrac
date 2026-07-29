@@ -38,6 +38,13 @@ const LISP_LF: u8 = '\n'
 global lookahead: u8 = 0
 global has_lookahead: u8 = 0
 global parse_error: u8 = 0
+global overflow_error: u8 = 0
+
+@cfg(target("msdos-com-i8086"))
+global dos_input: [u8; 32] = [30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+@cfg(target("msdos-com-i8086"))
+global dos_input_index: u8 = 0
 
 @cfg(target("ti99-4a-tms9900"))
 global ti_cursor: u16 = 0
@@ -140,8 +147,8 @@ fn platform_read() -> u8 {
 
 @cfg(target("msdos-com-i8086"))
 fn platform_read() -> u8 {
-    // DOS function 01h supplies blocking echoed input with Ctrl-C checking.
-    return console.read_echo()
+    // DOS buffered input handles backspace editing before the parser sees a line.
+    return console.read_raw()
 }
 
 @cfg(target("zxspectrum-z80"))
@@ -162,6 +169,60 @@ fn lisp_newline() {
     platform_write(LISP_CR)
     platform_write(LISP_LF)
 }
+
+@cfg(target("msdos-com-i8086"))
+fn prepare_input() {
+    dos_input[0] = 30
+    dos_input[1] = 0
+    console.read_buffered(&dos_input[0])
+    dos_input_index = 0
+}
+
+@cfg(target("msdos-com-i8086"))
+fn read_input_character() -> u8 {
+    if dos_input_index < dos_input[1] {
+        let ch: u8 = dos_input[dos_input_index + 2]
+        dos_input_index += 1
+        return ch
+    }
+    return LISP_CR
+}
+
+@cfg(target("msdos-com-i8086"))
+fn finish_input_line() {}
+
+@cfg(target("agonlight-mos-ez80"))
+fn prepare_input() {}
+@cfg(target("commodore64-6502"))
+fn prepare_input() {}
+@cfg(target("cpm-2.2-z80"))
+fn prepare_input() {}
+@cfg(target("zxspectrum-z80"))
+fn prepare_input() {}
+@cfg(target("ti99-4a-tms9900"))
+fn prepare_input() {}
+
+@cfg(target("agonlight-mos-ez80"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("commodore64-6502"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("cpm-2.2-z80"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("zxspectrum-z80"))
+fn read_input_character() -> u8 { return platform_read() }
+@cfg(target("ti99-4a-tms9900"))
+fn read_input_character() -> u8 { return platform_read() }
+
+@cfg(target("agonlight-mos-ez80"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("commodore64-6502"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("cpm-2.2-z80"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("zxspectrum-z80"))
+fn finish_input_line() { lisp_newline() }
+@cfg(target("ti99-4a-tms9900"))
+fn finish_input_line() { lisp_newline() }
 
 fn write_text(text: ptr<u8>) {
     let ch: u8 = *text
@@ -188,7 +249,11 @@ fn write_banner() {
 }
 
 @inline fn write_error() {
-    write_text("error")
+    if overflow_error != 0 {
+        write_text("overflow")
+    } else {
+        write_text("error")
+    }
     lisp_newline()
 }
 
@@ -212,7 +277,7 @@ fn stream_char() -> u8 {
         has_lookahead = 0
         return lookahead
     }
-    return platform_read()
+    return read_input_character()
 }
 
 fn unread(ch: u8) {
@@ -239,7 +304,13 @@ fn parse_number(first: u8) -> u16 {
     let value: u16 = cast<u16>(first - '0')
     let ch: u8 = stream_char()
     while ch >= '0' && ch <= '9' {
-        value = value * 10 + cast<u16>(ch - '0')
+        let digit: u16 = cast<u16>(ch - '0')
+        if value > 6553 || (value == 6553 && digit > 5) {
+            parse_error = 1
+            overflow_error = 1
+        } else {
+            value = value * 10 + digit
+        }
         ch = stream_char()
     }
     unread(ch)
@@ -257,12 +328,15 @@ fn parse_form() -> u16 {
     }
 
     if operator == '+' {
+        if left > 65535 - right { overflow_error = 1 parse_error = 1 return 0 }
         return left + right
     }
     if operator == '-' {
+        if left < right { overflow_error = 1 parse_error = 1 return 0 }
         return left - right
     }
     if operator == '*' {
+        if left != 0 && right > 65535 / left { overflow_error = 1 parse_error = 1 return 0 }
         return left * right
     }
     if operator == '/' {
@@ -295,7 +369,10 @@ fn main() {
 
     loop {
         parse_error = 0
+        overflow_error = 0
+        has_lookahead = 0
         write_prompt()
+        prepare_input()
         let first: u8 = read_non_space()
         if first == 'q' || first == 'Q' {
             return
@@ -304,7 +381,7 @@ fn main() {
 
         let value: u16 = parse_expr()
         discard_line()
-        lisp_newline()
+        finish_input_line()
         if parse_error != 0 {
             write_error()
         } else {
