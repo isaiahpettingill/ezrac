@@ -201,12 +201,11 @@ fn parse_operand(
         }
     }
 
-    if mnemonic == "pei" {
-        if let Some(inner) = operand.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+    if mnemonic == "pei"
+        && let Some(inner) = operand.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
             let v = value_or(inner, labels, pc, resolve, 0)?;
             return Ok((Mode::IndexedIndirect, v));
         }
-    }
 
     if let Some(inner) = operand
         .strip_prefix('(')
@@ -282,12 +281,11 @@ fn parse_operand(
             v,
         ));
     }
-    if let Some(expr) = operand.strip_suffix(",s") {
-        if variant == Mos6502Variant::Wdc65C816 {
+    if let Some(expr) = operand.strip_suffix(",s")
+        && variant == Mos6502Variant::Wdc65C816 {
             let v = value_or(expr, labels, pc, resolve, 0x100)?;
             return Ok((Mode::ZeroPage, v));
         }
-    }
     let v = value_or(operand, labels, pc, resolve, 0x100)?;
     if operand.starts_with('>') || operand.starts_with('^') {
         let prefix = &operand[..1];
@@ -299,12 +297,11 @@ fn parse_operand(
                     return Ok((Mode::Absolute, v));
                 }
             }
-            "^" => {
-                if variant == Mos6502Variant::Wdc65C816 {
+            "^"
+                if variant == Mos6502Variant::Wdc65C816 => {
                     let bank = (v >> 16) as u8;
                     return Ok((Mode::Immediate, u32::from(bank)));
                 }
-            }
             _ => {}
         }
     }
@@ -617,7 +614,7 @@ fn opcode(m: &str, mode: Mode, variant: Mos6502Variant) -> Option<u8> {
         // Ricoh 2A03: standard NMOS but SBC immediate uses $EB not $E9
         ("sbc", Mode::Immediate, Mos6502Variant::Ricoh2A03) => Some(0xEB),
 
-        _ => return opcode_group(m, mode, variant),
+        _ => opcode_group(m, mode, variant),
     }
 }
 

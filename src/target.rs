@@ -437,12 +437,15 @@ fn is_bare_target(triple: &TargetTriple) -> bool {
 }
 
 fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
-    if triple.value == MSDOS_COM_I8086_TARGET {
-        OutputFormat::CpmCom
-    } else if matches!(
-        triple.cpu,
-        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::I8080 | CpuFamily::I8085
-    ) && triple.value.split('-').any(|part| part == "cpm")
+    if triple.value == MSDOS_COM_I8086_TARGET
+        || (matches!(
+            triple.cpu,
+            CpuFamily::Z80
+                | CpuFamily::Z80N
+                | CpuFamily::Z180
+                | CpuFamily::I8080
+                | CpuFamily::I8085
+        ) && triple.value.split('-').any(|part| part == "cpm"))
     {
         OutputFormat::CpmCom
     } else if triple.value.starts_with("ez180n-ez80") {

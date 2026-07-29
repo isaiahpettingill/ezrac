@@ -474,8 +474,8 @@ fn append_statement_text(
             },
         );
     }
-    if let Some((name, value)) = split_top_level_once(text, '=') {
-        if !name.trim().is_empty()
+    if let Some((name, value)) = split_top_level_once(text, '=')
+        && !name.trim().is_empty()
             && !name.trim().chars().any(char::is_whitespace)
             && !value.trim().is_empty()
         {
@@ -488,7 +488,6 @@ fn append_statement_text(
                 },
             );
         }
-    }
 
     if normalized_head.eq_ignore_ascii_case("section") {
         if rest.trim().is_empty() {

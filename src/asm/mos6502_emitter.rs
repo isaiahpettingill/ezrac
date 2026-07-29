@@ -631,7 +631,7 @@ impl Emitter {
                 self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
                 self.set_zp_from_storage(POINTER_ZP, destination);
                 self.lda(self.r0.address);
-                self.line(&format!("    ldy #$00"));
+                self.line("    ldy #$00");
                 self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
                 return Ok(());
             }
@@ -708,13 +708,11 @@ impl Emitter {
         if let Some(return_storage) = return_storage {
             self.copy(return_storage, self.r0, return_storage.size);
         }
-        if signature.return_type.is_none() {
-            self.zero(self.r0);
-        } else {
-            let return_width = self
-                .model
-                .type_width(signature.return_type.as_ref().unwrap())?;
+        if let Some(return_type) = &signature.return_type {
+            let return_width = self.model.type_width(return_type)?;
             self.extend_result(return_width, self.model.type_width(expected)?, false);
+        } else {
+            self.zero(self.r0);
         }
         Ok(())
     }

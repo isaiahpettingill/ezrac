@@ -609,6 +609,7 @@ fn bundled_sdk_context(path: &Path) -> Option<BundledSdkContext> {
         "ti-z80" => "ti84plus-z80",
         "agonlight-mos-ez80" => "agonlight-mos-ez80",
         "cpm-2.2-z80" => "cpm-2.2-z80",
+        "msdos-i8086" => "msdos-com-i8086",
         "ez180n-ez80" => "ez180n-ez80",
         "ezra-test-ez80" => "ezra-test-ez80",
         "zxspectrum-z80" => "zxspectrum-z80",

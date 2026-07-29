@@ -304,6 +304,7 @@ fn main() {
 
         let value: u16 = parse_expr()
         discard_line()
+        lisp_newline()
         if parse_error != 0 {
             write_error()
         } else {

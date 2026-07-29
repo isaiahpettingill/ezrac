@@ -2532,7 +2532,7 @@ impl Emitter {
             self.load_ax(source.address + offset);
             self.line(&format!("    mov {},ax", mem(target.address + offset)));
         }
-        if size % 2 != 0 {
+        if !size.is_multiple_of(2) {
             self.load_al(source.address + size - 1);
             self.store_al(target.address + size - 1);
         }
@@ -2544,7 +2544,7 @@ impl Emitter {
         for word in 0..words {
             self.line(&format!("    mov {},ax", mem(storage.address + word * 2)));
         }
-        if storage.size % 2 != 0 {
+        if !storage.size.is_multiple_of(2) {
             self.store_al(storage.address + storage.size - 1);
         }
     }

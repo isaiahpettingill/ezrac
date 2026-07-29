@@ -339,12 +339,12 @@ fn ea(s: &str, l: &HashMap<String, u32>, pc: u32, r: bool) -> Result<AM, Diagnos
         }
         return indexed_ea(&parts, l, pc, r);
     }
-    if let Some((disp, inner)) = s.rsplit_once('(') {
-        if let Some(inner) = inner.strip_suffix(')') {
-            let mut parts = vec![disp.trim().to_owned()];
-            parts.extend(split_operands(inner));
-            return indexed_ea(&parts, l, pc, r);
-        }
+    if let Some((disp, inner)) = s.rsplit_once('(')
+        && let Some(inner) = inner.strip_suffix(')')
+    {
+        let mut parts = vec![disp.trim().to_owned()];
+        parts.extend(split_operands(inner));
+        return indexed_ea(&parts, l, pc, r);
     }
     let v = val(s, l, pc, r)?;
     Ok(if v <= 0xffff {
@@ -429,8 +429,8 @@ fn val(s: &str, l: &HashMap<String, u32>, _pc: u32, r: bool) -> Result<u32, Diag
         u32::from_str_radix(h, 16)
     } else if let Some(h) = s.strip_prefix("0x") {
         u32::from_str_radix(h, 16)
-    } else if s.ends_with('h') {
-        u32::from_str_radix(&s[..s.len() - 1], 16)
+    } else if let Some(h) = s.strip_suffix('h') {
+        u32::from_str_radix(h, 16)
     } else {
         s.parse()
     }

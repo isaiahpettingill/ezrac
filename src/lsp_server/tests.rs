@@ -192,6 +192,21 @@ fn tiny_lisp_is_clean_for_every_configured_target() {
 }
 
 #[test]
+fn msdos_sdk_modules_use_their_target_module_context() {
+    let path = repository_path("toolchains/msdos-i8086/sdk/dos/console.ezra");
+    let document = OpenDocument {
+        text: fs::read_to_string(&path).unwrap(),
+        path: path.clone(),
+        version: None,
+    };
+
+    let sdk = sdk_for_path(&path).unwrap();
+    assert_eq!(sdk.target.as_deref(), Some("msdos-com-i8086"));
+    let diagnostics = check_document_diagnostics(&document);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
 fn cpm_examples_resolve_the_built_in_sdk_from_their_project_target() {
     let path = repository_path("examples/cpm-z80/console-output.ezra");
     let document = OpenDocument {

@@ -750,6 +750,7 @@ fn encode_alu(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Opcode decoding provides each encoding field separately.
 fn encode_alu_immediate(
     op: &str,
     group: u8,

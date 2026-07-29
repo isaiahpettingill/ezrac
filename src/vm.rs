@@ -383,7 +383,7 @@ mod runner {
 
             let words = image
                 .bytes
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
                 .collect::<Vec<_>>();
             let mut cpu = DcpuCpu::new(OnDecodeError::Fail);
@@ -462,7 +462,7 @@ mod runner {
     #[cfg(feature = "dcpu")]
     fn validate_dcpu_byte_range(base: u32, len: usize, subject: &str) -> Result<u32, Diagnostic> {
         dcpu_aligned_byte_address_to_word(base, &format!("{subject} base address"))?;
-        if len % 2 != 0 {
+        if !len.is_multiple_of(2) {
             return Err(Diagnostic::new(format!(
                 "{subject} must contain an even number of bytes for DCPU word memory"
             )));
@@ -492,7 +492,7 @@ mod runner {
 
     #[cfg(feature = "dcpu")]
     fn dcpu_aligned_byte_address_to_word(address: u32, subject: &str) -> Result<u16, Diagnostic> {
-        if address % 2 != 0 {
+        if !address.is_multiple_of(2) {
             return Err(Diagnostic::new(format!(
                 "{subject} 0x{address:X} is not an aligned byte address in the DCPU 16-bit word address space"
             )));

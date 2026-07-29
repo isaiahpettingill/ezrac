@@ -360,10 +360,10 @@ fn analyze(text: &str) -> Result<Option<(Opcode, String)>, Diagnostic> {
             ));
         }
         (AddrMode::Indexed, offset)
-    } else if rest.starts_with('<') {
-        (AddrMode::Direct, rest[1..].trim())
-    } else if rest.starts_with('>') {
-        (AddrMode::Extended, rest[1..].trim())
+    } else if let Some(operand) = rest.strip_prefix('<') {
+        (AddrMode::Direct, operand.trim())
+    } else if let Some(operand) = rest.strip_prefix('>') {
+        (AddrMode::Extended, operand.trim())
     } else if prefer_direct(mnemonic, rest) {
         (AddrMode::Direct, rest)
     } else {
