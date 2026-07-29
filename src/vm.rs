@@ -1146,11 +1146,14 @@ pub fn assemble_program_with_options_at(
     let mut instruction_lengths = vec![None; program.items.len()];
     let mut labels = BTreeMap::new();
     let mut declared_names = HashSet::new();
+    let mut address_symbol_names = HashSet::new();
     for symbol in &options.symbols {
         labels.insert(symbol.name.clone(), symbol.addr);
         declared_names.insert(symbol.name.clone());
+        address_symbol_names.insert(symbol.name.clone());
     }
     let mut pending_equates = Vec::new();
+    let mut equate_definitions = Vec::new();
     let begins_with_section = program
         .items
         .first()
@@ -1183,6 +1186,7 @@ pub fn assemble_program_with_options_at(
                     ));
                 }
                 labels.insert(name.clone(), pc);
+                address_symbol_names.insert(name.clone());
             }
             AssemblyItem::Equ { name, value } => {
                 if !declared_names.insert(name.clone()) {
@@ -1192,6 +1196,7 @@ pub fn assemble_program_with_options_at(
                     ));
                 }
                 pending_equates.push((item.clone(), name.clone(), value.clone(), pc));
+                equate_definitions.push((item.clone(), name.clone(), value.clone(), pc));
             }
             AssemblyItem::Section(name) => {
                 if let Some(base) = section_base(options, name) {
@@ -1208,7 +1213,7 @@ pub fn assemble_program_with_options_at(
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Data { width, values } => {
-                pc = checked_assembly_pc_advance(cpu, pc, data_len(*width, values) as u32)
+                pc = checked_assembly_pc_advance(cpu, pc, data_len(cpu, *width, values) as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Instruction(instruction) => {
@@ -1246,14 +1251,23 @@ pub fn assemble_program_with_options_at(
         pending_equates = unresolved;
     }
 
+    let labels = labels.into_iter().collect::<HashMap<_, _>>();
+    let encoder_symbols = if cpu == AssemblerCpu::Dcpu {
+        dcpu_word_symbols(&labels, &address_symbol_names, &equate_definitions)?
+    } else {
+        labels.clone()
+    };
     let symbols = labels
         .iter()
         .map(|(name, addr)| AssemblySymbol {
             name: name.clone(),
-            addr: *addr,
+            addr: if cpu == AssemblerCpu::Dcpu && !address_symbol_names.contains(name) {
+                encoder_symbols.get(name).copied().unwrap_or(*addr)
+            } else {
+                *addr
+            },
         })
         .collect();
-    let labels = labels.into_iter().collect::<HashMap<_, _>>();
     let mut bytes = Vec::new();
     let mut pc = base_addr & 0xFF_FFFF;
     if default_pc != pc {
@@ -1282,9 +1296,9 @@ pub fn assemble_program_with_options_at(
                 pc = new_pc;
             }
             AssemblyItem::Data { width, values } => {
-                emit_data(cpu, *width, values, &labels, pc, &mut bytes)
+                emit_data(cpu, *width, values, &encoder_symbols, pc, &mut bytes)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
-                pc = checked_assembly_pc_advance(cpu, pc, data_len(*width, values) as u32)
+                pc = checked_assembly_pc_advance(cpu, pc, data_len(cpu, *width, values) as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Instruction(instruction) => {
@@ -1295,7 +1309,7 @@ pub fn assemble_program_with_options_at(
                     cpu,
                     architecture,
                     &instruction.to_text(),
-                    &labels,
+                    &encoder_symbols,
                     pc,
                     &mut bytes,
                 )
@@ -1308,6 +1322,44 @@ pub fn assemble_program_with_options_at(
         }
     }
     Ok(AssembledProgram { bytes, symbols })
+}
+
+fn dcpu_word_symbols(
+    byte_symbols: &HashMap<String, u32>,
+    address_symbol_names: &HashSet<String>,
+    equate_definitions: &[(LocatedAssemblyItem, String, AssemblyExpression, u32)],
+) -> Result<HashMap<String, u32>, Diagnostic> {
+    let mut symbols = HashMap::new();
+    for name in address_symbol_names {
+        if let Some(value) = byte_symbols.get(name) {
+            symbols.insert(name.clone(), value / 2);
+        }
+    }
+
+    let mut pending = equate_definitions.iter().collect::<Vec<_>>();
+    while !pending.is_empty() {
+        let mut unresolved = Vec::new();
+        let mut progress = false;
+        for definition in pending {
+            let (_item, name, expression, byte_pc) = definition;
+            match eval_assembly_expression(expression, &symbols, byte_pc / 2) {
+                Ok(value) => {
+                    symbols.insert(name.clone(), value);
+                    progress = true;
+                }
+                Err(_) => unresolved.push(definition),
+            }
+        }
+        if !progress {
+            let (item, _, expression, byte_pc) = unresolved[0];
+            return Err(eval_assembly_expression(expression, &symbols, byte_pc / 2)
+                .unwrap_err()
+                .with_location_if_missing(item.location.clone()));
+        }
+        pending = unresolved;
+    }
+
+    Ok(symbols)
 }
 
 fn parse_assembly_program(
@@ -1495,7 +1547,7 @@ pub fn measure_assembly_program_with_options(
     let mut len = 0usize;
     for item in &program.items {
         let item_len = match &item.kind {
-            AssemblyItem::Data { width, values } => data_len(*width, values),
+            AssemblyItem::Data { width, values } => data_len(cpu, *width, values),
             AssemblyItem::Instruction(instruction) => {
                 let architecture = parse_instruction(cpu, instruction)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
@@ -1555,11 +1607,16 @@ fn checked_code_end(base_addr: u32, len: usize) -> Result<u32, Diagnostic> {
     Ok(end)
 }
 
-fn data_len(width: DataWidth, values: &[AssemblyDataValue]) -> usize {
+fn data_len(cpu: AssemblerCpu, width: DataWidth, values: &[AssemblyDataValue]) -> usize {
     values
         .iter()
         .map(|value| match value {
             AssemblyDataValue::Expression(_) => width.bytes(),
+            AssemblyDataValue::Bytes(bytes)
+                if cpu == AssemblerCpu::Dcpu && width == DataWidth::Word =>
+            {
+                bytes.len() * 2
+            }
             AssemblyDataValue::Bytes(bytes) => bytes.len(),
         })
         .sum()
@@ -1575,9 +1632,21 @@ fn emit_data(
 ) -> Result<(), Diagnostic> {
     for value in values {
         match value {
+            AssemblyDataValue::Bytes(raw)
+                if cpu == AssemblerCpu::Dcpu && width == DataWidth::Word =>
+            {
+                for byte in raw {
+                    bytes.extend(u16::from(*byte).to_le_bytes());
+                }
+            }
             AssemblyDataValue::Bytes(raw) => bytes.extend(raw),
             AssemblyDataValue::Expression(expression) => {
-                let value = eval_assembly_expression(expression, labels, pc)?;
+                let expression_pc = if cpu == AssemblerCpu::Dcpu {
+                    pc / 2
+                } else {
+                    pc
+                };
+                let value = eval_assembly_expression(expression, labels, expression_pc)?;
                 match width {
                     DataWidth::Byte => {
                         let value = u8::try_from(value).map_err(|_| {
@@ -1688,6 +1757,7 @@ fn eval_expression_value(
                 AssemblyUnaryOperator::Negate => value
                     .checked_neg()
                     .ok_or_else(|| expression_range_diagnostic(expression)),
+                AssemblyUnaryOperator::BitNot => Ok(!value),
             }
         }
         AssemblyExpression::Binary {
@@ -1701,6 +1771,19 @@ fn eval_expression_value(
                 AssemblyBinaryOperator::Add => left_value.checked_add(right_value),
                 AssemblyBinaryOperator::Subtract => left_value.checked_sub(right_value),
                 AssemblyBinaryOperator::Multiply => left_value.checked_mul(right_value),
+                AssemblyBinaryOperator::Divide if right_value == 0 => {
+                    return Err(Diagnostic::new("division by zero in assembly expression"));
+                }
+                AssemblyBinaryOperator::Divide => left_value.checked_div(right_value),
+                AssemblyBinaryOperator::ShiftLeft | AssemblyBinaryOperator::ShiftRight
+                    if !(0..=127).contains(&right_value) =>
+                {
+                    return Err(Diagnostic::new(format!(
+                        "assembly expression shift count `{right_value}` is outside 0 through 127"
+                    )));
+                }
+                AssemblyBinaryOperator::ShiftLeft => left_value.checked_shl(right_value as u32),
+                AssemblyBinaryOperator::ShiftRight => left_value.checked_shr(right_value as u32),
                 AssemblyBinaryOperator::BitAnd => Some(left_value & right_value),
                 AssemblyBinaryOperator::BitOr => Some(left_value | right_value),
                 AssemblyBinaryOperator::BitXor => Some(left_value ^ right_value),
@@ -1730,6 +1813,7 @@ fn expression_text(expression: &AssemblyExpression) -> String {
             match operator {
                 AssemblyUnaryOperator::Plus => "+",
                 AssemblyUnaryOperator::Negate => "-",
+                AssemblyUnaryOperator::BitNot => "~",
             },
             expression_text(expression)
         ),
@@ -1744,6 +1828,9 @@ fn expression_text(expression: &AssemblyExpression) -> String {
                 AssemblyBinaryOperator::Add => "+",
                 AssemblyBinaryOperator::Subtract => "-",
                 AssemblyBinaryOperator::Multiply => "*",
+                AssemblyBinaryOperator::Divide => "/",
+                AssemblyBinaryOperator::ShiftLeft => "<<",
+                AssemblyBinaryOperator::ShiftRight => ">>",
                 AssemblyBinaryOperator::BitAnd => "&",
                 AssemblyBinaryOperator::BitOr => "|",
                 AssemblyBinaryOperator::BitXor => "^",
@@ -1856,7 +1943,11 @@ fn emit_instruction(
     }
     #[cfg(feature = "dcpu")]
     if cpu == AssemblerCpu::Dcpu {
-        bytes.extend(dcpu::encode_instruction(text, labels, pc)?);
+        bytes.extend(dcpu::encode_instruction_with_word_symbols(
+            text,
+            labels,
+            pc / 2,
+        )?);
         return Ok(());
     }
     #[cfg(feature = "tms9900")]

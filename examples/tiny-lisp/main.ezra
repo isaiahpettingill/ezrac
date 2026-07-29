@@ -258,7 +258,7 @@ fn write_text(text: ptr<u8>) {
 }
 
 fn write_banner() {
-    write_text("TinyLisp - (+ 1 2), (* (+ 2 3) 4)")
+    write_text("TinyLisp - u16 only, +/-* operations")
     lisp_newline()
     write_text("Q to quit.")
     lisp_newline()

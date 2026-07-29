@@ -1462,3 +1462,58 @@ fn assembles_and_runs_dcpu_program_in_reference_emulator() {
         26
     );
 }
+
+#[test]
+#[cfg(feature = "dcpu")]
+fn dcpu_assembler_supports_das_style_symbols_expressions_and_data() {
+    let image = assemble_subset_with_symbols_at(
+        AssemblerCpu::Dcpu,
+        r#"
+            .set VALUE, data + 2
+            :start SET A, VALUE
+                   SET [data + I], 0x20
+            :data  DAT "A\x42\n\0", start + 1, (8 << 2) / 4
+        "#,
+        0,
+    )
+    .unwrap();
+    let words = image
+        .bytes
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        words,
+        [
+            0x7c01, 0x0007, 0x7ec1, 0x0005, 0x0020, 0x0041, 0x0042, 0x000a, 0x0000, 0x0001, 0x0008,
+        ]
+    );
+    assert_eq!(
+        image
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "start")
+            .unwrap()
+            .addr,
+        0
+    );
+    assert_eq!(
+        image
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "data")
+            .unwrap()
+            .addr,
+        10
+    );
+    assert_eq!(
+        image
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "VALUE")
+            .unwrap()
+            .addr,
+        7
+    );
+}

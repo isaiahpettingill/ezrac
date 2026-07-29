@@ -1,0 +1,79 @@
+import dos.console
+
+// 15 input bytes, DOS's two buffer-control bytes, and one '$' terminator.
+global name_buffer: [u8; 18] = [15]
+
+global player_race: u8 = 0
+const RACE_HUMAN: u8 = 1
+const RACE_DWARF: u8 = 2
+const RACE_ELF: u8 = 3
+
+global START_TEXT: ptr<u8> = "Welcome, weary traveler. What is your name? $"
+global HELLO: ptr<u8> = "Hello, $"
+global CHOOSE_RACE: ptr<u8> = "What is your race? "
+global RACE_OPTIONS: ptr<u8> = "(1) HUMAN (2) DWARF (3) ELF$"
+
+fn race_string(index: u8) -> ptr<u8> {
+    if index == 1 {
+        return "Human$"
+    }
+    if index == 2 {
+        return "Dwarf$"
+    }
+    if index == 3 {
+        return "Elf$"
+    }
+    return "NA$"
+}
+
+fn char_to_int(ch: u8) -> u8 {
+    if ch == '1' {
+        return 1
+    }
+    if ch == '2' {
+        return 2
+    }
+    if ch == '3' {
+        return 3
+    }
+    return 0
+}
+
+fn prompt_race(){
+    console.print_dollar(CHOOSE_RACE)
+    console.newline()
+    console.print_dollar(RACE_OPTIONS)
+}
+
+fn get_option(prompt: ptr<fn()>, option: ptr<u8>) {
+    let choice: u8 = 0
+    while choice == 0 {
+        prompt()
+        let input: u8 = console.read_char()
+        console.newline()
+        choice = char_to_int(input)
+    }
+    *option = choice
+}
+
+@inline fn get_name(){
+    console.print_dollar(START_TEXT)
+    console.read_buffered(&name_buffer[0])
+    console.newline()
+    console.print_dollar(HELLO)
+    console.print_buffered_dollar(&name_buffer[0])
+    console.newline()
+}
+
+fn setup_sequence() {
+    get_name()
+    get_option(&prompt_race, &player_race)
+    console.print_dollar("Ah, a $")
+    console.print_dollar(race_string(player_race))
+    console.print_dollar("! Very interesting...$")
+    console.newline()
+}
+
+fn main() {
+    setup_sequence()
+}

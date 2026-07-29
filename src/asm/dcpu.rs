@@ -1,6 +1,12 @@
 use std::collections::HashMap;
 
-use crate::diagnostic::Diagnostic;
+use crate::{
+    asm::{
+        AssemblyBinaryOperator, AssemblyExpression, AssemblyUnaryOperator,
+        parse_assembly_expression,
+    },
+    diagnostic::Diagnostic,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Position {
@@ -14,8 +20,14 @@ struct Operand {
     extra: Option<u16>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SymbolUnits {
+    ByteAddresses,
+    WordAddresses,
+}
+
 pub fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    Ok(encode(text, &HashMap::new(), 0, false)?.len())
+    Ok(encode(text, &HashMap::new(), 0, false, SymbolUnits::ByteAddresses)?.len())
 }
 
 pub fn encode_instruction(
@@ -23,7 +35,15 @@ pub fn encode_instruction(
     labels: &HashMap<String, u32>,
     pc: u32,
 ) -> Result<Vec<u8>, Diagnostic> {
-    encode(text, labels, pc, true)
+    encode(text, labels, pc, true, SymbolUnits::ByteAddresses)
+}
+
+pub(crate) fn encode_instruction_with_word_symbols(
+    text: &str,
+    symbols: &HashMap<String, u32>,
+    pc_words: u32,
+) -> Result<Vec<u8>, Diagnostic> {
+    encode(text, symbols, pc_words, true, SymbolUnits::WordAddresses)
 }
 
 fn encode(
@@ -31,6 +51,7 @@ fn encode(
     labels: &HashMap<String, u32>,
     pc: u32,
     resolve_labels: bool,
+    symbol_units: SymbolUnits,
 ) -> Result<Vec<u8>, Diagnostic> {
     let lowered = normalize(text);
     let (mnemonic, operands) = parse_instruction(&lowered)?;
@@ -38,7 +59,14 @@ fn encode(
 
     if let Some(opcode) = special_opcode(mnemonic) {
         let operand = parse_single_operand(mnemonic, operands)?;
-        let operand = parse_operand(operand, Position::A, labels, pc, resolve_labels)?;
+        let operand = parse_operand(
+            operand,
+            Position::A,
+            labels,
+            pc,
+            resolve_labels,
+            symbol_units,
+        )?;
         words.push((operand.code << 10) | (opcode << 5));
         if let Some(extra) = operand.extra {
             words.push(extra);
@@ -56,8 +84,22 @@ fn encode(
             "DCPU instruction `{mnemonic}` expects exactly two operands"
         ))
     })?;
-    let b = parse_operand(b_text, Position::B, labels, pc, resolve_labels)?;
-    let a = parse_operand(a_text, Position::A, labels, pc, resolve_labels)?;
+    let b = parse_operand(
+        b_text,
+        Position::B,
+        labels,
+        pc,
+        resolve_labels,
+        symbol_units,
+    )?;
+    let a = parse_operand(
+        a_text,
+        Position::A,
+        labels,
+        pc,
+        resolve_labels,
+        symbol_units,
+    )?;
     words.push(opcode | (b.code << 5) | (a.code << 10));
     if let Some(extra) = b.extra {
         words.push(extra);
@@ -155,6 +197,7 @@ fn parse_operand(
     labels: &HashMap<String, u32>,
     pc: u32,
     resolve_labels: bool,
+    symbol_units: SymbolUnits,
 ) -> Result<Operand, Diagnostic> {
     let registers = ["a", "b", "c", "x", "y", "z", "i", "j"];
     if let Some(index) = registers.iter().position(|register| *register == operand) {
@@ -177,47 +220,80 @@ fn parse_operand(
                 extra: None,
             });
         }
-        if let Some((left, right)) = inner.split_once('+') {
-            let left = left.trim();
-            let right = right.trim();
-            let (register, value) = if registers.contains(&left) {
-                (left, right)
-            } else if registers.contains(&right) {
-                (right, left)
-            } else if left == "sp" {
+        let expression = parse_value_expression(inner)?;
+        let mut terms = Vec::new();
+        collect_add_terms(&expression, &mut terms);
+        let register_terms = terms
+            .iter()
+            .filter_map(|term| expression_register(term))
+            .collect::<Vec<_>>();
+        if register_terms.len() > 1 {
+            return Err(Diagnostic::new(format!(
+                "DCPU address `{operand}` contains more than one register"
+            )));
+        }
+        if let Some(register) = register_terms.first().copied() {
+            if terms.iter().any(|term| {
+                expression_register(term).is_none() && expression_mentions_register(term)
+            }) {
+                return Err(Diagnostic::new(format!(
+                    "DCPU address `{operand}` has an unsupported register expression"
+                )));
+            }
+            let mut offset = 0u16;
+            for term in terms
+                .iter()
+                .filter(|term| expression_register(term).is_none())
+            {
+                offset = offset.wrapping_add(eval_value16(
+                    term,
+                    labels,
+                    pc,
+                    resolve_labels,
+                    symbol_units,
+                )?);
+            }
+            if register == "sp" {
                 return Ok(Operand {
                     code: 0x1a,
-                    extra: Some(value16(right, labels, pc, resolve_labels)?),
+                    extra: Some(offset),
                 });
-            } else if right == "sp" {
-                return Ok(Operand {
-                    code: 0x1a,
-                    extra: Some(value16(left, labels, pc, resolve_labels)?),
-                });
-            } else {
-                return Ok(Operand {
-                    code: 0x1e,
-                    extra: Some(value16(inner, labels, pc, resolve_labels)?),
-                });
-            };
+            }
             let index = registers
                 .iter()
                 .position(|candidate| *candidate == register)
                 .expect("register was checked above");
             return Ok(Operand {
                 code: 0x10 + index as u16,
-                extra: Some(value16(value, labels, pc, resolve_labels)?),
+                extra: Some(offset),
             });
+        }
+        if expression_mentions_register(&expression) {
+            return Err(Diagnostic::new(format!(
+                "DCPU address `{operand}` has an unsupported register expression"
+            )));
         }
         return Ok(Operand {
             code: 0x1e,
-            extra: Some(value16(inner, labels, pc, resolve_labels)?),
+            extra: Some(eval_value16(
+                &expression,
+                labels,
+                pc,
+                resolve_labels,
+                symbol_units,
+            )?),
         });
     }
     if let Some(value) = operand.strip_prefix("pick ") {
         return Ok(Operand {
             code: 0x1a,
-            extra: Some(value16(value.trim(), labels, pc, resolve_labels)?),
+            extra: Some(value16(
+                value.trim(),
+                labels,
+                pc,
+                resolve_labels,
+                symbol_units,
+            )?),
         });
     }
     if operand == "push" && position != Position::B {
@@ -242,9 +318,9 @@ fn parse_operand(
     let parsed = if let Some(code) = code {
         Operand { code, extra: None }
     } else {
-        let force_next_word = label_value(operand, labels).is_some()
-            || (!resolve_labels && !is_numeric_literal(operand));
-        let value = value16(operand, labels, pc, resolve_labels)?;
+        let expression = parse_value_expression(operand)?;
+        let force_next_word = expression_has_symbol_or_current(&expression);
+        let value = eval_value16(&expression, labels, pc, resolve_labels, symbol_units)?;
         if force_next_word {
             Operand {
                 code: 0x1f,
@@ -278,42 +354,192 @@ fn parse_operand(
 fn value16(
     text: &str,
     labels: &HashMap<String, u32>,
-    _pc: u32,
+    pc: u32,
     resolve_labels: bool,
+    symbol_units: SymbolUnits,
 ) -> Result<u16, Diagnostic> {
-    let text = text.trim();
-    if let Some(value) = label_value(text, labels) {
-        return Ok((value / 2) as u16);
-    }
-    match parse_numeric_literal(text) {
-        Ok(value) => Ok(value as u16),
-        Err(_) if !resolve_labels => Ok(0),
-        Err(_) => Err(Diagnostic::new(format!("unknown DCPU operand `{text}`"))),
+    let expression = parse_value_expression(text)?;
+    eval_value16(&expression, labels, pc, resolve_labels, symbol_units)
+}
+
+fn parse_value_expression(text: &str) -> Result<AssemblyExpression, Diagnostic> {
+    parse_assembly_expression(text)
+        .map_err(|_| Diagnostic::new(format!("invalid DCPU expression `{text}`")))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Eval {
+    Known(i128),
+    Unknown,
+}
+
+fn eval_value16(
+    expression: &AssemblyExpression,
+    symbols: &HashMap<String, u32>,
+    pc: u32,
+    resolve_symbols: bool,
+    symbol_units: SymbolUnits,
+) -> Result<u16, Diagnostic> {
+    match eval_expression(expression, symbols, pc, resolve_symbols, symbol_units)? {
+        Eval::Known(value) => Ok(value as u16),
+        Eval::Unknown => Ok(0),
     }
 }
 
-fn label_value(text: &str, labels: &HashMap<String, u32>) -> Option<u32> {
-    labels.get(text).copied().or_else(|| {
-        labels
+fn eval_expression(
+    expression: &AssemblyExpression,
+    symbols: &HashMap<String, u32>,
+    pc: u32,
+    resolve_symbols: bool,
+    symbol_units: SymbolUnits,
+) -> Result<Eval, Diagnostic> {
+    match expression {
+        AssemblyExpression::Symbol(name) => symbol_value(name, symbols)
+            .map(|value| match symbol_units {
+                SymbolUnits::ByteAddresses => value / 2,
+                SymbolUnits::WordAddresses => value,
+            })
+            .map(|value| Eval::Known(i128::from(value)))
+            .map_or_else(
+                || {
+                    if resolve_symbols {
+                        Err(Diagnostic::new(format!("unknown DCPU symbol `{name}`")))
+                    } else {
+                        Ok(Eval::Unknown)
+                    }
+                },
+                Ok,
+            ),
+        AssemblyExpression::Current => Ok(Eval::Known(i128::from(match symbol_units {
+            SymbolUnits::ByteAddresses => pc / 2,
+            SymbolUnits::WordAddresses => pc,
+        }))),
+        AssemblyExpression::Number(value) => Ok(Eval::Known(i128::from(*value))),
+        AssemblyExpression::Unary {
+            operator,
+            expression,
+        } => match eval_expression(expression, symbols, pc, resolve_symbols, symbol_units)? {
+            Eval::Unknown => Ok(Eval::Unknown),
+            Eval::Known(value) => Ok(Eval::Known(match operator {
+                AssemblyUnaryOperator::Plus => value,
+                AssemblyUnaryOperator::Negate => -value,
+                AssemblyUnaryOperator::BitNot => !value,
+            })),
+        },
+        AssemblyExpression::Binary {
+            operator,
+            left,
+            right,
+        } => match (
+            eval_expression(left, symbols, pc, resolve_symbols, symbol_units)?,
+            eval_expression(right, symbols, pc, resolve_symbols, symbol_units)?,
+        ) {
+            (Eval::Known(left), Eval::Known(right)) => {
+                let value = match operator {
+                    AssemblyBinaryOperator::Add => left
+                        .checked_add(right)
+                        .ok_or_else(|| expression_overflow(expression))?,
+                    AssemblyBinaryOperator::Subtract => left
+                        .checked_sub(right)
+                        .ok_or_else(|| expression_overflow(expression))?,
+                    AssemblyBinaryOperator::Multiply => left
+                        .checked_mul(right)
+                        .ok_or_else(|| expression_overflow(expression))?,
+                    AssemblyBinaryOperator::Divide if right == 0 => {
+                        return Err(Diagnostic::new("division by zero in DCPU expression"));
+                    }
+                    AssemblyBinaryOperator::Divide => left
+                        .checked_div(right)
+                        .ok_or_else(|| expression_overflow(expression))?,
+                    AssemblyBinaryOperator::ShiftLeft | AssemblyBinaryOperator::ShiftRight
+                        if !(0..=127).contains(&right) =>
+                    {
+                        return Err(Diagnostic::new(format!(
+                            "DCPU expression shift count `{right}` is outside 0 through 127"
+                        )));
+                    }
+                    AssemblyBinaryOperator::ShiftLeft => left
+                        .checked_shl(right as u32)
+                        .ok_or_else(|| expression_overflow(expression))?,
+                    AssemblyBinaryOperator::ShiftRight => left
+                        .checked_shr(right as u32)
+                        .ok_or_else(|| expression_overflow(expression))?,
+                    AssemblyBinaryOperator::BitAnd => left & right,
+                    AssemblyBinaryOperator::BitOr => left | right,
+                    AssemblyBinaryOperator::BitXor => left ^ right,
+                };
+                Ok(Eval::Known(value))
+            }
+            _ => Ok(Eval::Unknown),
+        },
+    }
+}
+
+fn expression_overflow(expression: &AssemblyExpression) -> Diagnostic {
+    Diagnostic::new(format!("DCPU expression `{expression:?}` overflows"))
+}
+
+fn symbol_value(name: &str, symbols: &HashMap<String, u32>) -> Option<u32> {
+    symbols.get(name).copied().or_else(|| {
+        symbols
             .iter()
-            .find_map(|(name, value)| name.eq_ignore_ascii_case(text).then_some(*value))
+            .find_map(|(known, value)| known.eq_ignore_ascii_case(name).then_some(*value))
     })
 }
 
-fn is_numeric_literal(text: &str) -> bool {
-    parse_numeric_literal(text).is_ok()
+fn expression_has_symbol_or_current(expression: &AssemblyExpression) -> bool {
+    match expression {
+        AssemblyExpression::Symbol(_) | AssemblyExpression::Current => true,
+        AssemblyExpression::Number(_) => false,
+        AssemblyExpression::Unary { expression, .. } => {
+            expression_has_symbol_or_current(expression)
+        }
+        AssemblyExpression::Binary { left, right, .. } => {
+            expression_has_symbol_or_current(left) || expression_has_symbol_or_current(right)
+        }
+    }
 }
 
-fn parse_numeric_literal(text: &str) -> Result<u32, std::num::ParseIntError> {
-    if text == "-1" {
-        return Ok(0xffff);
+fn expression_register(expression: &AssemblyExpression) -> Option<&str> {
+    let AssemblyExpression::Symbol(name) = expression else {
+        return None;
+    };
+    matches!(
+        name.as_str(),
+        "a" | "b" | "c" | "x" | "y" | "z" | "i" | "j" | "sp"
+    )
+    .then_some(name.as_str())
+}
+
+fn expression_mentions_register(expression: &AssemblyExpression) -> bool {
+    if expression_register(expression).is_some() {
+        return true;
     }
-    if let Some(hex) = text.strip_prefix("0x") {
-        u32::from_str_radix(hex, 16)
-    } else if let Some(hex) = text.strip_suffix('h') {
-        u32::from_str_radix(hex, 16)
+    match expression {
+        AssemblyExpression::Symbol(_)
+        | AssemblyExpression::Current
+        | AssemblyExpression::Number(_) => false,
+        AssemblyExpression::Unary { expression, .. } => expression_mentions_register(expression),
+        AssemblyExpression::Binary { left, right, .. } => {
+            expression_mentions_register(left) || expression_mentions_register(right)
+        }
+    }
+}
+
+fn collect_add_terms<'a>(
+    expression: &'a AssemblyExpression,
+    terms: &mut Vec<&'a AssemblyExpression>,
+) {
+    if let AssemblyExpression::Binary {
+        operator: AssemblyBinaryOperator::Add,
+        left,
+        right,
+    } = expression
+    {
+        collect_add_terms(left, terms);
+        collect_add_terms(right, terms);
     } else {
-        text.parse::<u32>()
+        terms.push(expression);
     }
 }
 
@@ -511,6 +737,54 @@ mod tests {
         );
         assert_eq!(instruction_len("set [symbol], symbol").unwrap(), 6);
         assert_eq!(instruction_len("hwi symbol").unwrap(), 4);
+    }
+
+    #[test]
+    fn evaluates_constant_and_word_address_expressions() {
+        let labels = HashMap::from([("Destination".to_owned(), 0x0020)]);
+
+        assert_eq!(
+            words(&encode_instruction("set a, (2 + 3) * 4", &labels, 0).unwrap()),
+            [0x01 | ((0x21 + 20) << 10)],
+        );
+        assert_eq!(
+            words(&encode_instruction("set a, ~0", &labels, 0).unwrap()),
+            [0x01 | (0x20 << 10)],
+        );
+        assert_eq!(
+            words(&encode_instruction("set a, 1 << 4", &labels, 0).unwrap()),
+            [0x01 | ((0x21 + 16) << 10)],
+        );
+        assert_eq!(
+            words(&encode_instruction("set a, destination + 2", &labels, 0).unwrap()),
+            [0x7c01, 0x0012],
+        );
+        assert_eq!(instruction_len("set a, 32 / destination").unwrap(), 4);
+        assert_eq!(
+            words(&encode_instruction("set a, 32 / destination", &labels, 0).unwrap()),
+            [0x7c01, 0x0002],
+        );
+        assert_eq!(
+            words(&encode_instruction("set a, $ + 2", &labels, 0x20).unwrap()),
+            [0x7c01, 0x0012],
+        );
+        assert_eq!(
+            words(&encode_instruction("set a, [destination + 2 + i]", &labels, 0).unwrap()),
+            [0x5801, 0x0012],
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_expressions_and_register_addresses() {
+        let labels = HashMap::new();
+        for source in [
+            "set a, 1 / 0",
+            "set a, 1 << 128",
+            "set a, [a + b]",
+            "set a, [a * 2]",
+        ] {
+            assert!(encode_instruction(source, &labels, 0).is_err(), "{source}");
+        }
     }
 
     #[test]

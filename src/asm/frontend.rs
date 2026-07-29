@@ -109,6 +109,7 @@ pub enum AssemblyExpression {
 pub enum AssemblyUnaryOperator {
     Plus,
     Negate,
+    BitNot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +117,9 @@ pub enum AssemblyBinaryOperator {
     Add,
     Subtract,
     Multiply,
+    Divide,
+    ShiftLeft,
+    ShiftRight,
     BitAnd,
     BitOr,
     BitXor,
@@ -375,6 +379,26 @@ fn append_statement(
     let location = pair_location(source_name, &pair);
     let text = pair.as_str().trim_end();
 
+    if let Some(rest) = text.strip_prefix(':') {
+        let (name, tail) = split_head(rest);
+        if name.is_empty() || name.chars().any(|character| character == ':') {
+            return Err(Diagnostic::at(
+                location,
+                "invalid colon-prefixed assembly label",
+            ));
+        }
+        output.push(LocatedParsedAssemblyItem {
+            location: location.clone(),
+            kind: ParsedAssemblyItem::Label(name.to_owned()),
+        });
+        if !tail.is_empty() {
+            let tail_offset = text.len() - tail.len();
+            let tail_location = offset_location(&location, &text[..tail_offset]);
+            append_statement_text(tail, tail_location, output)?;
+        }
+        return Ok(());
+    }
+
     if let Some(colon) = top_level_label_colon(text) {
         let name = text[..colon].trim();
         if !name.is_empty() {
@@ -449,7 +473,7 @@ fn append_statement_text(
     }
 
     let normalized_head = head.strip_prefix('.').unwrap_or(head);
-    if normalized_head.eq_ignore_ascii_case("equ") {
+    if normalized_head.eq_ignore_ascii_case("equ") || head.eq_ignore_ascii_case(".set") {
         let parts = split_delimited(rest, ',')
             .map_err(|message| Diagnostic::at(location.clone(), message))?;
         let (name, value) = if parts.len() == 2 {
@@ -631,6 +655,7 @@ fn build_expression(pair: Pair<'_, Rule>) -> Result<AssemblyExpression, String> 
         Rule::bit_or => build_binary(pair, Rule::or_op),
         Rule::bit_xor => build_binary(pair, Rule::xor_op),
         Rule::bit_and => build_binary(pair, Rule::and_op),
+        Rule::shift => build_binary(pair, Rule::shift_op),
         Rule::additive => build_binary(pair, Rule::add_op),
         Rule::multiplicative => build_binary(pair, Rule::multiply_op),
         Rule::unary => {
@@ -649,6 +674,7 @@ fn build_expression(pair: Pair<'_, Rule>) -> Result<AssemblyExpression, String> 
                     operator: match operator {
                         "+" => AssemblyUnaryOperator::Plus,
                         "-" => AssemblyUnaryOperator::Negate,
+                        "~" => AssemblyUnaryOperator::BitNot,
                         _ => return Err(format!("unsupported unary operator `{operator}`")),
                     },
                     expression: Box::new(value),
@@ -688,6 +714,9 @@ fn build_binary(pair: Pair<'_, Rule>, operator_rule: Rule) -> Result<AssemblyExp
                 "+" => AssemblyBinaryOperator::Add,
                 "-" => AssemblyBinaryOperator::Subtract,
                 "*" => AssemblyBinaryOperator::Multiply,
+                "/" => AssemblyBinaryOperator::Divide,
+                "<<" => AssemblyBinaryOperator::ShiftLeft,
+                ">>" => AssemblyBinaryOperator::ShiftRight,
                 "&" => AssemblyBinaryOperator::BitAnd,
                 "|" => AssemblyBinaryOperator::BitOr,
                 "^" => AssemblyBinaryOperator::BitXor,
@@ -747,28 +776,44 @@ fn decode_quoted_bytes(text: &str) -> Result<Vec<u8>, String> {
         return Err("malformed string literal".to_owned());
     }
     let end = text.len() - quote.len_utf8();
-    let mut output = String::new();
+    let mut output = Vec::new();
     let mut contents = text[quote.len_utf8()..end].chars();
     while let Some(character) = contents.next() {
         if character != '\\' {
-            output.push(character);
+            let mut encoded = [0; 4];
+            output.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
             continue;
         }
         let escaped = contents
             .next()
             .ok_or_else(|| "unexpected end of string escape".to_owned())?;
-        output.push(match escaped {
-            '\\' => '\\',
-            '\'' => '\'',
-            '"' => '"',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            '0' => '\0',
+        match escaped {
+            '\\' => output.push(b'\\'),
+            '\'' => output.push(b'\''),
+            '"' => output.push(b'"'),
+            'a' => output.push(0x07),
+            'b' => output.push(0x08),
+            'f' => output.push(0x0c),
+            'n' => output.push(b'\n'),
+            'r' => output.push(b'\r'),
+            't' => output.push(b'\t'),
+            'v' => output.push(0x0b),
+            '0' => output.push(0),
+            'x' => {
+                let high = contents
+                    .next()
+                    .and_then(|digit| digit.to_digit(16))
+                    .ok_or_else(|| "expected two hexadecimal digits after `\\x`".to_owned())?;
+                let low = contents
+                    .next()
+                    .and_then(|digit| digit.to_digit(16))
+                    .ok_or_else(|| "expected two hexadecimal digits after `\\x`".to_owned())?;
+                output.push(((high << 4) | low) as u8);
+            }
             other => return Err(format!("unknown string escape `\\{other}`")),
-        });
+        }
     }
-    Ok(output.into_bytes())
+    Ok(output)
 }
 
 fn split_head(text: &str) -> (&str, &str) {
@@ -802,6 +847,8 @@ fn data_width(directive: &str) -> Option<DataWidth> {
     } else if directive.eq_ignore_ascii_case("dw")
         || directive.eq_ignore_ascii_case("defw")
         || directive.eq_ignore_ascii_case("word")
+        || directive.eq_ignore_ascii_case("dat")
+        || directive.eq_ignore_ascii_case("short")
     {
         Some(DataWidth::Word)
     } else {

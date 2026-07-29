@@ -1866,6 +1866,7 @@ fn eval_expression(
             Eval::Known(value) => Ok(Eval::Known(match operator {
                 AssemblyUnaryOperator::Plus => value,
                 AssemblyUnaryOperator::Negate => -value,
+                AssemblyUnaryOperator::BitNot => !value,
             })),
         },
         AssemblyExpression::Binary {
@@ -1876,14 +1877,30 @@ fn eval_expression(
             eval_expression(left, labels, pc, resolve)?,
             eval_expression(right, labels, pc, resolve)?,
         ) {
-            (Eval::Known(left), Eval::Known(right)) => Ok(Eval::Known(match operator {
-                AssemblyBinaryOperator::Add => left + right,
-                AssemblyBinaryOperator::Subtract => left - right,
-                AssemblyBinaryOperator::Multiply => left * right,
-                AssemblyBinaryOperator::BitAnd => left & right,
-                AssemblyBinaryOperator::BitOr => left | right,
-                AssemblyBinaryOperator::BitXor => left ^ right,
-            })),
+            (Eval::Known(left), Eval::Known(right)) => {
+                let value = match operator {
+                    AssemblyBinaryOperator::Add => left + right,
+                    AssemblyBinaryOperator::Subtract => left - right,
+                    AssemblyBinaryOperator::Multiply => left * right,
+                    AssemblyBinaryOperator::Divide if right == 0 => {
+                        return Err(error("division by zero in 8086 expression"));
+                    }
+                    AssemblyBinaryOperator::Divide => left / right,
+                    AssemblyBinaryOperator::ShiftLeft | AssemblyBinaryOperator::ShiftRight
+                        if !(0..=127).contains(&right) =>
+                    {
+                        return Err(error(format!(
+                            "8086 expression shift count `{right}` is outside 0 through 127"
+                        )));
+                    }
+                    AssemblyBinaryOperator::ShiftLeft => left << right,
+                    AssemblyBinaryOperator::ShiftRight => left >> right,
+                    AssemblyBinaryOperator::BitAnd => left & right,
+                    AssemblyBinaryOperator::BitOr => left | right,
+                    AssemblyBinaryOperator::BitXor => left ^ right,
+                };
+                Ok(Eval::Known(value))
+            }
             _ => Ok(Eval::Unknown),
         },
     }

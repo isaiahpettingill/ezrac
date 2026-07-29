@@ -8,7 +8,8 @@ cargo run --features dcpu -- assemble --target generic-dcpu-bare program.asm
 
 `generic-dcpu-bare` produces a raw little-endian `.bin`. DCPU words are emitted
 least-significant byte first. Labels are case-insensitive and resolve to DCPU
-word addresses (the byte address divided by two).
+word addresses in instructions and data expressions. The symbol map continues to
+report label locations as byte offsets, matching the rest of the EZRA build API.
 
 ## Instructions
 
@@ -45,6 +46,45 @@ next_word
 ```
 
 `[SP]` is accepted as `PEEK`; `[SP + next_word]` is accepted as `PICK
-next_word`. Integer literals may be decimal, `0x`-prefixed hexadecimal, or
-`h`-suffixed hexadecimal. The assembler emits next words after the instruction
-word in DCPU operand order: `b`'s next word first, followed by `a`'s.
+next_word`. Register offsets may be expressions, such as `[table + 2 + I]`.
+Integer literals may use the shared assembler's decimal, hexadecimal, binary,
+and octal forms. The assembler emits next words after the instruction word in
+DCPU operand order: `b`'s next word first, followed by `a`'s.
+
+## Labels, symbols, and expressions
+
+Both traditional and Notch-style labels are accepted, including a statement on
+the same line:
+
+```text
+start:  SET A, message
+:loop   SUB I, 1
+```
+
+Use `.equ NAME, expression` or `.set NAME, expression` for constants. Forward
+references are supported. Constant expressions support parentheses, unary `+`,
+`-`, and `~`, and these binary operators with normal precedence:
+
+```text
+* / + - << >> & ^ |
+```
+
+Symbols and `$`, the current address, have DCPU word-address values. Symbolic
+literal operands always use the next-word encoding even when their final value
+would fit the short-literal range. This keeps instruction sizes and label values
+stable across both assembly passes. Constant-only expressions still use the
+shortest literal form.
+
+## Data
+
+`DAT`, `DW`, `DEFW`, `WORD`, and `.short` emit 16-bit little-endian DCPU words.
+Expressions and quoted strings can be mixed:
+
+```text
+message: DAT "Hello\n\0", message + 2, (8 << 2) / 4
+```
+
+Each decoded string byte occupies one DCPU word. Strings support `\\`, `\'`,
+`\"`, `\0`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`, and two-digit `\xNN`
+escapes. `DB`, `DEFB`, and `BYTE` remain available when raw byte data is
+required.

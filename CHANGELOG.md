@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.32
+
+- Added an MS-DOS i8086 character-creation RPG example covering buffered name input, function pointers, mutable pointer output, loops, and DOS console helpers.
+- Expanded the DCPU-16 assembler with DAS-compatible `DAT`/`.short` word data, `.set`, colon-prefixed labels, C-style string escapes, and constant expressions in literals and indexed operands. DCPU symbols and `$` now use word addresses throughout instruction, equate, and data evaluation while symbolic operands keep stable next-word encodings.
 - Standardized tracked Rust crates on edition 2024 and set development to the latest nightly toolchain with Rustfmt and Clippy components.
 
 - Moved explicit function inlining and safe direct-tail-recursion rewriting into TBIR so every source backend receives the same transformed program. Inline expansion preserves typed, left-to-right, exactly-once argument evaluation, renames parameters and locals, supports nested approved calls, and leaves conditionally evaluated calls in short-circuit and loop conditions unchanged. eZ80-family backends also lower compatible register-ABI sibling tail calls to jumps.

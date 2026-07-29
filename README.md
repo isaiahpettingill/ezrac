@@ -107,6 +107,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
 - `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
+- `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, operand forms, expressions, and word data.
 - `docs/msdos-sdk.md` documents the `msdos-com-i8086` `.COM` target and bundled `dos.*` SDK.
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.
