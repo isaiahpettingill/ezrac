@@ -774,10 +774,15 @@ fn completion_items(document: Option<&OpenDocument>, position: Position) -> Valu
             items.extend(field_completion_items(document, &prefix, position));
             for symbol in index.symbols.values() {
                 if should_show_symbol_completion(&symbol.label) {
+                    let documentation = function_comment(&document.text, &symbol.label);
                     items.push(json!({
                         "label": symbol.label,
                         "kind": symbol.kind,
                         "detail": symbol.detail,
+                        "documentation": documentation.map(|value| json!({
+                            "kind": "markdown",
+                            "value": value,
+                        })),
                     }));
                 }
             }
@@ -999,7 +1004,12 @@ fn hover(document: Option<&OpenDocument>, position: Position) -> Value {
     };
     let index = symbol_index(document);
     if let Some(info) = index.symbols.get(&symbol) {
-        return hover_markdown(&format!("```ezra\n{}\n```", info.detail));
+        let mut body = format!("```ezra\n{}\n```", info.detail);
+        if let Some(comment) = function_comment(&document.text, &symbol) {
+            body.push_str("\n\n");
+            body.push_str(&comment);
+        }
+        return hover_markdown(&body);
     }
     if index.modules.contains(&symbol) {
         let members = module_members(&index, &symbol);
@@ -1015,6 +1025,38 @@ fn hover(document: Option<&OpenDocument>, position: Position) -> Value {
 
 fn hover_markdown(value: &str) -> Value {
     json!({ "contents": { "kind": "markdown", "value": value } })
+}
+
+fn function_comment(source: &str, name: &str) -> Option<String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let declaration = lines.iter().position(|line| {
+        let line = line.trim_start();
+        let Some(function) = line.find("fn ") else {
+            return false;
+        };
+        let after = &line[function + 3..];
+        after
+            .strip_prefix(name)
+            .is_some_and(|suffix| suffix.starts_with('(') || suffix.starts_with('<'))
+    })?;
+
+    let mut comments = Vec::new();
+    for line in lines[..declaration].iter().rev() {
+        let line = line.trim();
+        if let Some(comment) = line.strip_prefix("//") {
+            comments.push(comment.trim_start().to_owned());
+        } else if line.starts_with('@') {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if comments.is_empty() {
+        None
+    } else {
+        comments.reverse();
+        Some(comments.join("\n"))
+    }
 }
 
 fn definition(document: Option<&OpenDocument>, position: Position) -> Value {

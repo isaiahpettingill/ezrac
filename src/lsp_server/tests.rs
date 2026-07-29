@@ -467,6 +467,47 @@ fn completion_includes_fields_and_cfg_values_during_incomplete_edits() {
 }
 
 #[test]
+fn function_comments_appear_in_hover_and_completion_documentation() {
+    let source = "// Adds two values.\n// The result wraps at u8 width.\n@inline fn add(left: u8, right: u8) -> u8 { return left + right }\nfn main() { let value: u8 = add(1, 2) }\n";
+    let document = OpenDocument {
+        path: PathBuf::from("function-comments.ezra"),
+        text: source.to_owned(),
+        version: None,
+    };
+
+    let hover = hover(
+        Some(&document),
+        Position {
+            line: 3,
+            character: 31,
+        },
+    );
+    assert!(hover.to_string().contains("Adds two values."), "{hover}");
+    assert!(
+        hover.to_string().contains("The result wraps at u8 width."),
+        "{hover}"
+    );
+
+    let completion = completion_items(
+        Some(&document),
+        Position {
+            line: 3,
+            character: 28,
+        },
+    );
+    let add = completion["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["label"] == "add")
+        .unwrap();
+    assert_eq!(
+        add["documentation"]["value"],
+        "Adds two values.\nThe result wraps at u8 width."
+    );
+}
+
+#[test]
 fn layout_symbols_are_available_for_completion_and_hover() {
     let line = "fn main() { let address: u24 = EZRA_RAM_BASE }";
     let document = OpenDocument {
