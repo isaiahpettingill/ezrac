@@ -109,9 +109,9 @@ or `FFFFh`.
 
 Examples are under `examples/msdos-i8086/`:
 
-- `hello.ezra` uses DOS console output;
-- `arguments.ezra` copies and prints the raw command tail; and
-- `file-io.ezra` creates, writes, closes, reopens, reads, prints, and deletes a file.
+- `hello/hello.ezra` uses DOS console output;
+- `arguments/arguments.ezra` copies and prints the raw command tail; and
+- `file-io/file-io.ezra` creates, writes, closes, reopens, reads, prints, and leaves `NEW.TXT` in the current directory for inspection.
 
 `examples/tiny-lisp` also includes `msdos-com-i8086` in its multi-target project.
 

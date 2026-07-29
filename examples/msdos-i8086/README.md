@@ -1,22 +1,23 @@
 # MS-DOS 8086 examples
 
-These examples exercise the built-in `dos.*` SDK and compile as real-mode
-MS-DOS `.COM` programs loaded at offset `0100h`.
+These projects use the built-in `dos.*` SDK and build real-mode MS-DOS `.COM`
+programs loaded at offset `0100h`.
 
-Run from the repository root:
+Run these commands from the repository root:
 
 ```sh
-cargo run --features i8086 -- build --target msdos-com-i8086 examples/msdos-i8086/hello.ezra
-cargo run --features i8086 -- build --target msdos-com-i8086 examples/msdos-i8086/arguments.ezra
-cargo run --features i8086 -- build --target msdos-com-i8086 examples/msdos-i8086/file-io.ezra
+cargo run --features i8086 -- build examples/msdos-i8086/hello/hello.ezra
+cargo run --features i8086 -- build examples/msdos-i8086/arguments/arguments.ezra
+cargo run --features i8086 -- build examples/msdos-i8086/file-io/file-io.ezra
 ```
 
-Artifacts are written under `examples/msdos-i8086/target/msdos-com-i8086/`.
+Each artifact is written to the corresponding example's
+`target/msdos-com-i8086/` directory.
 
-- `hello.ezra` writes a DOS `$`-terminated string.
-- `arguments.ezra` immediately copies and prints the raw PSP command tail.
-- `file-io.ezra` creates, writes, closes, reopens, reads, prints, and deletes a file.
+- `hello` writes a DOS `$`-terminated string.
+- `arguments` copies and prints the raw PSP command tail before DOS can reuse
+  the default DTA.
+- `file-io` creates `NEW.TXT`, writes a message, reopens and prints it, then
+  leaves the file in the current directory for inspection.
 
-The command tail normally begins with the shell-supplied separator. It is not
-NUL-terminated in the PSP and shares storage with DOS's default DTA, so copy it
-before directory searches. See [`../../docs/msdos-sdk.md`](../../docs/msdos-sdk.md).
+See [`../../docs/msdos-sdk.md`](../../docs/msdos-sdk.md) for the SDK reference.
