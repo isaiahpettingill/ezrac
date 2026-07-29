@@ -2,6 +2,7 @@
 name = "tiny-lisp"
 
 [build]
+input = "main.ezra"
 # The first target is the default for builds; the LSP checks every target so
 # target-specific implementations remain complete and warning-free.
 target = [
