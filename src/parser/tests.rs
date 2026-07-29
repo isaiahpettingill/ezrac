@@ -233,6 +233,25 @@ fn parses_newline_separated_deref_assignment_without_semicolon() {
 }
 
 #[test]
+fn parses_deref_assignment_after_a_block_without_an_inserted_separator() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            fn main() {
+                let value: u8 = 0
+                while value == 0 {
+                    break
+                }
+                *target = value
+            }
+        "#,
+    )
+    .unwrap();
+
+    assert!(program.main_function().is_some());
+}
+
+#[test]
 fn parses_else_if_as_nested_if() {
     let program = parse_program(
         Path::new("game.ezra"),

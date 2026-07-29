@@ -1,8 +1,8 @@
-use crate::compat::{SourcePath, prelude::*, source_path_owned};
+use crate::compat::{prelude::*, source_path_owned, SourcePath};
 #[cfg(all(feature = "std", test))]
 use std::path::Path;
 
-use pest::{Parser, iterators::Pair};
+use pest::{iterators::Pair, Parser};
 use pest_derive::Parser;
 
 use crate::{
@@ -80,6 +80,7 @@ fn previous_line_can_end_stmt(source_so_far: &str) -> bool {
     !matches!(
         ch,
         ';' | '{'
+            | '}'
             | '('
             | '['
             | ','
