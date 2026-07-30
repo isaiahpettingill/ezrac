@@ -73,7 +73,6 @@
 (boolean_literal) @boolean
 (primitive_type) @type.builtin
 (pointer_type "ptr" @type.builtin)
-(function_type "fn" @type.builtin)
 
 ; Operators and delimiters
 [

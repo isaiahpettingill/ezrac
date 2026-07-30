@@ -1,6 +1,6 @@
 id = "ezra"
 name = "Ezra"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["Ezra contributors"]
 description = "Ezra language support."
