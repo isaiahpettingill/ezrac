@@ -4627,6 +4627,35 @@ impl Emitter {
         }
 
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+            && let Expr::Binary {
+                left: masked,
+                op: BinaryOp::BitAnd,
+                right: mask,
+            } = left.as_ref()
+            && let Ok(mask) = self.eval_i64_with_local_constants(mask)
+            && let Ok(expected) = self.eval_i64_with_local_constants(right)
+            && mask > 0
+            && mask <= 0xFF
+            && (mask as u64).count_ones() > 1
+            && (expected == 0 || expected == mask)
+        {
+            let width = self.expr_width(masked)?;
+            if width == ValueWidth::U8 {
+                self.emit_expr_to_a(masked)?;
+            } else {
+                self.emit_expr_to_hl(masked, width)?;
+                self.line("    ld a, l");
+            }
+            self.line(&format!("    and {mask:02X}h"));
+            if expected == mask {
+                self.line(&format!("    cp {mask:02X}h"));
+            }
+            let branch = if *op == BinaryOp::Eq { "nz" } else { "z" };
+            self.line(&format!("    jp {branch}, {false_label}"));
+            return Ok(true);
+        }
+
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
             && self.expr_width(left)? == ValueWidth::U8
             && self.expr_width(right)? == ValueWidth::U8
             && is_immediate_u8(right)

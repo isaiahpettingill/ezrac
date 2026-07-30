@@ -880,22 +880,27 @@ fn emits_wide_branches_low_bit_masks_and_small_pointer_offsets() {
 #[test]
 fn branches_directly_on_single_bit_masks() {
     let source = r#"
-        global wide: u24 = 0x21u24
+        global wide: u24 = 0x31u24
 
         fn byte_has_high_bit(byte: u8) {
             if (byte & 0x80u8) == 0u8 {
                 test.fail(1)
             }
+            if (byte & 0x30u8) == 0u8 {
+                test.fail(2)
+            }
         }
 
         fn main() {
-            byte_has_high_bit(0x80u8)
+            byte_has_high_bit(0xB0u8)
             if (wide & 0x20u24) != 0u24 {
                 if (wide & 1u24) == 1u24 {
-                    test.pass()
+                    if (wide & 0x30u24) == 0x30u24 {
+                        test.pass()
+                    }
                 }
             }
-            test.fail(2)
+            test.fail(3)
         }
     "#;
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
@@ -905,6 +910,8 @@ fn branches_directly_on_single_bit_masks() {
     assert!(asm.contains("    bit 7, a"), "{asm}");
     assert!(asm.contains("    bit 5, l"), "{asm}");
     assert!(asm.contains("    bit 0, l"), "{asm}");
+    assert!(asm.contains("    and 30h"), "{asm}");
+    assert!(asm.contains("    cp 30h"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }
