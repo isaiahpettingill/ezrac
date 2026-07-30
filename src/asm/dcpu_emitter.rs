@@ -556,8 +556,14 @@ impl Emitter {
         self.emit_expr(right, ty)?;
         self.line("    set b, pop");
         match op {
-            BinaryOp::Eq => self.boolean_compare("ife", "b", "a"),
-            BinaryOp::Ne => self.boolean_compare("ifn", "b", "a"),
+            BinaryOp::Eq => {
+                self.boolean_compare("ife", "b", "a");
+                return Ok(());
+            }
+            BinaryOp::Ne => {
+                self.boolean_compare("ifn", "b", "a");
+                return Ok(());
+            }
             BinaryOp::Lt => self.boolean_compare(if signed(ty) { "ifa" } else { "ifl" }, "b", "a"),
             BinaryOp::Le => self.boolean_compare_le(ty, true),
             BinaryOp::Gt => self.boolean_compare(if signed(ty) { "ifa" } else { "ifg" }, "a", "b"),
@@ -1260,10 +1266,13 @@ mod tests {
     #[test]
     fn globals_arrays_structs_pointers_strings_and_mmio_assemble() {
         let assembly = emit(
-            "struct Pair { left: u16 right: u16 } global values: [u16; 2] = [1, 2] global pair: Pair = Pair { left: 3, right: 4 } mmio SCREEN: u16 = 0x8000 fn main() { values[1] = 7; pair.right += 1; let p: ptr<u16> = &values[0]; *p = 9; SCREEN = values[1]; let s: ptr<u8> = \"ok\" }",
+            "struct Pair { left: u16 right: u16 } global values: [u16; 2] = [1, 2] global pair: Pair = Pair { left: 3, right: 4 } mmio SCREEN: u16 = 0x8000 fn main() { values[1] = 7; let equal: bool = values[0] == values[1]; let unequal: bool = values[0] != values[1]; pair.right += 1; let p: ptr<u16> = &values[0]; *p = 9; SCREEN = values[1]; let s: ptr<u8> = \"ok\" }",
         );
         assert!(assembly.contains("__ezra_global_values:"));
         assert!(assembly.contains("__ezra_string_"));
+        assert!(assembly.contains("    ife b, a"));
+        assert!(assembly.contains("    ifn b, a"));
+        assert!(!assembly.contains("    and a, 0x00ff"));
     }
     #[test]
     fn sdk_style_inline_operands_assemble() {

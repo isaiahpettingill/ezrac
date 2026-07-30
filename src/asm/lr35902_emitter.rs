@@ -851,8 +851,10 @@ impl Emitter {
             } => {
                 let else_label = self.next_label("if_else");
                 let end_label = self.next_label("if_end");
-                self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
-                self.jump_if_zero(self.r0.address, &else_label);
+                if !self.emit_jump_if_false(condition, &else_label)? {
+                    self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
+                    self.jump_if_zero(self.r0.address, &else_label);
+                }
                 self.emit_block(then_body)?;
                 self.line(&format!("    jmp {end_label}"));
                 self.line(&format!("{else_label}:"));
@@ -867,8 +869,10 @@ impl Emitter {
                     break_label: break_label.clone(),
                 });
                 self.line(&format!("{condition_label}:"));
-                self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
-                self.jump_if_zero(self.r0.address, &break_label);
+                if !self.emit_jump_if_false(condition, &break_label)? {
+                    self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
+                    self.jump_if_zero(self.r0.address, &break_label);
+                }
                 self.emit_block(body)?;
                 self.line(&format!("    jmp {condition_label}"));
                 self.line(&format!("{break_label}:"));
@@ -1003,6 +1007,54 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn emit_jump_if_false(
+        &mut self,
+        condition: &Expr,
+        false_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let Expr::Binary { left, op, right } = condition else {
+            return Ok(false);
+        };
+        if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            return Ok(false);
+        }
+        let Expr::Binary {
+            left: source,
+            op: BinaryOp::BitAnd,
+            right: mask_expr,
+        } = left.as_ref()
+        else {
+            return Ok(false);
+        };
+        let (Ok(mask), Ok(expected)) = (
+            self.model.const_value(mask_expr),
+            self.model.const_value(right),
+        ) else {
+            return Ok(false);
+        };
+        let source_ty = self.model.resolved_type(&self.expr_type(source)?)?;
+        if self.model.type_width(&source_ty)? != 1 {
+            return Ok(false);
+        }
+        let (Ok(mask), Ok(expected)) = (u8::try_from(mask), u8::try_from(expected)) else {
+            return Ok(false);
+        };
+        if !mask.is_power_of_two() || (expected != 0 && expected != mask) {
+            return Ok(false);
+        }
+
+        self.emit_expr(source, &source_ty)?;
+        self.lda(self.r0.address);
+        self.line(&format!("    bit {}, a", mask.trailing_zeros()));
+        let branch = if (*op == BinaryOp::Eq) == (expected == 0) {
+            "jp nz,"
+        } else {
+            "jp z,"
+        };
+        self.line(&format!("    {branch} {false_label}"));
+        Ok(true)
     }
 
     fn emit_expr(&mut self, expr: &Expr, expected: &Type) -> Result<(), Diagnostic> {
@@ -2774,6 +2826,38 @@ mod tests {
         );
         assert!(assembly.contains("call _fib"));
         assert!(!assembly.contains("6502"));
+    }
+
+    #[test]
+    fn lowers_one_bit_mask_branches_to_bit() {
+        let assembly = emit(
+            r#"
+                fn bit_tests(byte: u8) {
+                    if (byte & 0x20u8) == 0 {
+                        let clear: u8 = byte
+                    }
+                    if (byte & 0x20u8) != 0 {
+                        let set: u8 = byte
+                    }
+                    while (byte & 0x20u8) == 0 { break }
+                    while (byte & 0x20u8) != 0 { break }
+                }
+                fn main() {
+                    bit_tests(0x20u8)
+                }
+            "#,
+        );
+
+        assert_eq!(assembly.matches("    bit 5, a").count(), 4, "{assembly}");
+        assert!(!assembly.contains("    and b"), "{assembly}");
+        for branch in [
+            "    bit 5, a\n    jp nz, .L_if_else_",
+            "    bit 5, a\n    jp z, .L_if_else_",
+            "    bit 5, a\n    jp nz, .L_while_end_",
+            "    bit 5, a\n    jp z, .L_while_end_",
+        ] {
+            assert!(assembly.contains(branch), "missing {branch}:\n{assembly}");
+        }
     }
 
     #[test]

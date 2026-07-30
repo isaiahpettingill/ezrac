@@ -265,10 +265,15 @@ impl Emitter {
             } => {
                 let otherwise = self.next_label("if_else");
                 let done = self.next_label("if_end");
-                if !self.emit_jump_if_false(condition, &otherwise)? {
+                let false_label = if else_body.is_empty() {
+                    &done
+                } else {
+                    &otherwise
+                };
+                if !self.emit_jump_if_false(condition, false_label)? {
                     self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
                     self.line("    tst.b d0");
-                    self.line(&format!("    beq {otherwise}"));
+                    self.line(&format!("    beq {false_label}"));
                 }
                 self.emit_block(then_body)?;
                 self.line(&format!("    bra {done}"));
@@ -521,22 +526,30 @@ impl Emitter {
         let Ok(expected) = u64::try_from(expected) else {
             return Ok(false);
         };
-        if mask > width_mask
+        if mask == 0
+            || mask > width_mask
             || expected > width_mask
-            || !mask.is_power_of_two()
             || (expected != 0 && expected != mask)
         {
             return Ok(false);
         }
 
         self.emit_expr(source, &source_ty)?;
-        let bit = mask.trailing_zeros();
-        self.line(&format!("    btst #{bit},d0"));
         let branch = if (*op == BinaryOp::Eq) == (expected == 0) {
             "bne"
         } else {
             "beq"
         };
+        if mask.is_power_of_two() {
+            let bit = mask.trailing_zeros();
+            self.line(&format!("    btst #{bit},d0"));
+        } else {
+            let size = size_suffix(&source_ty)?;
+            self.line(&format!("    andi.{size} #${mask:X},d0"));
+            if expected == mask {
+                self.line(&format!("    cmpi.{size} #${mask:X},d0"));
+            }
+        }
         self.line(&format!("    {branch} {false_label}"));
         Ok(true)
     }
@@ -1790,13 +1803,75 @@ mod tests {
         assert!(!assembly.contains("    and.b d2,d0"), "{assembly}");
         assert!(!assembly.contains("    and.w d2,d0"), "{assembly}");
         for branch in [
-            "    btst #5,d0\n    bne __ezra_if_else_",
-            "    btst #5,d0\n    beq __ezra_if_else_",
+            "    btst #5,d0\n    bne __ezra_if_end_",
+            "    btst #5,d0\n    beq __ezra_if_end_",
             "    btst #9,d0\n    bne __ezra_while_end_",
             "    btst #9,d0\n    beq __ezra_while_end_",
         ] {
             assert!(assembly.contains(branch), "missing {branch}:\n{assembly}");
         }
+    }
+
+    #[test]
+    fn lowers_multi_bit_mask_branches_without_memory_btst() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            fn bit_tests(byte: u8, word: u16) {
+                if (byte & 0x30u8) == 0 {
+                    let clear: u8 = byte
+                }
+                if (byte & 0x30u8) != 0 {
+                    let any_set: u8 = byte
+                }
+                if (word & 0x0300u16) == 0x0300u16 {
+                    let all_set: u16 = word
+                }
+                if (word & 0x0300u16) != 0x0300u16 {
+                    let not_all_set: u16 = word
+                }
+            }
+            fn main() {
+                bit_tests(0x30u8, 0x0300u16)
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            assembly.matches("    andi.b #$30,d0").count(),
+            2,
+            "{assembly}"
+        );
+        assert_eq!(
+            assembly.matches("    andi.w #$300,d0").count(),
+            2,
+            "{assembly}"
+        );
+        assert_eq!(
+            assembly.matches("    cmpi.w #$300,d0").count(),
+            2,
+            "{assembly}"
+        );
+        assert!(!assembly.contains("    btst #"), "{assembly}");
+        for branch in [
+            "    andi.b #$30,d0\n    bne __ezra_if_end_",
+            "    andi.b #$30,d0\n    beq __ezra_if_end_",
+            "    cmpi.w #$300,d0\n    bne __ezra_if_end_",
+            "    cmpi.w #$300,d0\n    beq __ezra_if_end_",
+        ] {
+            assert!(assembly.contains(branch), "missing {branch}:\n{assembly}");
+        }
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
     }
 
     #[test]

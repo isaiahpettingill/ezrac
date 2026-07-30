@@ -317,8 +317,10 @@ impl Emitter {
             } => {
                 let else_label = self.next_label("if_else");
                 let end_label = self.next_label("if_end");
-                self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
-                self.jump_if_zero(self.r0.address, &else_label);
+                if !self.emit_masked_bit_false_branch(condition, &else_label)? {
+                    self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
+                    self.jump_if_zero(self.r0.address, &else_label);
+                }
                 self.emit_block(then_body)?;
                 self.line(&format!("    jmp {end_label}"));
                 self.line(&format!("{else_label}:"));
@@ -333,8 +335,10 @@ impl Emitter {
                     break_label: break_label.clone(),
                 });
                 self.line(&format!("{condition_label}:"));
-                self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
-                self.jump_if_zero(self.r0.address, &break_label);
+                if !self.emit_masked_bit_false_branch(condition, &break_label)? {
+                    self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
+                    self.jump_if_zero(self.r0.address, &break_label);
+                }
                 self.emit_block(body)?;
                 self.line(&format!("    jmp {condition_label}"));
                 self.line(&format!("{break_label}:"));
@@ -1868,6 +1872,60 @@ impl Emitter {
         }
     }
 
+    /// Emits a false branch for `(value & bit) == 0|bit` and `!= 0|bit`.
+    ///
+    /// `value` is evaluated into the normal result storage before `BIT` inspects
+    /// one byte, so this preserves side effects and volatile access widths.
+    fn emit_masked_bit_false_branch(
+        &mut self,
+        condition: &Expr,
+        false_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let Expr::Binary { left, op, right } = condition else {
+            return Ok(false);
+        };
+        let Expr::Binary {
+            left: value,
+            op: BinaryOp::BitAnd,
+            right: mask_expr,
+        } = left.as_ref()
+        else {
+            return Ok(false);
+        };
+        if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            return Ok(false);
+        }
+
+        let Ok(raw_mask) = self.model.const_value(mask_expr) else {
+            return Ok(false);
+        };
+        let Ok(raw_expected) = self.model.const_value(right) else {
+            return Ok(false);
+        };
+        let value_ty = self.expr_type(value)?;
+        let width = self.model.type_width(&value_ty)?;
+        let width_mask = (1_i64 << (u32::from(width) * 8)) - 1;
+        let mask = raw_mask & width_mask;
+        let expected = raw_expected & width_mask;
+        if !(mask as u64).is_power_of_two() || !matches!(expected, 0) && expected != mask {
+            return Ok(false);
+        }
+
+        let bit_offset = mask.trailing_zeros();
+        let byte_offset = bit_offset / 8;
+        let byte_mask = (mask >> (byte_offset * 8)) as u8;
+        self.emit_expr(value, &value_ty)?;
+        self.lda_imm(byte_mask);
+        self.line(&format!("    bit ${:04X}", self.r0.address + byte_offset));
+        let branch = if (*op == BinaryOp::Eq) == (expected == mask) {
+            "beq"
+        } else {
+            "bne"
+        };
+        self.branch_long(branch, false_label);
+        Ok(true)
+    }
+
     fn jump_storage_zero(&mut self, storage: Storage, width: u8, label: &str) {
         let nonzero = self.next_label("nonzero");
         for offset in 0..u32::from(width) {
@@ -2837,6 +2895,44 @@ mod tests {
         assert_eq!(memory.byte(0xFF01), 0x45);
         assert_eq!(memory.byte(0xFF02), 0xFF);
         assert_eq!(memory.byte(0xFF03), 0);
+    }
+
+    #[test]
+    fn lowers_single_bit_masked_conditions_without_re_evaluating_the_value() {
+        let assembly = emit(
+            r#"
+                global calls: u8 = 0
+                global result: u8 = 0
+                fn sample() -> u8 { calls += 1; return calls }
+                fn main() {
+                    if (sample() & 1) == 1 { result += 1 }
+                    if (sample() & 2) != 0 { result += 2 }
+                    while (sample() & 4) == 4 { result += 4 }
+                }
+            "#,
+        );
+        assert_eq!(assembly.matches("    bit $").count(), 3, "{assembly}");
+        assert!(!assembly.contains("    and $"), "{assembly}");
+
+        let memory = run(
+            r#"
+                volatile mmio RESULT0: ptr<u8> = 0xFF00
+                volatile mmio RESULT1: ptr<u8> = 0xFF01
+                global calls: u8 = 0
+                global result: u8 = 0
+                fn sample() -> u8 { calls += 1; return calls }
+                fn main() {
+                    if (sample() & 1) == 1 { result += 1 }
+                    if (sample() & 2) != 0 { result += 2 }
+                    while (sample() & 4) == 4 { result += 4 }
+                    *(RESULT0) = calls
+                    *(RESULT1) = result
+                }
+            "#,
+            20_000,
+        );
+        assert_eq!(memory.byte(0xFF00), 3);
+        assert_eq!(memory.byte(0xFF01), 3);
     }
 
     #[test]

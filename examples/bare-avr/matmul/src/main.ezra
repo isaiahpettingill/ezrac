@@ -1,12 +1,12 @@
 volatile mmio output: ptr<u16> = 0x0100
 
-// The embeds will remain in the binary, but their contents will not be used at runtime.
-// Embeds are included in the binary as-is, and their contents are not modified by the compiler.
-embed matrix_a : [u16; 9] = [1, 2, 3, 4, 3, 0, 0, 2, 4]
-embed matrix_b : [u16; 9] = [7, 0, 3, 2, 2, 0, 1, 3, 9]
+// These constants will get compiled out
+// because every use of them can be calculated at compile time
+const matrix_a : [u16; 9] = [1, 2, 3, 4, 3, 0, 0, 2, 4]
+const matrix_b : [u16; 9] = [7, 0, 3, 2, 2, 0, 1, 3, 9]
 
-
-fn matmul3x3(a: ptr<u8>, b: ptr<u8>, result_matrix: ptr<u8>) {
+// Because it refences only constants, this becomes a constant expression and gets inlined
+fn matmul3x3(a: ptr<u16>, b: ptr<u16>, result_matrix: ptr<u16>) {
     *(result_matrix + 0) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     *(result_matrix + 1) = a[3] * b[0] + a[4] * b[1] + a[5] * b[2]
     *(result_matrix + 2) = a[6] * b[0] + a[7] * b[1] + a[8] * b[2]

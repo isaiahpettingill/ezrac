@@ -211,9 +211,11 @@ impl Emitter {
             } => {
                 let otherwise = self.next_label("if_else");
                 let done = self.next_label("if_end");
-                self.emit_expr(condition, &bool_type())?;
-                self.line("    tsta");
-                self.branch_long("beq", &otherwise);
+                if !self.emit_jump_if_false(condition, &otherwise)? {
+                    self.emit_expr(condition, &bool_type())?;
+                    self.line("    tsta");
+                    self.branch_long("beq", &otherwise);
+                }
                 self.emit_block(then_body)?;
                 self.line(&format!("    jmp {done}"));
                 self.line(&format!("{otherwise}:"));
@@ -228,9 +230,11 @@ impl Emitter {
                     break_label: done.clone(),
                 });
                 self.line(&format!("{check}:"));
-                self.emit_expr(condition, &bool_type())?;
-                self.line("    tsta");
-                self.branch_long("beq", &done);
+                if !self.emit_jump_if_false(condition, &done)? {
+                    self.emit_expr(condition, &bool_type())?;
+                    self.line("    tsta");
+                    self.branch_long("beq", &done);
+                }
                 self.emit_block(body)?;
                 self.line(&format!("    jmp {check}"));
                 self.line(&format!("{done}:"));
@@ -498,6 +502,51 @@ impl Emitter {
         self.line(&format!("{done}:"));
     }
 
+    fn emit_jump_if_false(
+        &mut self,
+        condition: &Expr,
+        false_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let Expr::Binary { left, op, right } = condition else {
+            return Ok(false);
+        };
+        if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            return Ok(false);
+        }
+        let Expr::Binary {
+            left: source,
+            op: BinaryOp::BitAnd,
+            right: mask_expr,
+        } = left.as_ref()
+        else {
+            return Ok(false);
+        };
+        let (Ok(mask), Ok(expected)) = (
+            self.model.const_value(mask_expr),
+            self.model.const_value(right),
+        ) else {
+            return Ok(false);
+        };
+        let (Ok(mask), Ok(expected)) = (u8::try_from(mask), u8::try_from(expected)) else {
+            return Ok(false);
+        };
+        if !mask.is_power_of_two() || (expected != 0 && expected != mask) {
+            return Ok(false);
+        }
+
+        let source_ty = self.expr_type(source)?;
+        self.require_scalar(&source_ty, "bit-test operand")?;
+        self.emit_expr(source, &source_ty)?;
+        self.line(&format!("    bita #{mask:02X}h"));
+        let branch = if (*op == BinaryOp::Eq) == (expected == 0) {
+            "bne"
+        } else {
+            "beq"
+        };
+        self.branch_long(branch, false_label);
+        Ok(true)
+    }
+
     fn emit_logical(&mut self, left: &Expr, op: BinaryOp, right: &Expr) -> Result<(), Diagnostic> {
         let decisive = self.next_label("logical_decisive");
         let done = self.next_label("logical_done");
@@ -613,7 +662,7 @@ impl Emitter {
         self.line(&format!("    ldaa #{value:02X}h"));
     }
     fn branch_long(&mut self, branch: &str, target: &str) {
-        let skip = self.next_label("branch_skip");
+        let skip = self.next_local_label("branch_skip");
         let inverse = match branch {
             "beq" => "bne",
             "bne" => "beq",
@@ -629,6 +678,11 @@ impl Emitter {
     }
     fn next_label(&mut self, prefix: &str) -> String {
         let label = format!("__ezra_{prefix}_{}", self.labels);
+        self.labels += 1;
+        label
+    }
+    fn next_local_label(&mut self, prefix: &str) -> String {
+        let label = format!("m6800_{prefix}_{}", self.labels);
         self.labels += 1;
         label
     }
@@ -920,6 +974,36 @@ mod tests {
         assert!(assembly.contains("_nested_pair:"), "{assembly}");
         assert!(assembly.contains("_ready:"), "{assembly}");
         assert_eq!(assembly.matches("jsr _ready").count(), 2, "{assembly}");
+    }
+
+    #[test]
+    fn lowers_single_bit_mask_branches_to_bita_without_skipping_evaluation() {
+        let program = parse_program(
+            Path::new("m6800_bit_test.ezra"),
+            r#"
+                global calls: u8 = 0
+
+                fn next() -> u8 {
+                    calls += 1
+                    return calls
+                }
+
+                fn main() -> u8 {
+                    if (next() & 1) == 0 { calls += 2 }
+                    while (next() & 2) != 0 { break }
+                    return calls
+                }
+            "#,
+        )
+        .unwrap();
+        let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+
+        assert_eq!(assembly.matches("    bita #01h\n").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("    bita #02h\n").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("jsr _next").count(), 2, "{assembly}");
+        assert!(!assembly.contains("anda >__ezra_r1"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
     }
 
     #[test]
