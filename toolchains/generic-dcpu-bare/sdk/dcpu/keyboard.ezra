@@ -1,0 +1,15 @@
+// Generic Keyboard command and key constants.
+
+pub const KEYBOARD_COMMAND_CLEAR: u16 = 0
+pub const KEYBOARD_COMMAND_READ: u16 = 1
+pub const KEYBOARD_COMMAND_IS_DOWN: u16 = 2
+pub const KEYBOARD_COMMAND_SET_INTERRUPT: u16 = 3
+
+pub const KEY_BACKSPACE: u16 = 0x0010
+pub const KEY_RETURN: u16 = 0x0011
+pub const KEY_INSERT: u16 = 0x0012
+pub const KEY_DELETE: u16 = 0x0013
+pub const KEY_UP: u16 = 0x0080
+pub const KEY_DOWN: u16 = 0x0081
+pub const KEY_LEFT: u16 = 0x0082
+pub const KEY_RIGHT: u16 = 0x0083

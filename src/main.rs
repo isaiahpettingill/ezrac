@@ -2673,8 +2673,8 @@ fn print_targets() {
             cpu: "dcpu",
             address_width_bits: 16,
             output: "bin",
-            sdk: "none",
-            status: "DCPU-16 assembly and limited scalar source target",
+            sdk: "dcpu.*",
+            status: "DCPU-16 assembly, SDK, and limited scalar source target",
         },
         #[cfg(feature = "avr")]
         TargetRow {

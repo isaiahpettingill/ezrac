@@ -1,0 +1,5 @@
+// Generic Clock commands. CLOCK_COMMAND_SET_RATE takes ticks per second in B.
+
+pub const CLOCK_COMMAND_SET_RATE: u16 = 0
+pub const CLOCK_COMMAND_READ_TICKS: u16 = 1
+pub const CLOCK_COMMAND_SET_INTERRUPT: u16 = 2

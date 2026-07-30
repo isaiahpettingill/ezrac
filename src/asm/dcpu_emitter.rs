@@ -73,6 +73,10 @@ impl Emitter {
                         "DCPU-16 emitter currently supports only `main`; function `{name}` is unsupported"
                     )));
                 }
+                TbirDeclaration::Object {
+                    kind: crate::tbir::TbirObjectKind::Const,
+                    ..
+                } => {}
                 TbirDeclaration::Object { name, kind } => {
                     return Err(Diagnostic::new(format!(
                         "DCPU-16 emitter does not yet support {kind:?} declaration `{name}`"

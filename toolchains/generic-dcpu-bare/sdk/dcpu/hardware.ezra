@@ -1,0 +1,17 @@
+// DCPU-16 Standard Machine hardware slots in dcpu-16-libretro.
+// Put a command in A and its arguments in B/C/X/Y/Z, then run HWI <slot>.
+
+pub const LEM1802: u16 = 0
+pub const KEYBOARD: u16 = 1
+pub const CLOCK: u16 = 2
+pub const M35FD: u16 = 3
+pub const SPED3: u16 = 4
+pub const SPEAKER: u16 = 5
+pub const RETROPAD_1: u16 = 6
+pub const RETROPAD_2: u16 = 7
+pub const RETROPAD_3: u16 = 8
+pub const RETROPAD_4: u16 = 9
+pub const RETROPAD_5: u16 = 10
+pub const RETROPAD_6: u16 = 11
+pub const RETROPAD_7: u16 = 12
+pub const RETROPAD_8: u16 = 13

@@ -26,7 +26,29 @@ cargo run --features dcpu -- build examples/dcpu-16/arithmetic/src/main.ezra
 ```
 
 The libretro core's Standard Compatibility profile maps LEM1802 screen words at
-`0x8000`. The `lem-hello` example writes directly to that screen memory.
+`0x8000`. The `lem-hello` example uses the vendorable SDK macros to write that
+screen memory.
+
+## Standard Machine SDK
+
+`toolchains/generic-dcpu-bare/sdk/dcpu/` contains built-in `dcpu.*` modules for
+device slots and command constants. The current DCPU source backend does not
+lower device calls or module constant field access yet, so use the vendorable
+assembly macro SDK for hardware work:
+
+```asm
+include "sdk/dcpu.inc"
+
+%lem_set_border 1
+%lem_put_cell 0, 0xf045
+%clock_set_rate 60
+%speaker_set 0, 440
+```
+
+The macro SDK covers generic `HWI`, LEM1802 setup and text cells, keyboard
+queue reads, clock setup, and stereo speaker frequencies. It fixes device slot
+numbers to the Standard Compatibility profile. Use `%dcpu_hwi(device)` for
+other commands after loading `A` through `Z` as required by that device.
 
 ## Instructions
 

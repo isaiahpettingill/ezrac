@@ -1,3 +1,9 @@
+import dcpu.clock
+import dcpu.hardware
+import dcpu.keyboard
+import dcpu.lem1802
+import dcpu.speaker
+
 fn main() {
     let left: u16 = 21
     let right: u16 = 2

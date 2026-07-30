@@ -56,7 +56,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
-| `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | none | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
+| `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
 | `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
 | `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
@@ -100,8 +100,9 @@ cargo run --features dcpu -- build --target generic-dcpu-bare src/main.ezra
 cargo run --features dcpu -- build examples/dcpu-16/lem-hello/main.asm
 ```
 
-The target has a complete DCPU-16 1.7 handwritten assembler and a limited scalar
-source backend. Images are compatible with the Standard Compatibility profile of
+The target has a complete DCPU-16 1.7 handwritten assembler, a vendorable
+standard-machine macro SDK, and a limited scalar source backend. Images are
+compatible with the Standard Compatibility profile of
 [`dcpu-16-libretro`](https://github.com/isaiahpettingill/dcpu-16-libretro), which
 maps LEM1802 screen memory at word address `0x8000`. See
 [`examples/dcpu-16`](../examples/dcpu-16/) and

@@ -1389,7 +1389,31 @@ fn builtin_sdk_path(target: Option<&str>, import: &str) -> PathBuf {
 }
 
 fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
-    if target == Some(crate::target::MSDOS_COM_I8086_TARGET) {
+    if target.is_some_and(|target| target.contains("dcpu")) {
+        match import {
+            "dcpu.hardware" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/hardware.ezra"),
+                "dcpu.hardware",
+            )),
+            "dcpu.lem1802" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/lem1802.ezra"),
+                "dcpu.lem1802",
+            )),
+            "dcpu.keyboard" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/keyboard.ezra"),
+                "dcpu.keyboard",
+            )),
+            "dcpu.clock" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/clock.ezra"),
+                "dcpu.clock",
+            )),
+            "dcpu.speaker" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/speaker.ezra"),
+                "dcpu.speaker",
+            )),
+            _ => None,
+        }
+    } else if target == Some(crate::target::MSDOS_COM_I8086_TARGET) {
         match import {
             "dos.constants" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/msdos-i8086/sdk/dos/constants.ezra"),
@@ -1712,6 +1736,11 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
 /// LSP cannot advertise a module that import resolution would reject.
 pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
     const MODULES: &[&str] = &[
+        "dcpu.hardware",
+        "dcpu.lem1802",
+        "dcpu.keyboard",
+        "dcpu.clock",
+        "dcpu.speaker",
         "dos.constants",
         "dos.raw",
         "dos.console",

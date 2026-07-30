@@ -1,0 +1,4 @@
+// Community two-channel speaker commands. Frequency is in Hz in B.
+
+pub const LEFT: u16 = 0
+pub const RIGHT: u16 = 1

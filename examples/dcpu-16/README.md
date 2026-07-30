@@ -9,4 +9,6 @@ cargo run --features dcpu -- build examples/dcpu-16/lem-hello/main.asm
 cargo run --features dcpu -- build examples/dcpu-16/arithmetic/src/main.ezra
 ```
 
-The assembly example writes a title and counter to LEM1802 screen memory. The source example stays within EZRAC's current DCPU source-backend limits: a parameterless `main`, scalar locals, and straight-line arithmetic.
+The assembly example uses `toolchains/generic-dcpu-bare/sdk/asm/dcpu.inc` to write a title and counter to LEM1802 screen memory. The source example imports the built-in `dcpu.lem1802` module and stays within EZRAC's current DCPU source-backend limits: a parameterless `main`, scalar locals, and straight-line arithmetic.
+
+Vendor `toolchains/generic-dcpu-bare/sdk/asm/dcpu.inc` into handwritten assembly projects. It provides device-slot constants plus macros for generic `HWI`, LEM1802 text output, keyboard reads, clock setup, and two-channel speaker frequencies.
