@@ -344,23 +344,22 @@ impl Emitter {
             .get(&function.name)
             .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
-        const ARG_REGS: [u8; 4] = [24, 22, 20, 18];
+        let argument_registers = self.argument_registers(&signature.params)?;
         for (index, param) in function.params.iter().enumerate() {
             let slot = signature.argument_slots[index];
-            for offset in 0..self.model.type_size(&param.ty)? {
-                self.line(&format!(
-                    "    sts {:04X}h, r{}",
-                    slot.address + offset,
-                    ARG_REGS[index] + offset as u8
-                ));
+            let size = self.model.type_size(&param.ty)?;
+            if let Some(register) = argument_registers[index] {
+                for offset in 0..size {
+                    self.line(&format!(
+                        "    sts {:04X}h, r{}",
+                        slot.address + offset,
+                        register + offset as u8
+                    ));
+                }
             }
             let storage = self.model.allocate_type(&param.ty)?;
             self.bind(param.name.clone(), storage, param.ty.clone())?;
-            self.copy(
-                signature.argument_slots[index],
-                storage,
-                self.model.type_size(&param.ty)?,
-            );
+            self.copy(slot, storage, size);
         }
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
@@ -515,7 +514,7 @@ impl Emitter {
             } => self.emit_inline_asm(inputs, outputs, lines)?,
             Stmt::Out { port, .. } => {
                 return Err(Diagnostic::new(format!(
-                    "MOS 6502 does not support separate port I/O `{port}`; use mmio instead"
+                    "AVR does not support separate port I/O `{port}`; use mmio instead"
                 )));
             }
             Stmt::Expr(expr) => {
@@ -613,7 +612,7 @@ impl Emitter {
             }
             Expr::In(port) => {
                 return Err(Diagnostic::new(format!(
-                    "MOS 6502 does not support separate port I/O `{port}`; use mmio instead"
+                    "AVR does not support separate port I/O `{port}`; use mmio instead"
                 )));
             }
             Expr::AddressOf(name) => {
@@ -779,9 +778,8 @@ impl Emitter {
         let mut evaluated_args = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let ty = &signature.params[index];
-            self.emit_expr(arg, ty)?;
             let storage = self.model.allocate(self.model.type_size(ty)?)?;
-            self.copy(self.r0, storage, storage.size);
+            self.emit_initializer(storage, ty, arg)?;
             evaluated_args.push(storage);
         }
         for (storage, argument_slot) in evaluated_args.into_iter().zip(&signature.argument_slots) {
@@ -797,19 +795,21 @@ impl Emitter {
                 self.line("    pha");
             }
         }
-        const ARG_REGS: [u8; 4] = [24, 22, 20, 18];
+        let argument_registers = self.argument_registers(&signature.params)?;
         for (index, (ty, slot)) in signature
             .params
             .iter()
             .zip(&signature.argument_slots)
             .enumerate()
         {
-            for offset in 0..self.model.type_size(ty)? {
-                self.line(&format!(
-                    "    lds r{}, {:04X}h",
-                    ARG_REGS[index] + offset as u8,
-                    slot.address + offset
-                ));
+            if let Some(register) = argument_registers[index] {
+                for offset in 0..self.model.type_size(ty)? {
+                    self.line(&format!(
+                        "    lds r{}, {:04X}h",
+                        register + offset as u8,
+                        slot.address + offset
+                    ));
+                }
             }
         }
         self.line(&format!("    jsr {}", function_label(&resolved_name)));
@@ -934,9 +934,33 @@ impl Emitter {
             BinaryOp::Shl | BinaryOp::Shr => self.shift(width, op == BinaryOp::Shr, signed),
             BinaryOp::And | BinaryOp::Or => self.logical(op),
             op if is_comparison(op) => self.compare(op, width, signed),
-            _ => return Err(Diagnostic::new("unsupported 6502 binary operation")),
+            _ => return Err(Diagnostic::new("unsupported AVR binary operation")),
         }
         Ok(())
+    }
+
+    fn argument_registers(&self, params: &[Type]) -> Result<Vec<Option<u8>>, Diagnostic> {
+        const STARTS: [u8; 4] = [24, 22, 20, 18];
+        let mut occupied = [false; 32];
+        let mut registers = Vec::with_capacity(params.len());
+
+        for (index, ty) in params.iter().enumerate() {
+            let Some(&start) = STARTS.get(index) else {
+                registers.push(None);
+                continue;
+            };
+            let size = self.model.type_size(ty)?;
+            let end = u32::from(start) + size;
+            if end > 32 || (start..end as u8).any(|register| occupied[usize::from(register)]) {
+                registers.push(None);
+                continue;
+            }
+            for register in start..end as u8 {
+                occupied[usize::from(register)] = true;
+            }
+            registers.push(Some(start));
+        }
+        Ok(registers)
     }
 
     fn emit_unary(&mut self, op: UnaryOp, width: u8) {
@@ -2307,6 +2331,29 @@ mod tests {
             5,
             "each multiply and startup must restore r1:\n{assembly}"
         );
+    }
+
+    #[test]
+    fn supports_more_than_four_and_overlapping_register_arguments() {
+        let assembly = emit(
+            r#"
+            struct Triple { first: u8 second: u8 third: u8 }
+            fn sum(a: u8, b: u16, c: u8, d: u16, e: u8) -> u16 {
+                return cast<u16>(a) + b + cast<u16>(c) + d + cast<u16>(e)
+            }
+            fn first_after_wide(a: u8, b: u24, c: u8) -> u8 { return c }
+            fn take_triple(value: Triple) -> u8 { return value.first }
+            fn main() {
+                let triple: Triple = Triple { first: 1, second: 2, third: 3 }
+                let total: u16 = sum(1, 2, 3, 4, 5)
+                let after: u8 = first_after_wide(1, 2, 3)
+                let first: u8 = take_triple(triple)
+            }
+        "#,
+        );
+        assert!(assembly.contains("call _sum"), "{assembly}");
+        assert!(assembly.contains("call _first_after_wide"), "{assembly}");
+        assert!(assembly.contains("call _take_triple"), "{assembly}");
     }
 
     #[test]
