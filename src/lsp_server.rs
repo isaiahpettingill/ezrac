@@ -5,7 +5,9 @@ use std::{
 };
 
 use ezra::{
-    asm::{AssemblyPreprocessOptions, preprocess_assembly_source},
+    asm::{
+        AssemblyPreprocessOptions, FilesystemAssemblyResolver, preprocess_assembly_with_resolver,
+    },
     ast::{Declaration, Expr, Function, Stmt, Type},
     compile::{
         CompileOptions, SdkResolver, builtin_sdk_modules,
@@ -577,9 +579,10 @@ fn check_assembly_document_diagnostics(
         .transpose()
         .map_err(Diagnostic::new)?
         .unwrap_or_else(|| AssemblerCpu::from(target.triple.cpu));
-    let preprocessed = preprocess_assembly_source(
+    let preprocessed = preprocess_assembly_with_resolver(
         &document.path.to_string_lossy(),
         &document.text,
+        &FilesystemAssemblyResolver,
         AssemblyPreprocessOptions::for_compiled_features(
             &target.triple.value,
             assembler_cpu.as_str(),

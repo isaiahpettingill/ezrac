@@ -302,6 +302,29 @@ fn assembly_diagnostics_use_the_project_cpu_and_unsaved_text() {
 }
 
 #[test]
+fn assembly_diagnostics_resolve_project_includes() {
+    let root =
+        std::env::temp_dir().join(format!("ezrac-lsp-assembly-include-{}", std::process::id()));
+    let path = root.join("src/main.asm");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(root.join("Ezra.toml"), "[build]\ntarget = \"bare-z80\"\n").unwrap();
+    fs::write(root.join("src/shared.asm"), "nop\n").unwrap();
+    let document = OpenDocument {
+        path,
+        text: "include \"shared.asm\"\nnop\n".to_owned(),
+        version: None,
+    };
+
+    assert!(
+        check_assembly_document_diagnostics(&document)
+            .unwrap()
+            .is_empty()
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn assembly_documents_outside_an_ezra_project_have_no_diagnostics() {
     let document = OpenDocument {
         path: std::env::temp_dir().join("ezrac-lsp-no-project/main.asm"),
