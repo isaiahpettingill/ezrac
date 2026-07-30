@@ -2390,7 +2390,15 @@ fn optimize_expr(
         },
         Expr::Unary { op, expr } => {
             let expr = optimize_expr(*expr, constants, report);
-            if let Some(value) = fold_unary(op, &expr) {
+            if op == UnaryOp::BitNot
+                && let Expr::Unary {
+                    op: UnaryOp::BitNot,
+                    expr,
+                } = expr
+            {
+                report.algebraic_simplifications += 1;
+                *expr
+            } else if let Some(value) = fold_unary(op, &expr) {
                 report.constant_folds += 1;
                 value
             } else {
@@ -2504,6 +2512,28 @@ fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<(Expr, boo
         {
             algebraic(value.clone())
         }
+        (value, BinaryOp::BitAnd, mask) if is_all_ones_mask(mask) => algebraic(value.clone()),
+        (value, BinaryOp::BitXor, mask) if is_all_ones_mask(mask) => algebraic(Expr::Unary {
+            op: UnaryOp::BitNot,
+            expr: Box::new(value.clone()),
+        }),
+        (
+            Expr::Binary {
+                left: inner,
+                op: inner_op,
+                right: inner_constant,
+            },
+            outer_op,
+            outer_constant,
+        ) if matches!(
+            inner_op,
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+        ) && *inner_op == outer_op =>
+        {
+            combine_bitwise_constants(inner.as_ref(), *inner_op, inner_constant, outer_constant)
+                .map(algebraic)
+                .unwrap_or(None)
+        }
         (Expr::Bool(true), BinaryOp::And, value)
         | (Expr::Bool(false), BinaryOp::Or, value)
         | (value, BinaryOp::And, Expr::Bool(true))
@@ -2526,6 +2556,40 @@ fn int_value(expr: &Expr) -> Option<i64> {
         Expr::Int(value) | Expr::TypedInt(value, _) => Some(*value),
         _ => None,
     }
+}
+
+fn is_all_ones_mask(expr: &Expr) -> bool {
+    let Expr::TypedInt(value, ty) = expr else {
+        return false;
+    };
+    typed_integer_mask(ty).is_some_and(|mask| *value == mask)
+}
+
+fn combine_bitwise_constants(
+    value: &Expr,
+    op: BinaryOp,
+    inner: &Expr,
+    outer: &Expr,
+) -> Option<Expr> {
+    let (Expr::TypedInt(inner_value, inner_ty), Expr::TypedInt(outer_value, outer_ty)) =
+        (inner, outer)
+    else {
+        return None;
+    };
+    if inner_ty != outer_ty {
+        return None;
+    }
+    let combined = match op {
+        BinaryOp::BitAnd => inner_value & outer_value,
+        BinaryOp::BitOr => inner_value | outer_value,
+        BinaryOp::BitXor => inner_value ^ outer_value,
+        _ => return None,
+    };
+    Some(Expr::Binary {
+        left: Box::new(value.clone()),
+        op,
+        right: Box::new(Expr::TypedInt(combined, inner_ty.clone())),
+    })
 }
 
 fn power_of_two_shift(expr: &Expr) -> Option<u32> {

@@ -239,6 +239,41 @@ fn folds_typed_bitnot_and_the_integer_expression_it_exposes() {
 }
 
 #[test]
+fn simplifies_width_aware_bitwise_masks_and_constant_chains() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn test(x: u24) -> u24 { let unchanged: u24 = x & 0xFFFFFFu24 let inverted: u24 = x ^ 0xFFFFFFu24 let narrowed: u24 = (x & 0x00FFFFu24) & 0x0000FFu24 return ~~narrowed }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = function_named(&program, "test");
+
+    assert!(matches!(
+        test.body[0],
+        Stmt::Let { value: Expr::Ident(ref name), .. } if name == "x"
+    ));
+    assert!(matches!(
+        test.body[1],
+        Stmt::Let { value: Expr::Unary { op: UnaryOp::BitNot, ref expr }, .. }
+            if matches!(expr.as_ref(), Expr::Ident(name) if name == "x")
+    ));
+    assert!(matches!(
+        test.body[2],
+        Stmt::Let {
+            value: Expr::Binary { op: BinaryOp::BitAnd, ref right, .. },
+            ..
+        } if matches!(right.as_ref(), Expr::TypedInt(0xFF, Type::Named(name)) if name == "u24")
+    ));
+    assert!(matches!(
+        test.body[3],
+        Stmt::Return(Some(Expr::Cast { ref expr, .. }))
+            if matches!(expr.as_ref(), Expr::Binary { op: BinaryOp::BitAnd, right, .. }
+                if matches!(right.as_ref(), Expr::TypedInt(0xFF, Type::Named(name)) if name == "u24"))
+    ));
+    assert!(report.algebraic_simplifications >= 4);
+}
+
+#[test]
 fn simplifies_safe_short_circuit_boolean_and_control_expressions() {
     let program = parse_program(
         Path::new("test.ezra"),

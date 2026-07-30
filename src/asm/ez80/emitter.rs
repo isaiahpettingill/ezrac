@@ -308,6 +308,13 @@ fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
     )
 }
 
+fn supports_z80_bit_instructions(cpu: CpuFamily) -> bool {
+    matches!(
+        cpu,
+        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::Ez80
+    )
+}
+
 fn peephole_cleanup(assembly: &str) -> String {
     let mut out = String::new();
     let mut previous_redundant_load = None;
@@ -4590,31 +4597,48 @@ impl Emitter {
         let Expr::Binary { left, op, right } = condition else {
             return Ok(false);
         };
+        if supports_z80_bit_instructions(self.cpu)
+            && matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+            && let Expr::Binary {
+                left: masked,
+                op: BinaryOp::BitAnd,
+                right: mask,
+            } = left.as_ref()
+            && let Ok(mask) = self.eval_i64_with_local_constants(mask)
+            && let Ok(expected) = self.eval_i64_with_local_constants(right)
+            && mask > 0
+            && mask <= 0x80
+            && (mask as u64).is_power_of_two()
+            && (expected == 0 || expected == mask)
+        {
+            let width = self.expr_width(masked)?;
+            if width == ValueWidth::U8 {
+                self.emit_expr_to_a(masked)?;
+                self.line(&format!("    bit {}, a", (mask as u64).trailing_zeros()));
+            } else {
+                self.emit_expr_to_hl(masked, width)?;
+                self.line(&format!("    bit {}, l", (mask as u64).trailing_zeros()));
+            }
+            let set_when_true =
+                (*op == BinaryOp::Eq && expected == mask) || (*op == BinaryOp::Ne && expected == 0);
+            let branch = if set_when_true { "z" } else { "nz" };
+            self.line(&format!("    jp {branch}, {false_label}"));
+            return Ok(true);
+        }
+
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
             && self.expr_width(left)? == ValueWidth::U8
             && self.expr_width(right)? == ValueWidth::U8
             && is_immediate_u8(right)
         {
             self.emit_expr_to_a(left)?;
-            self.line(&format!("    cp {:02X}h", self.u8(right)?));
+            let immediate = self.u8(right)?;
+            if immediate == 0 {
+                self.line("    or a");
+            } else {
+                self.line(&format!("    cp {immediate:02X}h"));
+            }
             let branch = if *op == BinaryOp::Eq { "nz" } else { "z" };
-            self.line(&format!("    jp {branch}, {false_label}"));
-            return Ok(true);
-        }
-
-        if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
-            && self.eval_i64_with_local_constants(right).ok() == Some(1)
-            && let Expr::Binary {
-                left: masked,
-                op: BinaryOp::BitAnd,
-                right: mask,
-            } = left.as_ref()
-            && self.eval_i64_with_local_constants(mask).ok() == Some(1)
-            && self.expr_width(masked)? != ValueWidth::U8
-        {
-            self.emit_expr_to_hl(masked, self.expr_width(masked)?)?;
-            self.line("    bit 0, l");
-            let branch = if *op == BinaryOp::Eq { "z" } else { "nz" };
             self.line(&format!("    jp {branch}, {false_label}"));
             return Ok(true);
         }

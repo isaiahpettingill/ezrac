@@ -878,6 +878,38 @@ fn emits_wide_branches_low_bit_masks_and_small_pointer_offsets() {
 }
 
 #[test]
+fn branches_directly_on_single_bit_masks() {
+    let source = r#"
+        global wide: u24 = 0x21u24
+
+        fn byte_has_high_bit(byte: u8) {
+            if (byte & 0x80u8) == 0u8 {
+                test.fail(1)
+            }
+        }
+
+        fn main() {
+            byte_has_high_bit(0x80u8)
+            if (wide & 0x20u24) != 0u24 {
+                if (wide & 1u24) == 1u24 {
+                    test.pass()
+                }
+            }
+            test.fail(2)
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+
+    assert!(asm.contains("    bit 7, a"), "{asm}");
+    assert!(asm.contains("    bit 5, l"), "{asm}");
+    assert!(asm.contains("    bit 0, l"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn rejects_local_shadowing() {
     let source = r#"
             global score: u8 = 0
