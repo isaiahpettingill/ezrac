@@ -17,6 +17,7 @@ ezrac check <file.ezra>
 ezrac emit-asm <file.ezra>
 ezrac emit-ir [--stage hir|tbir] <file.ezra>
 ezrac build <file.ezra>
+ezrac disk --format <format> --output <image> [--file [NAME=]PATH]...
 ezrac test [<file.ezra>]
 ezrac assemble [--base <addr>] [--output <file.bin>] <file.asm>
 ezrac init [--name <name>] [--target <triple>] [dir]
@@ -34,6 +35,7 @@ cargo run -- check <file.ezra>
 cargo run -- emit-asm <file.ezra>
 cargo run -- emit-ir [--stage hir|tbir] <file.ezra>
 cargo run -- build <file.ezra>
+cargo run -- disk --format <format> --output <image> [--file [NAME=]PATH]...
 cargo run -- test [<file.ezra>]
 cargo run -- assemble [--base <addr>] [--output <file.bin>] <file.asm>
 cargo run -- init [--name <name>] [--target <triple>] [dir]
@@ -45,6 +47,8 @@ cargo run -- header
 ```
 
 `build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, CP/M and MS-DOS `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
+
+`disk` creates M35FD images for DCPU-16, FAT12 floppy images for CP/M through IS-DOS, MOS, and DOS, and D64 images for C64. Each image can contain multiple named files. See `docs/disk-images.md`.
 
 `init` creates a non-destructive starter project with `.gitignore`, `Ezra.toml`, `README.md`, `src/main.ezra`, `sdk/`, and `assets/`. `install-syntax` installs syntax files for selected editors; supported editor names are `vim`, `neovim`, `nano`, `micro`, `helix`, `vscode`, `zed`, and `notepad++`.
 
@@ -107,6 +111,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
 - `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
+- `docs/disk-images.md` documents the disk-image command, emulator profiles, and `no_std + alloc` API.
 - `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, operand forms, expressions, and word data.
 - `docs/msdos-sdk.md` documents the `msdos-com-i8086` `.COM` target and bundled `dos.*` SDK.
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
@@ -146,7 +151,7 @@ assert_eq!(build.executable_extension, "com");
 
 `build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, section-aware standalone assembly, or explicit-base flat assembly, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, `link_assembly_program`, or `link_assembly_program_at` from `ezra::api`. Explicit layouts drive both source code generation and final linking. The CLI `build` and `assemble` commands resolve host configuration and files into these same library pipelines; they do not own separate compiler, linker, or packager implementations.
 
-`ezra::api`, `diagnostic`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
+`ezra::api`, `diagnostic`, `disk`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
 
 Both std and alloc-only builds validate the selected layout, strictly validate generated target assembly, and ensure the assembled `.text` bytes fit the region assigned by the layout before packaging. The same API performs source parsing, import resolution, code generation, assembly, and packaging under `no_std + alloc` for eZ80/Z80-family, MOS 6502, and experimental i8086 targets:
 

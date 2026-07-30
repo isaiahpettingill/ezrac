@@ -6,6 +6,7 @@ use support::*;
 mod assembly_behavior;
 mod build_behavior;
 mod cli_options;
+mod disk_behavior;
 mod emulator_behavior;
 mod layout_behavior;
 mod project_behavior;

@@ -5,6 +5,7 @@ use ezra::api::compile_workspace_to_assembly;
 use ezra::{
     api::{CompileRequest, Workspace, WorkspaceFile, build_workspace},
     ast::{Declaration, EmbedSource, Expr, Program},
+    disk::{DiskFile, DiskFormat, DiskRequest, create_disk_image},
 };
 #[cfg(feature = "z80")]
 use ezra::{
@@ -12,6 +13,24 @@ use ezra::{
     target::AssemblerCpu,
     vm::assemble_program_at,
 };
+
+#[test]
+fn creates_disk_image_without_host_io() {
+    let files = [DiskFile::new("GAME.COM", &[0xc3, 0x00, 0x01])];
+    let image = create_disk_image(&DiskRequest::new(
+        DiskFormat::Fat12_720K,
+        "EZRA CPM",
+        &files,
+    ))
+    .expect("in-memory FAT12 image should build");
+
+    assert_eq!(image.len(), DiskFormat::Fat12_720K.image_size());
+    let root_directory = 7 * 512;
+    assert_eq!(
+        &image[root_directory + 32..root_directory + 43],
+        b"GAME    COM"
+    );
+}
 
 fn materialized_embed_bytes(program: &Program, name: &str) -> Vec<u8> {
     let embed = program

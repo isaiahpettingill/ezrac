@@ -90,6 +90,52 @@ fn init_options_parse_path_name_target_and_force() {
 }
 
 #[test]
+fn disk_options_parse_format_label_output_and_named_files() {
+    let options = DiskCommandOptions::parse(&[
+        "--format".to_owned(),
+        "dcpu".to_owned(),
+        "--label".to_owned(),
+        "TOOLS".to_owned(),
+        "--output".to_owned(),
+        "tools.dsk".to_owned(),
+        "--file".to_owned(),
+        "BOOT.BIN=build/main.bin".to_owned(),
+        "README.TXT".to_owned(),
+    ])
+    .unwrap();
+
+    assert_eq!(options.format, DiskFormat::M35Fd);
+    assert_eq!(options.label, "TOOLS");
+    assert_eq!(options.output, PathBuf::from("tools.dsk"));
+    assert_eq!(
+        options.files,
+        [
+            DiskInput {
+                name: "BOOT.BIN".to_owned(),
+                path: PathBuf::from("build/main.bin"),
+            },
+            DiskInput {
+                name: "README.TXT".to_owned(),
+                path: PathBuf::from("README.TXT"),
+            },
+        ]
+    );
+}
+
+#[test]
+fn disk_options_infer_common_image_extensions() {
+    for (output, expected) in [
+        ("cpm.dsk", DiskFormat::Fat12_720K),
+        ("dos.IMG", DiskFormat::Fat12_1440K),
+        ("game.d64", DiskFormat::Commodore1541),
+    ] {
+        let options =
+            DiskCommandOptions::parse(&["--output".to_owned(), output.to_owned()]).unwrap();
+        assert_eq!(options.format, expected);
+    }
+}
+
+#[test]
 fn install_syntax_options_require_editor_selection() {
     let error = InstallSyntaxOptions::parse(&[]).unwrap_err();
 

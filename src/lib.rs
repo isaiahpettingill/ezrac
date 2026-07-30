@@ -23,6 +23,7 @@ pub mod cart;
 pub mod compile;
 mod declaration;
 pub mod diagnostic;
+pub mod disk;
 pub mod hir;
 pub mod layout;
 pub mod package;

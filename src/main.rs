@@ -14,6 +14,7 @@ use ezra::{
     cart::CartridgeHeader,
     compile::{SdkResolver, load_program_with_sdk},
     diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
+    disk::{DiskFile, DiskFormat, DiskRequest, create_disk_image},
     hir::HirProgram,
     layout::{Layout, parse_layout},
     parser::parse_program,
@@ -65,6 +66,10 @@ fn run() -> Result<(), String> {
         Some("build") => {
             let options = BuildCommandOptions::parse(&args[1..])?;
             build(&options)
+        }
+        Some("disk") => {
+            let options = DiskCommandOptions::parse(&args[1..])?;
+            create_disk(&options)
         }
         Some("emit-asm") => {
             let options = CommandOptions::parse(&args[1..])?;
@@ -157,6 +162,106 @@ impl InitOptions {
             target,
             force,
         })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiskCommandOptions {
+    output: PathBuf,
+    format: DiskFormat,
+    label: String,
+    files: Vec<DiskInput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiskInput {
+    name: String,
+    path: PathBuf,
+}
+
+impl DiskCommandOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut output = None;
+        let mut format = None;
+        let mut label = "EZRA DISK".to_owned();
+        let mut files = Vec::new();
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--output" | "-o" => {
+                    output = Some(PathBuf::from(iter.next().ok_or_else(usage)?));
+                }
+                "--format" => {
+                    let value = iter.next().ok_or_else(usage)?;
+                    format = Some(DiskFormat::from_name(value).ok_or_else(|| {
+                        format!(
+                            "unknown disk format `{value}`; expected m35fd, m35fd-be, fat12-720, fat12-720k, fat12-1440, fat12-1440k, d64, dcpu, dcpu-be, cpm, mos, dos, or c64"
+                        )
+                    })?);
+                }
+                "--label" => label = iter.next().ok_or_else(usage)?.clone(),
+                "--file" => files.push(DiskInput::parse(iter.next().ok_or_else(usage)?)?),
+                value if !value.starts_with('-') => files.push(DiskInput::parse(value)?),
+                _ => return Err(usage()),
+            }
+        }
+        let output = output
+            .ok_or_else(|| "disk requires `--output <image.dsk|image.img|image.d64>`".to_owned())?;
+        let format = format
+            .or_else(|| infer_disk_format(&output))
+            .ok_or_else(|| {
+                "cannot infer disk format from the output name; use `--format m35fd|m35fd-be|fat12-720|fat12-1440|d64`"
+                    .to_owned()
+            })?;
+        Ok(Self {
+            output,
+            format,
+            label,
+            files,
+        })
+    }
+}
+
+impl DiskInput {
+    fn parse(specification: &str) -> Result<Self, String> {
+        let (name, path) = match specification.split_once('=') {
+            Some((name, path)) if !name.is_empty() && !path.is_empty() => {
+                (name.to_owned(), PathBuf::from(path))
+            }
+            Some(_) => {
+                return Err(format!(
+                    "invalid disk file `{specification}`; expected PATH or NAME=PATH"
+                ));
+            }
+            None => {
+                let path = PathBuf::from(specification);
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot derive a disk file name from `{specification}`; use NAME=PATH"
+                        )
+                    })?
+                    .to_owned();
+                (name, path)
+            }
+        };
+        Ok(Self { name, path })
+    }
+}
+
+fn infer_disk_format(output: &Path) -> Option<DiskFormat> {
+    let extension = output.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("d64") {
+        Some(DiskFormat::Commodore1541)
+    } else if extension.eq_ignore_ascii_case("dsk") {
+        Some(DiskFormat::Fat12_720K)
+    } else if extension.eq_ignore_ascii_case("img") {
+        Some(DiskFormat::Fat12_1440K)
+    } else {
+        None
     }
 }
 
@@ -1823,6 +1928,42 @@ fn check_source_with_layout(
     Ok(())
 }
 
+fn create_disk(options: &DiskCommandOptions) -> Result<(), String> {
+    struct LoadedDiskFile {
+        name: String,
+        bytes: Vec<u8>,
+    }
+
+    let mut loaded = Vec::with_capacity(options.files.len());
+    for file in &options.files {
+        let bytes = fs::read(&file.path)
+            .map_err(|error| format!("failed to read {}: {error}", file.path.display()))?;
+        loaded.push(LoadedDiskFile {
+            name: file.name.clone(),
+            bytes,
+        });
+    }
+    let files = loaded
+        .iter()
+        .map(|file| DiskFile::new(&file.name, &file.bytes))
+        .collect::<Vec<_>>();
+    let image = create_disk_image(&DiskRequest::new(options.format, &options.label, &files))
+        .map_err(|error| error.to_string())?;
+
+    if let Some(parent) = options
+        .output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    fs::write(&options.output, image)
+        .map_err(|error| format!("failed to write {}: {error}", options.output.display()))?;
+    println!("wrote {}", options.output.display());
+    Ok(())
+}
+
 fn print_layout(path: Option<&str>) -> Result<(), String> {
     let layout_path = path.map(PathBuf::from);
     let layout = load_layout(layout_path.as_deref(), ezra::target::DEFAULT_TARGET_TRIPLE)?;
@@ -2553,7 +2694,9 @@ fn print_targets() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
+    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  disk [--format <format>] [--label <label>] --output <image> [--file [NAME=]PATH]...
+                                       create an emulator-ready disk image with named files
+  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
 }
 
 #[cfg(all(test, feature = "i8086"))]

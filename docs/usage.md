@@ -77,6 +77,14 @@ ezrac build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--d
 
 `build` does not accept `-o`/`--output`; it writes `.asm`, `.map`, and executable artifacts under the target directory described in [Build Artifacts](#build-artifacts). Use `[build].executable` to choose the artifact basename. The standalone `assemble` command accepts `-o`/`--output` for a specific output path.
 
+Create an emulator-ready disk image with named support files:
+
+```sh
+ezrac disk [--format m35fd|m35fd-be|fat12-720|fat12-1440|d64] [--label <label>] --output <image> [--file [NAME=]PATH]...
+```
+
+Platform aliases are `dcpu`, `cpm`, `mos`, `dos`, and `c64`. `.dsk` defaults to the 720 KiB CP/M/IS-DOS FAT12 profile, `.img`/`.IMG` defaults to 1.44 MiB FAT12, and `.d64` defaults to a Commodore 1541 image. Select M35FD explicitly because `.dsk` is also widely used for CP/M media. See [`disk-images.md`](disk-images.md) for format details, filename rules, examples, emulator notes, and the `no_std + alloc` API.
+
 Run generated code in the compiler's target VM test path:
 
 ```sh
