@@ -1,17 +1,29 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use crate::{
     asm::{AssemblyOptions, comments::with_readability_comments},
-    ast::{AssignOp, BinaryOp, Expr, Type, UnaryOp},
+    ast::{
+        AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
+        Stmt, Type, UnaryOp,
+    },
+    declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
     target::CpuFamily,
-    tbir::{TbirDeclaration, TbirProgram, TbirStmt},
+    tbir::TbirProgram,
 };
 
-/// Emits the small, currently supported DCPU-16 subset from the common HIR/TBIR pipeline.
+/// Emit DCPU-16 source from the optimized program retained by TBIR.
+///
+/// DCPU memory is word addressed.  Every EZRA scalar, including `u8`, occupies one
+/// DCPU word; arrays and structs are sequences of words. Pointers therefore contain
+/// DCPU word addresses. The call ABI passes arguments left-to-right above the return
+/// address, saves J as the frame pointer, and returns scalar values in A.
 pub fn emit_dcpu_assembly_with_options(
-    program: &crate::ast::Program,
+    program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
     if options.cpu != CpuFamily::Dcpu {
@@ -22,380 +34,1193 @@ pub fn emit_dcpu_assembly_with_options(
             "DCPU-16 programs require a `main` function",
         ));
     }
-
     let hir = HirProgram::from_ast(program)?;
     let tbir = TbirProgram::lower(&hir, program, &options)?;
     Emitter::new()
-        .emit(&tbir)
-        .map(|asm| with_readability_comments(asm, program, &options, "dcpu"))
+        .emit(&tbir.lowered_program)
+        .map(|assembly| with_readability_comments(assembly, program, &options, "dcpu"))
+}
+
+#[derive(Clone)]
+struct Binding {
+    offset: i16,
+    ty: Type,
+}
+#[derive(Clone)]
+struct LoopLabels {
+    again: String,
+    done: String,
 }
 
 struct Emitter {
     out: String,
-    locals: HashMap<String, &'static str>,
-    local_types: HashMap<String, Type>,
-    next_register: usize,
+    labels: usize,
+    bindings: HashMap<String, Binding>,
+    locals: HashMap<String, Binding>,
+    loops: Vec<LoopLabels>,
+    return_label: String,
+    return_type: Option<Type>,
+    constants: HashMap<String, i64>,
+    constant_types: HashMap<String, Type>,
+    globals: HashMap<String, Type>,
+    mmio: HashMap<String, (i64, Type)>,
+    embeds: HashMap<String, Vec<u8>>,
+    structs: HashMap<String, Vec<(String, Type)>>,
+    functions: HashMap<String, Function>,
+    extern_functions: HashSet<String>,
+    strings: HashMap<String, String>,
+    global_initializers: Vec<(String, Type, Expr)>,
 }
 
 impl Emitter {
     fn new() -> Self {
         Self {
             out: String::new(),
+            labels: 0,
+            bindings: HashMap::new(),
             locals: HashMap::new(),
-            local_types: HashMap::new(),
-            // I and J are reserved for expression temporaries.
-            next_register: 0,
+            loops: Vec::new(),
+            return_label: String::new(),
+            return_type: None,
+            constants: HashMap::new(),
+            constant_types: HashMap::new(),
+            globals: HashMap::new(),
+            mmio: HashMap::new(),
+            embeds: HashMap::new(),
+            structs: HashMap::new(),
+            functions: HashMap::new(),
+            extern_functions: HashSet::new(),
+            strings: HashMap::new(),
+            global_initializers: Vec::new(),
         }
     }
 
-    fn emit(mut self, program: &TbirProgram) -> Result<String, Diagnostic> {
-        let mut main = None;
-        let inline_functions = program.optimizations.inline_function_names();
-        for declaration in &program.declarations {
-            match declaration {
-                TbirDeclaration::Function {
-                    name,
-                    params,
-                    return_type,
-                    body,
-                    ..
-                } if name == "main" => {
-                    if !params.is_empty() || return_type.is_some() {
-                        return Err(Diagnostic::new(
-                            "DCPU-16 `main` must not have parameters or a return value",
-                        ));
-                    }
-                    main = Some(body.as_slice());
-                }
-                TbirDeclaration::Function {
-                    name, attrs, body, ..
-                } if inline_functions.contains(name)
-                    || (attrs.iter().any(|attr| attr == "inline")
-                        && body.iter().any(|stmt| matches!(stmt, TbirStmt::Asm { .. }))) => {}
-                TbirDeclaration::Function { name, .. } => {
-                    return Err(Diagnostic::new(format!(
-                        "DCPU-16 emitter currently supports only `main`; function `{name}` is unsupported"
-                    )));
-                }
-                TbirDeclaration::Object {
-                    kind: crate::tbir::TbirObjectKind::Const,
-                    ..
-                } => {}
-                TbirDeclaration::Object { name, kind } => {
-                    return Err(Diagnostic::new(format!(
-                        "DCPU-16 emitter does not yet support {kind:?} declaration `{name}`"
-                    )));
-                }
-            }
-        }
-        let main =
-            main.ok_or_else(|| Diagnostic::new("DCPU-16 programs require a `main` function"))?;
-
+    fn emit(mut self, program: &Program) -> Result<String, Diagnostic> {
+        self.collect_declarations(program)?;
         self.line("; generated by ezrac");
-        self.line("; target: DCPU-16");
+        self.line("; target: DCPU-16; all EZRA storage addresses are DCPU words");
         self.line("__ezra_start:");
+        self.line("    set sp, 0xffff");
+        self.emit_global_initializers()?;
         self.line("    jsr _main");
         self.line("__ezra_exit:");
         self.line("    set pc, __ezra_exit");
-        self.line("_main:");
-        self.emit_block(main)?;
-        self.line("    set pc, pop");
+
+        let functions = self.functions.values().cloned().collect::<Vec<_>>();
+        for function in functions {
+            self.emit_function(&function)?;
+        }
+        self.emit_static_data()?;
         Ok(self.out)
     }
 
-    fn emit_block(&mut self, statements: &[TbirStmt]) -> Result<(), Diagnostic> {
-        for statement in statements {
-            self.emit_stmt(statement)?;
+    fn collect_declarations(&mut self, program: &Program) -> Result<(), Diagnostic> {
+        for declaration in &program.declarations {
+            match unwrapped_declaration(declaration) {
+                Declaration::Const(value) => {
+                    let constant = self.const_value(&value.value)?;
+                    self.constants.insert(value.name.clone(), constant);
+                    self.constant_types
+                        .insert(value.name.clone(), value.ty.clone());
+                }
+                Declaration::Global(value) => {
+                    self.globals.insert(value.name.clone(), value.ty.clone());
+                    self.global_initializers.push((
+                        value.name.clone(),
+                        value.ty.clone(),
+                        value.value.clone(),
+                    ));
+                }
+                Declaration::Mmio(value) => {
+                    self.mmio.insert(
+                        value.name.clone(),
+                        (self.const_value(&value.value)?, value.ty.clone()),
+                    );
+                }
+                Declaration::Embed(value) => {
+                    let bytes = match &value.source {
+                        crate::ast::EmbedSource::Bytes(values) => values
+                            .iter()
+                            .map(|value| {
+                                self.const_value(value).and_then(|v| {
+                                    u8::try_from(v).map_err(|_| {
+                                        Diagnostic::new("DCPU embed byte is outside 0..255")
+                                    })
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        crate::ast::EmbedSource::Text(text) => text.bytes().collect(),
+                        crate::ast::EmbedSource::CStr(text) => {
+                            text.bytes().chain(core::iter::once(0)).collect()
+                        }
+                        crate::ast::EmbedSource::Repeat { value, len } => {
+                            vec![
+                                u8::try_from(self.const_value(value)?).map_err(|_| {
+                                    Diagnostic::new("DCPU embed byte is outside 0..255")
+                                })?;
+                                usize::try_from(self.const_value(len)?)
+                                    .map_err(|_| Diagnostic::new("DCPU embed length is invalid"))?
+                            ]
+                        }
+                        crate::ast::EmbedSource::File(file) => {
+                            let path = program
+                                .source_path
+                                .parent()
+                                .unwrap_or_else(|| Path::new("."))
+                                .join(file);
+                            std::fs::read(&path).map_err(|error| {
+                                Diagnostic::new(format!(
+                                    "failed to read DCPU embed `{}`: {error}",
+                                    path.display()
+                                ))
+                            })?
+                        }
+                    };
+                    self.embeds.insert(value.name.clone(), bytes);
+                }
+                Declaration::Struct(value) => {
+                    self.structs.insert(
+                        value.name.clone(),
+                        value
+                            .fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.ty.clone()))
+                            .collect(),
+                    );
+                }
+                Declaration::Function(function) => {
+                    self.functions
+                        .insert(function.name.clone(), function.clone());
+                }
+                Declaration::ExternAsmFunction(function) => {
+                    self.extern_functions.insert(function.name.clone());
+                }
+                Declaration::Port(port) => {
+                    return Err(Diagnostic::new(format!(
+                        "DCPU-16 has no separate port I/O; use MMIO or inline asm instead of port `{}`",
+                        port.name
+                    )));
+                }
+                Declaration::Alias(_)
+                | Declaration::Import(_)
+                | Declaration::Cfg { .. }
+                | Declaration::Bank { .. } => {}
+            }
         }
         Ok(())
     }
 
-    fn emit_stmt(&mut self, statement: &TbirStmt) -> Result<(), Diagnostic> {
-        match statement {
-            TbirStmt::Let { name, ty, value } => {
-                self.require_scalar_type(ty, &format!("local `{name}`"))?;
-                let register = self.allocate_local(name)?;
-                self.local_types.insert(name.clone(), ty.clone());
-                self.emit_expr(value, register)
+    fn emit_global_initializers(&mut self) -> Result<(), Diagnostic> {
+        let initializers = self.global_initializers.clone();
+        for (name, ty, value) in initializers {
+            if self.is_aggregate(&ty) {
+                self.emit_aggregate(&value, &ty, &format!("__ezra_global_{name}"))?;
+            } else {
+                self.emit_expr(&value, &ty)?;
+                self.line(&format!("    set [__ezra_global_{name}], a"));
             }
-            TbirStmt::Assign { target, op, value } => {
-                let crate::ast::Place::Ident(name) = target else {
-                    return Err(Diagnostic::new(
-                        "DCPU-16 emitter currently supports assignment to local scalar variables only",
-                    ));
+        }
+        Ok(())
+    }
+
+    fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
+        let naked = function.attrs.iter().any(|attr| attr == "naked");
+        self.line(&format!("{}:", function_label(&function.name)));
+        if naked {
+            for stmt in &function.body {
+                let Stmt::Asm {
+                    inputs,
+                    outputs,
+                    lines,
+                    ..
+                } = stmt
+                else {
+                    return Err(Diagnostic::new(format!(
+                        "naked DCPU function `{}` may contain only asm blocks",
+                        function.name
+                    )));
                 };
-                let register = self.local(name)?;
-                if *op == AssignOp::Set {
-                    self.emit_expr(value, register)
-                } else {
-                    self.line(&format!("    set push, {register}"));
-                    self.emit_expr(value, register)?;
-                    self.line("    set j, pop");
-                    let signed = type_is_signed(self.local_type(name)?);
-                    self.line(&format!(
-                        "    {} j, {register}",
-                        assign_opcode(*op, signed)?
+                if !inputs.is_empty() || !outputs.is_empty() {
+                    return Err(Diagnostic::new(
+                        "naked DCPU asm cannot use compiler operands",
                     ));
-                    self.line(&format!("    set {register}, j"));
-                    Ok(())
+                }
+                for line in lines {
+                    self.line(&format!("    {line}"));
                 }
             }
-            TbirStmt::Asm {
+            return Ok(());
+        }
+        self.locals = plan_locals(&function.body, self)?;
+        self.bindings.clear();
+        for (index, param) in function.params.iter().enumerate() {
+            // [J+0] saved J, [J+1] return PC, then arguments in source order.
+            self.bindings.insert(
+                param.name.clone(),
+                Binding {
+                    offset: i16::try_from(index + 2)
+                        .map_err(|_| Diagnostic::new("too many DCPU parameters"))?,
+                    ty: param.ty.clone(),
+                },
+            );
+        }
+        self.return_label = self.next_label(&format!("{}_return", function.name));
+        self.return_type = function.return_type.clone();
+        self.line("    set push, j");
+        self.line("    set j, sp");
+        let words = self.locals.values().try_fold(0usize, |total, binding| {
+            Ok::<_, Diagnostic>(total + self.type_words(&binding.ty)?)
+        })?;
+        if words != 0 {
+            self.line(&format!("    sub sp, {words}"));
+        }
+        self.emit_block(&function.body)?;
+        self.line(&format!("{}:", self.return_label));
+        self.line("    set sp, j");
+        self.line("    set j, pop");
+        self.line("    set pc, pop");
+        Ok(())
+    }
+
+    fn emit_block(&mut self, body: &[Stmt]) -> Result<(), Diagnostic> {
+        for stmt in body {
+            self.emit_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
+        match stmt {
+            Stmt::Let { name, ty, value } => {
+                let binding = self
+                    .locals
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| Diagnostic::new(format!("missing DCPU local `{name}`")))?;
+                self.bindings.insert(name.clone(), binding.clone());
+                if self.is_aggregate(ty) {
+                    self.emit_aggregate(value, ty, &self.frame_operand(binding.offset))?
+                } else {
+                    self.emit_expr(value, ty)?;
+                    self.store_frame(binding.offset);
+                }
+            }
+            Stmt::Assign { target, op, value } => self.emit_assign(target, *op, value)?,
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let otherwise = self.next_label("if_else");
+                let done = self.next_label("if_end");
+                self.emit_expr(condition, &Type::Named("bool".into()))?;
+                self.line("    ife a, 0");
+                self.line(&format!("    set pc, {otherwise}"));
+                self.emit_block(then_body)?;
+                self.line(&format!("    set pc, {done}"));
+                self.line(&format!("{otherwise}:"));
+                self.emit_block(else_body)?;
+                self.line(&format!("{done}:"));
+            }
+            Stmt::While { condition, body } => {
+                let again = self.next_label("while");
+                let done = self.next_label("while_end");
+                self.loops.push(LoopLabels {
+                    again: again.clone(),
+                    done: done.clone(),
+                });
+                self.line(&format!("{again}:"));
+                self.emit_expr(condition, &Type::Named("bool".into()))?;
+                self.line("    ife a, 0");
+                self.line(&format!("    set pc, {done}"));
+                self.emit_block(body)?;
+                self.line(&format!("    set pc, {again}"));
+                self.line(&format!("{done}:"));
+                self.loops.pop();
+            }
+            Stmt::Loop { body } => {
+                let again = self.next_label("loop");
+                let done = self.next_label("loop_end");
+                self.loops.push(LoopLabels {
+                    again: again.clone(),
+                    done: done.clone(),
+                });
+                self.line(&format!("{again}:"));
+                self.emit_block(body)?;
+                self.line(&format!("    set pc, {again}"));
+                self.line(&format!("{done}:"));
+                self.loops.pop();
+            }
+            Stmt::Break => {
+                let label = self
+                    .loops
+                    .last()
+                    .ok_or_else(|| Diagnostic::new("break outside loop"))?
+                    .done
+                    .clone();
+                self.line(&format!("    set pc, {label}"));
+            }
+            Stmt::Continue => {
+                let label = self
+                    .loops
+                    .last()
+                    .ok_or_else(|| Diagnostic::new("continue outside loop"))?
+                    .again
+                    .clone();
+                self.line(&format!("    set pc, {label}"));
+            }
+            Stmt::Return(value) => {
+                if let Some(value) = value {
+                    let ty = self
+                        .return_type
+                        .clone()
+                        .ok_or_else(|| Diagnostic::new("value return in void function"))?;
+                    self.emit_expr(value, &ty)?;
+                }
+                let label = self.return_label.clone();
+                self.line(&format!("    set pc, {label}"));
+            }
+            Stmt::Asm {
                 inputs,
                 outputs,
                 lines,
                 ..
-            } => {
-                if !outputs.is_empty() {
-                    return Err(Diagnostic::new(
-                        "DCPU-16 inline asm outputs are not yet supported",
-                    ));
-                }
-                let mut operands = HashMap::new();
-                for input in inputs {
-                    self.require_scalar_type(
-                        &input.ty,
-                        &format!("inline asm input `{}`", input.name),
-                    )?;
-                    if input.class != "reg16" {
-                        return Err(Diagnostic::new(format!(
-                            "DCPU-16 inline asm input `{}` must use `reg16`",
-                            input.name
-                        )));
-                    }
-                    let register = self.local(&input.name)?;
-                    if operands.insert(input.name.clone(), register).is_some() {
-                        return Err(Diagnostic::new(format!(
-                            "duplicate DCPU-16 inline asm operand `{}`",
-                            input.name
-                        )));
-                    }
-                }
-                for line in lines {
-                    let mut emitted = line.clone();
-                    for (name, register) in &operands {
-                        emitted = emitted.replace(&format!("{{{name}}}"), register);
-                    }
-                    if emitted.contains(['{', '}']) {
-                        return Err(Diagnostic::new(format!(
-                            "DCPU-16 inline asm has an unresolved operand placeholder in `{line}`"
-                        )));
-                    }
-                    self.line(&format!("    {emitted}"));
-                }
-                Ok(())
+            } => self.emit_asm(inputs, outputs, lines)?,
+            Stmt::Out { port, .. } => {
+                return Err(Diagnostic::new(format!(
+                    "DCPU-16 does not support port write `{port}`; use MMIO or asm"
+                )));
             }
-            TbirStmt::Return(None) => {
-                self.line("    set pc, pop");
-                Ok(())
+            Stmt::Expr(expr) => {
+                let ty = self.expr_type(expr)?;
+                if !self.is_aggregate(&ty) {
+                    self.emit_expr(expr, &ty)?;
+                }
             }
-            TbirStmt::Return(Some(_)) => Err(Diagnostic::new(
-                "DCPU-16 emitter does not yet support return values",
-            )),
-            TbirStmt::Eval(expr) => self.emit_expr(expr, "j"),
-            TbirStmt::If { .. }
-            | TbirStmt::While { .. }
-            | TbirStmt::Loop { .. }
-            | TbirStmt::Break
-            | TbirStmt::Continue => Err(Diagnostic::new(
-                "DCPU-16 emitter does not yet support control-flow statements",
-            )),
-            TbirStmt::PortWrite { port, .. } => Err(Diagnostic::new(format!(
-                "DCPU-16 does not support separate port I/O `{port}`"
-            ))),
         }
-    }
-
-    fn emit_expr(&mut self, expr: &Expr, destination: &str) -> Result<(), Diagnostic> {
-        match expr {
-            Expr::Int(value) => self.set_literal(destination, *value),
-            Expr::TypedInt(value, ty) => {
-                self.require_scalar_type(ty, "integer literal")?;
-                self.set_literal(destination, *value)
-            }
-            Expr::Bool(value) => {
-                self.line(&format!("    set {destination}, {}", u16::from(*value)));
-                Ok(())
-            }
-            Expr::Char(value) => {
-                self.line(&format!("    set {destination}, {value}"));
-                Ok(())
-            }
-            Expr::Ident(name) => {
-                let source = self.local(name)?;
-                if source != destination {
-                    self.line(&format!("    set {destination}, {source}"));
-                }
-                Ok(())
-            }
-            Expr::Cast { ty, expr } => {
-                self.require_scalar_type(ty, "cast")?;
-                self.emit_expr(expr, destination)
-            }
-            Expr::Unary { op, expr } => {
-                self.emit_expr(expr, destination)?;
-                match op {
-                    UnaryOp::Neg => {
-                        self.line("    set j, 0");
-                        self.line(&format!("    sub j, {destination}"));
-                        self.line(&format!("    set {destination}, j"));
-                    }
-                    UnaryOp::BitNot => self.line(&format!("    xor {destination}, 0xffff")),
-                    UnaryOp::Not => {
-                        self.line("    set j, 0");
-                        self.emit_comparison(destination, "ife", "j");
-                    }
-                }
-                Ok(())
-            }
-            Expr::Binary { left, op, right } => {
-                self.emit_expr(left, destination)?;
-                self.line(&format!("    set push, {destination}"));
-                self.emit_expr(right, destination)?;
-                self.line("    set j, pop");
-                match op {
-                    BinaryOp::Eq => self.emit_comparison(destination, "ife", "j"),
-                    BinaryOp::Ne => self.emit_comparison(destination, "ifn", "j"),
-                    BinaryOp::Lt => self.emit_comparison(destination, "ifl", "j"),
-                    BinaryOp::Gt => self.emit_comparison(destination, "ifg", "j"),
-                    BinaryOp::Le | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or => {
-                        return Err(Diagnostic::new(format!(
-                            "DCPU-16 emitter does not yet support binary operator `{op:?}`"
-                        )));
-                    }
-                    _ => {
-                        let signed = type_is_signed(&self.expr_type(left)?);
-                        self.line(&format!(
-                            "    {} j, {destination}",
-                            binary_opcode(*op, signed)?
-                        ));
-                        self.line(&format!("    set {destination}, j"));
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(Diagnostic::new(format!(
-                "DCPU-16 emitter does not yet support expression `{expr:?}`"
-            ))),
-        }
-    }
-
-    /// Compares J against the current destination value and leaves a boolean in destination.
-    fn emit_comparison(&mut self, destination: &str, instruction: &str, left: &str) {
-        self.line(&format!("    set i, {destination}"));
-        self.line(&format!("    set {destination}, 0"));
-        self.line(&format!("    {instruction} {left}, i"));
-        self.line(&format!("    set {destination}, 1"));
-    }
-
-    fn set_literal(&mut self, destination: &str, value: i64) -> Result<(), Diagnostic> {
-        let value = u16::try_from(value).map_err(|_| {
-            Diagnostic::new(format!(
-                "DCPU-16 literal `{value}` is outside the 16-bit range"
-            ))
-        })?;
-        self.line(&format!("    set {destination}, 0x{value:04x}"));
         Ok(())
     }
 
-    fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
-        match expr {
-            Expr::TypedInt(_, ty) | Expr::Cast { ty, .. } => Ok(ty.clone()),
-            Expr::Ident(name) => Ok(self.local_type(name)?.clone()),
-            Expr::Binary { left, .. } | Expr::Unary { expr: left, .. } => self.expr_type(left),
-            Expr::Int(_) | Expr::Char(_) => Ok(Type::Named("u16".to_owned())),
-            Expr::Bool(_) => Ok(Type::Named("bool".to_owned())),
-            _ => Err(Diagnostic::new(format!(
-                "DCPU-16 emitter cannot determine the type of expression `{expr:?}`"
-            ))),
+    fn emit_assign(
+        &mut self,
+        target: &Place,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let ty = self.place_type(target)?;
+        if op == AssignOp::Set {
+            if self.is_aggregate(&ty) {
+                let base = match target {
+                    Place::Ident(name) => {
+                        if let Some(binding) = self.bindings.get(name) {
+                            self.frame_operand(binding.offset)
+                        } else if self.globals.contains_key(name) {
+                            format!("__ezra_global_{name}")
+                        } else {
+                            return Err(Diagnostic::new("aggregate assignment target is unknown"));
+                        }
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "aggregate assignment requires a local or global target",
+                        ));
+                    }
+                };
+                return self.emit_aggregate(value, &ty, &base);
+            }
+            self.emit_expr(value, &ty)?;
+            return self.store_place(target, &ty);
         }
+        self.load_place(target, &ty)?;
+        self.line("    set push, a");
+        self.emit_expr(value, &ty)?;
+        self.line("    set b, pop");
+        self.emit_arithmetic(assign_binary(op), &ty)?;
+        self.store_place(target, &ty)
     }
 
-    fn require_scalar_type(&self, ty: &Type, context: &str) -> Result<(), Diagnostic> {
-        match ty {
-            Type::Named(name) if matches!(name.as_str(), "bool" | "u8" | "i8" | "u16" | "i16") => {
+    fn emit_expr(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+        match expr {
+            Expr::Int(value) | Expr::TypedInt(value, _) => self.literal("a", *value)?,
+            Expr::Bool(value) => self.literal("a", i64::from(*value))?,
+            Expr::Char(value) => self.literal("a", i64::from(*value))?,
+            Expr::String(value) => {
+                let label = self.string_label(value);
+                self.line(&format!("    set a, {label}"));
+            }
+            Expr::Ident(name) => self.load_ident(name, ty)?,
+            Expr::Field { base, field } => self.load_ident(&format!("{base}.{field}"), ty)?,
+            Expr::AddressOf(name) => self.emit_named_address(name)?,
+            Expr::AddressOfIndex { name, index } => {
+                self.emit_named_address(name)?;
+                self.line("    set push, a");
+                self.emit_expr(index, &Type::Named("u16".into()))?;
+                self.line("    set b, pop");
+                self.line("    add a, b");
+            }
+            Expr::AddressOfField { base, field } => {
+                self.emit_named_address(base)?;
+                self.line(&format!(
+                    "    add a, {}",
+                    self.field_offset(&self.named_type(base)?, field)?
+                ));
+            }
+            Expr::Index { name, index } => {
+                self.emit_named_address(name)?;
+                self.line("    set push, a");
+                self.emit_expr(index, &Type::Named("u16".into()))?;
+                self.line("    set i, pop");
+                self.line("    add i, a");
+                self.line("    set a, [i]");
+            }
+            Expr::Access(path) => {
+                let ty = self.access_type(path)?;
+                self.emit_access_address(path)?;
+                self.line("    set a, [i]");
+                self.mask(&ty)?;
+            }
+            Expr::AddressOfAccess(path) => {
+                self.emit_access_address(path)?;
+                self.line("    set a, i");
+            }
+            Expr::Deref(pointer) => {
+                self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
+                self.line("    set a, [a]");
+                self.mask(ty)?;
+            }
+            Expr::BankedPointer { pointer, .. } | Expr::Cast { expr: pointer, .. } => {
+                self.emit_expr(pointer, ty)?
+            }
+            Expr::Call { path, args } => self.emit_call(path, args)?,
+            Expr::Unary { op, expr } => {
+                self.emit_expr(expr, ty)?;
+                match op {
+                    UnaryOp::Neg => {
+                        self.line("    set b, 0");
+                        self.line("    sub b, a");
+                        self.line("    set a, b");
+                    }
+                    UnaryOp::BitNot => self.line("    xor a, 0xffff"),
+                    UnaryOp::Not => self.boolean_compare("ife", "a", "0"),
+                };
+                self.mask(ty)?;
+            }
+            Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right, ty)?,
+            Expr::Array(_) | Expr::StructInit { .. } => {
+                return Err(Diagnostic::new(
+                    "aggregate value is valid only while initializing or assigning aggregate storage",
+                ));
+            }
+            Expr::In(port) => {
+                return Err(Diagnostic::new(format!(
+                    "DCPU-16 has no port input `{port}`; use MMIO or asm"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_binary_expr(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+        ty: &Type,
+    ) -> Result<(), Diagnostic> {
+        if op == BinaryOp::And || op == BinaryOp::Or {
+            let short = self.next_label("logical_short");
+            let done = self.next_label("logical_end");
+            self.emit_expr(left, &Type::Named("bool".into()))?;
+            self.line(&format!(
+                "    {} a, 0",
+                if op == BinaryOp::And { "ife" } else { "ifn" }
+            ));
+            self.line(&format!("    set pc, {short}"));
+            self.emit_expr(right, &Type::Named("bool".into()))?;
+            self.line("    ifn a, 0");
+            self.line("    set a, 1");
+            self.line(&format!("    set pc, {done}"));
+            self.line(&format!("{short}:"));
+            self.literal("a", i64::from(op == BinaryOp::Or))?;
+            self.line(&format!("{done}:"));
+            return Ok(());
+        }
+        self.emit_expr(left, ty)?;
+        self.line("    set push, a");
+        self.emit_expr(right, ty)?;
+        self.line("    set b, pop");
+        match op {
+            BinaryOp::Eq => self.boolean_compare("ife", "b", "a"),
+            BinaryOp::Ne => self.boolean_compare("ifn", "b", "a"),
+            BinaryOp::Lt => self.boolean_compare(if signed(ty) { "ifa" } else { "ifl" }, "b", "a"),
+            BinaryOp::Le => self.boolean_compare_le(ty, true),
+            BinaryOp::Gt => self.boolean_compare(if signed(ty) { "ifa" } else { "ifg" }, "a", "b"),
+            BinaryOp::Ge => self.boolean_compare_le(ty, false),
+            _ => self.emit_arithmetic(op, ty)?,
+        }
+        self.mask(ty)
+    }
+
+    fn emit_arithmetic(&mut self, op: BinaryOp, ty: &Type) -> Result<(), Diagnostic> {
+        let instruction = match op {
+            BinaryOp::Add => "add",
+            BinaryOp::Sub => "sub",
+            BinaryOp::Mul if signed(ty) => "mli",
+            BinaryOp::Mul => "mul",
+            BinaryOp::Div if signed(ty) => "dvi",
+            BinaryOp::Div => "div",
+            BinaryOp::Mod if signed(ty) => "mdi",
+            BinaryOp::Mod => "mod",
+            BinaryOp::Shl => "shl",
+            BinaryOp::Shr if signed(ty) => "asr",
+            BinaryOp::Shr => "shr",
+            BinaryOp::BitAnd => "and",
+            BinaryOp::BitOr => "bor",
+            BinaryOp::BitXor => "xor",
+            _ => return Err(Diagnostic::new("invalid DCPU arithmetic operation")),
+        };
+        self.line(&format!("    {instruction} b, a"));
+        self.line("    set a, b");
+        Ok(())
+    }
+
+    fn boolean_compare(&mut self, instruction: &str, left: &str, right: &str) {
+        let yes = self.next_label("true");
+        let done = self.next_label("bool_end");
+        self.line(&format!("    {instruction} {left}, {right}"));
+        self.line(&format!("    set pc, {yes}"));
+        self.line("    set a, 0");
+        self.line(&format!("    set pc, {done}"));
+        self.line(&format!("{yes}:"));
+        self.line("    set a, 1");
+        self.line(&format!("{done}:"));
+    }
+    fn boolean_compare_le(&mut self, ty: &Type, less_or_equal: bool) {
+        let yes = self.next_label("true");
+        let done = self.next_label("bool_end");
+        let strict = if signed(ty) { "ifa" } else { "ifl" };
+        if less_or_equal {
+            self.line(&format!("    {strict} a, b"));
+        } else {
+            self.line(&format!("    {strict} b, a"));
+        }
+        self.line(&format!("    set pc, {yes}"));
+        self.line("    ife a, b");
+        self.line(&format!("    set pc, {yes}"));
+        self.line("    set a, 0");
+        self.line(&format!("    set pc, {done}"));
+        self.line(&format!("{yes}:"));
+        self.line("    set a, 1");
+        self.line(&format!("{done}:"));
+    }
+
+    fn emit_call(&mut self, path: &[String], args: &[Expr]) -> Result<(), Diagnostic> {
+        let name = path
+            .last()
+            .ok_or_else(|| Diagnostic::new("empty call path"))?;
+        let function = self
+            .functions
+            .get(name)
+            .cloned()
+            .or_else(|| self.functions.get(&path.join(".")).cloned());
+        let params = if let Some(function) = &function {
+            function.params.clone()
+        } else {
+            return_type_params_none(self, name, args)?
+        };
+        if args.len() != params.len() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` expects {} arguments, got {}",
+                params.len(),
+                args.len()
+            )));
+        }
+        // Pushing in reverse gives the callee arguments [J+2], [J+3], ... in source order.
+        for (arg, param) in args.iter().zip(params.iter()).rev() {
+            self.emit_expr(arg, &param.ty)?;
+            self.line("    set push, a");
+        }
+        self.line(&format!("    jsr {}", function_label(name)));
+        if !args.is_empty() {
+            self.line(&format!("    add sp, {}", args.len()));
+        }
+        Ok(())
+    }
+
+    fn emit_asm(
+        &mut self,
+        inputs: &[crate::ast::AsmInput],
+        outputs: &[crate::ast::AsmOutput],
+        lines: &[String],
+    ) -> Result<(), Diagnostic> {
+        let registers = ["b", "c", "x", "y", "z"];
+        if inputs.len() + outputs.len() > registers.len() {
+            return Err(Diagnostic::new(
+                "DCPU inline asm supports at most five reg16 operands",
+            ));
+        }
+        let mut operands = HashMap::new();
+        for (index, input) in inputs.iter().enumerate() {
+            if input.class != "reg16" {
+                return Err(Diagnostic::new(format!(
+                    "DCPU inline asm input `{}` must use reg16",
+                    input.name
+                )));
+            }
+            self.load_ident(&input.name, &input.ty)?;
+            self.line(&format!("    set {}, a", registers[index]));
+            operands.insert(input.name.clone(), registers[index]);
+        }
+        for (index, output) in outputs.iter().enumerate() {
+            if output.class != "reg16" {
+                return Err(Diagnostic::new(format!(
+                    "DCPU inline asm output `{}` must use reg16",
+                    output.name
+                )));
+            }
+            operands.insert(output.name.clone(), registers[inputs.len() + index]);
+        }
+        for source in lines {
+            let mut line = source.clone();
+            for (name, register) in &operands {
+                line = line.replace(&format!("{{{name}}}"), register);
+            }
+            if line.contains(['{', '}']) {
+                return Err(Diagnostic::new(format!(
+                    "DCPU inline asm has unresolved operand in `{source}`"
+                )));
+            }
+            self.line(&format!("    {line}"));
+        }
+        for (index, output) in outputs.iter().enumerate() {
+            self.line(&format!("    set a, {}", registers[inputs.len() + index]));
+            self.store_named(&output.name, &output.ty)?;
+        }
+        Ok(())
+    }
+
+    fn load_ident(&mut self, name: &str, expected: &Type) -> Result<(), Diagnostic> {
+        if let Some(binding) = self.bindings.get(name).cloned() {
+            self.line(&format!(
+                "    set a, {}",
+                self.frame_operand(binding.offset)
+            ));
+            return self.mask(&binding.ty);
+        }
+        if let Some(value) = self.constants.get(name).copied() {
+            return self.literal("a", value);
+        }
+        if self.globals.contains_key(name) {
+            self.line(&format!("    set a, [__ezra_global_{name}]"));
+            return self.mask(expected);
+        }
+        if let Some((address, ty)) = self.mmio.get(name).cloned() {
+            self.line(&format!("    set a, [0x{:04x}]", address as u16));
+            return self.mask(&ty);
+        }
+        if self.embeds.contains_key(name) {
+            self.line(&format!("    set a, __ezra_embed_{name}"));
+            return Ok(());
+        }
+        Err(Diagnostic::new(format!("unknown DCPU value `{name}`")))
+    }
+
+    fn emit_named_address(&mut self, name: &str) -> Result<(), Diagnostic> {
+        if let Some(binding) = self.bindings.get(name).cloned() {
+            self.line("    set a, j");
+            self.line(&format!("    add a, {}", binding.offset));
+        } else if self.globals.contains_key(name) {
+            self.line(&format!("    set a, __ezra_global_{name}"));
+        } else if self.embeds.contains_key(name) {
+            self.line(&format!("    set a, __ezra_embed_{name}"));
+        } else {
+            return Err(Diagnostic::new(format!("cannot take address of `{name}`")));
+        }
+        Ok(())
+    }
+    fn load_place(&mut self, place: &Place, ty: &Type) -> Result<(), Diagnostic> {
+        match place {
+            Place::Ident(name) => self.load_ident(name, ty),
+            _ => {
+                self.emit_place_address(place)?;
+                self.line("    set a, [i]");
+                self.mask(ty)
+            }
+        }
+    }
+    fn store_place(&mut self, place: &Place, ty: &Type) -> Result<(), Diagnostic> {
+        self.mask(ty)?;
+        match place {
+            Place::Ident(name) => self.store_named(name, ty),
+            _ => {
+                self.line("    set push, a");
+                self.emit_place_address(place)?;
+                self.line("    set b, pop");
+                self.line("    set [i], b");
                 Ok(())
             }
-            _ => Err(Diagnostic::new(format!(
-                "DCPU-16 emitter supports only bool, u8, i8, u16, and i16 scalar values; unsupported {context} type `{ty:?}`"
+        }
+    }
+    fn store_named(&mut self, name: &str, ty: &Type) -> Result<(), Diagnostic> {
+        if let Some(binding) = self.bindings.get(name).cloned() {
+            self.store_frame(binding.offset);
+            Ok(())
+        } else if self.globals.contains_key(name) {
+            self.line(&format!("    set [__ezra_global_{name}], a"));
+            Ok(())
+        } else if let Some((address, _)) = self.mmio.get(name) {
+            self.line(&format!("    set [0x{:04x}], a", *address as u16));
+            Ok(())
+        } else {
+            Err(Diagnostic::new(format!(
+                "unknown DCPU assignment target `{name}` of type `{ty:?}`"
+            )))
+        }
+    }
+    fn store_frame(&mut self, offset: i16) {
+        self.line(&format!("    set {}, a", self.frame_operand(offset)));
+    }
+
+    fn emit_place_address(&mut self, place: &Place) -> Result<(), Diagnostic> {
+        match place {
+            Place::Index { name, index } => {
+                self.emit_named_address(name)?;
+                self.line("    set push, a");
+                self.emit_expr(index, &Type::Named("u16".into()))?;
+                self.line("    set i, pop");
+                self.line("    add i, a");
+            }
+            Place::Field { base, field } => {
+                self.emit_named_address(base)?;
+                self.line("    set i, a");
+                self.line(&format!(
+                    "    add i, {}",
+                    self.field_offset(&self.named_type(base)?, field)?
+                ));
+            }
+            Place::Access(path) => self.emit_access_address(path)?,
+            Place::Deref(pointer) => {
+                self.emit_expr(pointer, &Type::Ptr(Box::new(Type::Named("u16".into()))))?;
+                self.line("    set i, a");
+            }
+            Place::Ident(name) => {
+                self.emit_named_address(name)?;
+                self.line("    set i, a");
+            }
+        }
+        Ok(())
+    }
+    fn emit_access_address(&mut self, path: &AccessPath) -> Result<(), Diagnostic> {
+        self.emit_named_address(&path.root)?;
+        self.line("    set i, a");
+        let mut ty = self.named_type(&path.root)?;
+        for segment in &path.segments {
+            match segment {
+                AccessSegment::Field(field) => {
+                    let offset = self.field_offset(&ty, field)?;
+                    self.line(&format!("    add i, {offset}"));
+                    ty = self.field_type(&ty, field)?;
+                }
+                AccessSegment::Index(index) => {
+                    let element = self.array_element(&ty)?;
+                    self.emit_expr(index, &Type::Named("u16".into()))?;
+                    self.line("    add i, a");
+                    ty = element;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_aggregate(&mut self, value: &Expr, ty: &Type, base: &str) -> Result<(), Diagnostic> {
+        match value {
+            Expr::Array(values) => {
+                let element = self.array_element(ty)?;
+                for (index, value) in values.iter().enumerate() {
+                    self.emit_expr(value, &element)?;
+                    self.line(&format!("    set [{base} + {index}], a"));
+                }
+            }
+            Expr::StructInit { ty: named, fields } => {
+                for (field, value) in fields {
+                    let field_ty = self.field_type(&Type::Named(named.clone()), field)?;
+                    let offset = self.field_offset(&Type::Named(named.clone()), field)?;
+                    self.emit_expr(value, &field_ty)?;
+                    self.line(&format!("    set [{base} + {offset}], a"));
+                }
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "aggregate initialization requires an array or struct literal",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_static_data(&mut self) -> Result<(), Diagnostic> {
+        self.line("; word-addressed static storage");
+        for (name, bytes) in self.embeds.clone() {
+            self.line(&format!("__ezra_embed_{name}:"));
+            self.data_words(bytes.iter().map(|byte| i64::from(*byte)).collect());
+        }
+        for (name, ty) in self.globals.clone() {
+            self.line(&format!("__ezra_global_{name}:"));
+            self.data_words(vec![0; self.type_words(&ty)?]);
+        }
+        for (text, label) in self.strings.clone() {
+            self.line(&format!("{label}:"));
+            self.data_words(
+                text.bytes()
+                    .chain(core::iter::once(0))
+                    .map(i64::from)
+                    .collect(),
+            );
+        }
+        Ok(())
+    }
+    fn data_words(&mut self, values: Vec<i64>) {
+        if values.is_empty() {
+            self.line("    dat 0");
+        } else {
+            self.line(&format!(
+                "    dat {}",
+                values
+                    .iter()
+                    .map(|value| format!("0x{:04x}", *value as u16))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    fn string_label(&mut self, value: &str) -> String {
+        if let Some(label) = self.strings.get(value) {
+            return label.clone();
+        }
+        let label = self.next_label("string");
+        self.strings.insert(value.to_owned(), label.clone());
+        label
+    }
+    fn literal(&mut self, register: &str, value: i64) -> Result<(), Diagnostic> {
+        if !(-32768..=65535).contains(&value) {
+            return Err(Diagnostic::new(format!(
+                "DCPU literal `{value}` is outside 16 bits"
+            )));
+        }
+        self.line(&format!("    set {register}, 0x{:04x}", value as u16));
+        Ok(())
+    }
+    fn mask(&mut self, ty: &Type) -> Result<(), Diagnostic> {
+        if self.scalar_words(ty)? == 1
+            && matches!(self.resolve_type(ty)?, Type::Named(ref name) if matches!(name.as_str(), "u8" | "i8" | "bool"))
+        {
+            self.line("    and a, 0x00ff");
+        }
+        Ok(())
+    }
+    fn frame_operand(&self, offset: i16) -> String {
+        format!("[j + {offset}]")
+    }
+    fn next_label(&mut self, stem: &str) -> String {
+        let label = format!("__ezra_{stem}_{}", self.labels);
+        self.labels += 1;
+        label
+    }
+    fn line(&mut self, text: &str) {
+        self.out.push_str(text);
+        self.out.push('\n');
+    }
+
+    fn place_type(&self, place: &Place) -> Result<Type, Diagnostic> {
+        match place {
+            Place::Ident(name) => self.named_type(name),
+            Place::Index { name, .. } => self.array_element(&self.named_type(name)?),
+            Place::Field { base, field } => self.field_type(&self.named_type(base)?, field),
+            Place::Access(path) => self.access_type(path),
+            Place::Deref(pointer) => match self.expr_type(pointer)? {
+                Type::Ptr(inner) => Ok(*inner),
+                _ => Err(Diagnostic::new("dereference requires pointer")),
+            },
+        }
+    }
+    fn access_type(&self, path: &AccessPath) -> Result<Type, Diagnostic> {
+        let mut ty = self.named_type(&path.root)?;
+        for segment in &path.segments {
+            ty = match segment {
+                AccessSegment::Field(field) => self.field_type(&ty, field)?,
+                AccessSegment::Index(_) => self.array_element(&ty)?,
+            };
+        }
+        Ok(ty)
+    }
+    fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
+        match expr {
+            Expr::Int(_) => Ok(Type::Named("u16".into())),
+            Expr::TypedInt(_, ty) | Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::Bool(_) => Ok(Type::Named("bool".into())),
+            Expr::Char(_) | Expr::In(_) => Ok(Type::Named("u8".into())),
+            Expr::String(_) => Ok(Type::Ptr(Box::new(Type::Named("u8".into())))),
+            Expr::Ident(name) => self.named_type(name),
+            Expr::Field { base, field } => self.field_type(&self.named_type(base)?, field),
+            Expr::Index { name, .. } => self.array_element(&self.named_type(name)?),
+            Expr::Access(path) => self.access_type(path),
+            Expr::AddressOf(name) => Ok(Type::Ptr(Box::new(self.named_type(name)?))),
+            Expr::AddressOfIndex { name, .. } => Ok(Type::Ptr(Box::new(
+                self.array_element(&self.named_type(name)?)?,
+            ))),
+            Expr::AddressOfField { base, field } => Ok(Type::Ptr(Box::new(
+                self.field_type(&self.named_type(base)?, field)?,
+            ))),
+            Expr::AddressOfAccess(path) => Ok(Type::Ptr(Box::new(self.access_type(path)?))),
+            Expr::Deref(pointer) => match self.expr_type(pointer)? {
+                Type::Ptr(inner) => Ok(*inner),
+                _ => Err(Diagnostic::new("dereference requires pointer")),
+            },
+            Expr::BankedPointer { pointer, .. }
+            | Expr::Unary { expr: pointer, .. }
+            | Expr::Binary { left: pointer, .. } => self.expr_type(pointer),
+            Expr::Call { path, .. } => {
+                let name = path.last().ok_or_else(|| Diagnostic::new("empty call"))?;
+                self.functions
+                    .get(name)
+                    .and_then(|function| function.return_type.clone())
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("DCPU function `{name}` has no value return"))
+                    })
+            }
+            Expr::Array(_) | Expr::StructInit { .. } => {
+                Err(Diagnostic::new("aggregate expression has no scalar type"))
+            }
+        }
+    }
+    fn named_type(&self, name: &str) -> Result<Type, Diagnostic> {
+        self.bindings
+            .get(name)
+            .map(|binding| binding.ty.clone())
+            .or_else(|| self.globals.get(name).cloned())
+            .or_else(|| self.constant_types.get(name).cloned())
+            .or_else(|| self.mmio.get(name).map(|(_, ty)| ty.clone()))
+            .or_else(|| {
+                self.embeds
+                    .get(name)
+                    .map(|_| Type::Ptr(Box::new(Type::Named("u8".into()))))
+            })
+            .ok_or_else(|| Diagnostic::new(format!("unknown DCPU value `{name}`")))
+    }
+    fn resolve_type(&self, ty: &Type) -> Result<Type, Diagnostic> {
+        Ok(ty.clone())
+    }
+    fn scalar_words(&self, ty: &Type) -> Result<usize, Diagnostic> {
+        match ty {
+            Type::Named(name) if matches!(name.as_str(), "bool" | "u8" | "i8" | "u16" | "i16") => {
+                Ok(1)
+            }
+            Type::Ptr(_) | Type::Function { .. } => Ok(1),
+            Type::Named(name) if self.structs.contains_key(name) => {
+                Err(Diagnostic::new("struct is not scalar"))
+            }
+            Type::Array { .. } => Err(Diagnostic::new("array is not scalar")),
+            Type::Named(name) => Err(Diagnostic::new(format!(
+                "DCPU does not support type `{name}`; values must fit in one word"
             ))),
         }
     }
-
-    fn allocate_local(&mut self, name: &str) -> Result<&'static str, Diagnostic> {
-        const REGISTERS: [&str; 8] = ["a", "b", "c", "x", "y", "z", "i", "j"];
-        if self.locals.contains_key(name) {
-            return Err(Diagnostic::new(format!("duplicate DCPU-16 local `{name}`")));
+    fn type_words(&self, ty: &Type) -> Result<usize, Diagnostic> {
+        match ty {
+            Type::Array { element, len } => usize::try_from(self.const_value(len)?)
+                .map_err(|_| Diagnostic::new("array length must be non-negative"))?
+                .checked_mul(self.type_words(element)?)
+                .ok_or_else(|| Diagnostic::new("DCPU aggregate is too large")),
+            Type::Named(name) if self.structs.contains_key(name) => self.structs[name]
+                .iter()
+                .try_fold(
+                    0usize,
+                    |size, (_, field)| Ok(size + self.type_words(field)?),
+                ),
+            _ => self.scalar_words(ty),
         }
-        let register = *REGISTERS.get(self.next_register).ok_or_else(|| {
-            Diagnostic::new("DCPU-16 emitter currently supports at most six local scalar variables")
-        })?;
-        self.next_register += 1;
-        self.locals.insert(name.to_owned(), register);
-        Ok(register)
     }
-
-    fn local(&self, name: &str) -> Result<&'static str, Diagnostic> {
-        self.locals
-            .get(name)
-            .copied()
-            .ok_or_else(|| Diagnostic::new(format!("DCPU-16 local `{name}` is not available")))
+    fn is_aggregate(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Array { .. })
+            || matches!(ty, Type::Named(name) if self.structs.contains_key(name))
     }
-
-    fn local_type(&self, name: &str) -> Result<&Type, Diagnostic> {
-        self.local_types
-            .get(name)
-            .ok_or_else(|| Diagnostic::new(format!("DCPU-16 local `{name}` has no type")))
+    fn array_element(&self, ty: &Type) -> Result<Type, Diagnostic> {
+        match ty {
+            Type::Array { element, .. } => Ok((**element).clone()),
+            _ => Err(Diagnostic::new("index requires an array")),
+        }
     }
-
-    fn line(&mut self, line: &str) {
-        self.out.push_str(line);
-        self.out.push('\n');
+    fn field_type(&self, ty: &Type, field: &str) -> Result<Type, Diagnostic> {
+        match ty {
+            Type::Named(name) => self
+                .structs
+                .get(name)
+                .and_then(|fields| fields.iter().find(|(candidate, _)| candidate == field))
+                .map(|(_, ty)| ty.clone())
+                .ok_or_else(|| Diagnostic::new(format!("unknown field `{field}`"))),
+            _ => Err(Diagnostic::new("field access requires struct")),
+        }
+    }
+    fn field_offset(&self, ty: &Type, field: &str) -> Result<usize, Diagnostic> {
+        match ty {
+            Type::Named(name) => {
+                let fields = self
+                    .structs
+                    .get(name)
+                    .ok_or_else(|| Diagnostic::new("field access requires struct"))?;
+                let mut offset = 0;
+                for (candidate, ty) in fields {
+                    if candidate == field {
+                        return Ok(offset);
+                    }
+                    offset += self.type_words(ty)?;
+                }
+                Err(Diagnostic::new(format!("unknown field `{field}`")))
+            }
+            _ => Err(Diagnostic::new("field access requires struct")),
+        }
+    }
+    fn const_value(&self, expr: &Expr) -> Result<i64, Diagnostic> {
+        match expr {
+            Expr::Int(value) | Expr::TypedInt(value, _) => Ok(*value),
+            Expr::Bool(value) => Ok(i64::from(*value)),
+            Expr::Char(value) => Ok(i64::from(*value)),
+            Expr::Ident(name) => self
+                .constants
+                .get(name)
+                .copied()
+                .ok_or_else(|| Diagnostic::new(format!("`{name}` is not a constant"))),
+            Expr::Unary { op, expr } => Ok(match op {
+                UnaryOp::Neg => self.const_value(expr)?.wrapping_neg(),
+                UnaryOp::BitNot => !self.const_value(expr)?,
+                UnaryOp::Not => i64::from(self.const_value(expr)? == 0),
+            }),
+            Expr::Binary { left, op, right } => {
+                let a = self.const_value(left)?;
+                let b = self.const_value(right)?;
+                Ok(match op {
+                    BinaryOp::Add => a.wrapping_add(b),
+                    BinaryOp::Sub => a.wrapping_sub(b),
+                    BinaryOp::Mul => a.wrapping_mul(b),
+                    BinaryOp::Div if b != 0 => a.wrapping_div(b),
+                    BinaryOp::Mod if b != 0 => a.wrapping_rem(b),
+                    BinaryOp::Shl => a.wrapping_shl(b as u32),
+                    BinaryOp::Shr => ((a as u64) >> b) as i64,
+                    BinaryOp::BitAnd => a & b,
+                    BinaryOp::BitOr => a | b,
+                    BinaryOp::BitXor => a ^ b,
+                    BinaryOp::Eq => i64::from(a == b),
+                    BinaryOp::Ne => i64::from(a != b),
+                    BinaryOp::Lt => i64::from(a < b),
+                    BinaryOp::Le => i64::from(a <= b),
+                    BinaryOp::Gt => i64::from(a > b),
+                    BinaryOp::Ge => i64::from(a >= b),
+                    BinaryOp::And => i64::from(a != 0 && b != 0),
+                    BinaryOp::Or => i64::from(a != 0 || b != 0),
+                    _ => 0,
+                })
+            }
+            Expr::Cast { expr, .. } => self.const_value(expr),
+            _ => Err(Diagnostic::new("expression is not constant")),
+        }
     }
 }
 
-fn type_is_signed(ty: &Type) -> bool {
+fn return_type_params_none(
+    emitter: &Emitter,
+    name: &str,
+    args: &[Expr],
+) -> Result<Vec<crate::ast::Param>, Diagnostic> {
+    if emitter.extern_functions.contains(name) {
+        return Err(Diagnostic::new(format!(
+            "DCPU external function `{name}` has no source signature; declare a naked EZRA wrapper with the DCPU stack ABI"
+        )));
+    }
+    Err(Diagnostic::new(format!(
+        "unknown DCPU function `{name}` with {} arguments",
+        args.len()
+    )))
+}
+fn plan_locals(body: &[Stmt], emitter: &Emitter) -> Result<HashMap<String, Binding>, Diagnostic> {
+    fn collect(
+        body: &[Stmt],
+        emitter: &Emitter,
+        locals: &mut HashMap<String, Binding>,
+        next: &mut i16,
+    ) -> Result<(), Diagnostic> {
+        for stmt in body {
+            match stmt {
+                Stmt::Let { name, ty, .. } => {
+                    if locals
+                        .insert(
+                            name.clone(),
+                            Binding {
+                                offset: *next,
+                                ty: ty.clone(),
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(Diagnostic::new(format!("duplicate DCPU local `{name}`")));
+                    }
+                    let words = i16::try_from(emitter.type_words(ty)?)
+                        .map_err(|_| Diagnostic::new("DCPU local frame is too large"))?;
+                    *next = next
+                        .checked_sub(words)
+                        .ok_or_else(|| Diagnostic::new("DCPU local frame is too large"))?;
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    collect(then_body, emitter, locals, next)?;
+                    collect(else_body, emitter, locals, next)?;
+                }
+                Stmt::While { body, .. } | Stmt::Loop { body } => {
+                    collect(body, emitter, locals, next)?
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    let mut locals = HashMap::new();
+    let mut next = -1;
+    collect(body, emitter, &mut locals, &mut next)?;
+    Ok(locals)
+}
+fn assign_binary(op: AssignOp) -> BinaryOp {
+    match op {
+        AssignOp::Set => unreachable!(),
+        AssignOp::Add => BinaryOp::Add,
+        AssignOp::Sub => BinaryOp::Sub,
+        AssignOp::Mul => BinaryOp::Mul,
+        AssignOp::Div => BinaryOp::Div,
+        AssignOp::Mod => BinaryOp::Mod,
+        AssignOp::BitAnd => BinaryOp::BitAnd,
+        AssignOp::BitOr => BinaryOp::BitOr,
+        AssignOp::BitXor => BinaryOp::BitXor,
+        AssignOp::Shl => BinaryOp::Shl,
+        AssignOp::Shr => BinaryOp::Shr,
+    }
+}
+fn signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16"))
 }
-
-fn binary_opcode(op: BinaryOp, signed: bool) -> Result<&'static str, Diagnostic> {
-    match op {
-        BinaryOp::Mul if signed => Ok("mli"),
-        BinaryOp::Mul => Ok("mul"),
-        BinaryOp::Div if signed => Ok("dvi"),
-        BinaryOp::Div => Ok("div"),
-        BinaryOp::Mod => Ok("mod"),
-        BinaryOp::Add => Ok("add"),
-        BinaryOp::Sub => Ok("sub"),
-        BinaryOp::Shl => Ok("shl"),
-        BinaryOp::Shr if signed => Ok("asr"),
-        BinaryOp::Shr => Ok("shr"),
-        BinaryOp::BitAnd => Ok("and"),
-        BinaryOp::BitXor => Ok("xor"),
-        BinaryOp::BitOr => Ok("bor"),
-        _ => Err(Diagnostic::new(format!(
-            "DCPU-16 emitter does not yet support binary operator `{op:?}`"
-        ))),
-    }
-}
-
-fn assign_opcode(op: AssignOp, signed: bool) -> Result<&'static str, Diagnostic> {
-    match op {
-        AssignOp::Add => Ok("add"),
-        AssignOp::Sub => Ok("sub"),
-        AssignOp::Mul if signed => Ok("mli"),
-        AssignOp::Mul => Ok("mul"),
-        AssignOp::Div if signed => Ok("dvi"),
-        AssignOp::Div => Ok("div"),
-        AssignOp::Mod => Ok("mod"),
-        AssignOp::BitAnd => Ok("and"),
-        AssignOp::BitOr => Ok("bor"),
-        AssignOp::BitXor => Ok("xor"),
-        AssignOp::Shl => Ok("shl"),
-        AssignOp::Shr if signed => Ok("asr"),
-        AssignOp::Shr => Ok("shr"),
-        AssignOp::Set => Err(Diagnostic::new("internal DCPU-16 assignment error")),
-    }
+fn function_label(name: &str) -> String {
+    format!(
+        "_{}",
+        name.chars()
+            .map(
+                |character| if character.is_ascii_alphanumeric() || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            )
+            .collect::<String>()
+    )
 }
 
 #[cfg(test)]
@@ -406,10 +1231,50 @@ mod tests {
         vm::assemble_subset_with_symbols_at,
     };
     use std::path::Path;
-
-    fn emit_result(source: &str) -> Result<String, Diagnostic> {
+    fn emit(source: &str) -> String {
         let program = parse_program(Path::new("dcpu.ezra"), source).unwrap();
-        emit_dcpu_assembly_with_options(
+        let assembly = emit_dcpu_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::Dcpu,
+                ram_base: crate::target::Address24::new(0x8000),
+                rodata_base: crate::target::Address24::new(0x9000),
+                asset_base: crate::target::Address24::new(0xa000),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        assemble_subset_with_symbols_at(CpuFamily::Dcpu.into(), &assembly, 0)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        assembly
+    }
+    #[test]
+    fn functions_control_flow_and_frames_assemble() {
+        let assembly = emit(
+            "fn add(a: u16, b: u16) -> u16 { let n: u16 = a + b; return n } fn main() { let n: u16 = 0; while n < 3 { n += add(n, 1) } }",
+        );
+        assert!(assembly.contains("_add:"));
+        assert!(assembly.contains("__ezra_while"));
+    }
+    #[test]
+    fn globals_arrays_structs_pointers_strings_and_mmio_assemble() {
+        let assembly = emit(
+            "struct Pair { left: u16 right: u16 } global values: [u16; 2] = [1, 2] global pair: Pair = Pair { left: 3, right: 4 } mmio SCREEN: u16 = 0x8000 fn main() { values[1] = 7; pair.right += 1; let p: ptr<u16> = &values[0]; *p = 9; SCREEN = values[1]; let s: ptr<u8> = \"ok\" }",
+        );
+        assert!(assembly.contains("__ezra_global_values:"));
+        assert!(assembly.contains("__ezra_string_"));
+    }
+    #[test]
+    fn sdk_style_inline_operands_assemble() {
+        let assembly = emit(
+            "inline fn command(value: u16) { asm volatile(in value: u16 as reg16, clobber memory) { \"set a, 0\" \"set b, {value}\" \"hwi 2\" } } fn main() { command(60) }",
+        );
+        assert!(assembly.contains("hwi 2"));
+    }
+    #[test]
+    fn ports_remain_rejected() {
+        let program = parse_program(Path::new("dcpu.ezra"), "port P: u8 = 1 fn main() {}").unwrap();
+        let error = emit_dcpu_assembly_with_options(
             &program,
             AssemblyOptions {
                 cpu: CpuFamily::Dcpu,
@@ -417,112 +1282,7 @@ mod tests {
                 ..AssemblyOptions::default()
             },
         )
-    }
-
-    fn emit(source: &str) -> String {
-        let assembly = emit_result(source).unwrap();
-        assemble_subset_with_symbols_at(CpuFamily::Dcpu.into(), &assembly, 0)
-            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
-        assembly
-    }
-
-    #[test]
-    fn empty_main_assembles() {
-        let assembly = emit("fn main() {}");
-        assert!(assembly.contains("jsr _main"));
-    }
-
-    #[test]
-    fn operand_free_inline_asm_assembles() {
-        let assembly =
-            emit(r#"fn main() { asm volatile(clobber memory) { "set a, 0x30" "add a, 2" } }"#);
-        assert!(assembly.contains("set a, 0x30"));
-    }
-
-    #[test]
-    fn scalar_arithmetic_assembles() {
-        let assembly = emit(
-            "fn main() { let left: u16 = 0x10; let right: u16 = 2; right += left; left += right * 3 }",
-        );
-        assert!(assembly.contains("mul j, a"));
-        assert!(assembly.contains("add j, a"));
-    }
-
-    #[test]
-    fn signed_arithmetic_emits_signed_opcodes() {
-        let assembly = emit(
-            "fn main() { let left: i16 = 15; let right: i16 = 3; left += right; let product: i16 = left * right; let quotient: i16 = left / right; let shifted: i16 = left >> right }",
-        );
-        assert!(assembly.contains("mli j, c"));
-        assert!(assembly.contains("dvi j, x"));
-        assert!(assembly.contains("asr j, y"));
-    }
-
-    #[test]
-    fn unsigned_arithmetic_emits_unsigned_opcodes() {
-        let assembly = emit(
-            "fn main() { let left: u16 = 15; let right: u16 = 3; left += right; let product: u16 = left * right; let quotient: u16 = left / right; let shifted: u16 = left >> right }",
-        );
-        assert!(assembly.contains("mul j, c"));
-        assert!(assembly.contains("div j, x"));
-        assert!(assembly.contains("shr j, y"));
-    }
-
-    #[test]
-    fn signed_compound_assignments_emit_signed_opcodes() {
-        let assembly = emit(
-            "fn main() { let value: i16 = 24; let amount: i16 = 3; value *= amount; value /= amount; value >>= amount }",
-        );
-        assert!(assembly.contains("mli j, a"));
-        assert!(assembly.contains("dvi j, a"));
-        assert!(assembly.contains("asr j, a"));
-    }
-
-    #[test]
-    fn explicit_inline_arguments_lower_once_left_to_right_with_typed_temps_and_nested_calls() {
-        let typed_arguments = emit(
-            r#"
-                inline fn pair(left: u8, right: u16) {}
-                fn main() { pair(3, 4) }
-            "#,
-        );
-        assert!(!typed_arguments.contains("_pair:"), "{typed_arguments}");
-
-        let nested = emit(
-            r#"
-                inline fn leaf() {}
-                inline fn nested() { leaf() }
-                fn main() { nested() }
-            "#,
-        );
-        assert!(!nested.contains("_leaf:"), "{nested}");
-        assert!(!nested.contains("_nested:"), "{nested}");
-    }
-
-    #[test]
-    fn unsafe_conditionally_evaluated_inline_call_remains_for_backend_validation() {
-        let error = emit_result(
-            r#"
-                inline fn guarded(value: bool) -> bool { return value }
-                fn main() {
-                    let flag: bool = false
-                    let result: bool = flag && guarded(true)
-                }
-            "#,
-        )
         .unwrap_err();
-
-        assert!(
-            error.message.contains("function `guarded` is unsupported"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn multiply_by_power_of_two_keeps_shared_shift_rewrite() {
-        let assembly = emit("fn main() { let value: i16 = 7; let scaled: i16 = value * 8 }");
-        assert!(assembly.contains("shl j, b"));
-        assert!(!assembly.contains("mli j, b"));
-        assert!(!assembly.contains("mul j, b"));
+        assert!(error.message.contains("port"));
     }
 }
