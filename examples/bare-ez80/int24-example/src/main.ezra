@@ -1,0 +1,11 @@
+volatile mmio OUTPUT: ptr<i24> = 0x0000AA
+
+fn main() {
+    // This should get optimized into something really short
+    let a : ptr = 0x0000FF
+    let b : u24 = cast<u24>(a)
+    let c : i24 = cast<i24>(b)
+    // This should be the bulk of the work
+    c = -c
+    *OUTPUT = c
+}

@@ -1693,6 +1693,12 @@ impl Emitter {
                 ty: self.model.global_types[name].clone(),
             });
         }
+        if let Some(embed) = self.model.embeds.get(name) {
+            return Ok(Binding {
+                storage: embed.storage,
+                ty: embed.ty.clone(),
+            });
+        }
         Err(Diagnostic::new(format!("unknown variable `{name}`")))
     }
 

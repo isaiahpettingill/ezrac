@@ -202,6 +202,107 @@ fn lowers_single_bit_expression_masks() {
 }
 
 #[test]
+fn lowers_single_bit_compound_assignments_for_local_scalars() {
+    let source = r#"
+        global global_value: u8 = 0
+
+        fn local_u8() -> u8 {
+            let value: u8 = 0xFFu8
+            value |= 0x20u8
+            value &= 0xDFu8
+            value ^= 0x20u8
+            return value
+        }
+
+        fn local_u16() -> u16 {
+            let value: u16 = 0xFFFFu16
+            value |= 0x0200u16
+            value &= 0xFDFFu16
+            return value
+        }
+
+        fn local_u24() -> u24 {
+            let value: u24 = 0xFFFFFFu24
+            value |= 0x020000u24
+            value &= 0xFDFFFFu24
+            return value
+        }
+
+        fn global_mask() -> u8 {
+            global_value |= 0x20u8
+            global_value &= 0xDFu8
+            return global_value
+        }
+
+        fn pointed_mask() -> u8 {
+            let value: u8 = 0xFFu8
+            let pointer: ptr<u8> = &value
+            *pointer |= 0x20u8
+            *pointer &= 0xDFu8
+            return *pointer
+        }
+
+        fn main() {
+            test.assert_eq_u8(local_u8(), 0xFFu8, 1)
+            test.assert_eq_u16(local_u16(), 0xFDFFu16, 2)
+            test.assert_eq_u24(local_u24(), 0xFDFFFFu24, 3)
+            test.assert_eq_u8(global_mask(), 0u8, 4)
+            test.assert_eq_u8(pointed_mask(), 0xDFu8, 5)
+            test.pass()
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 12_000).unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+
+    assert!(body("local_u8").contains("    set 5, (hl)"), "{asm}");
+    assert!(body("local_u8").contains("    res 5, (hl)"), "{asm}");
+    assert!(body("local_u8").contains("    xor b"), "{asm}");
+    assert!(body("local_u16").contains("    set 1, (hl)"), "{asm}");
+    assert!(body("local_u16").contains("    res 1, (hl)"), "{asm}");
+    assert!(body("local_u24").contains("    set 1, (hl)"), "{asm}");
+    assert!(body("local_u24").contains("    res 1, (hl)"), "{asm}");
+    assert!(!body("global_mask").contains(", (hl)"), "{asm}");
+    assert!(!body("pointed_mask").contains("    set "), "{asm}");
+    assert!(!body("pointed_mask").contains("    res "), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+
+    let intel_source = r#"
+        fn main() {
+            let value: u8 = 0xFFu8
+            value |= 0x20u8
+            value &= 0xDFu8
+        }
+    "#;
+    let intel_program = parse_program(Path::new("intel.ezra"), intel_source).unwrap();
+    for cpu in [CpuFamily::I8080, CpuFamily::I8085] {
+        let intel_asm = emit_ez80_assembly_with_options(
+            &intel_program,
+            AssemblyOptions {
+                cpu,
+                ram_base: Address24::new(0x2000),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!intel_asm.contains("\n    set "), "{intel_asm}");
+        assert!(!intel_asm.contains("\n    res "), "{intel_asm}");
+        assert!(intel_asm.contains("    ora b"), "{intel_asm}");
+        assert!(intel_asm.contains("    ana b"), "{intel_asm}");
+    }
+}
+
+#[test]
 fn lowers_byte_aligned_wide_temporary_shifts() {
     let source = r#"
             fn shl16_8(value: u16) -> u16 {

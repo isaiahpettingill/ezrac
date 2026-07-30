@@ -145,7 +145,7 @@ u24  i24
 
 Other built-in names used by the compiler and SDK include `bool` and `bytes`. Paths may also name structs or aliases.
 
-Pointers use `ptr<T>` and arrays use `[T; LEN]`.
+Pointers use `ptr<T>` and arrays use `[T; LEN]`. Arrays are storage, not return values. Pass arrays through pointer parameters, normally as `ptr<[T; LEN]>`; use the same form for output arrays. Arrays do not decay to element pointers. To perform element-pointer arithmetic, explicitly cast the array address to `ptr<T>`.
 
 ```ezra
 alias Byte = u8
@@ -153,6 +153,16 @@ alias Byte = u8
 global counter: u8 = 0
 global buffer: [u8; 16] = [0, 0, 0, 0]
 global framebuffer: ptr<u8> = 0x080000
+
+fn clear(buffer: ptr<[u8; 16]>) {
+    // Write the array through `buffer`.
+}
+
+fn main() {
+    clear(&buffer)
+    let bytes: ptr<u8> = cast<ptr<u8>>(&buffer)
+    *(bytes + 1) = 0
+}
 ```
 
 The target controls pointer width. eZ80, WDC 65C816, and the generic M68k target use 24-bit pointers. Z80-family, 8080/8085, LR35902, MOS 6502, TMS9900, and AVR targets use 16-bit pointers.
@@ -180,7 +190,7 @@ Characters use single quotes and evaluate to one byte.
 '\0'
 ```
 
-Strings use double quotes.
+Strings use double quotes. A string is immutable byte storage: it can be passed as a pointer and accessed as a byte array. Cast it to `ptr<u8>` before element-pointer arithmetic.
 
 ```ezra
 "hello"
@@ -227,7 +237,7 @@ fn main() {
 
 ## Embedded Data
 
-`embed` places byte data into the program image. The declared type is currently `bytes`.
+`embed` places immutable byte data into the program image. The legacy `bytes` spelling remains available. A typed embed must be a fixed `u8` array whose declared length exactly matches the embedded bytes.
 
 ```ezra
 embed logo: bytes = file("assets/logo.bin")
@@ -235,12 +245,14 @@ embed message: bytes = text("HELLO")
 embed c_message: bytes = cstr("HELLO")
 embed palette: bytes = bytes [0x00, 0x11, 0x22, 0x33]
 embed padding: bytes = repeat(0, 256)
+
+embed matrix: [u8; 4] = [1, 2, 3, 4]
 ```
 
 Embeds may select an output section and alignment.
 
 ```ezra
-embed banked: bytes = bytes [0xA1, 0xA2] section .bank1 align 256
+embed banked: [u8; 2] = [0xA1, 0xA2] section .bank1 align 256
 ```
 
 Use custom layouts to define additional sections. A project can also provide

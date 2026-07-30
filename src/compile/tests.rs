@@ -28,6 +28,23 @@ fn warns_for_costly_wide_integer_targets() {
 }
 
 #[test]
+fn reports_array_and_struct_function_returns_before_codegen() {
+    let program = parse_program(
+        Path::new("aggregate_return.ezra"),
+        "struct Pair { value: u8 } fn takes_array(values: [u8; 2]) {} fn array() -> [u8; 2] { return [1, 2] } fn pair() -> Pair { return Pair { value: 1 } } fn main() {}",
+    )
+    .unwrap();
+
+    let diagnostics = aggregate_return_diagnostics(&program);
+    assert!(diagnostics.iter().any(|value| value.message
+        == "function `takes_array` parameter `values` is an array; use `ptr<T>` instead"));
+    assert!(diagnostics.iter().any(|value| value.message
+        == "function `array` returns an array; pass an output pointer instead"));
+    assert!(diagnostics.iter().any(|value| value.message
+        == "function `pair` returns struct `Pair`; pass an output pointer instead"));
+}
+
+#[test]
 fn skips_wide_integer_warnings_on_exempt_targets() {
     let program = parse_program(
         Path::new("wide.ezra"),

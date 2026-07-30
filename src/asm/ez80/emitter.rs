@@ -1840,6 +1840,41 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_local_single_bit_compound_assignment(
+        &mut self,
+        variable: Variable,
+        ty: &Type,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<bool, Diagnostic> {
+        if !supports_z80_bit_instructions(self.cpu) {
+            return Ok(false);
+        }
+        let ty = self.symbols.resolved_type(ty)?;
+        if !matches!(ty, Type::Named(ref name) if matches!(name.as_str(), "u8" | "u16" | "u24")) {
+            return Ok(false);
+        }
+        let width_mask = (1_i64 << (variable.size * 8)) - 1;
+        let Ok(mask) = self.eval_i64_with_local_constants(value) else {
+            return Ok(false);
+        };
+        let mask = mask & width_mask;
+        let changed_bit = match op {
+            AssignOp::BitOr if mask.count_ones() == 1 => mask,
+            AssignOp::BitAnd if (!mask & width_mask).count_ones() == 1 => !mask & width_mask,
+            _ => return Ok(false),
+        };
+        let bit = changed_bit.trailing_zeros() as u32;
+        let address = variable.addr + bit / 8;
+        self.line(&format!("    ld hl, {address:06X}h"));
+        match op {
+            AssignOp::BitOr => self.line(&format!("    set {}, (hl)", bit % 8)),
+            AssignOp::BitAnd => self.line(&format!("    res {}, (hl)", bit % 8)),
+            _ => unreachable!("single-bit compound assignment only uses AND/OR"),
+        }
+        Ok(true)
+    }
+
     fn emit_arithmetic_assignment_op(
         &mut self,
         variable: Variable,
@@ -2151,6 +2186,22 @@ impl Emitter {
                         self.record_local_constant(name, ty, value);
                         self.record_readonly_pointer_alias(name, value);
                     }
+                    return Ok(());
+                }
+                if let (Some(local), Some(local_ty)) = (
+                    self.scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name))
+                        .copied(),
+                    self.scope_types
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name))
+                        .cloned(),
+                ) && self
+                    .emit_local_single_bit_compound_assignment(local, &local_ty, op, value)?
+                {
                     return Ok(());
                 }
                 let signed = self

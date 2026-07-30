@@ -128,6 +128,7 @@ fn check_diagnostics_with_sdk_and_overrides(
     };
     let mut diagnostics =
         collect_reference_diagnostics(&source_program, &resolved, options.default_sdk_symbols);
+    diagnostics.extend(aggregate_return_diagnostics(&source_program));
     for unit in &resolved.source_units {
         if normalize_path(&unit.path) == normalize_path(&source_program.source_path) {
             continue;
@@ -468,6 +469,9 @@ pub fn check_source_with_sdk_and_overrides(
         None,
     )
     .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
+    if let Some(error) = aggregate_return_diagnostics(&program).into_iter().next() {
+        return Err(locate_source_diagnostic(error, source, &options.source));
+    }
     let declarations = program.declarations.len();
     let has_main = program.main_function().is_some();
 
@@ -664,6 +668,95 @@ impl ReferenceDiagnostics {
 
 fn normalize_reference(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn aggregate_return_diagnostics(program: &Program) -> Vec<Diagnostic> {
+    fn collect_types(
+        declaration: &Declaration,
+        aliases: &mut HashMap<String, Type>,
+        structs: &mut HashSet<String>,
+    ) {
+        match declaration {
+            Declaration::Alias(alias) => {
+                aliases.insert(alias.name.clone(), alias.ty.clone());
+            }
+            Declaration::Struct(value) => {
+                structs.insert(value.name.clone());
+            }
+            Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                collect_types(declaration, aliases, structs);
+            }
+            _ => {}
+        }
+    }
+
+    fn resolve_alias(ty: &Type, aliases: &HashMap<String, Type>) -> Type {
+        let mut ty = ty;
+        let mut seen = HashSet::new();
+        while let Type::Named(name) = ty {
+            let Some(alias) = aliases.get(name) else {
+                break;
+            };
+            if !seen.insert(name) {
+                break;
+            }
+            ty = alias;
+        }
+        ty.clone()
+    }
+
+    fn visit(
+        declaration: &Declaration,
+        aliases: &HashMap<String, Type>,
+        structs: &HashSet<String>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let (name, params, return_type) = match declaration {
+            Declaration::Function(function) => {
+                (&function.name, &function.params, &function.return_type)
+            }
+            Declaration::ExternAsmFunction(function) => {
+                (&function.name, &function.params, &function.return_type)
+            }
+            Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                visit(declaration, aliases, structs, diagnostics);
+                return;
+            }
+            _ => return,
+        };
+        for param in params {
+            if matches!(resolve_alias(&param.ty, aliases), Type::Array { .. }) {
+                diagnostics.push(Diagnostic::new(format!(
+                    "function `{name}` parameter `{}` is an array; use `ptr<T>` instead",
+                    param.name
+                )));
+            }
+        }
+        if let Some(return_type) = return_type {
+            match resolve_alias(return_type, aliases) {
+                Type::Array { .. } => diagnostics.push(Diagnostic::new(format!(
+                    "function `{name}` returns an array; pass an output pointer instead"
+                ))),
+                Type::Named(type_name) if structs.contains(&type_name) => {
+                    diagnostics.push(Diagnostic::new(format!(
+                        "function `{name}` returns struct `{type_name}`; pass an output pointer instead"
+                    )))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut aliases = HashMap::new();
+    let mut structs = HashSet::new();
+    for declaration in &program.declarations {
+        collect_types(declaration, &mut aliases, &mut structs);
+    }
+    let mut diagnostics = Vec::new();
+    for declaration in &program.declarations {
+        visit(declaration, &aliases, &structs, &mut diagnostics);
+    }
+    diagnostics
 }
 
 fn collect_reference_diagnostics(

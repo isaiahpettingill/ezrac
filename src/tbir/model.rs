@@ -41,6 +41,8 @@ pub struct FunctionSignature {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EmbedObject {
     pub storage: Storage,
+    /// Embeds are stored as bytes, but retain their source-level array type.
+    pub ty: Type,
     pub bytes: Vec<u8>,
 }
 
@@ -358,6 +360,31 @@ impl SemanticModel {
                 }
                 Declaration::Embed(declaration) => {
                     let bytes = embed_bytes(&declaration.source, &program.source_path, self)?;
+                    let len = match &declaration.ty {
+                        Some(Type::Array { len, .. }) => usize::try_from(self.const_value(len)?)
+                            .map_err(|_| Diagnostic::new("embed length must be non-negative"))?,
+                        Some(_) => {
+                            return Err(Diagnostic::new(format!(
+                                "embed `{}` must have an array type",
+                                declaration.name
+                            )));
+                        }
+                        None => bytes.len(),
+                    };
+                    if len != bytes.len() {
+                        return Err(Diagnostic::new(format!(
+                            "embed `{}` declares {len} bytes but contains {}",
+                            declaration.name,
+                            bytes.len()
+                        )));
+                    }
+                    // Embeds are always raw byte storage. Their declared array length
+                    // documents and validates the number of bytes; it does not change
+                    // their in-memory representation.
+                    let ty = Type::Array {
+                        element: Box::new(Type::Named("u8".to_owned())),
+                        len: Box::new(Expr::Int(i64::try_from(len).unwrap_or(i64::MAX))),
+                    };
                     let align = declaration
                         .align
                         .as_ref()
@@ -373,7 +400,7 @@ impl SemanticModel {
                     let storage =
                         allocate_from(&mut self.next_asset, size, align, self.max_address)?;
                     self.embeds
-                        .insert(declaration.name.clone(), EmbedObject { storage, bytes });
+                        .insert(declaration.name.clone(), EmbedObject { storage, ty, bytes });
                     for (suffix, value, ty) in [
                         (
                             "ptr",

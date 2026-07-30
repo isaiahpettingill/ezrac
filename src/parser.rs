@@ -287,6 +287,7 @@ fn parse_cfg_int(name: &str, pair: Pair<'_, Rule>) -> Result<u16, Diagnostic> {
 fn build_embed(pair: Pair<'_, Rule>) -> Result<EmbedDecl, Diagnostic> {
     let mut public = false;
     let mut name = None;
+    let mut ty = None;
     let mut source = None;
     let mut section = None;
     let mut align = None;
@@ -294,7 +295,12 @@ fn build_embed(pair: Pair<'_, Rule>) -> Result<EmbedDecl, Diagnostic> {
         match inner.as_rule() {
             Rule::visibility => public = true,
             Rule::ident => name = Some(inner.as_str().to_owned()),
+            Rule::ty => ty = Some(build_type(inner)?),
             Rule::embed_source => source = Some(build_embed_source(inner)?),
+            Rule::array_lit => match build_expr(inner)? {
+                Expr::Array(bytes) => source = Some(EmbedSource::Bytes(bytes)),
+                _ => unreachable!("array_lit must produce an array expression"),
+            },
             Rule::embed_opts => {
                 for opt in inner.into_inner() {
                     match opt.as_rule() {
@@ -310,6 +316,7 @@ fn build_embed(pair: Pair<'_, Rule>) -> Result<EmbedDecl, Diagnostic> {
     Ok(EmbedDecl {
         public,
         name: name.unwrap(),
+        ty,
         source: source.unwrap(),
         section,
         align,

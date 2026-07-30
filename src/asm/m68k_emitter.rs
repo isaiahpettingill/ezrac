@@ -246,6 +246,8 @@ impl Emitter {
                 }
                 if *op == AssignOp::Set {
                     self.emit_expr(value, &ty)?;
+                } else if self.emit_local_single_bit_compound_assignment(target, &ty, *op, value)? {
+                    return Ok(());
                 } else {
                     self.load_place(target, &ty)?;
                     self.line(&format!("    move.{} d0,d1", size_suffix(&ty)?));
@@ -263,9 +265,11 @@ impl Emitter {
             } => {
                 let otherwise = self.next_label("if_else");
                 let done = self.next_label("if_end");
-                self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
-                self.line("    tst.b d0");
-                self.line(&format!("    beq {otherwise}"));
+                if !self.emit_jump_if_false(condition, &otherwise)? {
+                    self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
+                    self.line("    tst.b d0");
+                    self.line(&format!("    beq {otherwise}"));
+                }
                 self.emit_block(then_body)?;
                 self.line(&format!("    bra {done}"));
                 self.line(&format!("{otherwise}:"));
@@ -280,9 +284,11 @@ impl Emitter {
                     break_label: done.clone(),
                 });
                 self.line(&format!("{check}:"));
-                self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
-                self.line("    tst.b d0");
-                self.line(&format!("    beq {done}"));
+                if !self.emit_jump_if_false(condition, &done)? {
+                    self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
+                    self.line("    tst.b d0");
+                    self.line(&format!("    beq {done}"));
+                }
                 self.emit_block(body)?;
                 self.line(&format!("    bra {check}"));
                 self.line(&format!("{done}:"));
@@ -428,6 +434,111 @@ impl Emitter {
             }
         ));
         Ok(())
+    }
+
+    fn emit_local_single_bit_compound_assignment(
+        &mut self,
+        target: &Place,
+        ty: &Type,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<bool, Diagnostic> {
+        let Place::Ident(name) = target else {
+            return Ok(false);
+        };
+        let Some(binding) = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let ty = self.model.resolved_type(ty)?;
+        if !matches!(ty, Type::Named(ref name) if matches!(name.as_str(), "u8" | "u16" | "u24" | "u32"))
+        {
+            return Ok(false);
+        }
+        let Ok(mask) = self.model.const_value(value) else {
+            return Ok(false);
+        };
+        let width = scalar_width(&ty)?;
+        let width_mask = (1_u64 << (u32::from(width) * 8)) - 1;
+        let mask = (mask as u64) & width_mask;
+        let bit_mask = match op {
+            AssignOp::BitOr | AssignOp::BitXor if mask.is_power_of_two() => mask,
+            AssignOp::BitAnd if (!mask & width_mask).is_power_of_two() => !mask & width_mask,
+            _ => return Ok(false),
+        };
+        let bit = bit_mask.trailing_zeros();
+        let byte_offset = u32::from(width - 1) - bit / 8;
+        let instruction = match op {
+            AssignOp::BitOr => "bset",
+            AssignOp::BitAnd => "bclr",
+            AssignOp::BitXor => "bchg",
+            _ => unreachable!(),
+        };
+        self.line(&format!(
+            "    {instruction} #{},${:06X}",
+            bit % 8,
+            binding.storage.address + byte_offset
+        ));
+        Ok(true)
+    }
+
+    fn emit_jump_if_false(
+        &mut self,
+        condition: &Expr,
+        false_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let Expr::Binary { left, op, right } = condition else {
+            return Ok(false);
+        };
+        if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            return Ok(false);
+        }
+        let Expr::Binary {
+            left: source,
+            op: BinaryOp::BitAnd,
+            right: mask_expr,
+        } = left.as_ref()
+        else {
+            return Ok(false);
+        };
+        let (Ok(mask), Ok(expected)) = (
+            self.model.const_value(mask_expr),
+            self.model.const_value(right),
+        ) else {
+            return Ok(false);
+        };
+        let source_ty = self.model.resolved_type(&self.expr_type(source)?)?;
+        let width = scalar_width(&source_ty)?;
+        let width_mask = (1_u64 << (u32::from(width) * 8)) - 1;
+        let Ok(mask) = u64::try_from(mask) else {
+            return Ok(false);
+        };
+        let Ok(expected) = u64::try_from(expected) else {
+            return Ok(false);
+        };
+        if mask > width_mask
+            || expected > width_mask
+            || !mask.is_power_of_two()
+            || (expected != 0 && expected != mask)
+        {
+            return Ok(false);
+        }
+
+        self.emit_expr(source, &source_ty)?;
+        let bit = mask.trailing_zeros();
+        self.line(&format!("    btst #{bit},d0"));
+        let branch = if (*op == BinaryOp::Eq) == (expected == 0) {
+            "bne"
+        } else {
+            "beq"
+        };
+        self.line(&format!("    {branch} {false_label}"));
+        Ok(true)
     }
 
     fn emit_expr(&mut self, expr: &Expr, expected: &Type) -> Result<(), Diagnostic> {
@@ -1640,6 +1751,125 @@ mod tests {
         assert!(assembly.contains("eor.b d2,d0"), "{assembly}");
         assert!(assembly.contains("lsl.b #1,d0"), "{assembly}");
         assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn lowers_one_bit_mask_branches_to_btst() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            fn bit_tests(byte: u8, word: u16) {
+                if (byte & 0x20u8) == 0 {
+                    let clear: u8 = byte
+                }
+                if (byte & 0x20u8) != 0 {
+                    let set: u8 = byte
+                }
+                while (word & 0x0200u16) == 0 { break }
+                while (word & 0x0200u16) != 0 { break }
+            }
+            fn main() {
+                let byte: u8 = 0x20u8
+                let word: u16 = 0
+                bit_tests(byte, word)
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(assembly.matches("    btst #5,d0").count(), 2, "{assembly}");
+        assert_eq!(assembly.matches("    btst #9,d0").count(), 2, "{assembly}");
+        assert!(!assembly.contains("    and.b d2,d0"), "{assembly}");
+        assert!(!assembly.contains("    and.w d2,d0"), "{assembly}");
+        for branch in [
+            "    btst #5,d0\n    bne __ezra_if_else_",
+            "    btst #5,d0\n    beq __ezra_if_else_",
+            "    btst #9,d0\n    bne __ezra_while_end_",
+            "    btst #9,d0\n    beq __ezra_while_end_",
+        ] {
+            assert!(assembly.contains(branch), "missing {branch}:\n{assembly}");
+        }
+    }
+
+    #[test]
+    fn lowers_local_single_bit_compound_assignments() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            struct Pair { value: u8 }
+            global global_value: u8 = 0
+            global bytes: [u8; 1] = [0]
+            global pair: Pair = Pair { value: 0 }
+
+            fn bit_ops(input8: u8, input16: u16, input24: u24, input32: u32) {
+                let byte: u8 = input8
+                let word: u16 = input16
+                let triple: u24 = input24
+                let long: u32 = input32
+                byte |= 0x20u8
+                byte &= 0xDFu8
+                byte ^= 0x20u8
+                word |= 0x0200u16
+                word &= 0xFDFFu16
+                word ^= 0x0200u16
+                triple |= 0x020000u24
+                triple &= 0xFDFFFFu24
+                triple ^= 0x020000u24
+                long |= 0x80000000u32
+                long &= 0x7FFFFFFFu32
+                long ^= 0x80000000u32
+
+                global_value |= 0x20u8
+                bytes[0] |= 0x20u8
+                pair.value |= 0x20u8
+                let pointer: ptr<u8> = &byte
+                *pointer |= 0x20u8
+            }
+
+            fn main() {
+                bit_ops(0, 0, 0, 0)
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        for instruction in [
+            "    bset #5,$",
+            "    bclr #5,$",
+            "    bchg #5,$",
+            "    bset #1,$",
+            "    bclr #1,$",
+            "    bchg #1,$",
+            "    bset #7,$",
+            "    bclr #7,$",
+            "    bchg #7,$",
+        ] {
+            assert!(
+                assembly.contains(instruction),
+                "missing {instruction}:\n{assembly}"
+            );
+        }
+        assert_eq!(assembly.matches("    bset #5,$").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("    bclr #5,$").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("    bchg #5,$").count(), 1, "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
     }
 
     #[test]

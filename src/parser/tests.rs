@@ -808,11 +808,16 @@ fn parses_embed_byte_declarations() {
             embed blob: bytes = file("assets/blob.bin")
             embed title: bytes = cstr("OK")
             embed blank: bytes = repeat(0, 4)
+            embed typed_palette: [u8; 2] = [0x11, 0x22]
             fn main() {}
             "#,
     )
     .unwrap();
 
     assert!(matches!(program.declarations[0], Declaration::Embed(_)));
+    assert!(matches!(
+        &program.declarations[4],
+        Declaration::Embed(embed) if matches!(&embed.ty, Some(Type::Array { element, .. }) if matches!(element.as_ref(), Type::Named(name) if name == "u8"))
+    ));
     assert!(program.main_function().is_some());
 }

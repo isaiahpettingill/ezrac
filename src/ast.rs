@@ -93,6 +93,9 @@ pub struct MmioDecl {
 pub struct EmbedDecl {
     pub public: bool,
     pub name: String,
+    /// `None` is the legacy `bytes` spelling. Typed embeds are currently
+    /// restricted to fixed `[u8; N]` arrays.
+    pub ty: Option<Type>,
     pub source: EmbedSource,
     pub section: Option<String>,
     pub align: Option<Expr>,

@@ -1007,6 +1007,8 @@ Rules:
 - compile-time known out-of-bounds indexes are compile errors
 - array elements are stored compactly
 - array pointer decay does not exist
+- use `cast<ptr<T>>(&array)` for element-pointer arithmetic
+- index a raw pointer only after casting it to a pointer-to-array type; the compiler may warn when the element count is unknown
 ```
 
 Use explicit address-of:
@@ -1361,7 +1363,8 @@ Rules:
 - function overloading is not allowed
 - varargs are not allowed
 - structs are passed by pointer only
-- arrays are passed by pointer only
+- arrays cannot be function parameters; pass `ptr<T>` instead
+- structs and arrays cannot be return values; pass an output pointer instead
 ```
 
 Attributes:
@@ -1394,6 +1397,7 @@ Return values:
 bool/u8/i8      -> A
 u16/i16         -> HL low 16 bits
 u24/i24/ptr   -> HL
+arrays/structs -> unsupported; pass an output pointer
 ```
 
 Arguments:

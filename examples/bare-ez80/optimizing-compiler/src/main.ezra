@@ -1,0 +1,25 @@
+volatile mmio OUTPUT : ptr<u16> = 0x200000
+
+// should do nothing because it only declares immediates that have no side effects
+fn nop(){
+    let x : u8 = 20
+    let y : u8 = 20
+    let z : u16 = cast<u16>(x) * cast<u16>(y)
+}
+
+fn nops(){
+    nop()
+    nop()
+    nop()
+}
+
+fn main() {
+    nop()
+    nops()
+
+    // Should be a single instruction since its just constants
+    let x : u8 = 20
+    let y : u8 = 20
+    let z : u16 = cast<u16>(x) * cast<u16>(y)
+    *OUTPUT = z
+}

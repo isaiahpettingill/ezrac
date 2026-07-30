@@ -58,10 +58,7 @@ pub fn memory_objects(
         objects.push(object(
             name,
             TbirObjectKind::Embed,
-            Type::Array {
-                element: Box::new(Type::Named("u8".to_owned())),
-                len: Box::new(crate::ast::Expr::Int(i64::from(embed.storage.size))),
-            },
+            embed.ty.clone(),
             embed.storage.address,
             embed.storage.size,
             TbirAccess::ReadOnly,
