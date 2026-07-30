@@ -1,0 +1,15 @@
+{
+  "name": "tree-sitter-ezra-asm",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Ezra-supported assembly files.",
+  "main": "grammar.js",
+  "keywords": [
+    "tree-sitter",
+    "ezra",
+    "assembly"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "tree-sitter-cli": "^0.22.6"
+  }
+}

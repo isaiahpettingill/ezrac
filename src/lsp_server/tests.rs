@@ -283,6 +283,40 @@ fn typechecking_diagnostics_are_returned_for_type_mismatches() {
 }
 
 #[test]
+fn assembly_diagnostics_use_the_project_cpu_and_unsaved_text() {
+    let root = std::env::temp_dir().join(format!("ezrac-lsp-assembly-{}", std::process::id()));
+    let path = root.join("src/main.asm");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(root.join("Ezra.toml"), "[build]\ntarget = \"bare-z80\"\n").unwrap();
+    fs::write(&path, "nop\n").unwrap();
+    let document = OpenDocument {
+        path,
+        text: "mov ax, bx\n".to_owned(),
+        version: None,
+    };
+
+    let error = check_assembly_document_diagnostics(&document).unwrap_err();
+    assert!(error.message.contains("mov"), "{error}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn assembly_documents_outside_an_ezra_project_have_no_diagnostics() {
+    let document = OpenDocument {
+        path: std::env::temp_dir().join("ezrac-lsp-no-project/main.asm"),
+        text: "not valid assembly\n".to_owned(),
+        version: None,
+    };
+
+    assert!(
+        check_assembly_document_diagnostics(&document)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn compiler_diagnostics_publish_multiple_exact_ranges() {
     let document = OpenDocument {
         path: PathBuf::from("multi-error.ezra"),
@@ -650,6 +684,7 @@ fn initialized_registers_project_file_watchers_and_responses_are_ignored() {
     assert!(output.contains("**/Ezra.toml"));
     assert!(output.contains("**/*.ezra"));
     assert!(output.contains("**/*.ezralayout"));
+    assert!(output.contains("**/*.asm"));
 
     let mut output = Vec::new();
     server

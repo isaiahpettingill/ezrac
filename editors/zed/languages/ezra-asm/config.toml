@@ -1,0 +1,11 @@
+name = "Ezra Assembly"
+grammar = "ezra_asm"
+path_suffixes = ["asm"]
+line_comments = [";", "//"]
+word_characters = ["."]
+brackets = [
+  { start = "(", end = ")", close = true, newline = false },
+  { start = "[", end = "]", close = true, newline = false },
+  { start = "\"", end = "\"", close = true, newline = false, not_in = ["comment", "string"] },
+  { start = "'", end = "'", close = true, newline = false, not_in = ["comment", "string"] },
+]

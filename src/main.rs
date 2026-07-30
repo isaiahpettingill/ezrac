@@ -2344,6 +2344,14 @@ fn install_zed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
             "languages/ezra/textobjects.scm",
             include_str!("editor_assets/zed/languages/ezra/textobjects.scm"),
         ),
+        (
+            "languages/ezra-asm/config.toml",
+            include_str!("editor_assets/zed/languages/ezra-asm/config.toml"),
+        ),
+        (
+            "languages/ezra-asm/highlights.scm",
+            include_str!("editor_assets/zed/languages/ezra-asm/highlights.scm"),
+        ),
     ];
     write_syntax_files(root, &files, dry_run)
 }

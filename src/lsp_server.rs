@@ -5,6 +5,7 @@ use std::{
 };
 
 use ezra::{
+    asm::{AssemblyPreprocessOptions, preprocess_assembly_source},
     ast::{Declaration, Expr, Function, Stmt, Type},
     compile::{
         CompileOptions, SdkResolver, builtin_sdk_modules,
@@ -16,7 +17,8 @@ use ezra::{
     layout::parse_layout,
     parser::parse_program,
     project::{LspMode, load_nearest_project_config},
-    target::DEFAULT_TARGET_TRIPLE,
+    target::{AssemblerCpu, DEFAULT_TARGET_TRIPLE, resolve_target_profile},
+    vm::assemble_program_at,
 };
 use lsp::notification::{Notification, TextDocumentPublishDiagnostics};
 use serde::{Deserialize, Serialize};
@@ -359,20 +361,27 @@ impl Server {
             })
             .collect::<HashMap<_, _>>();
         let mut roots = BTreeSet::new();
-        let mut configuration_errors = Vec::new();
+        let mut diagnostics = Vec::new();
         for document in self.documents.values() {
+            if is_assembly_document(&document.path) {
+                match check_assembly_document_diagnostics(document) {
+                    Ok(document_diagnostics) => diagnostics.extend(
+                        document_diagnostics
+                            .into_iter()
+                            .map(|diagnostic| (document.path.clone(), diagnostic, false)),
+                    ),
+                    Err(error) => diagnostics.push((document.path.clone(), error, false)),
+                }
+                continue;
+            }
+
             match project_source_path(&document.path) {
                 Ok(path) => {
                     roots.insert(normalize_document_path(&path));
                 }
-                Err(error) => configuration_errors.push((document.path.clone(), error)),
+                Err(error) => diagnostics.push((document.path.clone(), error, false)),
             }
         }
-
-        let mut diagnostics = configuration_errors
-            .into_iter()
-            .map(|(path, diagnostic)| (path, diagnostic, false))
-            .collect::<Vec<_>>();
         for path in roots {
             let source = source_overrides
                 .get(&path)
@@ -554,6 +563,36 @@ fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
     }
 }
 
+fn check_assembly_document_diagnostics(
+    document: &OpenDocument,
+) -> Result<Vec<Diagnostic>, Diagnostic> {
+    let Some(project) = load_nearest_project_config(&document.path)? else {
+        return Ok(Vec::new());
+    };
+    let target = resolve_target_profile(project.target.as_deref()).map_err(Diagnostic::new)?;
+    let assembler_cpu = project
+        .assembler_cpu
+        .as_deref()
+        .map(AssemblerCpu::parse)
+        .transpose()
+        .map_err(Diagnostic::new)?
+        .unwrap_or_else(|| AssemblerCpu::from(target.triple.cpu));
+    let preprocessed = preprocess_assembly_source(
+        &document.path.to_string_lossy(),
+        &document.text,
+        AssemblyPreprocessOptions::for_compiled_features(
+            &target.triple.value,
+            assembler_cpu.as_str(),
+        ),
+    )?;
+    assemble_program_at(assembler_cpu, &preprocessed.program, 0)?;
+    Ok(Vec::new())
+}
+
+fn is_assembly_document(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("asm")
+}
+
 fn uses_library_lsp_mode(path: &Path) -> Result<bool, Diagnostic> {
     Ok(load_nearest_project_config(path)?
         .is_some_and(|project| project.lsp_mode == LspMode::Library))
@@ -659,7 +698,7 @@ fn is_project_input(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == "Ezra.toml")
         || matches!(
             path.extension().and_then(|extension| extension.to_str()),
-            Some("ezra" | "ezralayout")
+            Some("ezra" | "ezralayout" | "asm")
         )
 }
 
@@ -738,7 +777,8 @@ fn register_file_watchers(output: &mut impl Write) -> Result<(), String> {
                         "watchers": [
                             { "globPattern": "**/Ezra.toml" },
                             { "globPattern": "**/*.ezra" },
-                            { "globPattern": "**/*.ezralayout" }
+                            { "globPattern": "**/*.ezralayout" },
+                            { "globPattern": "**/*.asm" }
                         ]
                     }
                 }]
