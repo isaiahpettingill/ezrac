@@ -58,6 +58,7 @@ ret_ty = { "->" ~ ty }
 block = { "{" ~ stmt* ~ "}" }
 stmt = _{
     let_stmt
+  | untyped_let_stmt
   | if_stmt
   | while_stmt
   | loop_stmt
@@ -71,6 +72,7 @@ stmt = _{
 }
 
 let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
+untyped_let_stmt = { "let" ~ ident ~ "=" ~ expr ~ semi? }
 assign_stmt = { place ~ assign_op ~ expr ~ semi? }
 place = { deref_place | access_place | index_place | field_place | ident }
 deref_place = { "*" ~ deref_operand }

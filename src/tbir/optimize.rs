@@ -1036,6 +1036,7 @@ fn local_propagation_and_cse_program(
                 Declaration::Function(function) => {
                     let mut assigned = HashSet::new();
                     collect_assigned_names(&function.body, &mut assigned);
+                    collect_address_taken_names(&function.body, &mut assigned);
                     let mut values = HashMap::new();
                     let mut available = Vec::new();
                     function.body = propagate_block(
@@ -1082,6 +1083,114 @@ fn collect_assigned_names(stmts: &[Stmt], assigned: &mut HashSet<String>) {
     }
 }
 
+fn collect_address_taken_names(stmts: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. }
+            | Stmt::Return(Some(value))
+            | Stmt::Out { value, .. }
+            | Stmt::Expr(value) => collect_address_taken_names_in_expr(value, names),
+            Stmt::Assign { target, value, .. } => {
+                collect_address_taken_names_in_place(target, names);
+                collect_address_taken_names_in_expr(value, names);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_address_taken_names_in_expr(condition, names);
+                collect_address_taken_names(then_body, names);
+                collect_address_taken_names(else_body, names);
+            }
+            Stmt::While { condition, body } => {
+                collect_address_taken_names_in_expr(condition, names);
+                collect_address_taken_names(body, names);
+            }
+            Stmt::Loop { body } => collect_address_taken_names(body, names),
+            Stmt::Asm { .. } | Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+
+fn collect_address_taken_names_in_place(place: &Place, names: &mut HashSet<String>) {
+    match place {
+        Place::Index { index, .. } | Place::Deref(index) => {
+            collect_address_taken_names_in_expr(index, names)
+        }
+        Place::Access(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_address_taken_names_in_expr(index, names);
+                }
+            }
+        }
+        Place::Ident(_) | Place::Field { .. } => {}
+    }
+}
+
+fn collect_address_taken_names_in_expr(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::AddressOf(name) => {
+            names.insert(name.clone());
+        }
+        Expr::AddressOfIndex { name, index } => {
+            names.insert(name.clone());
+            collect_address_taken_names_in_expr(index, names);
+        }
+        Expr::AddressOfField { base, .. } => {
+            names.insert(base.clone());
+        }
+        Expr::AddressOfAccess(path) => {
+            names.insert(path.root.clone());
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_address_taken_names_in_expr(index, names);
+                }
+            }
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_address_taken_names_in_expr(value, names);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_address_taken_names_in_expr(value, names);
+            }
+        }
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => collect_address_taken_names_in_expr(value, names),
+        Expr::Binary { left, right, .. } => {
+            collect_address_taken_names_in_expr(left, names);
+            collect_address_taken_names_in_expr(right, names);
+        }
+        Expr::Call { args, .. } => {
+            for argument in args {
+                collect_address_taken_names_in_expr(argument, names);
+            }
+        }
+        Expr::Access(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_address_taken_names_in_expr(index, names);
+                }
+            }
+        }
+        Expr::Index { index, .. } => collect_address_taken_names_in_expr(index, names),
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. } => {}
+    }
+}
+
 #[derive(Clone)]
 struct PropagatedValue {
     ty: Type,
@@ -1101,6 +1210,7 @@ fn propagate_block(
         let stmt = match stmt {
             Stmt::Let { name, ty, value } => {
                 let mut value = substitute_expr(value, values, report);
+                value = reuse_available_expr(value, available, &name, context, report);
                 let references_memory = expr_references_memory_object(&value, context);
                 if is_cse_candidate(&value) && !references_memory {
                     if let Some((_, prior)) = available.iter().find(|(expr, _)| expr == &value) {
@@ -1345,6 +1455,54 @@ fn substitute_expr(
         },
         other => other,
     }
+}
+
+fn reuse_available_expr(
+    expr: Expr,
+    available: &[(Expr, String)],
+    name: &str,
+    context: &OptimizationContext,
+    report: &mut TbirOptimizationReport,
+) -> Expr {
+    let expr = match expr {
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(reuse_available_expr(
+                *expr, available, name, context, report,
+            )),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(reuse_available_expr(
+                *left, available, name, context, report,
+            )),
+            op,
+            right: Box::new(reuse_available_expr(
+                *right, available, name, context, report,
+            )),
+        },
+        Expr::Cast { ty, expr } => Expr::Cast {
+            ty,
+            expr: Box::new(reuse_available_expr(
+                *expr, available, name, context, report,
+            )),
+        },
+        other => other,
+    };
+
+    if is_cse_candidate(&expr) && !expr_references_memory_object(&expr, context) {
+        if let Some((_, prior)) = available.iter().find(|(prior, _)| prior == &expr) {
+            report.common_subexpressions += 1;
+            decision(
+                report,
+                TbirOptimizationKind::CommonSubexpression,
+                None,
+                name,
+                None,
+            );
+            return Expr::Ident(prior.clone());
+        }
+    }
+    expr
 }
 
 fn is_pure_scalar(expr: &Expr) -> bool {
@@ -2346,6 +2504,19 @@ fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<(Expr, boo
         {
             algebraic(value.clone())
         }
+        (Expr::Bool(true), BinaryOp::And, value)
+        | (Expr::Bool(false), BinaryOp::Or, value)
+        | (value, BinaryOp::And, Expr::Bool(true))
+        | (value, BinaryOp::Or, Expr::Bool(false)) => algebraic(value.clone()),
+        (Expr::Bool(false), BinaryOp::And, _) | (Expr::Bool(true), BinaryOp::Or, _) => {
+            algebraic(Expr::Bool(matches!(op, BinaryOp::Or)))
+        }
+        (value, BinaryOp::And, Expr::Bool(false)) if is_pure_scalar(value) => {
+            algebraic(Expr::Bool(false))
+        }
+        (value, BinaryOp::Or, Expr::Bool(true)) if is_pure_scalar(value) => {
+            algebraic(Expr::Bool(true))
+        }
         _ => None,
     }
 }
@@ -2377,8 +2548,31 @@ fn shift_expr(value: Expr, op: BinaryOp, shift: u32) -> Expr {
 fn fold_unary(op: UnaryOp, expr: &Expr) -> Option<Expr> {
     match (op, expr) {
         (UnaryOp::Not, Expr::Bool(value)) => Some(Expr::Bool(!value)),
+        (UnaryOp::BitNot, Expr::TypedInt(value, ty)) => {
+            let value = if type_is_unsigned_integer(ty) {
+                (!value) & typed_integer_mask(ty)?
+            } else {
+                !value
+            };
+            Some(Expr::TypedInt(value, ty.clone()))
+        }
         _ => None,
     }
+}
+
+fn type_is_unsigned_integer(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name) if matches!(name.as_str(), "u8" | "u16" | "u24" | "u32"))
+}
+
+fn typed_integer_mask(ty: &Type) -> Option<i64> {
+    let bits = match ty {
+        Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => 8,
+        Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => 16,
+        Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => 24,
+        Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => 32,
+        _ => return None,
+    };
+    Some((1_i64 << bits) - 1)
 }
 
 fn fold_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
@@ -2390,8 +2584,25 @@ fn fold_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<Expr> {
             BinaryOp::Ne => Some(Expr::Bool(left != right)),
             _ => None,
         },
+        (Expr::Int(left), Expr::Int(right)) => fold_integer_binary(*left, *right, op, None),
+        (Expr::TypedInt(left, ty), Expr::TypedInt(right, _)) => {
+            fold_integer_binary(*left, *right, op, Some(ty))
+        }
         _ => None,
     }
+}
+
+fn fold_integer_binary(left: i64, right: i64, op: BinaryOp, ty: Option<&Type>) -> Option<Expr> {
+    let value = match op {
+        BinaryOp::BitAnd => left & right,
+        BinaryOp::BitXor => left ^ right,
+        BinaryOp::BitOr => left | right,
+        _ => return None,
+    };
+    Some(match ty {
+        Some(ty) => Expr::TypedInt(value, ty.clone()),
+        None => Expr::Int(value),
+    })
 }
 
 fn terminates(stmt: &Stmt) -> bool {

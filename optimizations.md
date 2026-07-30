@@ -459,11 +459,11 @@ Do not use `.S`-style operation for:
 
 ```text
 - ptr<T>
-- ptr24
+- ptr
 - address calculations
 - stack pointer adjustments unless explicitly proven and tested
 - memory loads/stores through HL/DE/BC
-- values later passed as u24/i24/ptr24
+- values later passed as u24/i24/ptr
 ```
 
 Important hazard:

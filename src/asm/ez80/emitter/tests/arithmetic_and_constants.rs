@@ -919,7 +919,7 @@ fn emits_and_runs_null_pointer_constants() {
     let source = r#"
             const NULL_BYTE: ptr<u8> = 0
             const NULL_WORD: ptr<u16> = cast<ptr<u16>>(0u24)
-            const NULL_RAW: ptr24 = cast<ptr24>(NULL_BYTE)
+            const NULL_RAW: ptr = cast<ptr>(NULL_BYTE)
 
             fn is_null(p: ptr<u8>) -> bool {
                 return p == NULL_BYTE

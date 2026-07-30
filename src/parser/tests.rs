@@ -72,6 +72,17 @@ fn rejects_duplicate_banking_placement_attributes() {
 }
 
 #[test]
+fn reports_missing_local_type() {
+    let error = parse_program(Path::new("game.ezra"), "fn main() { let value = 1 }").unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "let declaration requires a type (for example, `let value: u8 = ...`)"
+    );
+    assert_eq!(error.location().unwrap().column, 13);
+}
+
+#[test]
 fn parses_main_with_out() {
     let program = parse_program(
         Path::new("game.ezra"),

@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    asm::{AssemblyOptions, comments::with_readability_comments},
+    asm::{
+        AssemblyOptions,
+        comments::with_readability_comments,
+        reachability::{RoutineProfile, strip_unreachable_generated_routines},
+    },
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -40,7 +44,10 @@ pub fn emit_tms9900_assembly_with_options(
     )?;
     Emitter::new(model, options.clone())
         .emit(&tbir.lowered_program)
-        .map(|asm| with_readability_comments(asm, program, &options, "tms9900"))
+        .map(|asm| {
+            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Tms9900);
+            with_readability_comments(asm, program, &options, "tms9900")
+        })
 }
 
 #[derive(Clone)]

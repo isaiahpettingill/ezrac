@@ -342,7 +342,7 @@ impl Symbols {
                     let resolved = symbols.resolved_type(&decl.ty)?;
                     let is_pointer = match &resolved {
                         Type::Ptr(_) => true,
-                        Type::Named(name) if name == "ptr24" => true,
+                        Type::Named(name) if name == "ptr" => true,
                         _ => false,
                     };
                     if !is_pointer {
@@ -847,9 +847,8 @@ impl Symbols {
                 Ok(ValueWidth::U8)
             }
             Type::Named(name) if name == "u16" || name == "i16" => Ok(ValueWidth::U16),
-            Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => {
-                Ok(ValueWidth::U24)
-            }
+            Type::Named(name) if name == "u24" || name == "i24" => Ok(ValueWidth::U24),
+            Type::Named(name) if name == "ptr" => Ok(self.function_pointer_width),
             Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
                 Err(Diagnostic::new(format!(
                     "type `{name}` is not supported; use explicit u8/u16/u24 or i8/i16/i24"
@@ -866,7 +865,7 @@ impl Symbols {
                 };
                 self.type_width(alias)
             }
-            Type::Ptr(_) => Ok(ValueWidth::U24),
+            Type::Ptr(_) => Ok(self.function_pointer_width),
             Type::Function { .. } => Ok(self.function_pointer_width),
             Type::Array { .. } => Err(Diagnostic::new("array value cannot be used as a scalar")),
         }
@@ -877,7 +876,7 @@ impl Symbols {
             Type::Named(name)
                 if matches!(
                     name.as_str(),
-                    "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "bool" | "ptr24"
+                    "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "bool" | "ptr"
                 ) =>
             {
                 Ok(())
@@ -1692,11 +1691,11 @@ impl Symbols {
             (Type::Ptr(_), Type::Named(name)) if name == "bool" => Ok(()),
             (Type::Ptr(_), Type::Named(name)) if is_raw_address_type(name) => Ok(()),
             (Type::Ptr(_), Type::Named(_)) => Err(Diagnostic::new(
-                "pointer-to-integer casts produce u24 or ptr24",
+                "pointer-to-integer casts produce u24 or ptr",
             )),
             (Type::Named(name), Type::Ptr(_)) if is_raw_address_type(name) => Ok(()),
             (Type::Named(_), Type::Ptr(_)) => Err(Diagnostic::new(
-                "integer-to-pointer casts require u24 or ptr24",
+                "integer-to-pointer casts require u24 or ptr",
             )),
             _ => Ok(()),
         }

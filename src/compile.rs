@@ -571,7 +571,13 @@ pub fn check_source_with_sdk_and_overrides(
         layout.entry.get(),
     )
     .map_err(|error| error.with_location_if_missing(source_start_location(&options.source)))?;
-    validate_text_section_fit(&layout, assembled.bytes.len())
+    let text_len = assembled
+        .section_ranges
+        .iter()
+        .find(|section| section.name == ".text")
+        .map(|section| section.end.saturating_sub(section.start))
+        .unwrap_or_else(|| assembled.bytes.len() as u32);
+    validate_text_section_fit(&layout, text_len as usize)
         .map_err(|error| error.with_location_if_missing(source_start_location(&options.source)))?;
 
     Ok(CompileReport {

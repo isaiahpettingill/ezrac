@@ -4,7 +4,12 @@ use std::{
 };
 
 use crate::{
-    asm::{AssemblyOptions, comments::with_readability_comments},
+    asm::{
+        AssemblyOptions,
+        comments::with_readability_comments,
+        data::terminated_text_data_line,
+        reachability::{RoutineProfile, strip_unreachable_generated_routines},
+    },
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -36,9 +41,10 @@ pub fn emit_dcpu_assembly_with_options(
     }
     let hir = HirProgram::from_ast(program)?;
     let tbir = TbirProgram::lower(&hir, program, &options)?;
-    Emitter::new()
-        .emit(&tbir.lowered_program)
-        .map(|assembly| with_readability_comments(assembly, program, &options, "dcpu"))
+    Emitter::new().emit(&tbir.lowered_program).map(|assembly| {
+        let assembly = strip_unreachable_generated_routines(&assembly, RoutineProfile::Dcpu);
+        with_readability_comments(assembly, program, &options, "dcpu")
+    })
 }
 
 #[derive(Clone)]
@@ -870,12 +876,7 @@ impl Emitter {
         }
         for (text, label) in self.strings.clone() {
             self.line(&format!("{label}:"));
-            self.data_words(
-                text.bytes()
-                    .chain(core::iter::once(0))
-                    .map(i64::from)
-                    .collect(),
-            );
+            self.line(&terminated_text_data_line("dat", &text, "0"));
         }
         Ok(())
     }

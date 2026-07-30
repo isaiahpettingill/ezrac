@@ -582,6 +582,12 @@ fn build_stmt(
     let span = pair_span(file, &pair);
     let references = collect_pair_references(file, &pair);
     let (statement, children) = match pair.as_rule() {
+        Rule::untyped_let_stmt => {
+            return Err(Diagnostic::at_span(
+                span,
+                "let declaration requires a type (for example, `let value: u8 = ...`)",
+            ));
+        }
         Rule::let_stmt => {
             let mut inner = pair.into_inner();
             (
@@ -1114,7 +1120,7 @@ fn validate_asm_operand_class(ty: &Type, class: &str) -> Result<(), Diagnostic> 
             Type::Named(name)
                 if !matches!(
                     name.as_str(),
-                    "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr24" | "u32" | "i32"
+                    "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr" | "u32" | "i32"
                 ) =>
             {
                 true
@@ -1142,7 +1148,7 @@ fn type_storage_size(ty: &Type) -> Option<u8> {
     match ty {
         Type::Named(name) if name == "u8" || name == "i8" || name == "bool" => Some(1),
         Type::Named(name) if name == "u16" || name == "i16" => Some(2),
-        Type::Named(name) if name == "u24" || name == "i24" || name == "ptr24" => Some(3),
+        Type::Named(name) if name == "u24" || name == "i24" || name == "ptr" => Some(3),
         Type::Named(name) if name == "u32" || name == "i32" => Some(4),
         Type::Ptr(_) | Type::Function { .. } => Some(3),
         Type::Named(_) | Type::Array { .. } => None,

@@ -371,7 +371,7 @@ fn required_diagnostics_report_messages_and_locations() {
                     let p: ptr<u8> = cast<ptr<u8>>(raw)
                 }
                 "#,
-            "integer-to-pointer casts require u24 or ptr24",
+            "integer-to-pointer casts require u24 or ptr",
         ),
         (
             "pointer arithmetic on non-pointers",

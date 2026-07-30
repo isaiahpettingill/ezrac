@@ -161,7 +161,8 @@ impl SemanticModel {
         match self.resolved_type(ty)? {
             Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => Ok(1),
             Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok(2),
-            Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => Ok(3),
+            Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Ok(3),
+            Type::Named(name) if name == "ptr" => Ok(self.pointer_bytes),
             Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Ok(4),
             Type::Ptr(_) | Type::Function { .. } => Ok(self.pointer_bytes),
             Type::Named(name) if self.structs.contains_key(&name) => Err(Diagnostic::new(format!(

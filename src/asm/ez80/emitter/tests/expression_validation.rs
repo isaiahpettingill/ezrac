@@ -507,7 +507,7 @@ fn rejects_invalid_pointer_casts() {
                     test.pass()
                 }
                 "#,
-            "integer-to-pointer casts require u24 or ptr24",
+            "integer-to-pointer casts require u24 or ptr",
         ),
         (
             r#"
@@ -518,7 +518,7 @@ fn rejects_invalid_pointer_casts() {
                     test.pass()
                 }
                 "#,
-            "pointer-to-integer casts produce u24 or ptr24",
+            "pointer-to-integer casts produce u24 or ptr",
         ),
     ];
 
@@ -531,11 +531,11 @@ fn rejects_invalid_pointer_casts() {
 }
 
 #[test]
-fn emits_and_runs_ptr24_pointer_casts() {
+fn emits_and_runs_ptr_pointer_casts() {
     let source = r#"
-            volatile mmio SCRATCH: ptr24 = 0x040180
+            volatile mmio SCRATCH: ptr = 0x040180
 
-            fn read_raw(raw: ptr24) -> u8 {
+            fn read_raw(raw: ptr) -> u8 {
                 let p: ptr<u8> = cast<ptr<u8>>(raw)
                 return *p
             }
@@ -543,7 +543,7 @@ fn emits_and_runs_ptr24_pointer_casts() {
             fn main() {
                 let p: ptr<u8> = cast<ptr<u8>>(SCRATCH);
                 *(p) = 0x5A;
-                let raw: ptr24 = cast<ptr24>(p);
+                let raw: ptr = cast<ptr>(p);
                 test.assert_eq_u8(read_raw(raw), 0x5A, 1);
                 test.pass()
             }
@@ -568,7 +568,7 @@ fn rejects_invalid_constant_pointer_casts() {
                     test.pass()
                 }
                 "#,
-            "pointer-to-integer casts produce u24 or ptr24",
+            "pointer-to-integer casts produce u24 or ptr",
         ),
         (
             r#"
@@ -578,7 +578,7 @@ fn rejects_invalid_constant_pointer_casts() {
                     test.pass()
                 }
                 "#,
-            "integer-to-pointer casts require u24 or ptr24",
+            "integer-to-pointer casts require u24 or ptr",
         ),
     ];
 
@@ -591,9 +591,9 @@ fn rejects_invalid_constant_pointer_casts() {
 }
 
 #[test]
-fn emits_and_runs_constant_ptr24_pointer_casts() {
+fn emits_and_runs_constant_ptr_pointer_casts() {
     let source = r#"
-            const RAW: ptr24 = cast<ptr24>(cast<ptr<u8>>(0x040190))
+            const RAW: ptr = cast<ptr>(cast<ptr<u8>>(0x040190))
             const BYTE_PTR: ptr<u8> = cast<ptr<u8>>(RAW)
 
             fn main() {
@@ -636,7 +636,7 @@ fn emits_and_runs_constant_storage_addresses() {
             const SECOND: ptr<u8> = &bytes[1]
             const CELL_NEXT: ptr<u16> = &cell.next
             const PACKET_NEXT: ptr<u16> = &packet.cells[1].next
-            const RAW_THIRD: ptr24 = cast<ptr24>(&bytes[2])
+            const RAW_THIRD: ptr = cast<ptr>(&bytes[2])
 
             fn main() {
                 let byte_ptr: ptr<u8> = BYTE;
@@ -676,7 +676,7 @@ fn emits_and_runs_forward_constant_storage_addresses() {
 
             const SECOND: ptr<u8> = &bytes[1]
             const PAIR_RIGHT: ptr<u16> = &pair.right
-            const RAW_THIRD: ptr24 = cast<ptr24>(&bytes[2])
+            const RAW_THIRD: ptr = cast<ptr>(&bytes[2])
 
             const MARKER_ALIGN: u8 = 4
             embed marker: bytes = bytes [0xAA, 0xBB] align MARKER_ALIGN

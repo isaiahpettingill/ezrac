@@ -840,7 +840,9 @@ fn is_named_generic_directive(name: &str) -> bool {
 
 fn data_width(directive: &str) -> Option<DataWidth> {
     if directive.eq_ignore_ascii_case("db")
+        || directive.eq_ignore_ascii_case("dm")
         || directive.eq_ignore_ascii_case("defb")
+        || directive.eq_ignore_ascii_case("defm")
         || directive.eq_ignore_ascii_case("byte")
     {
         Some(DataWidth::Byte)

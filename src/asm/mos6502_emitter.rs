@@ -1,5 +1,9 @@
 use crate::{
-    asm::{AssemblyOptions, comments::with_readability_comments},
+    asm::{
+        AssemblyOptions,
+        comments::with_readability_comments,
+        reachability::{RoutineProfile, strip_unreachable_generated_routines},
+    },
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -33,7 +37,10 @@ pub fn emit_mos6502_assembly_with_options(
     )?;
     Emitter::new(model, options.clone())
         .emit(&tbir.lowered_program)
-        .map(|asm| with_readability_comments(asm, program, &options, "mos6502"))
+        .map(|asm| {
+            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Mos6502);
+            with_readability_comments(asm, program, &options, "mos6502")
+        })
 }
 
 #[derive(Clone)]
@@ -681,10 +688,12 @@ impl Emitter {
                     size: self.model.next_ram_address() - *base,
                 })
             })
-            .flatten();
-        if let Some(saved) = saved {
-            for offset in 0..saved.size {
-                self.lda(saved.address + offset);
+            .flatten()
+            .map(|live| self.live_storage_segments(live, args))
+            .unwrap_or_default();
+        for storage in &saved {
+            for offset in 0..storage.size {
+                self.lda(storage.address + offset);
                 self.line("    pha");
             }
         }
@@ -699,10 +708,10 @@ impl Emitter {
         if let Some(return_storage) = return_storage {
             self.copy(self.r0, return_storage, return_storage.size);
         }
-        if let Some(saved) = saved {
-            for offset in (0..saved.size).rev() {
+        for storage in saved.iter().rev() {
+            for offset in (0..storage.size).rev() {
                 self.line("    pla");
-                self.sta(saved.address + offset);
+                self.sta(storage.address + offset);
             }
         }
         if let Some(return_storage) = return_storage {
@@ -1623,6 +1632,47 @@ impl Emitter {
         Err(Diagnostic::new(format!("unknown variable `{name}`")))
     }
 
+    fn live_storage_segments(&self, live: Storage, args: &[Expr]) -> Vec<Storage> {
+        let mut excluded = args
+            .iter()
+            .filter_map(|arg| match arg {
+                // The callee can mutate this storage through its pointer parameter.
+                // Restoring a pre-call snapshot would discard that mutation.
+                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
+                _ => None,
+            })
+            .filter_map(|storage| {
+                let start = storage.address.max(live.address);
+                let end = storage
+                    .address
+                    .saturating_add(storage.size)
+                    .min(live.address.saturating_add(live.size));
+                (start < end).then_some((start, end))
+            })
+            .collect::<Vec<_>>();
+        excluded.sort_unstable();
+
+        let mut saved = Vec::new();
+        let mut cursor = live.address;
+        for (start, end) in excluded {
+            if start > cursor {
+                saved.push(Storage {
+                    address: cursor,
+                    size: start - cursor,
+                });
+            }
+            cursor = cursor.max(end);
+        }
+        let live_end = live.address.saturating_add(live.size);
+        if cursor < live_end {
+            saved.push(Storage {
+                address: cursor,
+                size: live_end - cursor,
+            });
+        }
+        saved
+    }
+
     fn copy(&mut self, source: Storage, target: Storage, size: u32) {
         for offset in 0..size {
             self.lda(source.address + offset);
@@ -2351,6 +2401,25 @@ mod structural_tests {
         );
         assert!(mutual.contains("    pha"), "{mutual}");
         assert!(mutual.contains("    pla"), "{mutual}");
+    }
+
+    #[test]
+    fn recursive_calls_do_not_restore_direct_pointer_out_arguments() {
+        let assembly = emit(
+            r#"
+                fn recurse(output: ptr<u8>) {
+                    let local: u8 = 0
+                    recurse(&local)
+                }
+                fn main() {
+                    let result: u8 = 0
+                    recurse(&result)
+                }
+            "#,
+        );
+
+        assert_eq!(assembly.matches("    pha").count(), 4, "{assembly}");
+        assert_eq!(assembly.matches("    pla").count(), 4, "{assembly}");
     }
 
     #[test]

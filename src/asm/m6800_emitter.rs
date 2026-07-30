@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    asm::{AssemblyOptions, comments::with_readability_comments},
+    asm::{
+        AssemblyOptions,
+        comments::with_readability_comments,
+        reachability::{RoutineProfile, strip_unreachable_generated_routines},
+    },
     ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, Type, UnaryOp},
     diagnostic::Diagnostic,
     hir::HirProgram,
@@ -36,9 +40,10 @@ pub fn emit_m6800_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    Emitter::new(model)?
-        .emit(&tbir.lowered_program)
-        .map(|asm| with_readability_comments(asm, program, &options, "m6800"))
+    Emitter::new(model)?.emit(&tbir.lowered_program).map(|asm| {
+        let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
+        with_readability_comments(asm, program, &options, "m6800")
+    })
 }
 
 #[derive(Clone)]

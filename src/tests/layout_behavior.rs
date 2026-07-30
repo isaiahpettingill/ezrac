@@ -447,9 +447,9 @@ fn test_command_can_use_custom_layout_file() {
                     test.assert_eq_u24(EZRA_RAM_BASE, 0x030000, 2)
                     test.assert_eq_u24(EZRA_VRAM_BASE, 0x090000, 3)
                     test.assert_eq_u24(EZRA_CODE_BASE, 0x020040, 4)
-                    test.assert_eq_u24(cast<ptr24>(banked.ptr), 0x120000, 5)
+                    test.assert_eq_u24(cast<ptr>(banked.ptr), 0x120000, 5)
                     test.assert_eq_u8(*(banked.ptr + 1), 0xA2, 6)
-                    test.assert_eq_u24(cast<ptr24>(banked2.ptr), 0x120100, 7)
+                    test.assert_eq_u24(cast<ptr>(banked2.ptr), 0x120100, 7)
                     test.assert_eq_u8(*(banked2.ptr), 0xB1, 8)
                     test.pass()
                 }

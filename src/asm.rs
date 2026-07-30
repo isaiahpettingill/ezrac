@@ -6,9 +6,12 @@ pub mod avr;
 #[cfg(feature = "avr")]
 pub mod avr_emitter;
 mod comments;
+pub(crate) mod data;
 pub mod frontend;
 pub(crate) mod grammar;
 pub mod preprocess;
+#[allow(dead_code)]
+pub(crate) mod reachability;
 
 #[cfg(feature = "dcpu")]
 pub mod dcpu;

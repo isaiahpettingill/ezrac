@@ -457,19 +457,6 @@ fn rejects_invalid_comparison_operand_types() {
         ),
         (
             r#"
-                global left: u8 = 0
-                global right: u8 = 0
-                fn main() {
-                    let lp: ptr<u8> = &left
-                    let rp: ptr<u8> = &right
-                    let ordered: bool = lp < rp
-                    test.pass()
-                }
-                "#,
-            "pointer comparisons support only == and !=",
-        ),
-        (
-            r#"
                 struct Pair {
                     left: u8
                     right: u8
@@ -1009,8 +996,8 @@ fn rejects_non_integer_unary_operands() {
         (
             r#"
                 fn main() {
-                    let raw: ptr24 = cast<ptr24>(0x040000)
-                    let value: ptr24 = -raw
+                    let raw: ptr = cast<ptr>(0x040000)
+                    let value: ptr = -raw
                     test.pass()
                 }
                 "#,

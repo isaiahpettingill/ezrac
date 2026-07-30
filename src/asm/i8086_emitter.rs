@@ -6,7 +6,11 @@
 //! 16-bit offsets in the single segment established by the startup stub.
 
 use crate::{
-    asm::{AssemblyOptions, comments::with_readability_comments},
+    asm::{
+        AssemblyOptions,
+        comments::with_readability_comments,
+        reachability::{RoutineProfile, strip_unreachable_generated_routines},
+    },
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -45,7 +49,10 @@ pub fn emit_i8086_assembly_with_options(
     )?;
     Emitter::new(model, options.clone())?
         .emit(&tbir.lowered_program, program)
-        .map(|asm| with_readability_comments(asm, program, &options, "i8086"))
+        .map(|asm| {
+            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::I8086);
+            with_readability_comments(asm, program, &options, "i8086")
+        })
 }
 
 #[derive(Clone)]
@@ -1046,8 +1053,11 @@ impl Emitter {
             address: *base,
             size: self.model.next_ram_address() - *base,
         });
-        if let Some(live) = live {
-            self.push_bytes(live);
+        let saved_live = live
+            .map(|live| self.live_storage_segments(live, args))
+            .unwrap_or_default();
+        for storage in &saved_live {
+            self.push_bytes(*storage);
         }
         if let Some(resolved) = direct_target {
             self.line(&format!("    call near {}", function_label(&resolved)));
@@ -1065,8 +1075,8 @@ impl Emitter {
         if let Some(returned) = returned {
             self.copy(self.r0, returned, returned.size);
         }
-        if let Some(live) = live {
-            self.pop_bytes(live);
+        for storage in saved_live.iter().rev() {
+            self.pop_bytes(*storage);
         }
         if let Some(returned) = returned {
             self.copy(returned, self.r0, returned.size);
@@ -2200,7 +2210,7 @@ impl Emitter {
                 "i8" => (i8::MIN as i64..=i8::MAX as i64).contains(&value),
                 "u16" => (0..=u16::MAX as i64).contains(&value),
                 "i16" => (i16::MIN as i64..=i16::MAX as i64).contains(&value),
-                "u24" | "ptr24" => (0..=0xFF_FFFF).contains(&value),
+                "u24" | "ptr" => (0..=0xFF_FFFF).contains(&value),
                 "i24" => (-0x80_0000..=0x7F_FFFF).contains(&value),
                 "u32" => (0..=u32::MAX as i64).contains(&value),
                 "i32" => (i32::MIN as i64..=i32::MAX as i64).contains(&value),
@@ -2922,6 +2932,47 @@ impl Emitter {
         self.line(&format!("    {inverse} short {skip}"));
         self.line(&format!("    jmp near {target}"));
         self.line(&format!("{skip}:"));
+    }
+
+    fn live_storage_segments(&self, live: Storage, args: &[Expr]) -> Vec<Storage> {
+        let mut excluded = args
+            .iter()
+            .filter_map(|arg| match arg {
+                // The callee can mutate this storage through its pointer parameter.
+                // Restoring a pre-call snapshot would discard that mutation.
+                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
+                _ => None,
+            })
+            .filter_map(|storage| {
+                let start = storage.address.max(live.address);
+                let end = storage
+                    .address
+                    .saturating_add(storage.size)
+                    .min(live.address.saturating_add(live.size));
+                (start < end).then_some((start, end))
+            })
+            .collect::<Vec<_>>();
+        excluded.sort_unstable();
+
+        let mut saved = Vec::new();
+        let mut cursor = live.address;
+        for (start, end) in excluded {
+            if start > cursor {
+                saved.push(Storage {
+                    address: cursor,
+                    size: start - cursor,
+                });
+            }
+            cursor = cursor.max(end);
+        }
+        let live_end = live.address.saturating_add(live.size);
+        if cursor < live_end {
+            saved.push(Storage {
+                address: cursor,
+                size: live_end - cursor,
+            });
+        }
+        saved
     }
 
     fn push_bytes(&mut self, storage: Storage) {

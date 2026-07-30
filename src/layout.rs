@@ -1872,7 +1872,7 @@ fn cast_layout_named_type(value: i128, name: &str) -> Result<i128, Diagnostic> {
         "bool" => Ok(i128::from(value != 0)),
         "u8" => Ok(wrap_layout_unsigned(value, 8)),
         "u16" => Ok(wrap_layout_unsigned(value, 16)),
-        "u24" | "ptr24" => Ok(wrap_layout_unsigned(value, 24)),
+        "u24" | "ptr" => Ok(wrap_layout_unsigned(value, 24)),
         "i8" => Ok(wrap_layout_signed(value, 8)),
         "i16" => Ok(wrap_layout_signed(value, 16)),
         "i24" => Ok(wrap_layout_signed(value, 24)),

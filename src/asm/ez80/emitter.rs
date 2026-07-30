@@ -26,7 +26,11 @@ use crate::{
 mod intel8080;
 mod symbols;
 
-use crate::asm::comments::with_readability_comments;
+use crate::asm::{
+    comments::with_readability_comments,
+    data::terminated_text_data_line,
+    reachability::{RoutineProfile, strip_unreachable_generated_routines},
+};
 use intel8080::{is_intel_8080_family, translate_assembly_for_cpu};
 use symbols::{FunctionSig, StructLayout, Symbols, ValueWidth, Variable};
 
@@ -285,8 +289,16 @@ pub fn emit_ez80_assembly_from_checked(
         }
     }
     emitter.emit_required_sections();
-    translate_assembly_for_cpu(cpu, &peephole_cleanup(&emitter.out))
-        .map(|asm| with_readability_comments(asm, original_program, &options, "ez80"))
+    let assembly = peephole_cleanup(&emitter.out);
+    translate_assembly_for_cpu(cpu, &assembly).map(|asm| {
+        let profile = if is_intel_8080_family(cpu) {
+            RoutineProfile::Z80
+        } else {
+            RoutineProfile::Ez80
+        };
+        let asm = strip_unreachable_generated_routines(&asm, profile);
+        with_readability_comments(asm, original_program, &options, "ez80")
+    })
 }
 
 fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
@@ -314,6 +326,129 @@ fn peephole_cleanup(assembly: &str) -> String {
     }
 
     out
+}
+
+#[allow(dead_code)]
+fn strip_unreachable_runtime_helpers(assembly: &str) -> String {
+    const RUNTIME_LABELS: [&str; 16] = [
+        "__ezra_pass",
+        "__ezra_fail",
+        "__ezra_memcpy",
+        "__ezra_memset",
+        "__ezra_mul_u8",
+        "__ezra_mul_u16",
+        "__ezra_mul_u24",
+        "__ezra_mul_i24",
+        "__ezra_div_u8",
+        "__ezra_div_u16",
+        "__ezra_div_u24",
+        "__ezra_div_i24",
+        "__ezra_mod_u8",
+        "__ezra_mod_u16",
+        "__ezra_mod_u24",
+        "__ezra_mod_i24",
+    ];
+
+    let lines = assembly.lines().collect::<Vec<_>>();
+    let mut blocks = HashMap::<&str, (usize, usize)>::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(label) = line.trim().strip_suffix(':') else {
+            continue;
+        };
+        if !RUNTIME_LABELS.contains(&label) {
+            continue;
+        }
+        let end = lines[index + 1..]
+            .iter()
+            .position(|candidate| {
+                let trimmed = candidate.trim();
+                trimmed.starts_with("section ")
+                    || (!candidate.starts_with(' ')
+                        && !candidate.starts_with('\t')
+                        && !trimmed.starts_with('.')
+                        && trimmed.ends_with(':'))
+            })
+            .map_or(lines.len(), |offset| index + 1 + offset);
+        blocks.insert(label, (index, end));
+    }
+
+    if blocks.is_empty() {
+        return assembly.to_owned();
+    }
+
+    let is_in_runtime_block = |index: usize| {
+        blocks
+            .values()
+            .any(|(start, end)| (*start..*end).contains(&index))
+    };
+    let references = |label: &str, source: &[&str]| {
+        source.iter().enumerate().any(|(index, line)| {
+            !is_in_runtime_block(index)
+                && (line.contains(&format!("call {label}"))
+                    || line.contains(&format!("jp {label}")))
+        })
+    };
+
+    let mut reachable = RUNTIME_LABELS
+        .iter()
+        .copied()
+        .filter(|label| references(label, &lines))
+        .collect::<HashSet<_>>();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for label in reachable.clone() {
+            let Some((start, end)) = blocks.get(label).copied() else {
+                continue;
+            };
+            for dependency in RUNTIME_LABELS {
+                if !reachable.contains(dependency)
+                    && lines[start..end].iter().any(|line| {
+                        line.contains(&format!("call {dependency}"))
+                            || line.contains(&format!("jp {dependency}"))
+                    })
+                {
+                    reachable.insert(dependency);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    let mut output = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if blocks.iter().any(|(label, (start, end))| {
+            !reachable.contains(label) && (*start..*end).contains(&index)
+        }) {
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+fn is_immediate_u8(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) | Expr::Bool(_)
+    )
+}
+
+fn is_unit_integer_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Int(1) | Expr::TypedInt(1, _))
+}
+
+fn is_self_unit_pointer_increment(name: &str, expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Binary {
+            left,
+            op: BinaryOp::Add,
+            right,
+        } if matches!(left.as_ref(), Expr::Ident(source) if source == name)
+            && is_unit_integer_literal(right)
+    )
 }
 
 fn redundant_load_key(line: &str) -> Option<&str> {
@@ -350,6 +485,7 @@ struct LocalConstant {
 struct Emitter {
     symbols: Symbols,
     out: String,
+    rodata: String,
     label_counter: usize,
     scopes: Vec<HashMap<String, Variable>>,
     scope_types: Vec<HashMap<String, Type>>,
@@ -373,6 +509,7 @@ struct Emitter {
     mos_executable: bool,
     ti_os_executable: bool,
     stack_top: Address24,
+    rodata_base: Address24,
     eliminate_dead_code: bool,
 }
 
@@ -387,6 +524,7 @@ impl Emitter {
         Self {
             symbols,
             out: String::new(),
+            rodata: String::new(),
             label_counter: 0,
             scopes: Vec::new(),
             scope_types: Vec::new(),
@@ -410,6 +548,7 @@ impl Emitter {
             mos_executable: options.mos_executable,
             ti_os_executable: options.ti_os_executable,
             stack_top: options.stack_top,
+            rodata_base: options.rodata_base,
             eliminate_dead_code: true,
         }
     }
@@ -464,7 +603,13 @@ impl Emitter {
     }
 
     fn emit_required_sections(&mut self) {
-        for section in [".header", ".rodata", ".data", ".bss", ".assets", ".scratch"] {
+        self.line("section .header");
+        self.line("section .rodata");
+        if !self.rodata.is_empty() {
+            self.line(&format!("org {:06X}h", self.rodata_base.get()));
+            self.out.push_str(&self.rodata);
+        }
+        for section in [".data", ".bss", ".assets", ".scratch"] {
             self.line(&format!("section {section}"));
         }
     }
@@ -899,14 +1044,10 @@ impl Emitter {
         }
     }
 
-    fn emit_string_literal_initializer(&mut self, value: &str, variable: Variable) {
-        for (offset, byte) in value.bytes().chain(core::iter::once(0)).enumerate() {
-            self.line(&format!("    ld a, {byte:02X}h"));
-            self.emit_store_a(scalar_var(
-                variable.addr + offset as u32,
-                u32::from(ValueWidth::U8.bytes()),
-            ));
-        }
+    fn emit_string_literal_initializer(&mut self, value: &str, _variable: Variable) {
+        self.rodata
+            .push_str(&terminated_text_data_line(".dm", value, "00h"));
+        self.rodata.push('\n');
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
@@ -1201,11 +1342,15 @@ impl Emitter {
                 }
                 let else_label = self.next_label("else");
                 let end_label = self.next_label("endif");
-                self.emit_expr_to_a(condition)?;
-                self.line("    or a");
-                self.line(&format!("    jp z, {else_label}"));
+                if !self.emit_jump_if_false(condition, &else_label)? {
+                    self.emit_expr_to_a(condition)?;
+                    self.line("    or a");
+                    self.line(&format!("    jp z, {else_label}"));
+                }
                 self.emit_block(then_body)?;
-                self.line(&format!("    jp {end_label}"));
+                if !self.block_terminates_current_block(then_body) {
+                    self.line(&format!("    jp {end_label}"));
+                }
                 self.line(&format!("{else_label}:"));
                 self.emit_block(else_body)?;
                 self.line(&format!("{end_label}:"));
@@ -1228,7 +1373,7 @@ impl Emitter {
                     break_label: end_label.clone(),
                 });
                 self.line(&format!("{start_label}:"));
-                if !condition_is_always_true {
+                if !condition_is_always_true && !self.emit_jump_if_false(condition, &end_label)? {
                     self.emit_expr_to_a(condition)?;
                     self.line("    or a");
                     self.line(&format!("    jp z, {end_label}"));
@@ -1930,6 +2075,15 @@ impl Emitter {
         };
         self.ensure_pointer_offset_expr(value)?;
         let scale = self.symbols.type_size(pointee)?;
+        if scale == 1 && is_unit_integer_literal(value) {
+            self.emit_load_width(variable);
+            match binary_op {
+                BinaryOp::Add => self.line("    inc hl"),
+                BinaryOp::Sub => self.line("    dec hl"),
+                _ => unreachable!("pointer compound assignment only uses add/sub"),
+            }
+            return Ok(());
+        }
         self.emit_load_width(variable);
         self.line("    push hl");
         self.emit_scaled_offset_to_hl(value, scale)?;
@@ -1979,9 +2133,17 @@ impl Emitter {
                 if op == AssignOp::Set
                     && let Some(ty) = ty.as_ref()
                 {
-                    self.emit_storage_initializer(variable, ty, value)?;
-                    self.record_local_constant(name, ty, value);
-                    self.record_readonly_pointer_alias(name, value);
+                    if is_self_unit_pointer_increment(name, value)
+                        && matches!(self.symbols.resolved_type(ty)?, Type::Ptr(ref pointee) if self.symbols.type_size(pointee)? == 1)
+                    {
+                        self.emit_load_width(variable);
+                        self.line("    inc hl");
+                        self.emit_store_width(variable);
+                    } else {
+                        self.emit_storage_initializer(variable, ty, value)?;
+                        self.record_local_constant(name, ty, value);
+                        self.record_readonly_pointer_alias(name, value);
+                    }
                     return Ok(());
                 }
                 let signed = self
@@ -2483,7 +2645,7 @@ impl Emitter {
             temps.push(temp);
         }
 
-        let saved_variables = self.recursive_call_saved_variables(name);
+        let saved_variables = self.recursive_call_saved_variables(name, args);
         let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
             None
         } else {
@@ -2545,7 +2707,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn recursive_call_saved_variables(&self, callee: &str) -> Vec<Variable> {
+    fn recursive_call_saved_variables(&self, callee: &str, args: &[Expr]) -> Vec<Variable> {
         let caller = self.current_function_name();
         if !self
             .recursive_call_edges
@@ -2557,7 +2719,20 @@ impl Emitter {
         let Some(storage) = self.function_storage_stack.last() else {
             return Vec::new();
         };
-        let mut variables = storage.clone();
+        let excluded = args
+            .iter()
+            .filter_map(|arg| match arg {
+                // The callee can mutate this local through its pointer parameter.
+                // Do not restore its pre-call value after returning.
+                Expr::AddressOf(name) => self.variable_opt(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut variables = storage
+            .iter()
+            .copied()
+            .filter(|variable| !excluded.contains(variable))
+            .collect::<Vec<_>>();
         variables.sort_by_key(|variable| variable.addr);
         variables.dedup_by_key(|variable| variable.addr);
         variables
@@ -2761,11 +2936,11 @@ impl Emitter {
                 Ok(())
             }
             (Type::Ptr(_), Type::Named(_)) => Err(Diagnostic::new(
-                "pointer-to-integer casts produce u24 or ptr24",
+                "pointer-to-integer casts produce u24 or ptr",
             )),
             (Type::Named(name), Type::Ptr(_)) if is_raw_address_type(name) => Ok(()),
             (Type::Named(_), Type::Ptr(_)) => Err(Diagnostic::new(
-                "integer-to-pointer casts require u24 or ptr24",
+                "integer-to-pointer casts require u24 or ptr",
             )),
             _ => Ok(()),
         }
@@ -2880,6 +3055,9 @@ impl Emitter {
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor => {
                     self.ensure_binary_arithmetic_operands_compatible(left, right)?;
+                    if self.emit_wide_low_bit_mask(left, *op, right, width)? {
+                        return Ok(());
+                    }
                     if *op == BinaryOp::Mul {
                         self.emit_mul_to_width(
                             left,
@@ -2955,6 +3133,9 @@ impl Emitter {
             (BinaryOp::Add, Some(scale), None) => {
                 self.ensure_pointer_offset_expr(right)?;
                 self.emit_expr_to_hl(left, ValueWidth::U24)?;
+                if self.emit_small_byte_pointer_offset(scale, right, false)? {
+                    return Ok(true);
+                }
                 self.line("    push hl");
                 self.emit_scaled_offset_to_hl(right, scale)?;
                 self.line("    pop bc");
@@ -2964,6 +3145,9 @@ impl Emitter {
             (BinaryOp::Add, None, Some(scale)) => {
                 self.ensure_pointer_offset_expr(left)?;
                 self.emit_expr_to_hl(right, ValueWidth::U24)?;
+                if self.emit_small_byte_pointer_offset(scale, left, false)? {
+                    return Ok(true);
+                }
                 self.line("    push hl");
                 self.emit_scaled_offset_to_hl(left, scale)?;
                 self.line("    pop bc");
@@ -2976,6 +3160,9 @@ impl Emitter {
             (BinaryOp::Sub, Some(scale), None) => {
                 self.ensure_pointer_offset_expr(right)?;
                 self.emit_expr_to_hl(left, ValueWidth::U24)?;
+                if self.emit_small_byte_pointer_offset(scale, right, true)? {
+                    return Ok(true);
+                }
                 self.line("    push hl");
                 self.emit_scaled_offset_to_hl(right, scale)?;
                 self.line("    ex de, hl");
@@ -2989,6 +3176,32 @@ impl Emitter {
             )),
             _ => Ok(false),
         }
+    }
+
+    fn emit_small_byte_pointer_offset(
+        &mut self,
+        scale: u32,
+        offset: &Expr,
+        subtract: bool,
+    ) -> Result<bool, Diagnostic> {
+        if scale != 1 {
+            return Ok(false);
+        }
+        let Ok(offset) = self.eval_i64_with_local_constants(offset) else {
+            return Ok(false);
+        };
+        let signed_offset = if subtract { -offset } else { offset };
+        if !(-8..=8).contains(&signed_offset) {
+            return Ok(false);
+        }
+        for _ in 0..signed_offset.unsigned_abs() {
+            self.line(if signed_offset < 0 {
+                "    dec hl"
+            } else {
+                "    inc hl"
+            });
+        }
+        Ok(true)
     }
 
     fn ensure_pointer_offset_expr(&self, expr: &Expr) -> Result<(), Diagnostic> {
@@ -3357,9 +3570,9 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         let pointee_type = match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
             Type::Ptr(inner) => *inner,
-            Type::Named(name) if name == "ptr24" => {
+            Type::Named(name) if name == "ptr" => {
                 return Err(Diagnostic::new(
-                    "raw ptr24 dereference requires an explicit typed pointer cast",
+                    "raw ptr dereference requires an explicit typed pointer cast",
                 ));
             }
             other => {
@@ -3369,6 +3582,16 @@ impl Emitter {
             }
         };
         self.ensure_pointer_write_target_is_mutable(ptr, &pointee_type)?;
+        if op == AssignOp::Add
+            && self.symbols.type_size(&pointee_type)? == 1
+            && is_unit_integer_literal(value)
+        {
+            self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
+            self.line("    ld a, (hl)");
+            self.line("    inc a");
+            self.line("    ld (hl), a");
+            return Ok(());
+        }
         let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
         self.emit_store_hl(addr);
@@ -4330,6 +4553,103 @@ impl Emitter {
         self.emit_comparison_from_flags(op);
     }
 
+    fn emit_wide_low_bit_mask(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+        width: ValueWidth,
+    ) -> Result<bool, Diagnostic> {
+        if width == ValueWidth::U8 {
+            return Ok(false);
+        }
+        let Ok(mask) = self.eval_i64_with_local_constants(right) else {
+            return Ok(false);
+        };
+        let is_clear_low_bit = matches!(op, BinaryOp::BitAnd) && (mask == -2 || mask == 0xFF_FFFE);
+        let is_set_low_bit = matches!(op, BinaryOp::BitOr) && mask == 1;
+        if !is_clear_low_bit && !is_set_low_bit {
+            return Ok(false);
+        }
+        self.emit_expr_to_hl(left, width)?;
+        self.line(if is_clear_low_bit {
+            "    res 0, l"
+        } else {
+            "    set 0, l"
+        });
+        Ok(true)
+    }
+
+    /// Emits a false branch without materializing a boolean for byte equality
+    /// and inequality against an immediate. Returns whether it handled `condition`.
+    fn emit_jump_if_false(
+        &mut self,
+        condition: &Expr,
+        false_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let Expr::Binary { left, op, right } = condition else {
+            return Ok(false);
+        };
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+            && self.expr_width(left)? == ValueWidth::U8
+            && self.expr_width(right)? == ValueWidth::U8
+            && is_immediate_u8(right)
+        {
+            self.emit_expr_to_a(left)?;
+            self.line(&format!("    cp {:02X}h", self.u8(right)?));
+            let branch = if *op == BinaryOp::Eq { "nz" } else { "z" };
+            self.line(&format!("    jp {branch}, {false_label}"));
+            return Ok(true);
+        }
+
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+            && self.eval_i64_with_local_constants(right).ok() == Some(1)
+            && let Expr::Binary {
+                left: masked,
+                op: BinaryOp::BitAnd,
+                right: mask,
+            } = left.as_ref()
+            && self.eval_i64_with_local_constants(mask).ok() == Some(1)
+            && self.expr_width(masked)? != ValueWidth::U8
+        {
+            self.emit_expr_to_hl(masked, self.expr_width(masked)?)?;
+            self.line("    bit 0, l");
+            let branch = if *op == BinaryOp::Eq { "z" } else { "nz" };
+            self.line(&format!("    jp {branch}, {false_label}"));
+            return Ok(true);
+        }
+
+        let width = self.expr_width(left)?.max(self.expr_width(right)?);
+        if width == ValueWidth::U8 || self.binary_operands_are_signed(left, right)? {
+            return Ok(false);
+        }
+        self.emit_expr_to_hl(left, width)?;
+        self.line("    push hl");
+        self.emit_expr_to_hl(right, width)?;
+        self.line("    ex de, hl");
+        self.line("    pop hl");
+        self.line("    or a");
+        self.line("    sbc hl, de");
+        match op {
+            BinaryOp::Eq => self.line(&format!("    jp nz, {false_label}")),
+            BinaryOp::Ne => self.line(&format!("    jp z, {false_label}")),
+            BinaryOp::Lt => self.line(&format!("    jp nc, {false_label}")),
+            BinaryOp::Ge => self.line(&format!("    jp c, {false_label}")),
+            BinaryOp::Gt => {
+                self.line(&format!("    jp c, {false_label}"));
+                self.line(&format!("    jp z, {false_label}"));
+            }
+            BinaryOp::Le => {
+                let keep_going = self.next_label("cmp_le_true");
+                self.line(&format!("    jp c, {keep_going}"));
+                self.line(&format!("    jp nz, {false_label}"));
+                self.line(&format!("{keep_going}:"));
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     fn emit_comparison_from_flags(&mut self, op: BinaryOp) {
         let true_label = self.next_label("cmp_true");
         let end_label = self.next_label("cmp_end");
@@ -4552,6 +4872,9 @@ impl Emitter {
         index: &Expr,
     ) -> Result<Option<Variable>, Diagnostic> {
         self.validate_array_index_type(index)?;
+        if self.pointer_element_type(name)?.is_some() {
+            return Ok(None);
+        }
         let (array, element_size, len) = self.array_info(name)?;
         let index_value = match self.symbols.eval_i64(index) {
             Ok(value) => value,
@@ -4583,8 +4906,7 @@ impl Emitter {
     }
 
     fn array_element_width(&self, name: &str) -> Result<ValueWidth, Diagnostic> {
-        let (_, element_size, _) = self.array_info(name)?;
-        scalar_var(0, element_size).width()
+        self.symbols.type_width(&self.array_element_type(name)?)
     }
 
     fn emit_variable_address(&mut self, name: &str) -> Result<(), Diagnostic> {
@@ -4858,12 +5180,24 @@ impl Emitter {
     }
 
     fn array_element_type(&self, name: &str) -> Result<Type, Diagnostic> {
-        let Some(ty) = self.variable_type(name) else {
+        let Some(ty) = self.named_value_type(name) else {
             return Err(Diagnostic::new(format!("unknown array `{name}`")));
         };
         match self.symbols.resolved_type(ty)? {
-            Type::Array { element, .. } => Ok(*element),
-            _ => Err(Diagnostic::new(format!("`{name}` is not an array"))),
+            Type::Array { element, .. } | Type::Ptr(element) => Ok(*element),
+            _ => Err(Diagnostic::new(format!(
+                "`{name}` is not an array or pointer"
+            ))),
+        }
+    }
+
+    fn pointer_element_type(&self, name: &str) -> Result<Option<Type>, Diagnostic> {
+        let Some(ty) = self.named_value_type(name) else {
+            return Ok(None);
+        };
+        match self.symbols.resolved_type(ty)? {
+            Type::Ptr(element) => Ok(Some(*element)),
+            _ => Ok(None),
         }
     }
 
@@ -4918,6 +5252,15 @@ impl Emitter {
 
     fn emit_array_element_address(&mut self, name: &str, index: &Expr) -> Result<(), Diagnostic> {
         self.validate_array_index_type(index)?;
+        if let Some(element_ty) = self.pointer_element_type(name)? {
+            self.emit_expr_to_hl(&Expr::Ident(name.to_owned()), ValueWidth::U24)?;
+            self.line("    push hl");
+            self.emit_expr_to_hl(index, ValueWidth::U24)?;
+            self.emit_scale_hl_by(self.symbols.type_size(&element_ty)?);
+            self.line("    pop bc");
+            self.line("    add hl, bc");
+            return Ok(());
+        }
         if let Some(element) = self.const_array_element_variable(name, index)? {
             self.line(&format!("    ld hl, {:06X}h", element.addr));
             return Ok(());
@@ -4973,7 +5316,7 @@ impl Emitter {
         name: &str,
         index: &Expr,
     ) -> Result<(), Diagnostic> {
-        let (_, element_size, _) = self.array_info(name)?;
+        let element_size = self.symbols.type_size(&self.array_element_type(name)?)?;
         if let Some(element) = self.const_array_element_variable(name, index)? {
             self.emit_load_width(element);
             return Ok(());
@@ -5010,6 +5353,11 @@ impl Emitter {
         value: &Expr,
     ) -> Result<(), Diagnostic> {
         let ty = self.array_element_type(name)?;
+        if self.pointer_element_type(name)?.is_some() {
+            return Err(Diagnostic::new(
+                "index assignment through pointers is not supported; use explicit dereference",
+            ));
+        }
         if let Some(element) = self.const_array_element_variable(name, index)? {
             if op == AssignOp::Set {
                 self.validate_expr_assignable_to_type(value, &ty)?;
@@ -5024,7 +5372,7 @@ impl Emitter {
             return Ok(());
         }
 
-        let (_, element_size, _) = self.array_info(name)?;
+        let element_size = self.symbols.type_size(&ty)?;
         let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_array_element_address(name, index)?;
         self.emit_store_hl(addr);
@@ -5308,8 +5656,8 @@ impl Emitter {
             }
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => Ok(*inner),
-                Type::Named(name) if name == "ptr24" => Err(Diagnostic::new(
-                    "raw ptr24 dereference requires an explicit typed pointer cast",
+                Type::Named(name) if name == "ptr" => Err(Diagnostic::new(
+                    "raw ptr dereference requires an explicit typed pointer cast",
                 )),
                 other => Err(Diagnostic::new(format!(
                     "cannot dereference non-pointer expression of type `{other:?}`"
@@ -5414,8 +5762,8 @@ impl Emitter {
             Expr::AddressOf(_) => Ok(ValueWidth::U24),
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => self.symbols.type_width(&inner),
-                Type::Named(name) if name == "ptr24" => Err(Diagnostic::new(
-                    "raw ptr24 dereference requires an explicit typed pointer cast",
+                Type::Named(name) if name == "ptr" => Err(Diagnostic::new(
+                    "raw ptr dereference requires an explicit typed pointer cast",
                 )),
                 other => Err(Diagnostic::new(format!(
                     "cannot dereference non-pointer expression of type `{other:?}`"
@@ -6151,7 +6499,7 @@ impl Emitter {
             Ok(Type::Ptr(_)) => true,
             Ok(Type::Named(name)) => matches!(
                 name.as_str(),
-                "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr24"
+                "u8" | "i8" | "bool" | "u16" | "i16" | "u24" | "i24" | "ptr"
             ),
             _ => false,
         }
@@ -7422,7 +7770,7 @@ fn validate_integer_unary_operand_type(ty: &Type) -> Result<(), Diagnostic> {
         {
             Ok(())
         }
-        Type::Named(name) if name == "ptr24" => {
+        Type::Named(name) if name == "ptr" => {
             Err(Diagnostic::new("unary operand must be an integer"))
         }
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
@@ -7448,7 +7796,7 @@ fn validate_shift_operand_type(ty: &Type) -> Result<(), Diagnostic> {
         {
             Ok(())
         }
-        Type::Named(name) if name == "ptr24" => {
+        Type::Named(name) if name == "ptr" => {
             Err(Diagnostic::new("shift operand must be an integer"))
         }
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
@@ -7474,7 +7822,7 @@ fn validate_shift_count_integer_type(ty: &Type) -> Result<(), Diagnostic> {
         {
             Ok(())
         }
-        Type::Named(name) if name == "ptr24" => {
+        Type::Named(name) if name == "ptr" => {
             Err(Diagnostic::new("shift count must be an integer"))
         }
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
@@ -7511,7 +7859,7 @@ fn width_unsigned_type(width: ValueWidth) -> Type {
 }
 
 fn is_raw_address_type(name: &str) -> bool {
-    matches!(name, "u24" | "ptr24")
+    matches!(name, "u24" | "ptr")
 }
 
 fn validate_comparison_types<F>(
@@ -7536,16 +7884,10 @@ where
     let left_is_ptr = matches!(left_type, Type::Ptr(_) | Type::Function { .. });
     let right_is_ptr = matches!(right_type, Type::Ptr(_) | Type::Function { .. });
     if left_is_ptr || right_is_ptr {
-        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && left_type == right_type {
+        // Pointers of the same type share an address representation. The
+        // backend lowers their ordering comparisons as unsigned wide compares.
+        if left_type == right_type {
             return Ok(());
-        }
-        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-            return Err(Diagnostic::new("type mismatch"));
-        }
-        if left_is_ptr && right_is_ptr {
-            return Err(Diagnostic::new(
-                "pointer comparisons support only == and !=",
-            ));
         }
         return Err(Diagnostic::new("type mismatch"));
     }

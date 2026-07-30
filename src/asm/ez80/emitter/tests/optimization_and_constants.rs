@@ -255,6 +255,52 @@ fn emits_and_runs_recursive_function_calls() {
 }
 
 #[test]
+fn preserves_pointer_out_arguments_across_recursive_calls() {
+    let source = r#"
+            fn write_through_chain(output: ptr<u8>, depth: u8) {
+                let local: u8 = 0
+                if depth == 0 {
+                    *output = 7
+                    return
+                }
+                write_through_chain(&local, depth - 1)
+                *output = local
+            }
+
+            fn main() {
+                let result: u8 = 0
+                write_through_chain(&result, 3)
+                test.assert_eq_u8(result, 7, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let recursive_call = asm
+        .split("_write_through_chain:")
+        .nth(1)
+        .and_then(|body| body.split("_main:").next())
+        .expect("write_through_chain function");
+
+    assert!(
+        recursive_call.contains("call _write_through_chain"),
+        "{recursive_call}"
+    );
+    // The 14-byte caller frame excludes the one-byte `local` out-argument.
+    // Direct comparison branching also avoids a scratch boolean local.
+    assert_eq!(
+        recursive_call.matches("    dec sp").count(),
+        13,
+        "{recursive_call}"
+    );
+    assert_eq!(
+        recursive_call.matches("    inc sp").count(),
+        13,
+        "{recursive_call}"
+    );
+}
+
+#[test]
 fn emits_and_runs_recursive_function_with_stack_arguments() {
     let source = r#"
             fn stepped(value: u8, base: u8, filler: u8, step: u8) -> u8 {
@@ -606,7 +652,7 @@ fn propagates_local_pointer_constants_until_assignment() {
             }
 
             fn copied_raw() -> u24 {
-                let raw: ptr24 = cast<ptr24>(&byte)
+                let raw: ptr = cast<ptr>(&byte)
                 return cast<u24>(raw)
             }
 
@@ -647,6 +693,186 @@ fn propagates_local_pointer_constants_until_assignment() {
     assert!(copied_raw.contains("    ld hl, 040"), "{asm}");
     assert!(copied_raw.contains("    ret"), "{asm}");
     assert!(assigned_ptr.contains("    ld hl, (040"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn emits_direct_z80_pointer_loop_fast_paths() {
+    let source = r#"
+        global s: u8 = 0
+        global p: u8 = 0
+
+        fn main() {
+            let text: ptr<u8> = "SP$"
+            let cursor: ptr<u8> = text
+            let count_s: ptr<u8> = &s
+            let count_p: ptr<u8> = &p
+            loop {
+                let letter: u8 = *cursor
+                if letter == 'S' {
+                    *count_s += 1
+                } else if letter == 'P' {
+                    *count_p += 1
+                } else if letter == '$' {
+                    break
+                }
+                cursor = cursor + 1
+            }
+            test.assert_eq_u8(s, 1, 1)
+            test.assert_eq_u8(p, 1, 2)
+            test.pass()
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let options = AssemblyOptions {
+        cpu: CpuFamily::Z80,
+        ram_base: Address24::new(0x2000),
+        rodata_base: Address24::new(0x3000),
+        section_bases: vec![(".rodata".to_owned(), Address24::new(0x3000))],
+        ..AssemblyOptions::default()
+    };
+    let asm = emit_ez80_assembly_with_options(&program, options).unwrap();
+    let ez80_asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&ez80_asm, 4_000).unwrap();
+
+    assert!(asm.contains("    cp 53h\n    jp nz, .L_else"), "{asm}");
+    assert!(asm.contains("    cp 50h\n    jp nz, .L_else"), "{asm}");
+    assert!(
+        asm.contains("    ld a, (hl)\n    inc a\n    ld (hl), a"),
+        "{asm}"
+    );
+    assert!(asm.contains("    inc hl"), "{asm}");
+    assert!(!asm.contains(".L_cmp_true"), "{asm}");
+    assert!(run.halted, "{ez80_asm}");
+    assert_eq!(run.result_code, 0, "{ez80_asm}");
+}
+
+#[test]
+fn emits_and_runs_pointer_ordering_comparisons() {
+    let source = r#"
+        global bytes: [u8; 2] = [0, 0]
+
+        fn main() {
+            let first: ptr<u8> = &bytes[0]
+            let second: ptr<u8> = &bytes[1]
+            test.assert_eq_u8(first < second, true, 1)
+            test.assert_eq_u8(first <= second, true, 2)
+            test.assert_eq_u8(second > first, true, 3)
+            test.assert_eq_u8(second >= first, true, 4)
+            test.pass()
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn emits_and_runs_u24_header_allocator() {
+    let source = r#"
+        const HEAP_START: u24 = 0x0D0000
+        const HEAP_END: u24 = 0x0E0000
+        const HEADER_SIZE: u24 = 3
+
+        fn null_ptr() -> ptr<u8> {
+            return cast<ptr<u8>>(0u24)
+        }
+
+        fn alloc(request_size: u24) -> ptr<u8> {
+            if request_size == 0 {
+                return null_ptr()
+            }
+            let total_needed: u24 = (request_size + HEADER_SIZE + 1u24) & ~1u24
+            let heap_end: ptr<u8> = cast<ptr<u8>>(HEAP_END)
+            let current: ptr<u8> = cast<ptr<u8>>(HEAP_START)
+            while current < heap_end {
+                let current_header: ptr<u24> = cast<ptr<u24>>(current)
+                let tagged_size: u24 = *current_header
+                if tagged_size == 0 {
+                    break
+                }
+                let block_size: u24 = tagged_size & ~1u24
+                if (tagged_size & 1u24) == 1u24 && block_size >= total_needed {
+                    *current_header = block_size
+                    return current + HEADER_SIZE
+                }
+                current = current + block_size
+            }
+            if current + total_needed > heap_end {
+                return null_ptr()
+            }
+            let header: ptr<u24> = cast<ptr<u24>>(current)
+            let next: ptr<u8> = current + total_needed
+            *header = total_needed
+            if next + HEADER_SIZE <= heap_end {
+                *(cast<ptr<u24>>(next)) = 0
+            }
+            return current + HEADER_SIZE
+        }
+
+        fn release(pointer: ptr<u8>) {
+            if pointer == null_ptr() {
+                return
+            }
+            let header: ptr<u24> = cast<ptr<u24>>(pointer - HEADER_SIZE)
+            *header = *header | 1u24
+        }
+
+        fn main() {
+            let heap: ptr<u24> = cast<ptr<u24>>(HEAP_START)
+            *heap = 0
+            let first: ptr<u8> = alloc(10u24)
+            let second: ptr<u8> = alloc(5u24)
+            *first = 0x42
+            *second = 0x99
+            test.assert_eq_u8(*first, 0x42, 1)
+            test.assert_eq_u8(*second, 0x99, 2)
+            test.assert_eq_u24(cast<u24>(second), cast<u24>(first) + 14u24, 3)
+            release(first)
+            let reused: ptr<u8> = alloc(8u24)
+            test.assert_eq_u24(cast<u24>(reused), cast<u24>(first), 4)
+            test.assert_eq_u8(*reused, 0x42, 5)
+            test.pass()
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 80_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn emits_wide_branches_low_bit_masks_and_small_pointer_offsets() {
+    let source = r#"
+        global bytes: [u8; 8] = []
+        global tagged: u24 = 3u24
+
+        fn main() {
+            let cursor: ptr<u8> = &bytes[0]
+            let aligned: u24 = tagged & ~1u24
+            if aligned >= 2u24 {
+                if (tagged & 1u24) == 1u24 {
+                    let next: ptr<u8> = cursor + 3u24
+                    test.assert_eq_u24(cast<u24>(next), cast<u24>(cursor) + 3u24, 1)
+                    test.pass()
+                }
+            }
+            test.fail(2)
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+
+    assert!(asm.contains("    res 0, l"), "{asm}");
+    assert!(asm.contains("    bit 0, l"), "{asm}");
+    assert!(asm.contains("    inc hl\n    inc hl\n    inc hl"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }

@@ -1,0 +1,80 @@
+// Each block begins with a three-byte u24 header.
+// Bits 23..1 store the total block size in bytes, including this header.
+// Bit 0 is set when the block is free.
+const heap_start: u24 = 0x0D0000
+const heap_end: u24 = 0x0E0000
+const header_size: u24 = 3
+
+fn null_ptr() -> ptr<u8> {
+    return cast<ptr<u8>>(0u24)
+}
+
+fn malloc(request_size: u24) -> ptr<u8> {
+    if request_size == 0 {
+        return null_ptr()
+    }
+
+    // Keep every block size even so bit 0 remains available as the free flag.
+    let total_needed: u24 = (request_size + header_size + 1u24) & ~1u24
+    let heap_limit: ptr<u8> = cast<ptr<u8>>(heap_end)
+    let current: ptr<u8> = cast<ptr<u8>>(heap_start)
+
+    while current < heap_limit {
+        let current_header: ptr<u24> = cast<ptr<u24>>(current)
+        let tagged_size: u24 = *current_header
+        if tagged_size == 0 {
+            break
+        }
+
+        let block_size: u24 = tagged_size & ~1u24
+        let is_free: bool = (tagged_size & 1u24) == 1u24
+        if is_free && block_size >= total_needed {
+            // Reuse the whole free block. Splitting can be added later.
+            *current_header = block_size
+            return current + header_size
+        }
+
+        current = current + block_size
+    }
+
+    if current + total_needed > heap_limit {
+        return null_ptr()
+    }
+
+    let allocation_header: ptr<u24> = cast<ptr<u24>>(current)
+    let next: ptr<u8> = current + total_needed
+    *allocation_header = total_needed
+
+    // A zero header terminates the allocated-block list. It is only needed
+    // when a complete header still fits after this block.
+    if next + header_size <= heap_limit {
+        let next_header: ptr<u24> = cast<ptr<u24>>(next)
+        *next_header = 0
+    }
+
+    return current + header_size
+}
+
+fn free(ptr: ptr<u8>) {
+    if ptr == null_ptr() {
+        return
+    }
+
+    let header_addr: ptr<u8> = ptr - header_size
+    let header: ptr<u24> = cast<ptr<u24>>(header_addr)
+    *header = *header | 1u24
+}
+
+fn main() {
+    // A zero first header marks an empty heap.
+    let heap_init: ptr<u24> = cast<ptr<u24>>(heap_start)
+    *heap_init = 0
+
+    let my_buffer: ptr<u8> = malloc(10u24)
+    if my_buffer == null_ptr() {
+        return
+    }
+
+    *my_buffer = 0x42
+    free(my_buffer)
+}

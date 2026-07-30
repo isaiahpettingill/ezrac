@@ -15,6 +15,20 @@ fn semantic_model_uses_four_byte_u32_and_i32_widths() {
 }
 
 #[test]
+fn semantic_model_uses_target_width_for_raw_ptr() {
+    let program = parse_program(Path::new("test.ezra"), "fn main() {}").unwrap();
+    for (pointer_width_bits, expected_bytes) in [(16, 2), (24, 3)] {
+        let model =
+            SemanticModel::from_program(&program, pointer_width_bits, 0x040000, 0x020000, 0x100000)
+                .unwrap();
+        assert_eq!(
+            model.type_width(&Type::Named("ptr".to_owned())).unwrap(),
+            expected_bytes
+        );
+    }
+}
+
+#[test]
 fn tbir_binds_ez80_memory_model() {
     let program = parse_program(Path::new("test.ezra"), "fn main() {}").unwrap();
     let hir = HirProgram::from_ast(&program).unwrap();

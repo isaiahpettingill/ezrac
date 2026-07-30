@@ -15,22 +15,22 @@ fn emits_and_runs_inline_embedded_bytes() {
                 test.assert_eq_u8(*palette_ptr, 0x11, 2);
                 test.assert_eq_u8(*(palette.ptr + 1), 0x22, 3);
                 test.assert_eq_u8(*(palette.end - 1), 0x33, 4);
-                test.assert_eq_u24(cast<ptr24>(palette.ptr), EZRA_RODATA_BASE, 14);
+                test.assert_eq_u24(cast<ptr>(palette.ptr), EZRA_RODATA_BASE, 14);
 
                 test.assert_eq_u24(title_text.len, 2, 5);
                 test.assert_eq_u8(*(title_text.ptr + 0), 'H', 6);
                 test.assert_eq_u8(*(title_text.ptr + 1), 'I', 7);
-                test.assert_eq_u24(cast<ptr24>(title_text.ptr), EZRA_ASSET_BASE, 15);
+                test.assert_eq_u24(cast<ptr>(title_text.ptr), EZRA_ASSET_BASE, 15);
 
                 test.assert_eq_u24(title_cstr.len, 3, 8);
                 test.assert_eq_u8(*(title_cstr.ptr + 0), 'O', 9);
                 test.assert_eq_u8(*(title_cstr.ptr + 1), 'K', 10);
                 test.assert_eq_u8(*(title_cstr.ptr + 2), 0, 11);
-                test.assert_eq_u24(cast<ptr24>(title_cstr.ptr), EZRA_ASSET_BASE + 2, 16);
+                test.assert_eq_u24(cast<ptr>(title_cstr.ptr), EZRA_ASSET_BASE + 2, 16);
 
                 test.assert_eq_u24(blank.len, 4, 12);
                 test.assert_eq_u8(*(blank.ptr + 3), 0x7E, 13);
-                test.assert_eq_u24(cast<ptr24>(blank.ptr), EZRA_ASSET_BASE + 5, 17);
+                test.assert_eq_u24(cast<ptr>(blank.ptr), EZRA_ASSET_BASE + 5, 17);
                 test.pass()
             }
         "#;
@@ -48,7 +48,7 @@ fn emits_and_runs_custom_section_embedded_bytes_at_section_base() {
             embed banked: bytes = bytes [0xA1, 0xA2] section .bank1 align 256
 
             fn main() {
-                test.assert_eq_u24(cast<ptr24>(banked.ptr), 0x120000, 1)
+                test.assert_eq_u24(cast<ptr>(banked.ptr), 0x120000, 1)
                 test.assert_eq_u8(*(banked.ptr + 0), 0xA1, 2)
                 test.assert_eq_u8(*(banked.ptr + 1), 0xA2, 3)
                 test.pass()
@@ -305,14 +305,15 @@ fn emits_and_runs_zero_terminated_string_literals() {
             fn main() {
                 let text: ptr<u8> = "OK";
                 test.assert_eq_u8(*text, 'O', 1);
-                test.assert_eq_u8(*(text + 1), 'K', 2);
-                test.assert_eq_u8(*(text + 2), 0, 3);
-                test.assert_eq_u8(*title, 'E', 4);
-                test.assert_eq_u8(*(title + 1), 'Z', 5);
-                test.assert_eq_u8(*(title + 2), 0, 6);
-                test.assert_eq_u8(same("OK", "OK"), true, 7);
-                test.assert_eq_u24(cast<ptr24>(title), EZRA_RODATA_BASE, 8);
-                test.assert_eq_u24(cast<ptr24>(text), EZRA_RODATA_BASE + 3, 9);
+                test.assert_eq_u8(text[1], 'K', 2);
+                test.assert_eq_u8(*(text + 1), 'K', 3);
+                test.assert_eq_u8(*(text + 2), 0, 4);
+                test.assert_eq_u8(*title, 'E', 5);
+                test.assert_eq_u8(*(title + 1), 'Z', 6);
+                test.assert_eq_u8(*(title + 2), 0, 7);
+                test.assert_eq_u8(same("OK", "OK"), true, 8);
+                test.assert_eq_u24(cast<ptr>(title), EZRA_RODATA_BASE, 9);
+                test.assert_eq_u24(cast<ptr>(text), EZRA_RODATA_BASE + 3, 10);
                 test.pass()
             }
         "#;
@@ -320,6 +321,13 @@ fn emits_and_runs_zero_terminated_string_literals() {
     let asm = emit_ez80_assembly(&program).unwrap();
     let run = run_assembly_test(&asm, 10_000).unwrap();
 
+    assert!(
+        asm.contains("section .rodata\norg 020000h\n    .dm \"EZ\", 00h"),
+        "{asm}"
+    );
+    assert!(asm.contains("    .dm \"OK\", 00h"), "{asm}");
+    assert_eq!(asm.matches(".dm \"OK\", 00h").count(), 1, "{asm}");
+    assert!(!asm.contains("    ld (020000h), a"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }

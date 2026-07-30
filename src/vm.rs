@@ -49,6 +49,14 @@ use ::dcpu::{Cpu as DcpuCpu, NoHardware};
 pub struct AssembledProgram {
     pub bytes: Vec<u8>,
     pub symbols: Vec<AssemblySymbol>,
+    pub section_ranges: Vec<AssemblySectionRange>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssemblySectionRange {
+    pub name: String,
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1164,6 +1172,9 @@ pub fn assemble_program_with_options_at(
     } & 0xFF_FFFF;
     validate_assembly_pc(cpu, default_pc, "assembly start")?;
     let mut pc = default_pc;
+    let mut section_ranges = Vec::new();
+    let mut current_section = None;
+    let mut section_start = default_pc;
 
     for (item_index, item) in program.items.iter().enumerate() {
         match &item.kind {
@@ -1198,11 +1209,19 @@ pub fn assemble_program_with_options_at(
                 equate_definitions.push((item.clone(), name.clone(), value.clone(), pc));
             }
             AssemblyItem::Section(name) => {
+                if let Some(previous) = current_section.replace(name.clone()) {
+                    section_ranges.push(AssemblySectionRange {
+                        name: previous,
+                        start: section_start,
+                        end: pc,
+                    });
+                }
                 if let Some(base) = section_base(options, name) {
                     validate_assembly_pc(cpu, base, "section base")
                         .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                     pc = base;
                 }
+                section_start = pc;
             }
             AssemblyItem::Org(expression) => {
                 let known = labels.clone().into_iter().collect::<HashMap<_, _>>();
@@ -1226,6 +1245,14 @@ pub fn assemble_program_with_options_at(
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
         }
+    }
+
+    if let Some(name) = current_section {
+        section_ranges.push(AssemblySectionRange {
+            name,
+            start: section_start,
+            end: pc,
+        });
     }
 
     while !pending_equates.is_empty() {
@@ -1320,7 +1347,11 @@ pub fn assemble_program_with_options_at(
             }
         }
     }
-    Ok(AssembledProgram { bytes, symbols })
+    Ok(AssembledProgram {
+        bytes,
+        symbols,
+        section_ranges,
+    })
 }
 
 fn dcpu_word_symbols(

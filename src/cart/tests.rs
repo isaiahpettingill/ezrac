@@ -277,7 +277,7 @@ fn cartridge_embed_expressions_support_casts_and_comparisons() {
                 cast<byte>(RAW),
                 cast<u8>(-1),
                 cast<bool>(2),
-                cast<u8>(cast<ptr24>(DEVICE)),
+                cast<u8>(cast<ptr>(DEVICE)),
                 RAW > 0x1000,
                 RAW == 0xFFFF,
                 true && false,

@@ -674,7 +674,7 @@ i24    signed 24-bit integer
 u32    unsigned 32-bit integer
 i32    signed 32-bit integer
 bool   boolean
-ptr24  raw 24-bit address
+ptr    opaque raw pointer; width follows the target
 ```
 
 Typed pointers:
@@ -1039,7 +1039,8 @@ Struct layout:
 - no implicit padding
 - alignment is 1 byte
 - u16 occupies 2 bytes
-- u24 and ptr24 occupy 3 bytes
+- u24 occupies 3 bytes
+- ptr and ptr<T> occupy the target pointer width
 - u32 and i32 occupy 4 bytes
 ```
 
@@ -1070,10 +1071,10 @@ Pointer type:
 ptr<T>
 ```
 
-Raw address type:
+Opaque raw pointer type:
 
 ```text
-ptr24
+ptr
 ```
 
 Pointer operations:
@@ -1081,8 +1082,10 @@ Pointer operations:
 ```text
 &x          address of variable
 *p          dereference
-p + n       pointer addition
-p - n       pointer subtraction
+p + n       typed-pointer addition, scaled by sizeof(T)
+p - n       typed-pointer subtraction, scaled by sizeof(T)
+
+Raw ptr values cannot be dereferenced; cast them to ptr<T> first.
 ```
 
 Rules:
@@ -1263,8 +1266,9 @@ Rules:
 - integer narrowing truncates high bits
 - signed/unsigned casts preserve bit pattern
 - casts to bool produce false for zero and true for any nonzero value
-- integer-to-pointer casts require u24 or ptr24
-- pointer-to-integer casts produce u24 or ptr24
+- conversion between ptr and ptr<T> requires an explicit cast
+- integer-to-typed-pointer casts require a target address integer or ptr
+- typed-pointer-to-integer casts produce a target address integer or ptr
 ```
 
 Example:
@@ -1272,7 +1276,7 @@ Example:
 ```text
 let addr: u24 = 0x080000
 let fb: ptr<u8> = cast<ptr<u8>>(addr)
-let raw: ptr24 = cast<ptr24>(fb)
+let raw: ptr = cast<ptr>(fb)
 ```
 
 ---
@@ -1389,20 +1393,20 @@ Return values:
 ```text
 bool/u8/i8      -> A
 u16/i16         -> HL low 16 bits
-u24/i24/ptr24   -> HL
+u24/i24/ptr   -> HL
 ```
 
 Arguments:
 
 ```text
 arg1 u8/i8/bool     -> A
-arg1 u16/u24/ptr24  -> HL
+arg1 u16/u24/ptr  -> HL
 
 arg2 u8/i8/bool     -> B
-arg2 u16/u24/ptr24  -> DE
+arg2 u16/u24/ptr  -> DE
 
 arg3 u8/i8/bool     -> C
-arg3 u16/u24/ptr24  -> BC
+arg3 u16/u24/ptr  -> BC
 
 additional args     -> stack, right to left
 ```
@@ -1449,7 +1453,7 @@ Stack slot sizes:
 u8/bool   = 1 byte
 u16/i16   = 2 bytes
 u24/i24   = 3 bytes
-ptr24     = 3 bytes
+ptr/ptr<T> = target pointer width
 ```
 
 Stack grows downward.
@@ -2516,7 +2520,7 @@ ty            = primitive_ty
               | "[" ty ";" expr "]"
               | path
 
-primitive_ty  = "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "u32" | "i32" | "bool" | "ptr24"
+primitive_ty  = "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "u32" | "i32" | "bool" | "ptr"
 
 expr          = logical_or
 ```

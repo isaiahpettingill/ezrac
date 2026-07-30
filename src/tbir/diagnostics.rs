@@ -217,7 +217,7 @@ fn validate_inline_asm_operand_classes(program: &crate::ast::Program) -> Result<
             Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => {
                 matches!(class, "reg16" | "mem" | "imm")
             }
-            Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => {
+            Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr") => {
                 matches!(class, "reg24" | "mem" | "imm")
             }
             Type::Ptr(_) | Type::Function { .. } => {

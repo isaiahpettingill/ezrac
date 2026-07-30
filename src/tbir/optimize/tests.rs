@@ -41,6 +41,22 @@ fn folds_simplifies_and_marks_dead_statements_without_skipping_validation() {
 }
 
 #[test]
+fn does_not_propagate_an_address_taken_local_past_a_call() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn set(value: ptr<u8>) { *value = 7 } fn main() { let choice: u8 = 0 set(&choice) let result: u8 = choice }",
+    )
+    .unwrap();
+    let (program, _report) = optimize_program(&program, CpuFamily::I8086);
+    let main = program.main_function().unwrap();
+
+    assert!(matches!(
+        main.body.last(),
+        Some(Stmt::Let { value: Expr::Ident(name), .. }) if name == "choice"
+    ));
+}
+
+#[test]
 fn inline_asm_outputs_invalidate_propagated_locals() {
     let program = parse_program(
         Path::new("test.ezra"),
@@ -196,6 +212,92 @@ fn performs_local_cse_and_clears_it_at_barriers() {
         }
     ));
     assert_eq!(report.common_subexpressions, 1);
+}
+
+#[test]
+fn folds_typed_bitnot_and_the_integer_expression_it_exposes() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn test() -> u24 { let mask: u24 = ~1u24 return mask & 0xffu24 }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = function_named(&program, "test");
+
+    assert!(matches!(
+        test.body[0],
+        Stmt::Let {
+            value: Expr::TypedInt(0xFFFFFE, Type::Named(ref name)),
+            ..
+        } if name == "u24"
+    ));
+    assert!(matches!(
+        test.body[1],
+        Stmt::Return(Some(Expr::TypedInt(254, Type::Named(ref name)))) if name == "u24"
+    ));
+    assert!(report.constant_folds >= 2);
+}
+
+#[test]
+fn simplifies_safe_short_circuit_boolean_and_control_expressions() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn side() -> bool { return true } fn test(flag: bool) { let skipped: bool = false && side() let selected: bool = true && flag if true || side() { return } while false && side() {} }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = function_named(&program, "test");
+
+    assert!(matches!(
+        test.body[0],
+        Stmt::Let {
+            value: Expr::Bool(false),
+            ..
+        }
+    ));
+    assert!(matches!(
+        test.body[1],
+        Stmt::Let {
+            value: Expr::Ident(ref name),
+            ..
+        } if name == "flag"
+    ));
+    assert!(matches!(
+        test.body[2],
+        Stmt::If {
+            condition: Expr::Bool(true),
+            ..
+        }
+    ));
+    assert!(matches!(
+        test.body[3],
+        Stmt::While {
+            condition: Expr::Bool(false),
+            ..
+        }
+    ));
+    assert!(report.algebraic_simplifications >= 4);
+}
+
+#[test]
+fn reuses_pure_subexpressions_inside_later_expressions() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn test(a: u8, b: u8) { let sum: u8 = a + b let doubled: u8 = (a + b) + (a + b) }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+    let test = function_named(&program, "test");
+
+    assert!(matches!(
+        test.body[1],
+        Stmt::Let {
+            value: Expr::Binary { ref left, ref right, .. },
+            ..
+        } if matches!(left.as_ref(), Expr::Ident(name) if name == "sum")
+            && matches!(right.as_ref(), Expr::Ident(name) if name == "sum")
+    ));
+    assert!(report.common_subexpressions >= 2);
 }
 
 #[test]

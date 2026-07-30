@@ -10,7 +10,7 @@ fn emits_test_pass_ports() {
     let asm = emit_ez80_assembly(&program).unwrap();
 
     assert!(asm.contains("__ezra_pass:"));
-    assert!(asm.contains("__ezra_fail:"));
+    assert!(!asm.contains("__ezra_fail:"));
     assert!(asm.contains("    call __ezra_pass"));
     assert!(asm.contains("out0 (0Dh), a"));
     assert!(asm.contains("out0 (0Eh), a"));

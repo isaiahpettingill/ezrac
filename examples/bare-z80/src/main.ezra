@@ -1,0 +1,24 @@
+global word: ptr<u8> = "MISSISSIPPI$"
+global count_letter_s : ptr<u8> = 2001
+global count_letter_p : ptr<u8> = 2002
+global count_letter_i : ptr<u8> = 2003
+global count_letter_m : ptr<u8> = 2004
+
+fn main() {
+    let i: ptr<u8> = word;
+    loop {
+        let letter: u8 = *i
+        if letter == 'S' {
+            *count_letter_s += 1;
+        } else if letter == 'P' {
+            *count_letter_p += 1;
+        } else if letter == 'I' {
+            *count_letter_i += 1;
+        } else if letter == 'M' {
+            *count_letter_m += 1;
+        } else if letter == '$' {
+            break;
+        }
+        i = i+1;
+    }
+}

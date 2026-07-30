@@ -4,6 +4,8 @@ use crate::{
     asm::{
         AssemblyOptions, GameBoyBankingMapper, GameBoyBankingOptions,
         comments::with_readability_comments,
+        data::{ByteLiteralStyle, byte_data_lines},
+        reachability::{RoutineProfile, strip_unreachable_generated_routines},
     },
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
@@ -49,7 +51,10 @@ pub fn emit_lr35902_assembly_with_options(
         configure_gameboy_banking(&tbir.lowered_program, &mut model, options.gameboy_banking)?;
     Emitter::new(model, options.gameboy_banking, banked_layout)
         .emit(&tbir.lowered_program)
-        .map(|asm| with_readability_comments(asm, program, &options, "lr35902"))
+        .map(|asm| {
+            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Lr35902);
+            with_readability_comments(asm, program, &options, "lr35902")
+        })
 }
 
 #[derive(Clone, Default)]
@@ -624,15 +629,8 @@ impl Emitter {
             if let Some(data) = self.banked_layout.data.get(&bank).cloned() {
                 for (name, bytes) in data {
                     self.line(&format!("__ezra_banked_data_{name}:"));
-                    if !bytes.is_empty() {
-                        self.line(&format!(
-                            "    db {}",
-                            bytes
-                                .iter()
-                                .map(|byte| format!("{byte:02X}h"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
+                    for line in byte_data_lines("db", &bytes, ByteLiteralStyle::HexSuffix, 16) {
+                        self.line(&line);
                     }
                 }
             }
@@ -1153,6 +1151,47 @@ impl Emitter {
         Ok(())
     }
 
+    fn live_storage_segments(&self, live: Storage, args: &[Expr]) -> Vec<Storage> {
+        let mut excluded = args
+            .iter()
+            .filter_map(|arg| match arg {
+                // The callee can mutate this storage through its pointer parameter.
+                // Restoring a pre-call snapshot would discard that mutation.
+                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
+                _ => None,
+            })
+            .filter_map(|storage| {
+                let start = storage.address.max(live.address);
+                let end = storage
+                    .address
+                    .saturating_add(storage.size)
+                    .min(live.address.saturating_add(live.size));
+                (start < end).then_some((start, end))
+            })
+            .collect::<Vec<_>>();
+        excluded.sort_unstable();
+
+        let mut saved = Vec::new();
+        let mut cursor = live.address;
+        for (start, end) in excluded {
+            if start > cursor {
+                saved.push(Storage {
+                    address: cursor,
+                    size: start - cursor,
+                });
+            }
+            cursor = cursor.max(end);
+        }
+        let live_end = live.address.saturating_add(live.size);
+        if cursor < live_end {
+            saved.push(Storage {
+                address: cursor,
+                size: live_end - cursor,
+            });
+        }
+        saved
+    }
+
     fn emit_call(
         &mut self,
         path: &[String],
@@ -1209,13 +1248,18 @@ impl Emitter {
         for (storage, argument_slot) in evaluated_args.into_iter().zip(&signature.argument_slots) {
             self.copy(storage, *argument_slot, storage.size);
         }
-        let saved = self.function_ram_bases.last().map(|base| Storage {
-            address: *base,
-            size: self.model.next_ram_address() - *base,
-        });
-        if let Some(saved) = saved {
-            for offset in 0..saved.size {
-                self.lda(saved.address + offset);
+        let saved = self
+            .function_ram_bases
+            .last()
+            .map(|base| Storage {
+                address: *base,
+                size: self.model.next_ram_address() - *base,
+            })
+            .map(|live| self.live_storage_segments(live, args))
+            .unwrap_or_default();
+        for storage in &saved {
+            for offset in 0..storage.size {
+                self.lda(storage.address + offset);
                 self.line("    pha");
             }
         }
@@ -1237,10 +1281,10 @@ impl Emitter {
         if let Some(return_storage) = return_storage {
             self.copy(self.r0, return_storage, return_storage.size);
         }
-        if let Some(saved) = saved {
-            for offset in (0..saved.size).rev() {
+        for storage in saved.iter().rev() {
+            for offset in (0..storage.size).rev() {
                 self.line("    pla");
-                self.sta(saved.address + offset);
+                self.sta(storage.address + offset);
             }
         }
         if let Some(return_storage) = return_storage {

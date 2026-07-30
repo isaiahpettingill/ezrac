@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 
 use crate::{
-    asm::{AssemblyOptions, comments::with_readability_comments},
+    asm::{
+        AssemblyOptions,
+        comments::with_readability_comments,
+        data::{ByteLiteralStyle, byte_data_lines, terminated_text_data_line},
+        reachability::{RoutineProfile, strip_unreachable_generated_routines},
+    },
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -38,7 +43,10 @@ pub fn emit_m68k_assembly_with_options(
     )?;
     Emitter::new(model, options.clone())
         .emit(&tbir.lowered_program)
-        .map(|asm| with_readability_comments(asm, program, &options, "m68k"))
+        .map(|asm| {
+            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M68k);
+            with_readability_comments(asm, program, &options, "m68k")
+        })
 }
 
 #[derive(Clone)]
@@ -108,7 +116,7 @@ impl Emitter {
         if !strings.is_empty() {
             self.line("section .rodata");
             for (_, value) in strings {
-                self.emit_data_bytes(value.bytes().chain(std::iter::once(0)).collect());
+                self.emit_text_data(&value);
             }
         }
         let mut embeds = self.model.embeds.values().cloned().collect::<Vec<_>>();
@@ -824,20 +832,33 @@ impl Emitter {
             self.emit_expr(arg, &ty)?;
             self.store_d0(slot, &ty)?;
         }
-        let saved = self.function_ram_bases.last().map(|base| Storage {
-            address: *base,
-            size: self.model.next_ram_address() - *base,
-        });
-        if let Some(saved) = saved {
-            for offset in 0..saved.size {
-                self.line(&format!("    move.b ${:06X},-(sp)", saved.address + offset));
+        let saved = self
+            .function_ram_bases
+            .last()
+            .map(|base| Storage {
+                address: *base,
+                size: self.model.next_ram_address() - *base,
+            })
+            .map(|live| self.live_storage_segments(live, args))
+            .unwrap_or_default();
+        for storage in &saved {
+            for offset in 0..storage.size {
+                self.line(&format!(
+                    "    move.b ${:06X},-(sp)",
+                    storage.address + offset
+                ));
             }
         }
         self.line(&format!("    jsr {}", function_label(&name)));
-        if let Some(saved) = saved {
+        if !saved.is_empty() {
             self.line("    move.l d0,d6");
-            for offset in (0..saved.size).rev() {
-                self.line(&format!("    move.b (sp)+,${:06X}", saved.address + offset));
+            for storage in saved.iter().rev() {
+                for offset in (0..storage.size).rev() {
+                    self.line(&format!(
+                        "    move.b (sp)+,${:06X}",
+                        storage.address + offset
+                    ));
+                }
             }
             self.line("    move.l d6,d0");
         }
@@ -1123,6 +1144,47 @@ impl Emitter {
             self.line(&format!("    move.{} d0,(a0)", size_suffix(ty)?));
         }
         Ok(())
+    }
+
+    fn live_storage_segments(&self, live: Storage, args: &[Expr]) -> Vec<Storage> {
+        let mut excluded = args
+            .iter()
+            .filter_map(|arg| match arg {
+                // The callee can mutate this storage through its pointer parameter.
+                // Restoring a pre-call snapshot would discard that mutation.
+                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
+                _ => None,
+            })
+            .filter_map(|storage| {
+                let start = storage.address.max(live.address);
+                let end = storage
+                    .address
+                    .saturating_add(storage.size)
+                    .min(live.address.saturating_add(live.size));
+                (start < end).then_some((start, end))
+            })
+            .collect::<Vec<_>>();
+        excluded.sort_unstable();
+
+        let mut saved = Vec::new();
+        let mut cursor = live.address;
+        for (start, end) in excluded {
+            if start > cursor {
+                saved.push(Storage {
+                    address: cursor,
+                    size: start - cursor,
+                });
+            }
+            cursor = cursor.max(end);
+        }
+        let live_end = live.address.saturating_add(live.size);
+        if cursor < live_end {
+            saved.push(Storage {
+                address: cursor,
+                size: live_end - cursor,
+            });
+        }
+        saved
     }
 
     fn copy(&mut self, source: Storage, target: Storage, size: u32) {
@@ -1412,14 +1474,13 @@ impl Emitter {
     }
 
     fn emit_data_bytes(&mut self, bytes: Vec<u8>) {
-        for chunk in bytes.chunks(16) {
-            let values = chunk
-                .iter()
-                .map(|byte| format!("0x{byte:02X}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.line(&format!("    db {values}"));
+        for line in byte_data_lines("db", &bytes, ByteLiteralStyle::HexPrefix, 16) {
+            self.line(&line);
         }
+    }
+
+    fn emit_text_data(&mut self, value: &str) {
+        self.line(&terminated_text_data_line("db", value, "0"));
     }
 }
 
@@ -1434,7 +1495,7 @@ fn size_suffix(ty: &Type) -> Result<&'static str, Diagnostic> {
     match ty {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => Ok("b"),
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok("w"),
-        Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24" | "u32" | "i32") => {
+        Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr" | "u32" | "i32") => {
             Ok("l")
         }
         Type::Ptr(_) => Ok("l"),
@@ -1446,7 +1507,7 @@ fn scalar_width(ty: &Type) -> Result<u8, Diagnostic> {
     match ty {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => Ok(1),
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok(2),
-        Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr24") => Ok(3),
+        Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr") => Ok(3),
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Ok(4),
         Type::Ptr(_) => Ok(3),
         _ => Err(Diagnostic::new("unsupported M68k scalar type")),
@@ -1821,6 +1882,33 @@ mod tests {
         assert!(!assembly.contains("jsr _pair"), "{assembly}");
         assert!(!assembly.contains("jsr _bump"), "{assembly}");
         assert_eq!(assembly.matches("jsr _yes").count(), 2, "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn does_not_restore_direct_pointer_out_arguments() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            fn write(output: ptr<u8>) { *output = 7 }
+            fn main() {
+                let local: u8 = 0
+                write(&local)
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(assembly.contains("jsr _write"), "{assembly}");
+        assert!(!assembly.contains("-(sp)"), "{assembly}");
         assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
     }
 

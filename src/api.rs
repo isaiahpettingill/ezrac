@@ -369,11 +369,17 @@ pub fn validate_generated_assembly_for_request(
         build.layout.entry.get(),
         &assembly_source_options(source_path, &build.layout),
     )?;
+    let text = assembled
+        .section_ranges
+        .iter()
+        .find(|section| section.name == ".text");
     validate_assembled_section_fit(
         &build.layout,
         ".text",
-        build.layout.entry.get(),
-        assembled.bytes.len(),
+        text.map_or(build.layout.entry.get(), |section| section.start),
+        text.map_or(assembled.bytes.len(), |section| {
+            section.end.saturating_sub(section.start) as usize
+        }),
     )
 }
 
@@ -409,11 +415,17 @@ pub fn link_generated_assembly(
             build.layout.entry.get(),
             &assembly_source_options(source_path, &build.layout),
         )?;
+        let text = assembled
+            .section_ranges
+            .iter()
+            .find(|section| section.name == ".text");
         validate_assembled_section_fit(
             &build.layout,
             ".text",
-            build.layout.entry.get(),
-            assembled.bytes.len(),
+            text.map_or(build.layout.entry.get(), |section| section.start),
+            text.map_or(assembled.bytes.len(), |section| {
+                section.end.saturating_sub(section.start) as usize
+            }),
         )?;
         let map = build_output_map(build, program, assembled.bytes.len(), &assembled.symbols)?;
         (assembled.bytes, map, assembled.symbols)
@@ -1193,7 +1205,13 @@ fn validate_generated_assembly(
     layout: &Layout,
 ) -> Result<(), Diagnostic> {
     let assembled = assemble_subset_with_symbols_at(cpu.into(), assembly, layout.entry.get())?;
-    validate_text_section_fit(layout, assembled.bytes.len())
+    let text_len = assembled
+        .section_ranges
+        .iter()
+        .find(|section| section.name == ".text")
+        .map(|section| section.end.saturating_sub(section.start))
+        .unwrap_or_else(|| assembled.bytes.len() as u32);
+    validate_text_section_fit(layout, text_len as usize)
 }
 
 fn validate_text_section_fit(layout: &Layout, code_len: usize) -> Result<(), Diagnostic> {
