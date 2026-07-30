@@ -13,3 +13,10 @@ pub const KEY_UP: u16 = 0x0080
 pub const KEY_DOWN: u16 = 0x0081
 pub const KEY_LEFT: u16 = 0x0082
 pub const KEY_RIGHT: u16 = 0x0083
+
+@inline pub fn clear() {
+    asm volatile(clobber memory) {
+        "set a, 0"
+        "hwi 1"
+    }
+}

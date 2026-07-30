@@ -3,3 +3,11 @@
 pub const CLOCK_COMMAND_SET_RATE: u16 = 0
 pub const CLOCK_COMMAND_READ_TICKS: u16 = 1
 pub const CLOCK_COMMAND_SET_INTERRUPT: u16 = 2
+
+@inline pub fn set_rate(ticks_per_second: u16) {
+    asm volatile(in ticks_per_second: u16 as reg16, clobber memory) {
+        "set a, 0"
+        "set b, {ticks_per_second}"
+        "hwi 2"
+    }
+}

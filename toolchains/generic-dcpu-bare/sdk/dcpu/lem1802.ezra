@@ -1,4 +1,4 @@
-// LEM1802 display constants for the Standard Compatibility profile.
+// LEM1802 display constants and source wrappers for the Standard Compatibility profile.
 
 pub const SCREEN_MAP: u16 = 0x8000
 pub const WIDTH: u16 = 32
@@ -14,7 +14,20 @@ pub const LEM_COMMAND_DUMP_PALETTE: u16 = 5
 
 pub const COLOR_BLACK: u16 = 0
 pub const COLOR_WHITE: u16 = 15
-
-// Text-cell fields: blink in bit 7, background in bits 4..7, foreground in
-// bits 8..11, and the ASCII character in bits 0..6.
 pub const BLINK: u16 = 0x0080
+
+@inline pub fn map_screen(address: u16) {
+    asm volatile(in address: u16 as reg16, clobber memory) {
+        "set a, 0"
+        "set b, {address}"
+        "hwi 0"
+    }
+}
+
+@inline pub fn set_border(color: u16) {
+    asm volatile(in color: u16 as reg16, clobber memory) {
+        "set a, 3"
+        "set b, {color}"
+        "hwi 0"
+    }
+}

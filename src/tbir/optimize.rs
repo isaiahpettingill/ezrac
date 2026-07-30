@@ -153,7 +153,7 @@ fn inline_rejection<'a>(
 
 fn stmt_has_inline_forbidden_control(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Asm { .. } | Stmt::Break | Stmt::Continue => true,
+        Stmt::Break | Stmt::Continue => true,
         Stmt::If {
             then_body,
             else_body,
@@ -475,6 +475,44 @@ fn rename_stmts(stmts: Vec<Stmt>, names: &HashMap<String, String>) -> Vec<Stmt> 
                 value: rename_expr(value, names),
             },
             Stmt::Expr(value) => Stmt::Expr(rename_expr(value, names)),
+            Stmt::Asm {
+                volatile,
+                inputs,
+                outputs,
+                clobbers,
+                lines,
+            } => {
+                let inputs = inputs
+                    .into_iter()
+                    .map(|mut input| {
+                        input.name = renamed(input.name, names);
+                        input
+                    })
+                    .collect();
+                let outputs = outputs
+                    .into_iter()
+                    .map(|mut output| {
+                        output.name = renamed(output.name, names);
+                        output
+                    })
+                    .collect();
+                let lines = lines
+                    .into_iter()
+                    .map(|mut line| {
+                        for (old, new) in names {
+                            line = line.replace(&format!("{{{old}}}"), &format!("{{{new}}}"));
+                        }
+                        line
+                    })
+                    .collect();
+                Stmt::Asm {
+                    volatile,
+                    inputs,
+                    outputs,
+                    clobbers,
+                    lines,
+                }
+            }
             stmt => stmt,
         })
         .collect()

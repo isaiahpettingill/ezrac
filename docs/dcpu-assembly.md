@@ -31,24 +31,29 @@ screen memory.
 
 ## Standard Machine SDK
 
-`toolchains/generic-dcpu-bare/sdk/dcpu/` contains built-in `dcpu.*` modules for
-device slots and command constants. The current DCPU source backend does not
-lower device calls or module constant field access yet, so use the vendorable
-assembly macro SDK for hardware work:
+`toolchains/generic-dcpu-bare/sdk/dcpu/` contains built-in `dcpu.*` modules with
+typed constants and source-level device wrappers. Use them from ordinary EZRA
+source; the compiler expands the wrappers into the required `HWI` sequence:
 
-```asm
-include "sdk/dcpu.inc"
+```ezra
+import dcpu.clock
+import dcpu.keyboard
+import dcpu.lem1802
+import dcpu.speaker
 
-%lem_set_border 1
-%lem_put_cell 0, 0xf045
-%clock_set_rate 60
-%speaker_set 0, 440
+fn main() {
+    lem1802.map_screen(0x8000)
+    lem1802.set_border(9)
+    keyboard.clear()
+    clock.set_rate(60)
+    speaker.set_left(440)
+}
 ```
 
-The macro SDK covers generic `HWI`, LEM1802 setup and text cells, keyboard
-queue reads, clock setup, and stereo speaker frequencies. It fixes device slot
-numbers to the Standard Compatibility profile. Use `%dcpu_hwi(device)` for
-other commands after loading `A` through `Z` as required by that device.
+The vendorable assembly macro SDK remains available for handwritten assembly.
+It covers generic `HWI`, LEM1802 setup and text cells, keyboard queue reads,
+clock setup, and stereo speaker frequencies. Use `%dcpu_hwi(device)` for other
+commands after loading `A` through `Z` as required by that device.
 
 ## Instructions
 

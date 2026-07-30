@@ -1,0 +1,12 @@
+import dcpu.clock
+import dcpu.keyboard
+import dcpu.lem1802
+import dcpu.speaker
+
+fn main() {
+    lem1802.map_screen(0x8000)
+    lem1802.set_border(9)
+    keyboard.clear()
+    clock.set_rate(60)
+    speaker.set_left(440)
+}

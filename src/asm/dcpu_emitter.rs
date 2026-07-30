@@ -67,7 +67,11 @@ impl Emitter {
                     }
                     main = Some(body.as_slice());
                 }
-                TbirDeclaration::Function { name, .. } if inline_functions.contains(name) => {}
+                TbirDeclaration::Function {
+                    name, attrs, body, ..
+                } if inline_functions.contains(name)
+                    || (attrs.iter().any(|attr| attr == "inline")
+                        && body.iter().any(|stmt| matches!(stmt, TbirStmt::Asm { .. }))) => {}
                 TbirDeclaration::Function { name, .. } => {
                     return Err(Diagnostic::new(format!(
                         "DCPU-16 emitter currently supports only `main`; function `{name}` is unsupported"
@@ -142,18 +146,42 @@ impl Emitter {
                 lines,
                 ..
             } => {
-                if !inputs.is_empty() || !outputs.is_empty() {
+                if !outputs.is_empty() {
                     return Err(Diagnostic::new(
-                        "DCPU-16 inline asm operands are not yet supported; use an operand-free asm block",
+                        "DCPU-16 inline asm outputs are not yet supported",
                     ));
                 }
+                let mut operands = HashMap::new();
+                for input in inputs {
+                    self.require_scalar_type(
+                        &input.ty,
+                        &format!("inline asm input `{}`", input.name),
+                    )?;
+                    if input.class != "reg16" {
+                        return Err(Diagnostic::new(format!(
+                            "DCPU-16 inline asm input `{}` must use `reg16`",
+                            input.name
+                        )));
+                    }
+                    let register = self.local(&input.name)?;
+                    if operands.insert(input.name.clone(), register).is_some() {
+                        return Err(Diagnostic::new(format!(
+                            "duplicate DCPU-16 inline asm operand `{}`",
+                            input.name
+                        )));
+                    }
+                }
                 for line in lines {
-                    if line.contains(['{', '}']) {
+                    let mut emitted = line.clone();
+                    for (name, register) in &operands {
+                        emitted = emitted.replace(&format!("{{{name}}}"), register);
+                    }
+                    if emitted.contains(['{', '}']) {
                         return Err(Diagnostic::new(format!(
                             "DCPU-16 inline asm has an unresolved operand placeholder in `{line}`"
                         )));
                     }
-                    self.line(&format!("    {line}"));
+                    self.line(&format!("    {emitted}"));
                 }
                 Ok(())
             }
@@ -295,7 +323,7 @@ impl Emitter {
     }
 
     fn allocate_local(&mut self, name: &str) -> Result<&'static str, Diagnostic> {
-        const REGISTERS: [&str; 6] = ["a", "b", "c", "x", "y", "z"];
+        const REGISTERS: [&str; 8] = ["a", "b", "c", "x", "y", "z", "i", "j"];
         if self.locals.contains_key(name) {
             return Err(Diagnostic::new(format!("duplicate DCPU-16 local `{name}`")));
         }
