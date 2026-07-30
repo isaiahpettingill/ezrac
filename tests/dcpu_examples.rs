@@ -53,6 +53,24 @@ fn dcpu_lem_assembly_example_builds_little_endian_words() {
 }
 
 #[test]
+fn dcpu_sdk_example_builds_device_commands_and_screen_words() {
+    let bytes = build_example("sdk-hello", "examples/dcpu-16/sdk-hello/main.asm");
+    let words = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_le_bytes(*bytes))
+        .collect::<Vec<_>>();
+
+    for expected in [0x8000, 0xf053, 0xf044, 0xf04b, 440, 660] {
+        assert!(
+            words.contains(&expected),
+            "expected SDK example word 0x{expected:04x}: {words:?}"
+        );
+    }
+}
+
+#[test]
 fn dcpu_source_example_builds_little_endian_image() {
     let bytes = build_example("arithmetic", "examples/dcpu-16/arithmetic/src/main.ezra");
     let words = bytes

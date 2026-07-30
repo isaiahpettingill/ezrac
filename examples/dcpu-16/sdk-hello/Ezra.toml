@@ -1,0 +1,8 @@
+[project]
+name = "dcpu16-sdk-hello"
+
+[build]
+input = "main.asm"
+target = "generic-dcpu-bare"
+output = "bin"
+executable = "dcpu16-sdk-hello"
