@@ -84,6 +84,231 @@ fn emits_target_specific_constant_shifts_and_reduces_power_of_two_multiply() {
 }
 
 #[test]
+fn lowers_single_bit_expression_masks() {
+    let source = r#"
+            fn source16() -> u16 {
+                return 0x1200
+            }
+
+            fn set8(value: u8) -> u8 {
+                return value | 0x20
+            }
+
+            fn clear8(value: u8) -> u8 {
+                return value & 0xDF
+            }
+
+            fn toggle8(value: u8) -> u8 {
+                return value ^ 0x20
+            }
+
+            fn set16() -> u16 {
+                return source16() | 0x0200u16
+            }
+
+            fn clear16(value: u16) -> u16 {
+                return value & 0xFDFFu16
+            }
+
+            fn toggle16(value: u16) -> u16 {
+                return value ^ 0x0200u16
+            }
+
+            fn set24(value: u24) -> u24 {
+                return value | 0x020000u24
+            }
+
+            fn clear24(value: u24) -> u24 {
+                return value & 0xFDFFFFu24
+            }
+
+            fn toggle24(value: u24) -> u24 {
+                return value ^ 0x020000u24
+            }
+
+            fn main() {
+                test.assert_eq_u8(set8(1), 0x21, 1)
+                test.assert_eq_u8(clear8(0xFF), 0xDF, 2)
+                test.assert_eq_u8(toggle8(1), 0x21, 3)
+                test.assert_eq_u16(set16(), 0x1200, 4)
+                test.assert_eq_u16(clear16(0xFFFF), 0xFDFF, 5)
+                test.assert_eq_u16(toggle16(0xFFFF), 0xFDFF, 6)
+                test.assert_eq_u24(set24(0x010203), 0x030203, 7)
+                test.assert_eq_u24(clear24(0xFFFFFF), 0xFDFFFF, 8)
+                test.assert_eq_u24(toggle24(0xFFFFFF), 0xFDFFFF, 9)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 12_000).unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+
+    assert!(body("set8").contains("    set 5, a"), "{asm}");
+    assert!(body("clear8").contains("    res 5, a"), "{asm}");
+    assert!(body("toggle8").contains("    xor 20h"), "{asm}");
+    assert!(body("set16").contains("    set 1, a"), "{asm}");
+    assert!(body("clear16").contains("    res 1, a"), "{asm}");
+    assert!(body("toggle16").contains("    xor 02h"), "{asm}");
+    assert!(body("set24").contains("    set 1, a"), "{asm}");
+    assert!(body("clear24").contains("    res 1, a"), "{asm}");
+    assert!(body("toggle24").contains("    xor 02h"), "{asm}");
+    assert_eq!(body("set16").matches("call _source16").count(), 1, "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+
+    let intel_source = r#"
+            fn set(value: u8) -> u8 {
+                return value | 0x20
+            }
+
+            fn clear(value: u8) -> u8 {
+                return value & 0xDF
+            }
+
+            fn toggle(value: u8) -> u8 {
+                return value ^ 0x20
+            }
+
+            fn main() {
+                let set_value: u8 = set(0)
+                let clear_value: u8 = clear(0)
+                let toggle_value: u8 = toggle(0)
+            }
+        "#;
+    let intel_program = parse_program(Path::new("intel.ezra"), intel_source).unwrap();
+    let intel_asm = emit_ez80_assembly_with_options(
+        &intel_program,
+        AssemblyOptions {
+            cpu: CpuFamily::I8080,
+            ram_base: Address24::new(0x2000),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(!intel_asm.contains("\n    set "), "{intel_asm}");
+    assert!(!intel_asm.contains("\n    res "), "{intel_asm}");
+    assert!(intel_asm.contains("    ora c"), "{intel_asm}");
+    assert!(intel_asm.contains("    ana c"), "{intel_asm}");
+    assert!(intel_asm.contains("    xri 20h"), "{intel_asm}");
+}
+
+#[test]
+fn lowers_byte_aligned_wide_temporary_shifts() {
+    let source = r#"
+            fn shl16_8(value: u16) -> u16 {
+                return value << 8
+            }
+
+            fn shr16_8(value: u16) -> u16 {
+                return value >> 8
+            }
+
+            fn shl16_16(value: u16) -> u16 {
+                return value << 16
+            }
+
+            fn shr_i16_8(value: i16) -> i16 {
+                return value >> 8
+            }
+
+            fn shr_i16_16(value: i16) -> i16 {
+                return value >> 16
+            }
+
+            fn assign_shl16_8(value: u16) -> u16 {
+                let shifted: u16 = value
+                shifted <<= 8
+                return shifted
+            }
+
+            fn shl24_16(value: u24) -> u24 {
+                return value << 16
+            }
+
+            fn shr24_8(value: u24) -> u24 {
+                return value >> 8
+            }
+
+            fn shr24_24(value: u24) -> u24 {
+                return value >> 24
+            }
+
+            fn shr_i24_16(value: i24) -> i24 {
+                return value >> 16
+            }
+
+            fn shr_i24_24(value: i24) -> i24 {
+                return value >> 24
+            }
+
+            fn assign_shr_i24_16(value: i24) -> i24 {
+                let shifted: i24 = value
+                shifted >>= 16
+                return shifted
+            }
+
+            fn main() {
+                test.assert_eq_u16(shl16_8(0x1234), 0x3400, 1)
+                test.assert_eq_u16(shr16_8(0x1234), 0x0012, 2)
+                test.assert_eq_u16(shl16_16(0x1234), 0, 3)
+                test.assert_eq_u16(cast<u16>(shr_i16_8(-0x1234)), 0xFFED, 4)
+                test.assert_eq_u16(cast<u16>(shr_i16_16(-0x1234)), 0xFFFF, 5)
+                test.assert_eq_u16(assign_shl16_8(0x1234), 0x3400, 6)
+                test.assert_eq_u24(shl24_16(0x010203), 0x030000, 7)
+                test.assert_eq_u24(shr24_8(0x010203), 0x000102, 8)
+                test.assert_eq_u24(shr24_24(0x010203), 0, 9)
+                test.assert_eq_u24(cast<u24>(shr_i24_16(-0x012345)), 0xFFFFFE, 10)
+                test.assert_eq_u24(cast<u24>(shr_i24_24(-0x012345)), 0xFFFFFF, 11)
+                test.assert_eq_u24(cast<u24>(assign_shr_i24_16(-0x012345)), 0xFFFFFE, 12)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 12_000).unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+
+    for name in ["shl16_8", "shl16_16", "assign_shl16_8", "shl24_16"] {
+        let function = body(name);
+        assert!(!function.contains("    add a, a"), "{function}");
+        assert!(!function.contains("    rl a"), "{function}");
+    }
+    for name in ["shr16_8", "shr24_8", "shr24_24"] {
+        let function = body(name);
+        assert!(!function.contains("    srl a"), "{function}");
+    }
+    for name in [
+        "shr_i16_8",
+        "shr_i16_16",
+        "shr_i24_16",
+        "shr_i24_24",
+        "assign_shr_i24_16",
+    ] {
+        let function = body(name);
+        assert!(!function.contains("    sra a"), "{function}");
+    }
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn hoists_pure_loop_invariants_before_the_loop() {
     let source = r#"
             fn sum_scaled(base: u8, count: u8) -> u8 {
@@ -870,8 +1095,8 @@ fn emits_wide_branches_low_bit_masks_and_small_pointer_offsets() {
     let asm = emit_ez80_assembly(&program).unwrap();
     let run = run_assembly_test(&asm, 4_000).unwrap();
 
-    assert!(asm.contains("    res 0, l"), "{asm}");
-    assert!(asm.contains("    bit 0, l"), "{asm}");
+    assert!(asm.contains("    res 0, a"), "{asm}");
+    assert!(asm.contains("    bit 0, a"), "{asm}");
     assert!(asm.contains("    inc hl\n    inc hl\n    inc hl"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
@@ -908,12 +1133,136 @@ fn branches_directly_on_single_bit_masks() {
     let run = run_assembly_test(&asm, 4_000).unwrap();
 
     assert!(asm.contains("    bit 7, a"), "{asm}");
-    assert!(asm.contains("    bit 5, l"), "{asm}");
-    assert!(asm.contains("    bit 0, l"), "{asm}");
+    assert!(asm.contains("    bit 5, a"), "{asm}");
+    assert!(asm.contains("    bit 0, a"), "{asm}");
     assert!(asm.contains("    and 30h"), "{asm}");
     assert!(asm.contains("    cp 30h"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn branches_directly_on_single_byte_wide_masks() {
+    let source = r#"
+        fn source16() -> u16 {
+            return 0xA55Au16
+        }
+
+
+        fn equals_zero() -> u8 {
+            if (source16() & 0xA500u16) == 0u16 {
+                return 1
+            }
+            return 0
+        }
+
+        fn not_equals_zero() -> u8 {
+            if (source16() & 0xA500u16) != 0u16 {
+                return 1
+            }
+            return 0
+        }
+
+        fn equals_mask() -> u8 {
+            if (source16() & 0xA500u16) == 0xA500u16 {
+                return 1
+            }
+            return 0
+        }
+
+
+        fn main() {
+            test.assert_eq_u8(equals_zero(), 0, 1)
+            test.assert_eq_u8(not_equals_zero(), 1, 2)
+            test.assert_eq_u8(equals_mask(), 1, 3)
+            test.pass()
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 8_000).unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+
+    for name in ["equals_zero", "not_equals_zero", "equals_mask"] {
+        let function = body(name);
+        assert_eq!(function.matches("call _source16").count(), 1, "{function}");
+        assert!(function.contains("    and A5h"), "{function}");
+    }
+    assert!(body("equals_mask").contains("    cp A5h"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+
+    let z80_asm = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Z80,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(z80_asm.contains("    and A5h"), "{z80_asm}");
+    assert!(z80_asm.contains("    cp A5h"), "{z80_asm}");
+
+    let u24_source = r#"
+        fn source24() -> u24 {
+            return 0x01A55Au24
+        }
+
+        fn not_equals_mask() -> u8 {
+            if (source24() & 0x010000u24) != 0x010000u24 {
+                return 1
+            }
+            return 0
+        }
+
+        fn main() {
+            test.assert_eq_u8(not_equals_mask(), 0, 1)
+            test.pass()
+        }
+    "#;
+    let u24_program = parse_program(Path::new("u24.ezra"), u24_source).unwrap();
+    let u24_asm = emit_ez80_assembly(&u24_program).unwrap();
+    let u24_run = run_assembly_test(&u24_asm, 4_000).unwrap();
+    let not_equals_mask = u24_asm
+        .split("_not_equals_mask:")
+        .nth(1)
+        .unwrap()
+        .split("    ret")
+        .next()
+        .unwrap();
+
+    assert_eq!(
+        not_equals_mask.matches("call _source24").count(),
+        1,
+        "{not_equals_mask}"
+    );
+    assert!(
+        not_equals_mask.contains("    bit 0, a"),
+        "{not_equals_mask}"
+    );
+    assert!(u24_run.halted, "{u24_asm}");
+    assert_eq!(u24_run.result_code, 0, "{u24_asm}");
+
+    let intel_asm = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::I8080,
+            ram_base: Address24::new(0x2000),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(intel_asm.contains("    ani A5h"), "{intel_asm}");
+    assert!(intel_asm.contains("    cpi A5h"), "{intel_asm}");
+    assert!(!intel_asm.contains("\n    bit "), "{intel_asm}");
 }
 
 #[test]

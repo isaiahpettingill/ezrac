@@ -274,6 +274,86 @@ fn simplifies_width_aware_bitwise_masks_and_constant_chains() {
 }
 
 #[test]
+fn removes_masks_that_do_not_affect_explicit_unsigned_narrowing() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn test(word: u16, wide: u24, signed: i16, mask: u16) -> u16 { let low_word: u8 = cast<u8>(word & 0x00ffu16) let low_wide: u8 = cast<u8>(wide & 0x0000ffu24) let narrow_wide: u16 = cast<u16>(wide & 0x00ffffu24) let keep_signed: u8 = cast<u8>(signed & 0x00ffi16) let keep_bits: u8 = cast<u8>(word & 0x007fu16) let keep_dynamic: u8 = cast<u8>(word & mask) return narrow_wide }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Ez80);
+    let test = function_named(&program, "test");
+
+    for index in [0, 1, 2] {
+        assert!(matches!(
+            test.body[index],
+            Stmt::Let { value: Expr::Cast { ref expr, .. }, .. }
+                if matches!(expr.as_ref(), Expr::Ident(_))
+        ));
+    }
+    for index in [3, 4, 5] {
+        assert!(matches!(
+            test.body[index],
+            Stmt::Let { value: Expr::Cast { ref expr, .. }, .. }
+                if matches!(expr.as_ref(), Expr::Binary { op: BinaryOp::BitAnd, .. })
+        ));
+    }
+}
+
+#[test]
+fn folds_fully_known_one_bits_for_supported_local_integer_widths() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn byte(x: u8) -> u8 { let low: u8 = x | 0x0f return low | 0xf0 } fn word(x: u16) -> u16 { let low: u16 = x | 0x00ff return low | 0xff00 } fn triple(x: u24) -> u24 { let low: u24 = x | 0x0000ff return low | 0xffff00 } fn zero(x: u8) -> u8 { let low: u8 = x & 0x0f return low & 0xf0 }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Ez80);
+
+    for (name, ty, value) in [
+        ("byte", "u8", 0xff),
+        ("word", "u16", 0xffff),
+        ("triple", "u24", 0xffffff),
+    ] {
+        let function = function_named(&program, name);
+        assert!(
+            matches!(function.body.last(), Some(Stmt::Return(Some(Expr::TypedInt(actual, Type::Named(actual_ty))))) if *actual == value && actual_ty == ty),
+            "{name}: {:?}",
+            function.body
+        );
+    }
+
+    let zero = function_named(&program, "zero");
+    assert!(matches!(
+        zero.body.last(),
+        Some(Stmt::Return(Some(Expr::TypedInt(0, Type::Named(ty))))) if ty == "u8"
+    ));
+}
+
+#[test]
+fn known_bits_keeps_address_taken_locals_and_branch_facts_local() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn mutate(value: ptr<u8>) { *value = 0 } fn addressed(x: u8) -> u8 { let low: u8 = x | 0x0f mutate(&low) return low | 0xf0 } fn branches(x: u8, flag: bool) -> u8 { let result: u8 = x if flag { let low: u8 = result & 0x0f result = low } return result | 0xf0 }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Ez80);
+
+    for name in ["addressed", "branches"] {
+        let function = function_named(&program, name);
+        assert!(
+            matches!(
+                function.body.last(),
+                Some(Stmt::Return(Some(Expr::Binary {
+                    op: BinaryOp::BitOr,
+                    ..
+                })))
+            ),
+            "{name}: {:?}",
+            function.body
+        );
+    }
+}
+
+#[test]
 fn simplifies_safe_short_circuit_boolean_and_control_expressions() {
     let program = parse_program(
         Path::new("test.ezra"),

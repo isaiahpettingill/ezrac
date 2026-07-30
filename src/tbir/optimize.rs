@@ -28,6 +28,7 @@ pub fn optimize_program_with_context(
     scalar_simplify_program(&mut program, &mut report, true);
     local_propagation_and_cse_program(&mut program, context, &mut report);
     scalar_simplify_program(&mut program, &mut report, false);
+    known_bits_program(&mut program);
     hoist_pure_loop_invariants_program(&mut program, &mut report);
     hoist_named_memory_reads_program(&mut program, context, &mut report);
     expand_inline_functions(&mut program, context, &mut report);
@@ -153,7 +154,7 @@ fn inline_rejection<'a>(
 
 fn stmt_has_inline_forbidden_control(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Break | Stmt::Continue => true,
+        Stmt::Asm { .. } | Stmt::Break | Stmt::Continue => true,
         Stmt::If {
             then_body,
             else_body,
@@ -2168,6 +2169,259 @@ fn object_access_barrier(name: &str, context: &OptimizationContext) -> Option<St
         })
 }
 
+#[derive(Clone)]
+struct KnownBits {
+    ty: Type,
+    zero: i64,
+    one: i64,
+}
+
+fn known_bits_program(program: &mut Program) {
+    fn visit(declarations: &mut [Declaration]) {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Function(function) => {
+                    let mut address_taken = HashSet::new();
+                    collect_address_taken_names(&function.body, &mut address_taken);
+                    let mut facts = HashMap::new();
+                    for param in &function.params {
+                        if known_bits_mask(&param.ty).is_some()
+                            && !address_taken.contains(&param.name)
+                        {
+                            facts.insert(
+                                param.name.clone(),
+                                KnownBits {
+                                    ty: param.ty.clone(),
+                                    zero: 0,
+                                    one: 0,
+                                },
+                            );
+                        }
+                    }
+                    known_bits_block(
+                        &mut function.body,
+                        &address_taken,
+                        function.return_type.as_ref(),
+                        &mut facts,
+                    );
+                }
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    visit(core::slice::from_mut(declaration));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    visit(&mut program.declarations);
+}
+
+fn known_bits_block(
+    stmts: &mut [Stmt],
+    address_taken: &HashSet<String>,
+    return_ty: Option<&Type>,
+    facts: &mut HashMap<String, KnownBits>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, ty, value } => {
+                if known_bits_mask(ty).is_none() {
+                    facts.remove(name);
+                    continue;
+                };
+                let (simplified, fact) =
+                    known_bits_expr(core::mem::replace(value, Expr::Int(0)), facts, ty);
+                *value = simplified;
+                if let Some(fact) = fact.filter(|fact| fact.ty == *ty)
+                    && !address_taken.contains(name)
+                {
+                    facts.insert(name.clone(), fact);
+                } else {
+                    facts.remove(name);
+                }
+            }
+            Stmt::Assign { target, .. } => match target {
+                Place::Ident(name) => {
+                    facts.remove(name);
+                }
+                Place::Index { .. } | Place::Field { .. } | Place::Access(_) | Place::Deref(_) => {
+                    facts.clear();
+                }
+            },
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                let mut then_facts = facts.clone();
+                let mut else_facts = facts.clone();
+                known_bits_block(then_body, address_taken, return_ty, &mut then_facts);
+                known_bits_block(else_body, address_taken, return_ty, &mut else_facts);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                let mut body_facts = facts.clone();
+                known_bits_block(body, address_taken, return_ty, &mut body_facts);
+            }
+            Stmt::Asm { outputs, .. } => {
+                for output in outputs {
+                    facts.remove(&output.name);
+                }
+            }
+            Stmt::Return(Some(value)) => {
+                if let Some(return_ty) = return_ty {
+                    let (simplified, _) =
+                        known_bits_expr(core::mem::replace(value, Expr::Int(0)), facts, return_ty);
+                    *value = simplified;
+                }
+            }
+            Stmt::Expr(_)
+            | Stmt::Out { .. }
+            | Stmt::Return(None)
+            | Stmt::Break
+            | Stmt::Continue => {}
+        }
+    }
+}
+
+fn known_bits_expr(
+    expr: Expr,
+    facts: &HashMap<String, KnownBits>,
+    expected_ty: &Type,
+) -> (Expr, Option<KnownBits>) {
+    let Some(mask) = known_bits_mask(expected_ty) else {
+        return (expr, None);
+    };
+    match expr {
+        Expr::Int(value) if known_bits_value_fits(value, expected_ty, mask) => {
+            known_bits_constant(value, expected_ty, mask)
+        }
+        Expr::TypedInt(value, ty)
+            if ty == *expected_ty && known_bits_value_fits(value, &ty, mask) =>
+        {
+            known_bits_constant(value, &ty, mask)
+        }
+        Expr::Ident(name) => {
+            let fact = facts
+                .get(&name)
+                .filter(|fact| fact.ty == *expected_ty)
+                .cloned();
+            (Expr::Ident(name), fact)
+        }
+        Expr::Unary {
+            op: UnaryOp::BitNot,
+            expr,
+        } => {
+            let (expr, fact) = known_bits_expr(*expr, facts, expected_ty);
+            let fact = fact.map(|fact| KnownBits {
+                ty: fact.ty,
+                zero: fact.one,
+                one: fact.zero,
+            });
+            known_bits_fold(
+                Expr::Unary {
+                    op: UnaryOp::BitNot,
+                    expr: Box::new(expr),
+                },
+                fact,
+                mask,
+            )
+        }
+        Expr::Binary { left, op, right }
+            if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) =>
+        {
+            let (left, left_facts) = known_bits_expr(*left, facts, expected_ty);
+            let (right, right_facts) = known_bits_expr(*right, facts, expected_ty);
+            let fact = match (left_facts, right_facts) {
+                (Some(left), Some(right)) if left.ty == right.ty => Some(match op {
+                    BinaryOp::BitAnd => KnownBits {
+                        ty: left.ty,
+                        zero: left.zero | right.zero,
+                        one: left.one & right.one,
+                    },
+                    BinaryOp::BitOr => KnownBits {
+                        ty: left.ty,
+                        zero: left.zero & right.zero,
+                        one: left.one | right.one,
+                    },
+                    BinaryOp::BitXor => KnownBits {
+                        ty: left.ty,
+                        zero: (left.zero & right.zero) | (left.one & right.one),
+                        one: (left.zero & right.one) | (left.one & right.zero),
+                    },
+                    _ => unreachable!(),
+                }),
+                _ => None,
+            };
+            known_bits_fold(
+                Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                },
+                fact,
+                mask,
+            )
+        }
+        Expr::Cast { ty, expr } if ty == *expected_ty => {
+            let (expr, fact) = known_bits_expr(*expr, facts, expected_ty);
+            known_bits_fold(
+                Expr::Cast {
+                    ty,
+                    expr: Box::new(expr),
+                },
+                fact,
+                mask,
+            )
+        }
+        other => (other, None),
+    }
+}
+
+fn known_bits_value_fits(value: i64, ty: &Type, mask: i64) -> bool {
+    match ty {
+        Type::Named(name) if name.starts_with('u') => value >= 0 && value <= mask,
+        Type::Named(name) if name.starts_with('i') => {
+            let bits = mask.count_ones();
+            let sign = 1_i64 << (bits - 1);
+            value >= -sign && value < sign
+        }
+        _ => false,
+    }
+}
+
+fn known_bits_constant(value: i64, ty: &Type, mask: i64) -> (Expr, Option<KnownBits>) {
+    let value = value & mask;
+    (
+        Expr::TypedInt(value, ty.clone()),
+        Some(KnownBits {
+            ty: ty.clone(),
+            zero: (!value) & mask,
+            one: value,
+        }),
+    )
+}
+
+fn known_bits_fold(expr: Expr, fact: Option<KnownBits>, mask: i64) -> (Expr, Option<KnownBits>) {
+    if let Some(fact) = &fact
+        && fact.zero | fact.one == mask
+    {
+        return (
+            Expr::TypedInt(fact.one, fact.ty.clone()),
+            Some(fact.clone()),
+        );
+    }
+    (expr, fact)
+}
+
+fn known_bits_mask(ty: &Type) -> Option<i64> {
+    match ty {
+        Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => Some(0xff),
+        Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Some(0xffff),
+        Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Some(0xffffff),
+        _ => None,
+    }
+}
+
 fn scalar_simplify_program(
     program: &mut Program,
     report: &mut TbirOptimizationReport,
@@ -2436,10 +2690,14 @@ fn optimize_expr(
                 }
             }
         }
-        Expr::Cast { ty, expr } => Expr::Cast {
-            ty,
-            expr: Box::new(optimize_expr(*expr, constants, report)),
-        },
+        Expr::Cast { ty, expr } => {
+            let expr = optimize_expr(*expr, constants, report);
+            let expr = remove_unsigned_narrowing_mask(&ty, expr).unwrap_or_else(|expr| expr);
+            Expr::Cast {
+                ty,
+                expr: Box::new(expr),
+            }
+        }
         Expr::Int(_)
         | Expr::TypedInt(_, _)
         | Expr::Bool(_)
@@ -2451,6 +2709,45 @@ fn optimize_expr(
         | Expr::AddressOf(_) => expr,
     };
     expr
+}
+
+fn remove_unsigned_narrowing_mask(target: &Type, expr: Expr) -> Result<Expr, Expr> {
+    let Expr::Binary {
+        left,
+        op: BinaryOp::BitAnd,
+        right,
+    } = expr
+    else {
+        return Err(expr);
+    };
+    let Expr::TypedInt(mask, source) = right.as_ref() else {
+        return Err(Expr::Binary {
+            left,
+            op: BinaryOp::BitAnd,
+            right,
+        });
+    };
+    let retained_mask = match (source, target) {
+        (Type::Named(source), Type::Named(target)) if source == "u16" && target == "u8" => 0xFF,
+        (Type::Named(source), Type::Named(target)) if source == "u24" && target == "u8" => 0xFF,
+        (Type::Named(source), Type::Named(target)) if source == "u24" && target == "u16" => 0xFFFF,
+        _ => {
+            return Err(Expr::Binary {
+                left,
+                op: BinaryOp::BitAnd,
+                right,
+            });
+        }
+    };
+    if *mask & retained_mask == retained_mask {
+        Ok(*left)
+    } else {
+        Err(Expr::Binary {
+            left,
+            op: BinaryOp::BitAnd,
+            right,
+        })
+    }
 }
 
 fn optimize_access(

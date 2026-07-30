@@ -2360,7 +2360,7 @@ impl Emitter {
         let temp = self.alloc_var(variable.width()?.bytes());
         self.emit_load_width(variable);
         self.emit_store_width(temp);
-        self.emit_shift_memory_by_expr(temp, op, value, signed)?;
+        self.emit_shift_temporary_by_expr(temp, op, value, signed)?;
         self.emit_load_width(temp);
         Ok(())
     }
@@ -3062,7 +3062,7 @@ impl Emitter {
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor => {
                     self.ensure_binary_arithmetic_operands_compatible(left, right)?;
-                    if self.emit_wide_low_bit_mask(left, *op, right, width)? {
+                    if self.emit_single_bit_mask(left, *op, right, width)? {
                         return Ok(());
                     }
                     if *op == BinaryOp::Mul {
@@ -3086,7 +3086,7 @@ impl Emitter {
                     let signed = self.expr_is_signed(left)?;
                     self.emit_expr_to_hl(left, width)?;
                     self.emit_store_width(temp);
-                    self.emit_shift_memory_by_expr(temp, *op, right, signed)?;
+                    self.emit_shift_temporary_by_expr(temp, *op, right, signed)?;
                     self.emit_load_width(temp);
                 }
                 BinaryOp::Div | BinaryOp::Mod => {
@@ -3773,6 +3773,12 @@ impl Emitter {
             )?;
             return Ok(());
         }
+        if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
+            self.ensure_binary_arithmetic_operands_compatible(left, right)?;
+            if self.emit_single_bit_mask(left, op, right, ValueWidth::U8)? {
+                return Ok(());
+            }
+        }
 
         if matches!(
             op,
@@ -4428,6 +4434,84 @@ impl Emitter {
         self.emit_shift_memory_dynamic(variable, op, signed)
     }
 
+    fn emit_shift_temporary_by_expr(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        count: &Expr,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
+        if let Some(count) = self.maybe_const_shift_count(count)?
+            && count != 0
+            && count % 8 == 0
+        {
+            self.emit_byte_aligned_shift_temporary(variable, op, count / 8, signed);
+            return Ok(());
+        }
+        self.emit_shift_memory_by_expr(variable, op, count, signed)
+    }
+
+    fn emit_byte_aligned_shift_temporary(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        byte_count: u8,
+        signed: bool,
+    ) {
+        let size = variable.size as u8;
+        let byte_count = byte_count.min(size);
+
+        match op {
+            BinaryOp::Shl => {
+                for offset in (byte_count..size).rev() {
+                    let source = variable.addr + u32::from(offset - byte_count);
+                    let destination = variable.addr + u32::from(offset);
+                    self.line(&format!("    ld a, ({source:06X}h)"));
+                    self.line(&format!("    ld ({destination:06X}h), a"));
+                }
+                self.emit_zero_shifted_bytes(variable, 0, byte_count);
+            }
+            BinaryOp::Shr => {
+                for offset in 0..size.saturating_sub(byte_count) {
+                    let source = variable.addr + u32::from(offset + byte_count);
+                    let destination = variable.addr + u32::from(offset);
+                    self.line(&format!("    ld a, ({source:06X}h)"));
+                    self.line(&format!("    ld ({destination:06X}h), a"));
+                }
+                if signed {
+                    self.line(&format!(
+                        "    ld a, ({:06X}h)",
+                        variable.addr + u32::from(size - 1)
+                    ));
+                    self.line("    add a, a");
+                    self.line("    sbc a, a");
+                    for offset in size.saturating_sub(byte_count)..size {
+                        let destination = variable.addr + u32::from(offset);
+                        self.line(&format!("    ld ({destination:06X}h), a"));
+                    }
+                } else {
+                    self.emit_zero_shifted_bytes(
+                        variable,
+                        size.saturating_sub(byte_count),
+                        byte_count,
+                    );
+                }
+            }
+            _ => unreachable!("not a shift op"),
+        }
+    }
+
+    fn emit_zero_shifted_bytes(&mut self, variable: Variable, start: u8, count: u8) {
+        if count == 0 {
+            return;
+        }
+        self.line("    xor a");
+        for offset in start..start + count {
+            let destination = variable.addr + u32::from(offset);
+            self.line(&format!("    ld ({destination:06X}h), a"));
+        }
+    }
+
     fn emit_shift_memory_dynamic(
         &mut self,
         variable: Variable,
@@ -4560,31 +4644,76 @@ impl Emitter {
         self.emit_comparison_from_flags(op);
     }
 
-    fn emit_wide_low_bit_mask(
+    fn emit_single_bit_mask(
         &mut self,
         left: &Expr,
         op: BinaryOp,
         right: &Expr,
         width: ValueWidth,
     ) -> Result<bool, Diagnostic> {
-        if width == ValueWidth::U8 {
+        let ty = self.symbols.resolved_type(&self.expr_type(left)?)?;
+        if !matches!(ty, Type::Named(ref name) if matches!(name.as_str(), "u8" | "u16" | "u24")) {
             return Ok(false);
         }
         let Ok(mask) = self.eval_i64_with_local_constants(right) else {
             return Ok(false);
         };
-        let is_clear_low_bit = matches!(op, BinaryOp::BitAnd) && (mask == -2 || mask == 0xFF_FFFE);
-        let is_set_low_bit = matches!(op, BinaryOp::BitOr) && mask == 1;
-        if !is_clear_low_bit && !is_set_low_bit {
+        let width_mask = (1_i64 << (width.bytes() * 8)) - 1;
+        let mask = mask & width_mask;
+        let bit_mask = match op {
+            BinaryOp::BitOr | BinaryOp::BitXor if mask.count_ones() == 1 => mask,
+            BinaryOp::BitAnd if (!mask & width_mask).count_ones() == 1 => !mask & width_mask,
+            _ => return Ok(false),
+        };
+        let bit = bit_mask.trailing_zeros() as u8;
+        let byte_offset = u32::from(bit / 8);
+        let byte_mask = 1_u8 << (bit % 8);
+
+        if op != BinaryOp::BitXor && !supports_z80_bit_instructions(self.cpu) {
             return Ok(false);
         }
+
+        if width == ValueWidth::U8 {
+            self.emit_expr_to_a(left)?;
+            match op {
+                BinaryOp::BitAnd => self.line(&format!("    res {}, a", bit % 8)),
+                BinaryOp::BitOr => self.line(&format!("    set {}, a", bit % 8)),
+                BinaryOp::BitXor => self.line(&format!("    xor {byte_mask:02X}h")),
+                _ => unreachable!("not a bitwise mask operation"),
+            }
+            return Ok(true);
+        }
+
+        let value = self.alloc_var(width.bytes());
         self.emit_expr_to_hl(left, width)?;
-        self.line(if is_clear_low_bit {
-            "    res 0, l"
-        } else {
-            "    set 0, l"
-        });
+        self.emit_store_width(value);
+        self.line(&format!("    ld a, ({:06X}h)", value.addr + byte_offset));
+        match op {
+            BinaryOp::BitAnd => self.line(&format!("    res {}, a", bit % 8)),
+            BinaryOp::BitOr => self.line(&format!("    set {}, a", bit % 8)),
+            BinaryOp::BitXor => self.line(&format!("    xor {byte_mask:02X}h")),
+            _ => unreachable!("not a bitwise mask operation"),
+        }
+        self.line(&format!("    ld ({:06X}h), a", value.addr + byte_offset));
+        self.emit_load_width(value);
         Ok(true)
+    }
+
+    fn emit_masked_byte_to_a(
+        &mut self,
+        source: &Expr,
+        width: ValueWidth,
+        byte_offset: u32,
+    ) -> Result<(), Diagnostic> {
+        if width == ValueWidth::U8 {
+            return self.emit_expr_to_a(source);
+        }
+
+        let value = self.alloc_var(width.bytes());
+        self.emit_expr_to_hl(source, width)?;
+        self.emit_store_width(value);
+        self.line(&format!("    ld a, ({:06X}h)", value.addr + byte_offset));
+        Ok(())
     }
 
     /// Emits a false branch without materializing a boolean for byte equality
@@ -4597,62 +4726,46 @@ impl Emitter {
         let Expr::Binary { left, op, right } = condition else {
             return Ok(false);
         };
-        if supports_z80_bit_instructions(self.cpu)
-            && matches!(op, BinaryOp::Eq | BinaryOp::Ne)
-            && let Expr::Binary {
-                left: masked,
-                op: BinaryOp::BitAnd,
-                right: mask,
-            } = left.as_ref()
-            && let Ok(mask) = self.eval_i64_with_local_constants(mask)
-            && let Ok(expected) = self.eval_i64_with_local_constants(right)
-            && mask > 0
-            && mask <= 0x80
-            && (mask as u64).is_power_of_two()
-            && (expected == 0 || expected == mask)
-        {
-            let width = self.expr_width(masked)?;
-            if width == ValueWidth::U8 {
-                self.emit_expr_to_a(masked)?;
-                self.line(&format!("    bit {}, a", (mask as u64).trailing_zeros()));
-            } else {
-                self.emit_expr_to_hl(masked, width)?;
-                self.line(&format!("    bit {}, l", (mask as u64).trailing_zeros()));
-            }
-            let set_when_true =
-                (*op == BinaryOp::Eq && expected == mask) || (*op == BinaryOp::Ne && expected == 0);
-            let branch = if set_when_true { "z" } else { "nz" };
-            self.line(&format!("    jp {branch}, {false_label}"));
-            return Ok(true);
-        }
-
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
             && let Expr::Binary {
                 left: masked,
                 op: BinaryOp::BitAnd,
-                right: mask,
+                right: mask_expr,
             } = left.as_ref()
-            && let Ok(mask) = self.eval_i64_with_local_constants(mask)
-            && let Ok(expected) = self.eval_i64_with_local_constants(right)
-            && mask > 0
-            && mask <= 0xFF
-            && (mask as u64).count_ones() > 1
-            && (expected == 0 || expected == mask)
+            && let Ok(raw_mask) = self.eval_i64_with_local_constants(mask_expr)
+            && let Ok(raw_expected) = self.eval_i64_with_local_constants(right)
         {
             let width = self.expr_width(masked)?;
-            if width == ValueWidth::U8 {
-                self.emit_expr_to_a(masked)?;
-            } else {
-                self.emit_expr_to_hl(masked, width)?;
-                self.line("    ld a, l");
+            let width_mask = (1_i64 << (width.bytes() * 8)) - 1;
+            let mask = raw_mask & width_mask;
+            let expected = raw_expected & width_mask;
+            let bit_offset = mask.trailing_zeros();
+            let byte_offset = bit_offset / 8;
+            let byte_mask = mask >> (byte_offset * 8);
+
+            if mask != 0
+                && mask == byte_mask << (byte_offset * 8)
+                && (expected == 0 || expected == mask)
+            {
+                if supports_z80_bit_instructions(self.cpu) && (mask as u64).is_power_of_two() {
+                    self.emit_masked_byte_to_a(masked, width, byte_offset)?;
+                    self.line(&format!("    bit {}, a", bit_offset % 8));
+                    let set_when_true = (*op == BinaryOp::Eq && expected == mask)
+                        || (*op == BinaryOp::Ne && expected == 0);
+                    let branch = if set_when_true { "z" } else { "nz" };
+                    self.line(&format!("    jp {branch}, {false_label}"));
+                    return Ok(true);
+                }
+
+                self.emit_masked_byte_to_a(masked, width, byte_offset)?;
+                self.line(&format!("    and {byte_mask:02X}h"));
+                if expected == mask {
+                    self.line(&format!("    cp {byte_mask:02X}h"));
+                }
+                let branch = if *op == BinaryOp::Eq { "nz" } else { "z" };
+                self.line(&format!("    jp {branch}, {false_label}"));
+                return Ok(true);
             }
-            self.line(&format!("    and {mask:02X}h"));
-            if expected == mask {
-                self.line(&format!("    cp {mask:02X}h"));
-            }
-            let branch = if *op == BinaryOp::Eq { "nz" } else { "z" };
-            self.line(&format!("    jp {branch}, {false_label}"));
-            return Ok(true);
         }
 
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
