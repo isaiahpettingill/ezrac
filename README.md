@@ -112,7 +112,8 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
 - `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
 - `docs/disk-images.md` documents the disk-image command, emulator profiles, and `no_std + alloc` API.
-- `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, operand forms, expressions, and word data.
+- `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, limited source backend, operand forms, expressions, word data, and [`examples/dcpu-16`](examples/dcpu-16/).
+- [`dcpu-16-libretro`](https://github.com/isaiahpettingill/dcpu-16-libretro) provides the DCPU-16 Standard Machine libretro core; its published [`dcpu16-core`](https://crates.io/crates/dcpu16-core) crate backs EZRAC's DCPU emulator tests.
 - `docs/msdos-sdk.md` documents the `msdos-com-i8086` `.COM` target and bundled `dos.*` SDK.
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.

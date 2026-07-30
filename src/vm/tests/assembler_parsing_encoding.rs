@@ -1419,7 +1419,7 @@ fn mos6502_is_parsed_as_own_assembler_cpu_family() {
 #[cfg(feature = "dcpu")]
 fn assembles_and_runs_dcpu_program_in_reference_emulator() {
     use crate::target::AssemblerCpu;
-    use ::dcpu::{emulator::Cpu, types::Register};
+    use ::dcpu::{Cpu, NoHardware, Register};
 
     let image = assemble_subset_with_symbols_at(
         AssemblerCpu::Dcpu,
@@ -1433,13 +1433,14 @@ fn assembles_and_runs_dcpu_program_in_reference_emulator() {
         .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
         .collect::<Vec<_>>();
     let mut cpu = Cpu::default();
-    cpu.load(&words, 0);
+    cpu.load_words(&words).unwrap();
+    let mut hardware = NoHardware;
 
-    for _ in 0..24 {
-        cpu.tick(&mut []).unwrap();
+    for _ in 0..7 {
+        cpu.step(&mut hardware).unwrap();
     }
 
-    assert_eq!(cpu.registers[Register::A], 0x32);
+    assert_eq!(cpu.registers[Register::A.index()], 0x32);
     assert_eq!(cpu.ram[0x1000], 0x32);
     assert_eq!(cpu.ram[0x1001], 1);
     assert_eq!(cpu.ram[0x1002], 2);

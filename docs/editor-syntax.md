@@ -11,7 +11,7 @@ cargo install --path /path/to/ezrac --features lsp
 - VS Code: run `npm install` in `editors/vscode`, then open it as an extension folder or package it with `vsce`. The extension starts `ezrac lsp` by default; override `ezra.languageServer.command` or `ezra.languageServer.args` if needed.
 - Zed: install `editors/zed` as a development extension. It uses the local `editors/tree-sitter-ezra` grammar and starts `ezrac lsp` through the Rust extension.
 - Notepad++: import `editors/notepad++/ezra.xml` through Language > User Defined Language > Import.
-- Micro: copy `editors/micro/ezra.yaml` to Micro's syntax directory. For LSP, install Micro's official `lsp` plugin with `micro -plugin install lsp`, then add `"lsp.server": "ezra=ezrac lsp"` to `settings.json` or set `MICRO_LSP='ezra=ezrac lsp'`.
+- Micro: copy `editors/micro/ezra.yaml` to the `syntax` directory under `$MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, or `~/.config/micro`, in that order. For LSP, install Micro's official `lsp` plugin with `micro -plugin install lsp`, then add `"lsp.server": "ezra=ezrac lsp"` to `settings.json` or set `MICRO_LSP='ezra=ezrac lsp'`.
 - Helix: merge `editors/helix/languages.toml` into your Helix config and copy `editors/helix/queries/highlights.scm` to the Ezra query directory after building the grammar. The bundled language config starts `ezrac lsp`.
 - Nano: include `editors/nano/ezra.nanorc` from `~/.nanorc`.
 - Vim: put `editors/vim` on `runtimepath` or copy its `ftdetect`, `ftplugin`, and `syntax` directories into a Vim package. For LSP, use an LSP client such as `vim-lsp` and register `ezrac lsp` for filetype `ezra`.

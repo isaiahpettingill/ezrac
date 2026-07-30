@@ -1,0 +1,10 @@
+[project]
+name = "dcpu16-lem-hello"
+
+[build]
+input = "main.asm"
+target = "generic-dcpu-bare"
+input_kind = "assembly"
+assembler_cpu = "dcpu"
+output = "bin"
+executable = "dcpu16-lem-hello"

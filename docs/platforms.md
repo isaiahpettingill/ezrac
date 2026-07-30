@@ -56,7 +56,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
-| `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | none | Optional `dcpu` feature; assembly-only target |
+| `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | none | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
 | `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
 | `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
@@ -90,6 +90,22 @@ cargo run --features i8086 -- build --target msdos-com-i8086 program.ezra
 Startup establishes `DS=ES=CS`, verifies DOS granted at least `0F80h` paragraphs for the fixed layout and a 2 KiB minimum stack area, preserves the loader-provided `SS:SP`, clears the direction flag, calls `main`, and terminates a returning program with `INT 21h/AH=4Ch`. The built-in `dos.*` SDK covers console, handle-based files, directories and DTA searches, memory allocation and segment-aware access, date/time, process services, errors, constants, and PSP/FCB/JFT/environment helpers. DOS 2.0 is the baseline; newer wrappers are marked DOS 3+/4+/5+, and `EXEC` is DOS 3+ because DOS 2.x may destroy `SS:SP`.
 
 Pointers remain 16-bit near offsets. Segment values returned by DOS allocation are not pointers; use `dos.memory` far-memory accessors. Copy the PSP command tail before default-DTA searches or full default-FCB operations because these areas overlap. MZ `.EXE` packaging and deterministic emulator-backed runtime tests remain deferred. See [`msdos-sdk.md`](msdos-sdk.md) and `examples/msdos-i8086/`.
+
+## Generic DCPU-16
+
+Enable the `dcpu` feature to build a raw little-endian DCPU-16 image:
+
+```sh
+cargo run --features dcpu -- build --target generic-dcpu-bare src/main.ezra
+cargo run --features dcpu -- build examples/dcpu-16/lem-hello/main.asm
+```
+
+The target has a complete DCPU-16 1.7 handwritten assembler and a limited scalar
+source backend. Images are compatible with the Standard Compatibility profile of
+[`dcpu-16-libretro`](https://github.com/isaiahpettingill/dcpu-16-libretro), which
+maps LEM1802 screen memory at word address `0x8000`. See
+[`examples/dcpu-16`](../examples/dcpu-16/) and
+[`dcpu-assembly.md`](dcpu-assembly.md).
 
 ## AVR and Arduboy
 

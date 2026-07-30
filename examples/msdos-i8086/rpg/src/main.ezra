@@ -74,6 +74,66 @@ fn setup_sequence() {
     console.newline()
 }
 
+fn prompt_level_one(){
+    console.print_dollar("What do you do?$")
+    console.newline()
+    console.print_dollar("(1) Go up and talk to the troll$")
+    console.newline()
+    console.print_dollar("(2) Attack the troll$")
+    console.newline()
+    console.print_dollar("(3) Try to go around the ravine$")
+    console.newline()
+}
+
+fn prompt_level_two(){
+    console.print_dollar("How do you answer the riddle?$")
+    console.newline()
+    console.print_dollar("(1) Your mom (2) Stacy (3) Candace$")
+}
+
+fn level_two() {
+    console.print_dollar("The troll twiddles his thumbs...$")
+    console.newline()
+    console.print_dollar("'Who does Jeremy Johnson date in Phineas and Ferb?'$")
+    let choice: u8 = 0
+    get_option(&prompt_level_two, &choice)
+
+    if choice == 1 {
+        console.print_dollar("The troll gets wrecked and crashes out. You pass the bridge$")
+    }
+    if choice == 2 {
+        console.print_dollar("WRONG! Troll throws you off bridge$")
+        return
+    }
+    if choice == 3 {
+        console.print_dollar("That is correct. Troll lets you cross.$")
+    }
+}
+
+fn level_one() {
+    let choice: u8 = 0
+
+    get_option(&prompt_level_one, &choice)
+    if choice == 1 {
+        console.print_dollar("The troll eyes you suspiciously and speaks in a raspy voice.")
+        console.newline()
+        console.print_dollar("'You may cross, but you must answer my riddle.'$")
+        level_two()
+        return
+    }
+    if choice == 2 {
+        console.print_dollar("The troll kills you$")
+        console.newline()
+        return
+    }
+    if choice == 3 {
+        console.print_dollar("You wander for hours and eventually return to the bridge$")
+    }
+    level_one()
+}
+
 fn main() {
     setup_sequence()
+    console.print_dollar("You come to a ravine with a rickety bridge. A grupmy old troll guards the path.$")
+    level_one()
 }

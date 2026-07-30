@@ -131,7 +131,7 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, `.8080`, `.i8086`, and `.8086` are treated as assembly.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `dcpu`, `i8086`, `m6800`, `m68k`, `mos6502`, or `tms9900`. For example, `cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 program.asm` enables the complete strict 8086 standalone assembler, while `cargo run --features i8086 -- build --target msdos-com-i8086 program.ezra` builds a DOS `.COM` with the bundled `dos.*` SDK. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800, M68k, and 8086 have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The 8086 source ABI supports scalar recursion and constrained interrupt handlers while requiring aggregate parameters and returns to be passed by pointer. CLI and library source compilation run generated assembly through the strict 8086 assembler and require its assembled `.text` bytes to fit the selected layout's `.text` region; `emit-asm` prints only after validation succeeds. See [`i8086-assembly.md`](i8086-assembly.md) and [`msdos-sdk.md`](msdos-sdk.md) for details; TMS9900 syntax and scope are documented in [`tms9900-assembly.md`](tms9900-assembly.md).
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support `i8080`, `i8085`, `z80`, `z80n`, `z180`, `ez80`, and `lr35902`. Enable optional processor families with Cargo features: `avr`, `dcpu`, `i8086`, `m6800`, `m68k`, `mos6502`, or `tms9900`. For example, `cargo run --features i8086 -- assemble --cpu i8086 --target bare-i8086 program.asm` enables the complete strict 8086 standalone assembler, while `cargo run --features i8086 -- build --target msdos-com-i8086 program.ezra` builds a DOS `.COM` with the bundled `dos.*` SDK. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800, M68k, and 8086 have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The 8086 source ABI supports scalar recursion and constrained interrupt handlers while requiring aggregate parameters and returns to be passed by pointer. CLI and library source compilation run generated assembly through the strict 8086 assembler and require its assembled `.text` bytes to fit the selected layout's `.text` region; `emit-asm` prints only after validation succeeds. See [`dcpu-assembly.md`](dcpu-assembly.md), [`i8086-assembly.md`](i8086-assembly.md), [`msdos-sdk.md`](msdos-sdk.md), and [`tms9900-assembly.md`](tms9900-assembly.md) for details.
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 
@@ -278,7 +278,7 @@ Install locations are best-effort defaults:
 Vim          ~/.vim/{ftdetect,ftplugin,syntax}/ezra.vim
 Neovim       ~/.config/nvim/{ftdetect,ftplugin,syntax}/ezra.vim
 Nano         ~/.nano/ezra.nanorc and an include line in ~/.nanorc
-Micro        ~/.config/micro/syntax/ezra.yaml
+Micro        $MICRO_CONFIG_HOME/syntax/ezra.yaml, $XDG_CONFIG_HOME/micro/syntax/ezra.yaml, or ~/.config/micro/syntax/ezra.yaml
 Helix        ~/.config/helix/languages.toml and runtime/queries/ezra/highlights.scm
 VS Code      ~/.vscode/extensions/ezra-language
 Zed          ~/.config/zed/extensions/ezra
@@ -317,7 +317,7 @@ Supported fields:
 [build].target          target triple
 [build].output          output format: bin, com, gaem, hex, arduboy, tap, gb, prg, crt, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
-[build].assembler_cpu   i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, avr, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
+[build].assembler_cpu   i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, avr, dcpu, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
 [build].executable      artifact basename and TI variable/app name source
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots

@@ -7,9 +7,26 @@ cargo run --features dcpu -- assemble --target generic-dcpu-bare program.asm
 ```
 
 `generic-dcpu-bare` produces a raw little-endian `.bin`. DCPU words are emitted
-least-significant byte first. Labels are case-insensitive and resolve to DCPU
-word addresses in instructions and data expressions. The symbol map continues to
-report label locations as byte offsets, matching the rest of the EZRA build API.
+least-significant byte first, which is directly loadable by the
+[`dcpu-16-libretro`](https://github.com/isaiahpettingill/dcpu-16-libretro) core.
+Labels are case-insensitive and resolve to DCPU word addresses in instructions
+and data expressions. The symbol map continues to report label locations as byte
+offsets, matching the rest of the EZRA build API.
+
+The optional `dcpu` feature uses [`dcpu16-core`](https://crates.io/crates/dcpu16-core)
+for DCPU emulator-backed compiler tests. The standalone assembler stays in EZRAC.
+
+## Examples
+
+Build the handwritten LEM1802 example or the limited scalar EZRA source example:
+
+```sh
+cargo run --features dcpu -- build examples/dcpu-16/lem-hello/main.asm
+cargo run --features dcpu -- build examples/dcpu-16/arithmetic/src/main.ezra
+```
+
+The libretro core's Standard Compatibility profile maps LEM1802 screen words at
+`0x8000`. The `lem-hello` example writes directly to that screen memory.
 
 ## Instructions
 

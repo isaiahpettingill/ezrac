@@ -1,0 +1,18 @@
+fn main() {
+    let left: u16 = 21
+    let right: u16 = 2
+    let product: u16 = left * right
+    let quotient: u16 = product / right
+
+    asm volatile(clobber memory) {
+        "set [0x8000], 0xf041"
+        "set [0x8001], 0xf052"
+        "set [0x8002], 0xf054"
+        "set [0x8003], 0xf048"
+        "set [0x8004], 0xf03a"
+        "set [0x8005], 0xf020"
+    }
+
+    // Keeps the calculated values live in registers for debugger inspection.
+    asm volatile(clobber memory) { "set pc, pc" }
+}

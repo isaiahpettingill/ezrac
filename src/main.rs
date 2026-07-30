@@ -2170,7 +2170,7 @@ fn install_syntax_for_editor(editor: SyntaxEditor, dry_run: bool) -> Result<Vec<
         SyntaxEditor::Neovim => install_vim_syntax(config_home()?.join(".config/nvim"), dry_run),
         SyntaxEditor::Nano => install_nano_syntax(dry_run),
         SyntaxEditor::Micro => install_single_syntax_file(
-            config_home()?.join(".config/micro/syntax/ezra.yaml"),
+            micro_config_home()?.join("syntax/ezra.yaml"),
             include_str!("../editors/micro/ezra.yaml"),
             dry_run,
         ),
@@ -2181,10 +2181,43 @@ fn install_syntax_for_editor(editor: SyntaxEditor, dry_run: bool) -> Result<Vec<
     }
 }
 
-fn config_home() -> Result<PathBuf, String> {
-    env::var_os("HOME")
+fn environment_path(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| "HOME is not set".to_owned())
+}
+
+fn config_home() -> Result<PathBuf, String> {
+    if let Some(path) = environment_path("HOME") {
+        return Ok(path);
+    }
+    #[cfg(windows)]
+    if let Some(path) = environment_path("USERPROFILE") {
+        return Ok(path);
+    }
+    Err("user home directory is not set".to_owned())
+}
+
+fn micro_config_home() -> Result<PathBuf, String> {
+    resolve_micro_config_home(
+        environment_path("MICRO_CONFIG_HOME"),
+        environment_path("XDG_CONFIG_HOME"),
+        config_home(),
+    )
+}
+
+fn resolve_micro_config_home(
+    micro_home: Option<PathBuf>,
+    xdg_home: Option<PathBuf>,
+    home: Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = micro_home {
+        return Ok(path);
+    }
+    if let Some(path) = xdg_home {
+        return Ok(path.join("micro"));
+    }
+    Ok(home?.join(".config/micro"))
 }
 
 fn appdata_home() -> Result<PathBuf, String> {
@@ -2641,7 +2674,7 @@ fn print_targets() {
             address_width_bits: 16,
             output: "bin",
             sdk: "none",
-            status: "assembly-only DCPU-16 target",
+            status: "DCPU-16 assembly and limited scalar source target",
         },
         #[cfg(feature = "avr")]
         TargetRow {

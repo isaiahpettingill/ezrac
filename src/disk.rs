@@ -142,7 +142,7 @@ pub fn create_disk_image(request: &DiskRequest<'_>) -> Result<Vec<u8>, DiskError
         DiskFormat::M35Fd => create_fat12_image(Fat12Geometry::M35_FD, request),
         DiskFormat::M35FdBigEndian => {
             let mut image = create_fat12_image(Fat12Geometry::M35_FD, request)?;
-            for word in image.chunks_exact_mut(2) {
+            for word in image.as_chunks_mut::<2>().0 {
                 word.swap(0, 1);
             }
             Ok(image)

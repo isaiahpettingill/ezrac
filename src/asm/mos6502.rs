@@ -202,10 +202,11 @@ fn parse_operand(
     }
 
     if mnemonic == "pei"
-        && let Some(inner) = operand.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-            let v = value_or(inner, labels, pc, resolve, 0)?;
-            return Ok((Mode::IndexedIndirect, v));
-        }
+        && let Some(inner) = operand.strip_prefix('(').and_then(|s| s.strip_suffix(')'))
+    {
+        let v = value_or(inner, labels, pc, resolve, 0)?;
+        return Ok((Mode::IndexedIndirect, v));
+    }
 
     if let Some(inner) = operand
         .strip_prefix('(')
@@ -282,10 +283,11 @@ fn parse_operand(
         ));
     }
     if let Some(expr) = operand.strip_suffix(",s")
-        && variant == Mos6502Variant::Wdc65C816 {
-            let v = value_or(expr, labels, pc, resolve, 0x100)?;
-            return Ok((Mode::ZeroPage, v));
-        }
+        && variant == Mos6502Variant::Wdc65C816
+    {
+        let v = value_or(expr, labels, pc, resolve, 0x100)?;
+        return Ok((Mode::ZeroPage, v));
+    }
     let v = value_or(operand, labels, pc, resolve, 0x100)?;
     if operand.starts_with('>') || operand.starts_with('^') {
         let prefix = &operand[..1];
@@ -297,11 +299,10 @@ fn parse_operand(
                     return Ok((Mode::Absolute, v));
                 }
             }
-            "^"
-                if variant == Mos6502Variant::Wdc65C816 => {
-                    let bank = (v >> 16) as u8;
-                    return Ok((Mode::Immediate, u32::from(bank)));
-                }
+            "^" if variant == Mos6502Variant::Wdc65C816 => {
+                let bank = (v >> 16) as u8;
+                return Ok((Mode::Immediate, u32::from(bank)));
+            }
             _ => {}
         }
     }

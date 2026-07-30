@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Switched DCPU-16 emulator-backed compiler tests to the published `dcpu16-core` crate.
+- Added handwritten LEM1802 and scalar-source DCPU-16 examples under `examples/dcpu-16`, build-tested as raw little-endian images for `dcpu-16-libretro`.
+- Published the standalone [`dcpu-16-libretro`](https://github.com/isaiahpettingill/dcpu-16-libretro) Standard Machine core and its reusable CPU crate.
+
 ## 0.1.32
 
 - Added an MS-DOS i8086 character-creation RPG example covering buffered name input, function pointers, mutable pointer output, loops, and DOS console helpers.

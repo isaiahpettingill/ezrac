@@ -15,7 +15,7 @@ path = "src/main.rs"
 required-features = ["std", "test-runner"]
 
 [dependencies]
-dcpu = { version = "0.5.0", default-features = false, features = ["debugger-cli"], optional = true }
+dcpu = { package = "dcpu16-core", version = "0.1.0", default-features = false, optional = true }
 ez80 = { version = "0.5.0", optional = true }
 mos6502 = { version = "0.10.1", optional = true }
 lsp = { version = "0.1.1", optional = true }

@@ -500,18 +500,18 @@ fn append_statement_text(
     }
     if let Some((name, value)) = split_top_level_once(text, '=')
         && !name.trim().is_empty()
-            && !name.trim().chars().any(char::is_whitespace)
-            && !value.trim().is_empty()
-        {
-            return push_parsed(
-                output,
-                location,
-                ParsedAssemblyItem::Equ {
-                    name: name.trim().to_owned(),
-                    value: value.trim().to_owned(),
-                },
-            );
-        }
+        && !name.trim().chars().any(char::is_whitespace)
+        && !value.trim().is_empty()
+    {
+        return push_parsed(
+            output,
+            location,
+            ParsedAssemblyItem::Equ {
+                name: name.trim().to_owned(),
+                value: value.trim().to_owned(),
+            },
+        );
+    }
 
     if normalized_head.eq_ignore_ascii_case("section") {
         if rest.trim().is_empty() {

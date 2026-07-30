@@ -156,3 +156,42 @@ fn install_syntax_options_parse_selected_editors() {
     assert!(options.dry_run);
     assert!(!options.all);
 }
+
+#[test]
+fn micro_config_home_prefers_micro_then_xdg_then_home() {
+    let home = PathBuf::from("home");
+    let xdg = PathBuf::from("xdg");
+    let micro = PathBuf::from("custom-micro");
+
+    assert_eq!(
+        resolve_micro_config_home(Some(micro.clone()), Some(xdg.clone()), Ok(home.clone()))
+            .unwrap(),
+        micro
+    );
+    assert_eq!(
+        resolve_micro_config_home(None, Some(xdg.clone()), Ok(home.clone())).unwrap(),
+        xdg.join("micro")
+    );
+    assert_eq!(
+        resolve_micro_config_home(None, None, Ok(home.clone())).unwrap(),
+        home.join(".config/micro")
+    );
+}
+
+#[test]
+fn micro_config_home_only_needs_home_for_its_fallback() {
+    assert_eq!(
+        resolve_micro_config_home(
+            Some(PathBuf::from("custom-micro")),
+            None,
+            Err("no home".to_owned()),
+        )
+        .unwrap(),
+        PathBuf::from("custom-micro")
+    );
+    assert_eq!(
+        resolve_micro_config_home(None, Some(PathBuf::from("xdg")), Err("no home".to_owned()),)
+            .unwrap(),
+        PathBuf::from("xdg/micro")
+    );
+}

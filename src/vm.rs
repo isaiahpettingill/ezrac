@@ -43,7 +43,7 @@ use crate::target::{Address24, AssemblerCpu, CpuFamily};
 #[cfg(feature = "test-runner")]
 use crate::target::{EZRA_LOAD_ADDR, EZRA_STACK_TOP};
 #[cfg(feature = "dcpu")]
-use ::dcpu::emulator::{Cpu as DcpuCpu, cpu::OnDecodeError};
+use ::dcpu::{Cpu as DcpuCpu, NoHardware};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssembledProgram {
@@ -357,13 +357,13 @@ mod runner {
     /// DCPU test ABI word addresses. A changed debug sequence emits the low byte
     /// of the debug value word; result and halt use the low byte of their words.
     #[cfg(feature = "dcpu")]
-    const DCPU_DEBUG_SEQUENCE: u16 = 0xFFF0;
+    const DCPU_DEBUG_SEQUENCE: usize = 0xFFF0;
     #[cfg(feature = "dcpu")]
-    const DCPU_DEBUG_VALUE: u16 = 0xFFF1;
+    const DCPU_DEBUG_VALUE: usize = 0xFFF1;
     #[cfg(feature = "dcpu")]
-    const DCPU_RESULT_CODE: u16 = 0xFFF2;
+    const DCPU_RESULT_CODE: usize = 0xFFF2;
     #[cfg(feature = "dcpu")]
-    const DCPU_HALT: u16 = 0xFFF3;
+    const DCPU_HALT: usize = 0xFFF3;
     #[cfg(feature = "dcpu")]
     const DCPU_ADDRESS_SPACE_BYTES: u32 = 0x2_0000;
 
@@ -383,11 +383,13 @@ mod runner {
 
             let words = image
                 .bytes
-                .as_chunks::<2>().0.iter()
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
                 .collect::<Vec<_>>();
-            let mut cpu = DcpuCpu::new(OnDecodeError::Fail);
-            cpu.sp = std::num::Wrapping(stack_top);
+            let mut cpu = DcpuCpu::new();
+            cpu.sp = stack_top;
             cpu.ram[DCPU_DEBUG_SEQUENCE] = 0;
             cpu.ram[DCPU_DEBUG_VALUE] = 0;
             cpu.ram[DCPU_RESULT_CODE] = 0;
@@ -395,22 +397,22 @@ mod runner {
 
             for (address, value) in &options.initial_memory {
                 let word_address = dcpu_byte_address_to_word(*address, "test memory address")?;
-                let word = &mut cpu.ram[word_address];
+                let word = &mut cpu.ram[usize::from(word_address)];
                 if address & 1 == 0 {
                     *word = (*word & 0xFF00) | u16::from(*value);
                 } else {
                     *word = (*word & 0x00FF) | (u16::from(*value) << 8);
                 }
             }
-            cpu.load(
-                &words,
-                dcpu_byte_address_to_word(image.base_addr, "test image base address")?,
-            );
+            let code_start = dcpu_byte_address_to_word(image.base_addr, "test image base address")?;
+            let code_word_end = usize::from(code_start) + words.len();
+            cpu.ram[usize::from(code_start)..code_word_end].copy_from_slice(&words);
 
             let mut debug_sequence = cpu.ram[DCPU_DEBUG_SEQUENCE];
             let mut debug_output = Vec::new();
+            let mut hardware = NoHardware;
             for instruction in 0..options.instruction_budget {
-                let pc = u32::from(cpu.pc.0) * 2;
+                let pc = u32::from(cpu.pc) * 2;
                 if pc < image.base_addr || pc >= code_end {
                     return Ok(dcpu_test_run(
                         false,
@@ -420,10 +422,7 @@ mod runner {
                         Some(TestRunFailure::ExecutionOutsideMappedMemory { pc }),
                     ));
                 }
-                if !matches!(
-                    catch_unwind(AssertUnwindSafe(|| cpu.tick(&mut []))),
-                    Ok(Ok(_))
-                ) {
+                if cpu.step(&mut hardware).is_err() {
                     return Ok(dcpu_test_run(
                         false,
                         cpu.ram[DCPU_RESULT_CODE] as u8,
@@ -438,7 +437,7 @@ mod runner {
                     debug_sequence = sequence;
                     debug_output.push(cpu.ram[DCPU_DEBUG_VALUE] as u8);
                 }
-                if cpu.ram[DCPU_HALT] != 0 || cpu.halted {
+                if cpu.ram[DCPU_HALT] != 0 {
                     return Ok(dcpu_test_run(
                         true,
                         cpu.ram[DCPU_RESULT_CODE] as u8,
