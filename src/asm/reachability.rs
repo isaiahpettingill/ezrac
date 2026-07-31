@@ -415,6 +415,12 @@ const I8086_PROFILE: TransferParsingProfile<'static> = TransferParsingProfile::n
 const MOS6502_PROFILE: TransferParsingProfile<'static> = TransferParsingProfile::new(&[
     direct("jsr", 0, true),
     direct("jmp", 0, false),
+    direct("beq", 0, true),
+    direct("bne", 0, true),
+    direct("bcc", 0, true),
+    direct("bcs", 0, true),
+    direct("bpl", 0, true),
+    direct("bmi", 0, true),
     returns("rts"),
     returns("rti"),
 ]);
@@ -607,5 +613,24 @@ mod tests {
             strip_unreachable_generated_routines(assembly, RoutineProfile::Avr)
                 .contains("_avr_timer0_ovf:")
         );
+    }
+
+    #[test]
+    fn mos6502_conditional_branches_keep_generated_helper_targets_and_fallthrough() {
+        let assembly = "__ezra_start:\n    beq __ezra_equal\n__ezra_fallthrough:\n    rts\n__ezra_equal:\n    bne __ezra_not_equal\n    bcc __ezra_carry_clear\n    bcs __ezra_carry_set\n    bpl __ezra_positive\n    bmi __ezra_negative\n    rts\n__ezra_not_equal:\n    rts\n__ezra_carry_clear:\n    rts\n__ezra_carry_set:\n    rts\n__ezra_positive:\n    rts\n__ezra_negative:\n    rts\n__ezra_dead:\n    rts\n";
+
+        let output = strip_unreachable_generated_routines(assembly, RoutineProfile::Mos6502);
+        for label in [
+            "__ezra_fallthrough:",
+            "__ezra_equal:",
+            "__ezra_not_equal:",
+            "__ezra_carry_clear:",
+            "__ezra_carry_set:",
+            "__ezra_positive:",
+            "__ezra_negative:",
+        ] {
+            assert!(output.contains(label), "missing {label}\n{output}");
+        }
+        assert!(!output.contains("__ezra_dead:"), "{output}");
     }
 }

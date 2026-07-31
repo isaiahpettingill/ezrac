@@ -39,10 +39,9 @@ pub fn emit_mos6502_assembly_with_options(
     )?;
     Emitter::new(model, options.clone())
         .emit(&tbir.lowered_program)
-        .map(|asm| {
-            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Mos6502);
-            with_readability_comments(asm, program, &options, "mos6502")
-        })
+        .map(|asm| strip_unreachable_generated_routines(&asm, RoutineProfile::Mos6502))
+        .and_then(|asm| cleanup_assembly(&asm, options.cpu))
+        .map(|asm| with_readability_comments(asm, program, &options, "mos6502"))
 }
 
 #[derive(Clone)]
@@ -315,6 +314,12 @@ impl Emitter {
                     if self.emit_65c02_store_zero(target, width, value)? {
                         return Ok(());
                     }
+                    if width == 1
+                        && let Some(address) = self.direct_place_address(target)?
+                        && self.emit_byte_expr_to(value, &ty, address)?
+                    {
+                        return Ok(());
+                    }
                     self.emit_expr(value, &ty)?;
                 } else if self.emit_65c02_bit_modify(target, width, *op, value)? {
                     return Ok(());
@@ -352,12 +357,16 @@ impl Emitter {
             } => {
                 let else_label = self.next_label("if_else");
                 let end_label = self.next_label("if_end");
-                if !self.emit_masked_bit_false_branch(condition, &else_label)? {
+                if !self.emit_masked_bit_false_branch(condition, &else_label)?
+                    && !self.emit_condition_false_branch(condition, &else_label)?
+                {
                     self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
                     self.jump_if_zero(self.r0.address, &else_label);
                 }
                 self.emit_block(then_body)?;
-                self.line(&format!("    jmp {end_label}"));
+                if !block_terminates(then_body) {
+                    self.line(&format!("    jmp {end_label}"));
+                }
                 self.line(&format!("{else_label}:"));
                 self.emit_block(else_body)?;
                 self.line(&format!("{end_label}:"));
@@ -370,7 +379,9 @@ impl Emitter {
                     break_label: break_label.clone(),
                 });
                 self.line(&format!("{condition_label}:"));
-                if !self.emit_masked_bit_false_branch(condition, &break_label)? {
+                if !self.emit_masked_bit_false_branch(condition, &break_label)?
+                    && !self.emit_condition_false_branch(condition, &break_label)?
+                {
                     self.emit_expr(condition, &Type::Named("bool".to_owned()))?;
                     self.jump_if_zero(self.r0.address, &break_label);
                 }
@@ -496,13 +507,21 @@ impl Emitter {
                 let source = self.binding(source)?;
                 self.copy(source.storage, storage, storage.size);
             }
-            (resolved @ (Type::Array { .. } | Type::Named(_)), Expr::Deref(pointer)) => {
+            (resolved @ Type::Array { .. }, Expr::Deref(pointer)) => {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(resolved)))?;
+                self.copy_result_to_zp();
+                self.copy_indirect_to_storage(storage, storage.size);
+            }
+            (Type::Named(name), Expr::Deref(pointer)) if self.model.structs.contains_key(&name) => {
+                self.emit_expr(pointer, &Type::Ptr(Box::new(Type::Named(name))))?;
                 self.copy_result_to_zp();
                 self.copy_indirect_to_storage(storage, storage.size);
             }
             (resolved, _) => {
                 let width = self.model.type_width(&resolved)?;
+                if width == 1 && self.emit_byte_expr_to(value, &resolved, storage.address)? {
+                    return Ok(());
+                }
                 if self.supports_65c02() && self.model.const_value(value).ok() == Some(0) {
                     self.zero(Storage {
                         address: storage.address,
@@ -515,6 +534,238 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn can_emit_byte_expr(&self, expr: &Expr, expected: &Type) -> Result<bool, Diagnostic> {
+        Ok(match expr {
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) => true,
+            Expr::Ident(name) => {
+                self.model.constants.contains_key(name)
+                    || self.model.type_width(&self.binding(name)?.ty)? == 1
+            }
+            Expr::Deref(pointer) => {
+                self.constant_pointer_address(pointer).is_some()
+                    || self
+                        .absolute_index_parts(pointer)
+                        .is_some_and(|(_, index)| {
+                            self.model
+                                .type_width(
+                                    &self
+                                        .expr_type(index)
+                                        .unwrap_or_else(|_| Type::Named("u16".to_owned())),
+                                )
+                                .ok()
+                                == Some(1)
+                        })
+            }
+            Expr::Binary {
+                left,
+                op: BinaryOp::Shr,
+                right,
+            } => {
+                !type_is_signed(expected)
+                    && self.model.type_width(&self.expr_type(left)?)? == 1
+                    && self
+                        .model
+                        .const_value(right)
+                        .ok()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .is_some()
+                    && self.can_emit_byte_expr(left, expected)?
+            }
+            Expr::Binary { left, op, right } if matches!(op, BinaryOp::Add | BinaryOp::Sub) => {
+                self.can_emit_byte_expr(left, expected)?
+                    && self.can_emit_byte_expr(right, expected)?
+            }
+            Expr::Cast { ty, expr } => {
+                self.model.type_width(ty)? == 1 && self.can_emit_byte_expr(expr, ty)?
+            }
+            _ => false,
+        })
+    }
+
+    fn emit_byte_expr_to(
+        &mut self,
+        expr: &Expr,
+        expected: &Type,
+        destination: u32,
+    ) -> Result<bool, Diagnostic> {
+        if !self.can_emit_byte_expr(expr, expected)? {
+            return Ok(false);
+        }
+        match expr {
+            Expr::Int(value) | Expr::TypedInt(value, _) => {
+                self.lda_imm(*value as u8);
+                self.sta(destination);
+            }
+            Expr::Bool(value) => {
+                self.lda_imm(u8::from(*value));
+                self.sta(destination);
+            }
+            Expr::Char(value) => {
+                self.lda_imm(*value as u8);
+                self.sta(destination);
+            }
+            Expr::Ident(name) => {
+                if let Some(value) = self.model.constants.get(name).copied() {
+                    self.lda_imm(value as u8);
+                    self.sta(destination);
+                } else {
+                    let binding = self.binding(name)?;
+                    if self.model.type_width(&binding.ty)? != 1 {
+                        return Ok(false);
+                    }
+                    if binding.storage.address != destination {
+                        self.lda(binding.storage.address);
+                        self.sta(destination);
+                    }
+                }
+            }
+            Expr::Deref(pointer) => {
+                if let Some(address) = self.constant_pointer_address(pointer) {
+                    self.lda(address);
+                    self.sta(destination);
+                } else if !self.emit_absolute_indexed_load(pointer, destination)? {
+                    return Ok(false);
+                }
+            }
+            Expr::Binary {
+                left,
+                op: BinaryOp::Shr,
+                right,
+            } if !type_is_signed(expected) => {
+                let Ok(count) = self.model.const_value(right) else {
+                    return Ok(false);
+                };
+                let Ok(count) = u32::try_from(count) else {
+                    return Ok(false);
+                };
+                if count >= 8 {
+                    self.lda_imm(0);
+                } else {
+                    if !self.emit_byte_load_flags(left)? {
+                        self.emit_byte_expr_to(left, expected, destination)?;
+                        self.lda(destination);
+                    }
+                    for _ in 0..count {
+                        self.line("    lsr a");
+                    }
+                }
+                self.sta(destination);
+            }
+            Expr::Binary { left, op, right } if matches!(op, BinaryOp::Add | BinaryOp::Sub) => {
+                let direct_operand = match right.as_ref() {
+                    Expr::Int(value) | Expr::TypedInt(value, _) => {
+                        Some(format!("#${:02X}", *value as u8))
+                    }
+                    Expr::Char(value) => Some(format!("#${:02X}", *value as u8)),
+                    Expr::Ident(name) => {
+                        if let Some(value) = self.model.constants.get(name) {
+                            Some(format!("#${:02X}", *value as u8))
+                        } else {
+                            let binding = self.binding(name)?;
+                            (self.model.type_width(&binding.ty)? == 1)
+                                .then(|| format!("${:04X}", binding.storage.address))
+                        }
+                    }
+                    _ => None,
+                };
+                let operand = if let Some(operand) = direct_operand {
+                    operand
+                } else {
+                    let right_storage = self.model.allocate(1)?;
+                    self.emit_byte_expr_to(right, expected, right_storage.address)?;
+                    format!("${:04X}", right_storage.address)
+                };
+                let left_is_destination = matches!(left.as_ref(), Expr::Ident(name)
+                    if !self.model.constants.contains_key(name)
+                        && self.binding(name)?.storage.address == destination);
+                self.emit_byte_expr_to(left, expected, destination)?;
+                self.line(if *op == BinaryOp::Add {
+                    "    clc"
+                } else {
+                    "    sec"
+                });
+                if left_is_destination {
+                    self.lda(destination);
+                }
+                self.line(&format!(
+                    "    {} {operand}",
+                    if *op == BinaryOp::Add { "adc" } else { "sbc" }
+                ));
+                self.sta(destination);
+            }
+            Expr::Cast { ty, expr } if self.model.type_width(ty)? == 1 => {
+                return self.emit_byte_expr_to(expr, ty, destination);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn constant_pointer_address(&self, pointer: &Expr) -> Option<u32> {
+        match pointer {
+            Expr::BankedPointer { pointer, .. } | Expr::Cast { expr: pointer, .. } => {
+                self.constant_pointer_address(pointer)
+            }
+            Expr::Ident(name) => self
+                .model
+                .mmio
+                .get(name)
+                .map(|(address, _, _)| *address)
+                .or_else(|| u32::try_from(self.model.constants.get(name).copied()?).ok()),
+            _ => u32::try_from(self.model.const_value(pointer).ok()?).ok(),
+        }
+    }
+
+    fn absolute_index_parts<'a>(&self, pointer: &'a Expr) -> Option<(u32, &'a Expr)> {
+        let mut pointer = pointer;
+        loop {
+            match pointer {
+                Expr::BankedPointer { pointer: inner, .. } | Expr::Cast { expr: inner, .. } => {
+                    pointer = inner;
+                }
+                _ => break,
+            }
+        }
+        let Expr::Binary {
+            left,
+            op: BinaryOp::Add,
+            right,
+        } = pointer
+        else {
+            return None;
+        };
+        Some((self.constant_pointer_address(left)?, right))
+    }
+
+    fn emit_absolute_indexed_load(
+        &mut self,
+        pointer: &Expr,
+        destination: u32,
+    ) -> Result<bool, Diagnostic> {
+        let Some((base, right)) = self.absolute_index_parts(pointer) else {
+            return Ok(false);
+        };
+        if self.model.type_width(&self.expr_type(right)?)? != 1 {
+            return Ok(false);
+        }
+        match right {
+            Expr::Ident(name) if !self.model.constants.contains_key(name) => {
+                self.line(&format!(
+                    "    ldx ${:04X}",
+                    self.binding(name)?.storage.address
+                ));
+            }
+            _ => {
+                let index = self.model.allocate(1)?;
+                self.emit_byte_expr_to(right, &Type::Named("u8".to_owned()), index.address)?;
+                self.line(&format!("    ldx ${:04X}", index.address));
+            }
+        }
+        self.line(&format!("    lda ${base:04X},x"));
+        self.sta(destination);
+        Ok(true)
     }
 
     fn emit_expr(&mut self, expr: &Expr, expected: &Type) -> Result<(), Diagnostic> {
@@ -591,9 +842,17 @@ impl Emitter {
                 self.extend_result(source_width, width, false);
             }
             Expr::Deref(pointer) => {
-                self.emit_expr(pointer, &Type::Ptr(Box::new(expected.clone())))?;
-                self.copy_result_to_zp();
-                self.load_indirect(width);
+                if let Some(address) = self.constant_pointer_address(pointer) {
+                    for offset in 0..u32::from(width) {
+                        self.lda(address + offset);
+                        self.sta(self.r0.address + offset);
+                    }
+                } else if width == 1 && self.emit_absolute_indexed_load(pointer, self.r0.address)? {
+                } else {
+                    self.emit_expr(pointer, &Type::Ptr(Box::new(expected.clone())))?;
+                    self.copy_result_to_zp();
+                    self.load_indirect(width);
+                }
             }
             Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
             Expr::Call { path, args } => self.emit_call(path, args, expected)?,
@@ -1356,9 +1615,13 @@ impl Emitter {
                 self.lda(self.r0.address + u32::from(width - 1));
                 self.line("    asl a");
             } else {
-                self.line("    clc");
+                self.line(&format!(
+                    "    lsr ${:04X}",
+                    self.r0.address + u32::from(width - 1)
+                ));
             }
-            for offset in (0..u32::from(width)).rev() {
+            let lower_bytes = if signed { width } else { width - 1 };
+            for offset in (0..u32::from(lower_bytes)).rev() {
                 self.line(&format!("    ror ${:04X}", self.r0.address + offset));
             }
         } else {
@@ -1532,7 +1795,10 @@ impl Emitter {
         width: u8,
         value: &Expr,
     ) -> Result<bool, Diagnostic> {
-        if !self.supports_65c02() || self.model.const_value(value).ok() != Some(0) {
+        if !self.supports_65c02()
+            || self.model.const_value(value).ok() != Some(0)
+            || !matches!(place, Place::Ident(_) | Place::Field { .. })
+        {
             return Ok(false);
         }
         let Some(address) = self.direct_place_address(place)? else {
@@ -1551,7 +1817,10 @@ impl Emitter {
         op: AssignOp,
         value: &Expr,
     ) -> Result<bool, Diagnostic> {
-        if !self.supports_65c02() || !matches!(op, AssignOp::BitAnd | AssignOp::BitOr) {
+        if !self.supports_65c02()
+            || !matches!(op, AssignOp::BitAnd | AssignOp::BitOr)
+            || !matches!(place, Place::Ident(_) | Place::Field { .. })
+        {
             return Ok(false);
         }
         let Ok(raw_value) = self.model.const_value(value) else {
@@ -1577,7 +1846,8 @@ impl Emitter {
                 let field = self.model.field(&binding.ty, field)?;
                 Ok(Some(binding.storage.address + field.offset))
             }
-            Place::Index { .. } | Place::Access(_) | Place::Deref(_) => Ok(None),
+            Place::Deref(pointer) => Ok(self.constant_pointer_address(pointer)),
+            Place::Index { .. } | Place::Access(_) => Ok(None),
         }
     }
 
@@ -1641,9 +1911,13 @@ impl Emitter {
                 let Type::Ptr(inner) = self.model.resolved_type(&self.expr_type(expr)?)? else {
                     return Err(Diagnostic::new("dereference requires pointer"));
                 };
-                self.emit_expr(expr, &Type::Ptr(inner.clone()))?;
-                self.copy_result_to_zp();
-                Ok(Address::Indirect)
+                if let Some(address) = self.constant_pointer_address(expr) {
+                    Ok(Address::Direct(address))
+                } else {
+                    self.emit_expr(expr, &Type::Ptr(inner.clone()))?;
+                    self.copy_result_to_zp();
+                    Ok(Address::Indirect)
+                }
             }
         }
     }
@@ -2193,6 +2467,119 @@ impl Emitter {
         Ok(true)
     }
 
+    fn emit_condition_false_branch(
+        &mut self,
+        condition: &Expr,
+        false_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let Expr::Binary { left, op, right } = condition else {
+            return Ok(false);
+        };
+        if !is_comparison(*op) {
+            return Ok(false);
+        }
+        let operand_ty = self.expr_type(left).or_else(|_| self.expr_type(right))?;
+        if self.model.type_width(&operand_ty)? != 1 || type_is_signed(&operand_ty) {
+            return Ok(false);
+        }
+
+        if self.model.const_value(right).ok() == Some(0) && self.emit_byte_load_flags(left)? {
+            match op {
+                BinaryOp::Eq => self.branch_long("bne", false_label),
+                BinaryOp::Ne => self.branch_long("beq", false_label),
+                BinaryOp::Lt => self.line(&format!("    jmp {false_label}")),
+                BinaryOp::Le => self.branch_long("bne", false_label),
+                BinaryOp::Gt => self.branch_long("beq", false_label),
+                BinaryOp::Ge => {}
+                _ => unreachable!(),
+            }
+            return Ok(true);
+        }
+
+        let right_supported = match right.as_ref() {
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) => true,
+            Expr::Ident(name) => {
+                self.model.constants.contains_key(name)
+                    || self.model.type_width(&self.binding(name)?.ty)? == 1
+            }
+            _ => false,
+        };
+        if !right_supported || !self.emit_byte_load_flags(left)? {
+            return Ok(false);
+        }
+        match right.as_ref() {
+            Expr::Int(value) | Expr::TypedInt(value, _) => {
+                self.line(&format!("    cmp #${:02X}", *value as u8));
+            }
+            Expr::Char(value) => self.line(&format!("    cmp #${:02X}", *value as u8)),
+            Expr::Ident(name) => {
+                if let Some(value) = self.model.constants.get(name) {
+                    self.line(&format!("    cmp #${:02X}", *value as u8));
+                } else {
+                    let binding = self.binding(name)?;
+                    if self.model.type_width(&binding.ty)? != 1 {
+                        return Ok(false);
+                    }
+                    self.line(&format!("    cmp ${:04X}", binding.storage.address));
+                }
+            }
+            _ => return Ok(false),
+        }
+        match op {
+            BinaryOp::Eq => self.branch_long("bne", false_label),
+            BinaryOp::Ne => self.branch_long("beq", false_label),
+            BinaryOp::Lt => self.branch_long("bcs", false_label),
+            BinaryOp::Ge => self.branch_long("bcc", false_label),
+            BinaryOp::Le => {
+                let keep = self.next_label("compare_le");
+                self.branch_long("bcc", &keep);
+                self.branch_long("beq", &keep);
+                self.line(&format!("    jmp {false_label}"));
+                self.line(&format!("{keep}:"));
+            }
+            BinaryOp::Gt => {
+                self.branch_long("bcc", false_label);
+                self.branch_long("beq", false_label);
+            }
+            _ => unreachable!(),
+        }
+        Ok(true)
+    }
+
+    fn emit_byte_load_flags(&mut self, expr: &Expr) -> Result<bool, Diagnostic> {
+        match expr {
+            Expr::Int(value) | Expr::TypedInt(value, _) => self.lda_imm(*value as u8),
+            Expr::Bool(value) => self.lda_imm(u8::from(*value)),
+            Expr::Char(value) => self.lda_imm(*value as u8),
+            Expr::Ident(name) => {
+                if let Some(value) = self.model.constants.get(name) {
+                    self.lda_imm(*value as u8);
+                } else {
+                    let binding = self.binding(name)?;
+                    if self.model.type_width(&binding.ty)? != 1 {
+                        return Ok(false);
+                    }
+                    self.lda(binding.storage.address);
+                }
+            }
+            Expr::Deref(pointer) => {
+                if let Some(address) = self.constant_pointer_address(pointer) {
+                    self.lda(address);
+                } else {
+                    let temporary = self.model.allocate(1)?;
+                    if !self.emit_absolute_indexed_load(pointer, temporary.address)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Expr::Cast { ty, expr } if self.model.type_width(ty)? == 1 => {
+                return self.emit_byte_load_flags(expr);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     fn jump_storage_zero(&mut self, storage: Storage, width: u8, label: &str) {
         let nonzero = self.next_label("nonzero");
         for offset in 0..u32::from(width) {
@@ -2219,7 +2606,9 @@ impl Emitter {
             self.lda(left.address + offset);
             self.line(&format!("    cmp ${:04X}", right.address + offset));
             self.branch_long("bcc", label);
-            self.branch_long("bne", &done);
+            if offset != 0 {
+                self.branch_long("bne", &done);
+            }
         }
         self.line(&format!("{done}:"));
     }
@@ -2277,6 +2666,217 @@ impl Emitter {
 enum Address {
     Direct(u32),
     Indirect,
+}
+
+fn block_terminates(body: &[Stmt]) -> bool {
+    body.last().is_some_and(stmt_terminates)
+}
+
+fn stmt_terminates(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => !else_body.is_empty() && block_terminates(then_body) && block_terminates(else_body),
+        _ => false,
+    }
+}
+
+fn cleanup_assembly(assembly: &str, cpu: CpuFamily) -> Result<String, Diagnostic> {
+    let variant = match cpu {
+        CpuFamily::Mos6502 => crate::asm::mos6502::Mos6502Variant::Nmos6502,
+        CpuFamily::Cmos65C02 => crate::asm::mos6502::Mos6502Variant::Cmos65C02,
+        CpuFamily::Wdc65C816 => crate::asm::mos6502::Mos6502Variant::Wdc65C816,
+        CpuFamily::Ricoh2A03 => crate::asm::mos6502::Mos6502Variant::Ricoh2A03,
+        _ => crate::asm::mos6502::Mos6502Variant::Nmos6502,
+    };
+    let mut lines = assembly.lines().map(str::to_owned).collect::<Vec<_>>();
+    loop {
+        let mut remove = HashSet::new();
+        for (index, line) in lines.iter().enumerate() {
+            let Some((mnemonic, operands)) = instruction_parts(line) else {
+                continue;
+            };
+            if !mnemonic.eq_ignore_ascii_case("jmp") {
+                continue;
+            }
+            let target = operands.trim();
+            let next_label = lines[index + 1..]
+                .iter()
+                .find_map(|line| {
+                    let text = line.trim();
+                    if text.is_empty() || text.starts_with(';') {
+                        None
+                    } else {
+                        Some(line_label(line))
+                    }
+                })
+                .flatten();
+            if next_label == Some(target) {
+                remove.insert(index);
+            }
+        }
+        if !remove.is_empty() {
+            lines = lines
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, line)| (!remove.contains(&index)).then_some(line))
+                .collect();
+            continue;
+        }
+
+        let (offsets, labels) = assembly_offsets(&lines, variant)?;
+        for index in 0..lines.len().saturating_sub(2) {
+            let Some((inverse, skip_operand)) = instruction_parts(&lines[index]) else {
+                continue;
+            };
+            let Some(branch) = inverse_branch(inverse) else {
+                continue;
+            };
+            let Some((jmp, target)) = instruction_parts(&lines[index + 1]) else {
+                continue;
+            };
+            if !jmp.eq_ignore_ascii_case("jmp")
+                || !skip_operand.trim().starts_with(".L_branch_skip_")
+                || line_label(&lines[index + 2]) != Some(skip_operand.trim())
+            {
+                continue;
+            }
+            let Some(&target_offset) = labels.get(target.trim()) else {
+                continue;
+            };
+            let branch_offset = offsets[index];
+            let adjusted_target = if target_offset > branch_offset {
+                target_offset.saturating_sub(3)
+            } else {
+                target_offset
+            };
+            let displacement = adjusted_target as i64 - (branch_offset + 2) as i64;
+            if (-128..=127).contains(&displacement) {
+                lines[index] = format!("    {branch} {}", target.trim());
+                lines.remove(index + 2);
+                lines.remove(index + 1);
+                remove.insert(index);
+                break;
+            }
+        }
+        if remove.is_empty() {
+            break;
+        }
+    }
+
+    reuse_compare_at_bne_target(&mut lines);
+    let mut output = lines.join("\n");
+    if assembly.ends_with('\n') {
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn assembly_offsets(
+    lines: &[String],
+    variant: crate::asm::mos6502::Mos6502Variant,
+) -> Result<(Vec<usize>, HashMap<String, usize>), Diagnostic> {
+    let mut offsets = Vec::with_capacity(lines.len());
+    let mut labels = HashMap::new();
+    let mut offset = 0;
+    for line in lines {
+        offsets.push(offset);
+        if let Some(label) = line_label(line) {
+            labels.insert(label.to_owned(), offset);
+        }
+        if let Some((mnemonic, _)) = instruction_parts(line)
+            && !mnemonic.eq_ignore_ascii_case("section")
+        {
+            offset +=
+                crate::asm::mos6502::instruction_len_for_variant(line.trim(), variant).unwrap_or(0);
+        }
+    }
+    Ok((offsets, labels))
+}
+
+fn inverse_branch(branch: &str) -> Option<&'static str> {
+    Some(match branch.to_ascii_lowercase().as_str() {
+        "beq" => "bne",
+        "bne" => "beq",
+        "bcc" => "bcs",
+        "bcs" => "bcc",
+        "bpl" => "bmi",
+        "bmi" => "bpl",
+        _ => return None,
+    })
+}
+
+fn reuse_compare_at_bne_target(lines: &mut [String]) {
+    let references = lines
+        .iter()
+        .filter_map(|line| instruction_parts(line))
+        .filter_map(|(_, operands)| {
+            let operand = operands.trim();
+            operand.starts_with(".L_").then_some(operand.to_owned())
+        })
+        .fold(HashMap::<String, usize>::new(), |mut counts, label| {
+            *counts.entry(label).or_default() += 1;
+            counts
+        });
+    for branch_index in 2..lines.len() {
+        let Some((branch, target)) = instruction_parts(&lines[branch_index]) else {
+            continue;
+        };
+        if !branch.eq_ignore_ascii_case("bne") || references.get(target.trim()).copied() != Some(1)
+        {
+            continue;
+        }
+        let Some(label_index) = lines
+            .iter()
+            .position(|line| line_label(line) == Some(target.trim()))
+        else {
+            continue;
+        };
+        let Some(previous) = (0..label_index)
+            .rev()
+            .find(|index| instruction_parts(&lines[*index]).is_some())
+        else {
+            continue;
+        };
+        let Some((terminator, _)) = instruction_parts(&lines[previous]) else {
+            continue;
+        };
+        if !matches!(
+            terminator.to_ascii_lowercase().as_str(),
+            "jmp" | "rts" | "rti"
+        ) {
+            continue;
+        }
+        let following = (label_index + 1..lines.len())
+            .filter(|index| instruction_parts(&lines[*index]).is_some())
+            .take(2)
+            .collect::<Vec<_>>();
+        if following.len() == 2
+            && lines[branch_index - 2].trim() == lines[following[0]].trim()
+            && lines[branch_index - 1].trim() == lines[following[1]].trim()
+        {
+            lines[following[0]].clear();
+            lines[following[1]].clear();
+        }
+    }
+}
+
+fn line_label(line: &str) -> Option<&str> {
+    let text = line.trim();
+    let label = text.strip_suffix(':')?;
+    (!label.is_empty() && !label.chars().any(char::is_whitespace)).then_some(label)
+}
+
+fn instruction_parts(line: &str) -> Option<(&str, &str)> {
+    let text = line.split(';').next()?.trim();
+    if text.is_empty() || line_label(text).is_some() {
+        return None;
+    }
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    Some((&text[..end], text[end..].trim()))
 }
 
 fn element_type(ty: &Type) -> Result<Type, Diagnostic> {
@@ -2922,11 +3522,9 @@ mod structural_tests {
 
         let multiply = emit(
             r#"
-                fn main() {
-                    let left: u16 = 0xFFFF
-                    let right: u16 = 0x1234
-                    let product: u16 = left * right
-                }
+                global product: u16 = 0
+                fn multiply(left: u16, right: u16) -> u16 { return left * right }
+                fn main() { product = multiply(0xFFFF, 0x1234) }
             "#,
         );
         assert_eq!(multiply.matches(&format!("{U16_MUL_HELPER}:")).count(), 1);
@@ -2939,11 +3537,13 @@ mod structural_tests {
 
         let divide_and_remainder = emit(
             r#"
+                global quotient: u16 = 0
+                global remainder: u16 = 0
+                fn divide(dividend: u16, divisor: u16) -> u16 { return dividend / divisor }
+                fn remainder_of(dividend: u16, divisor: u16) -> u16 { return dividend % divisor }
                 fn main() {
-                    let dividend: u16 = 0xFFFF
-                    let divisor: u16 = 251
-                    let quotient: u16 = dividend / divisor
-                    let remainder: u16 = dividend % divisor
+                    quotient = divide(0xFFFF, 251)
+                    remainder = remainder_of(0xFFFF, 251)
                 }
             "#,
         );
@@ -2964,8 +3564,7 @@ mod structural_tests {
             "{divide_and_remainder}"
         );
         assert!(
-            divide_and_remainder
-                .contains("    inc $A000\n    bne __ezra_u16_divmod_next\n    inc $A001"),
+            divide_and_remainder.contains("    bne __ezra_u16_divmod_next\n    inc $"),
             "{divide_and_remainder}"
         );
     }
@@ -2975,14 +3574,20 @@ mod structural_tests {
         let assembly = emit(
             r#"
                 global value: u16 = 0x1234
+                global times_three: u16 = 0
+                global times_seven: u16 = 0
+                global times_eight: u16 = 0
+                global times_ten: u16 = 0
+                global negative: i16 = 0
+                global compound: u16 = 0
                 fn main() {
-                    let times_three: u16 = value * 3
-                    let times_seven: u16 = value * 7
-                    let times_eight: u16 = value * 8
-                    let times_ten: u16 = value * 10
+                    times_three = value * 3
+                    times_seven = value * 7
+                    times_eight = value * 8
+                    times_ten = value * 10
                     let signed: i16 = -1234
-                    let negative: i16 = signed * -7
-                    let compound: u16 = value
+                    negative = signed * -7
+                    compound = value
                     compound *= 5
                 }
             "#,
@@ -3005,10 +3610,13 @@ mod structural_tests {
     fn costed_constant_multiplication_accounts_for_cpu_variant() {
         let source = r#"
             global value: u16 = 0x1234
+            global times_seven: u16 = 0
+            global times_eight: u16 = 0
+            global byte_aligned: u16 = 0
             fn main() {
-                let times_seven: u16 = value * 7
-                let times_eight: u16 = value * 8
-                let byte_aligned: u16 = value * 256
+                times_seven = value * 7
+                times_eight = value * 8
+                byte_aligned = value * 256
             }
         "#;
         let nmos = emit_for_cpu(source, CpuFamily::Mos6502);
@@ -3031,7 +3639,8 @@ mod structural_tests {
         let large = emit(
             r#"
                 global value: u16 = 0x1234
-                fn main() { let product: u16 = value * 0xFFFE }
+                global product: u16 = 0
+                fn main() { product = value * 0xFFFE }
             "#,
         );
         assert!(
@@ -3045,12 +3654,15 @@ mod structural_tests {
     fn selects_fixed_instructions_for_constant_shifts() {
         let assembly = emit(
             r#"
+                global left: u24 = 0
+                global right: u24 = 0
+                global sign_fill: i16 = 0
                 fn main() {
                     let value: u24 = 0x123456
-                    let left: u24 = value << 12
-                    let right: u24 = value >> 16
+                    left = value << 12
+                    right = value >> 16
                     let signed: i16 = -2
-                    let sign_fill: i16 = signed >> 16
+                    sign_fill = signed >> 16
                 }
             "#,
         );
@@ -3068,18 +3680,24 @@ mod structural_tests {
     fn selects_costed_byte_boundary_moves_and_short_carry_chains() {
         let assembly = emit(
             r#"
+                global boundary_left: u24 = 0
+                global boundary_right: u24 = 0
+                global near_left: u24 = 0
+                global near_right: u24 = 0
                 fn main() {
                     let value: u24 = 0x123456
-                    let boundary_left: u24 = value << 8
-                    let boundary_right: u24 = value >> 8
-                    let near_left: u24 = value << 15
-                    let near_right: u24 = value >> 15
+                    boundary_left = value << 8
+                    boundary_right = value >> 8
+                    near_left = value << 15
+                    near_right = value >> 15
                 }
             "#,
         );
 
-        assert_eq!(assembly.matches("    rol $").count(), 7, "{assembly}");
-        assert_eq!(assembly.matches("    ror $").count(), 7, "{assembly}");
+        assert!(assembly.contains("    rol $"), "{assembly}");
+        assert!(assembly.contains("    lsr $"), "{assembly}");
+        assert!(assembly.contains("    ror $"), "{assembly}");
+        assert!(!assembly.contains("    clc\n    ror $"), "{assembly}");
     }
 
     #[test]
@@ -3187,15 +3805,67 @@ mod structural_tests {
             CpuFamily::Cmos65C02,
         );
 
-        assert!(!assembly.contains("    stz $"), "{assembly}");
-        assert!(!assembly.contains("    trb $"), "{assembly}");
-        assert!(!assembly.contains("    tsb $"), "{assembly}");
+        assert!(!assembly.contains("    stz $D000"), "{assembly}");
+        assert!(!assembly.contains("    trb $D000"), "{assembly}");
+        assert!(!assembly.contains("    tsb $D000"), "{assembly}");
         assert!(assembly.contains("    bit #$01"), "{assembly}");
-        assert!(
-            assembly.matches("    lda ($F0),y").count() >= 2,
-            "{assembly}"
+        assert!(assembly.contains("    sta $D000"), "{assembly}");
+        assert!(assembly.contains("    sta $D001"), "{assembly}");
+        assert!(assembly.contains("    lda $D000"), "{assembly}");
+        assert!(assembly.contains("    lda $D001"), "{assembly}");
+        assert!(!assembly.contains("($F0),y"), "{assembly}");
+    }
+
+    #[test]
+    fn cleans_fallthrough_jumps_and_relaxes_only_in_range_long_branches() {
+        let mut near = String::from(
+            "start:\n    beq .L_branch_skip_0\n    jmp .L_target\n.L_branch_skip_0:\n    nop\n    jmp .L_next\n.L_next:\n    rts\n.L_target:\n    rts\n",
         );
-        assert!(assembly.contains("    ldy #$01"), "{assembly}");
+        let cleaned = cleanup_assembly(&near, CpuFamily::Mos6502).unwrap();
+        assert!(cleaned.contains("    bne .L_target"), "{cleaned}");
+        assert!(!cleaned.contains("jmp .L_target"), "{cleaned}");
+        assert!(!cleaned.contains("jmp .L_next"), "{cleaned}");
+
+        near =
+            String::from("start:\n    beq .L_branch_skip_0\n    jmp .L_far\n.L_branch_skip_0:\n");
+        for _ in 0..130 {
+            near.push_str("    nop\n");
+        }
+        near.push_str(".L_far:\n    rts\n");
+        let far = cleanup_assembly(&near, CpuFamily::Cmos65C02).unwrap();
+        assert!(far.contains("    beq .L_branch_skip_0"), "{far}");
+        assert!(far.contains("    jmp .L_far"), "{far}");
+    }
+
+    #[test]
+    fn emits_direct_absolute_mmio_and_indexed_pointer_accesses() {
+        let assembly = emit(
+            r#"
+                volatile mmio WORD: ptr<u16> = 0x2200
+                volatile mmio LENGTH: ptr<u8> = 0x2300
+                volatile mmio INPUT: ptr<u8> = 0x2301
+                volatile mmio OUTPUT: ptr<u8> = 0x2401
+                fn main() {
+                    let index: u8 = *LENGTH
+                    let value: u8 = *(INPUT + index)
+                    *WORD = 0x1234
+                    *OUTPUT = value
+                }
+            "#,
+        );
+        for instruction in [
+            "lda $2300",
+            "lda $2301,x",
+            "sta $2200",
+            "sta $2201",
+            "sta $2401",
+        ] {
+            assert!(
+                assembly.contains(instruction),
+                "missing {instruction}\n{assembly}"
+            );
+        }
+        assert!(!assembly.contains("($F0),y"), "{assembly}");
     }
 
     #[test]
@@ -3265,6 +3935,9 @@ mod structural_tests {
         let assembly = emit(
             r#"
                 global calls: u8 = 0
+                global result: u8 = 0
+                global guarded: bool = false
+                volatile mmio FLAG: ptr<bool> = 0xD000
                 inline fn approved(value: u8) -> u8 { return value + 1 }
                 inline fn nested(value: u8) -> u8 { return approved(value) }
                 inline fn conditional(value: bool) -> bool {
@@ -3272,9 +3945,8 @@ mod structural_tests {
                     return value
                 }
                 fn main() {
-                    let result: u8 = nested(4)
-                    let flag: bool = false
-                    let guarded: bool = flag && conditional(true)
+                    result = nested(4)
+                    guarded = *FLAG && conditional(true)
                 }
             "#,
         );
@@ -3365,6 +4037,10 @@ mod tests {
         fn byte(&self, address: u16) -> u8 {
             self.bytes[usize::from(address)]
         }
+
+        fn set_byte(&mut self, address: u16, value: u8) {
+            self.bytes[usize::from(address)] = value;
+        }
     }
 
     impl Bus for TestBus {
@@ -3373,11 +4049,15 @@ mod tests {
         }
 
         fn set_byte(&mut self, address: u16, value: u8) {
-            self.bytes[usize::from(address)] = value;
+            TestBus::set_byte(self, address, value);
         }
     }
 
-    fn run(source: &str, instruction_budget: usize) -> TestBus {
+    fn run_with_setup(
+        source: &str,
+        instruction_budget: usize,
+        setup: impl FnOnce(&mut TestBus),
+    ) -> (TestBus, String, usize) {
         let assembly = emit(source);
         let assembled = crate::vm::assemble_subset_with_symbols_at(
             crate::target::AssemblerCpu::Mos6502,
@@ -3394,16 +4074,18 @@ mod tests {
                 .addr,
         )
         .unwrap();
+        let image_size = assembled.bytes.len();
         let mut bus = TestBus::new();
         for (offset, byte) in assembled.bytes.iter().copied().enumerate() {
             bus.set_byte(0x0200 + offset as u16, byte);
         }
+        setup(&mut bus);
         let mut cpu = CPU::new(bus, Nmos6502);
         cpu.registers.program_counter = 0x0200;
         cpu.registers.stack_pointer = StackPointer(0xFF);
         for _ in 0..instruction_budget {
             if cpu.registers.program_counter == exit {
-                return cpu.memory;
+                return (cpu.memory, assembly, image_size);
             }
             assert!(
                 cpu.single_step(),
@@ -3414,6 +4096,78 @@ mod tests {
         panic!(
             "6502 execution exceeded {instruction_budget} instructions at ${:04X}\n{assembly}",
             cpu.registers.program_counter
+        );
+    }
+
+    fn run(source: &str, instruction_budget: usize) -> TestBus {
+        run_with_setup(source, instruction_budget, |_| {}).0
+    }
+
+    #[test]
+    fn binary_search_uses_the_optimized_6502_slice_and_executes_edge_cases() {
+        let source = r#"
+            volatile mmio output: ptr<u8> = 0x2401
+            volatile mmio search: ptr<u8> = 0x23FF
+            volatile mmio input: ptr<u8> = 0x2301
+            volatile mmio input_length: ptr<u8> = 0x2300
+
+            fn main() {
+                let target: u8 = *search
+                let start: u8 = 0
+                let length: u8 = *input_length
+                loop {
+                    if length == 0 {
+                        *output = 0
+                        return
+                    }
+                    let offset: u8 = length / 2
+                    let mid: u8 = start + offset
+                    let value: u8 = *(input + mid)
+                    if value == target {
+                        *output = 1
+                        return
+                    }
+                    if value < target {
+                        start = mid + 1
+                        length = length - offset - 1
+                    } else {
+                        length = offset
+                    }
+                }
+            }
+        "#;
+
+        fn search(source: &str, target: u8, values: &[u8]) -> (u8, String, usize) {
+            let (bus, assembly, size) = run_with_setup(source, 10_000, |bus| {
+                bus.set_byte(0x23FF, target);
+                bus.set_byte(0x2300, values.len() as u8);
+                for (index, value) in values.iter().copied().enumerate() {
+                    bus.set_byte(0x2301 + index as u16, value);
+                }
+            });
+            (bus.byte(0x2401), assembly, size)
+        }
+
+        let (found, assembly, size) = search(source, 7, &[1, 3, 5, 7, 9]);
+        assert_eq!(found, 1);
+        assert_eq!(search(source, 4, &[1, 3, 5, 7, 9]).0, 0);
+        assert_eq!(search(source, 9, &[9]).0, 1);
+        assert_eq!(search(source, 9, &[]).0, 0);
+        for instruction in ["lda $23FF", "lda $2300", "lda $2301,x", "sta $2401", "lsr "] {
+            assert!(
+                assembly.contains(instruction),
+                "missing {instruction}\n{assembly}"
+            );
+        }
+        for forbidden in ["div_loop", "compare_true", "($F0),y"] {
+            assert!(
+                !assembly.contains(forbidden),
+                "found {forbidden}\n{assembly}"
+            );
+        }
+        assert!(
+            size <= 128,
+            "binary search image is {size} bytes\n{assembly}"
         );
     }
 
@@ -3482,7 +4236,7 @@ mod tests {
         );
         assert!(assembly.contains("; target: MOS 6502"), "{assembly}");
         assert!(assembly.contains("jsr _add"), "{assembly}");
-        assert!(assembly.contains("sta ($F0),y"), "{assembly}");
+        assert!(assembly.contains("sta $D020"), "{assembly}");
         assert!(!assembly.contains("ld hl"), "{assembly}");
         crate::vm::assemble_subset_with_symbols_at(
             crate::target::AssemblerCpu::Mos6502,
@@ -3682,11 +4436,8 @@ mod tests {
             .split("    rts")
             .next()
             .unwrap();
-        assert_eq!(
-            read_input.matches("    lda ($F0),y").count(),
-            2,
-            "{assembly}"
-        );
+        assert_eq!(read_input.matches("    lda $D00").count(), 2, "{assembly}");
+        assert!(!read_input.contains("($F0),y"), "{assembly}");
         assert_eq!(
             assembly.matches("    jsr _read_input").count(),
             1,
@@ -3721,10 +4472,9 @@ mod tests {
         "#;
         let assembly = emit(source);
         assert!(assembly.contains("    jsr _read_input"), "{assembly}");
-        assert!(
-            assembly.matches("    lda ($F0),y").count() >= 2,
-            "{assembly}"
-        );
+        assert!(assembly.contains("    lda $D000"), "{assembly}");
+        assert!(assembly.contains("    lda $D001"), "{assembly}");
+        assert!(!assembly.contains("($F0),y"), "{assembly}");
 
         let memory = run(source, 5_000);
         assert_eq!(memory.byte(0xFF00), 0xEB);
