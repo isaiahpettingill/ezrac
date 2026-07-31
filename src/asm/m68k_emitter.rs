@@ -593,6 +593,9 @@ impl Emitter {
         if self.emit_byte_swap_combine(expr, expected)? {
             return Ok(());
         }
+        if self.emit_rotate_combine(expr, expected)? {
+            return Ok(());
+        }
         match expr {
             Expr::Int(value) | Expr::TypedInt(value, _) => self.load_constant(*value, expected)?,
             Expr::Bool(value) => self.load_constant(i64::from(*value), expected)?,
@@ -740,6 +743,49 @@ impl Emitter {
             Expr::Cast { expr, .. } => self.constant_shift_count(expr),
             _ => None,
         }
+    }
+
+    fn emit_rotate_combine(&mut self, expr: &Expr, expected: &Type) -> Result<bool, Diagnostic> {
+        let expected = self.model.resolved_type(expected)?;
+        let width = scalar_width(&expected)?;
+        if !matches!(width, 1 | 2 | 4) {
+            return Ok(false);
+        }
+        let bits = u32::from(width) * 8;
+        let Some((source, left_count)) =
+            match_rotate(expr, bits, |value| self.constant_shift_count(value))
+        else {
+            return Ok(false);
+        };
+        if !self.can_reuse_without_memory_effects(source) {
+            return Ok(false);
+        }
+        let source_ty = self.model.resolved_type(&self.expr_type(source)?)?;
+        if scalar_width(&source_ty)? != width {
+            return Ok(false);
+        }
+
+        self.emit_expr(source, &source_ty)?;
+        if width == 4 && left_count == 16 {
+            self.line("    swap d0");
+        } else {
+            let right_count = bits - left_count;
+            let (instruction, mut count) = if left_count <= right_count {
+                ("rol", left_count)
+            } else {
+                ("ror", right_count)
+            };
+            let suffix = size_suffix(&source_ty)?;
+            while count > 8 {
+                self.line(&format!("    {instruction}.{suffix} #8,d0"));
+                count -= 8;
+            }
+            if count != 0 {
+                self.line(&format!("    {instruction}.{suffix} #{count},d0"));
+            }
+        }
+        self.convert_d0(&source_ty, &expected)?;
+        Ok(true)
     }
 
     fn emit_byte_swap_combine(&mut self, expr: &Expr, expected: &Type) -> Result<bool, Diagnostic> {
@@ -1884,6 +1930,41 @@ fn should_use_memory_shift(count: u32) -> bool {
     memory_cycles < register_cycles
 }
 
+fn match_rotate<'a, F>(expr: &'a Expr, bits: u32, shift_count: F) -> Option<(&'a Expr, u32)>
+where
+    F: Fn(&Expr) -> Option<u32>,
+{
+    let Expr::Binary {
+        left,
+        op: BinaryOp::BitOr,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let shifted = |expr: &'a Expr| {
+        let Expr::Binary { left, op, right } = expr else {
+            return None;
+        };
+        matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+            .then(|| (left.as_ref(), *op, shift_count(right)))
+            .and_then(|(source, op, count)| count.map(|count| (source, op, count)))
+    };
+    let first = shifted(left)?;
+    let second = shifted(right)?;
+    let (left_shift, right_shift) = match (first.1, second.1) {
+        (BinaryOp::Shl, BinaryOp::Shr) => (first, second),
+        (BinaryOp::Shr, BinaryOp::Shl) => (second, first),
+        _ => return None,
+    };
+    (left_shift.0 == right_shift.0
+        && left_shift.2 != 0
+        && right_shift.2 != 0
+        && left_shift.2 < bits
+        && left_shift.2 + right_shift.2 == bits)
+        .then_some((left_shift.0, left_shift.2))
+}
+
 fn flatten_bit_or<'a>(expr: &'a Expr, terms: &mut Vec<&'a Expr>) {
     if let Expr::Binary {
         left,
@@ -2349,6 +2430,70 @@ mod tests {
         assert!(assembly.contains("lsl.w #2,d0"), "{assembly}");
         assert!(!assembly.contains("lsl.w #0,d0"), "{assembly}");
         assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn selects_native_rotates_swaps_and_extensions() {
+        let program = parse_program(
+            Path::new("test.ezra"),
+            r#"
+            global sink16: u16 = 0
+            global sink32: u32 = 0
+            global signed_sink: i32 = 0
+
+            fn rotate16(value: u16) -> u16 {
+                return (value << 4) | (value >> 12)
+            }
+            fn rotate32_right8(value: u32) -> u32 {
+                return (value >> 8) | (value << 24)
+            }
+            fn rotate32_half(value: u32) -> u32 {
+                return (value << 16) | (value >> 16)
+            }
+            fn swap32(value: u32) -> u32 {
+                return ((value & 0x000000FFu32) << 24)
+                    | ((value & 0x0000FF00u32) << 8)
+                    | ((value & 0x00FF0000u32) >> 8)
+                    | ((value & 0xFF000000u32) >> 24)
+            }
+            fn extend8(value: i8) -> i32 { return cast<i32>(value) }
+            fn extend16(value: i16) -> i32 { return cast<i32>(value) }
+
+            fn main() {
+                sink16 = rotate16(0x1234)
+                sink32 = rotate32_right8(0x12345678u32)
+                sink32 = rotate32_half(sink32)
+                sink32 = swap32(sink32)
+                signed_sink = extend8(-1)
+                signed_sink = extend16(-2)
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(assembly.contains("    rol.w #4,d0"), "{assembly}");
+        assert!(assembly.contains("    ror.l #8,d0"), "{assembly}");
+        assert!(assembly.contains("_rotate32_half:"), "{assembly}");
+        assert!(assembly.contains("    swap d0"), "{assembly}");
+        assert!(
+            assembly.contains("    ror.w #8,d0\n    swap d0\n    ror.w #8,d0"),
+            "{assembly}"
+        );
+        assert!(
+            assembly.contains("    ext.w d0\n    ext.l d0"),
+            "{assembly}"
+        );
+        assert!(assembly.contains("    ext.l d0"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
     }
 
     #[test]
