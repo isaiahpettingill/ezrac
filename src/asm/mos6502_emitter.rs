@@ -640,6 +640,12 @@ impl Emitter {
                 {
                     return Ok(());
                 }
+                if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor)
+                    && let Ok(mask) = self.model.const_value(right)
+                    && self.emit_immediate_bitwise(*op, operand_width, mask)
+                {
+                    return Ok(());
+                }
                 let left_storage = self.model.allocate(u32::from(operand_width))?;
                 self.copy(self.r0, left_storage, u32::from(operand_width));
                 self.emit_expr(right, &operand_ty)?;
@@ -858,6 +864,38 @@ impl Emitter {
         self.line(&format!("{done}:"));
         self.zero(self.r0);
         Ok(())
+    }
+
+    fn emit_immediate_bitwise(&mut self, op: BinaryOp, width: u8, mask: i64) -> bool {
+        if width <= 1 {
+            return false;
+        }
+
+        for offset in 0..u32::from(width) {
+            let byte = ((mask as u64 >> (offset * 8)) & 0xFF) as u8;
+            let address = self.r0.address + offset;
+            match (op, byte) {
+                (BinaryOp::BitAnd, 0xFF) | (BinaryOp::BitOr, 0x00) | (BinaryOp::BitXor, 0x00) => {}
+                (BinaryOp::BitAnd, 0x00) => self.zero(Storage { address, size: 1 }),
+                (BinaryOp::BitOr, 0xFF) => {
+                    self.lda_imm(0xFF);
+                    self.sta(address);
+                }
+                (BinaryOp::BitAnd, byte) | (BinaryOp::BitOr, byte) | (BinaryOp::BitXor, byte) => {
+                    self.lda(address);
+                    let mnemonic = match op {
+                        BinaryOp::BitAnd => "and",
+                        BinaryOp::BitOr => "ora",
+                        BinaryOp::BitXor => "eor",
+                        _ => unreachable!(),
+                    };
+                    self.line(&format!("    {mnemonic} #${byte:02X}"));
+                    self.sta(address);
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     fn emit_binary_op(&mut self, op: BinaryOp, width: u8, signed: bool) -> Result<(), Diagnostic> {
@@ -3075,6 +3113,68 @@ mod structural_tests {
     }
 
     #[test]
+    fn lowers_multibyte_immediate_bitwise_operations_for_nmos_and_cmos() {
+        let source = r#"
+            fn keep_low(value: u16) -> u16 { return value & 0x00FFu16 }
+            fn set_high(value: u16) -> u16 { return value | 0xFF00u16 }
+            fn toggle_low(value: u16) -> u16 { return value ^ 0x00FFu16 }
+            fn partial_and(value: u16) -> u16 { return value & 0x0FFFu16 }
+            fn partial_or(value: u16) -> u16 { return value | 0x1200u16 }
+            fn main() {
+                let kept: u16 = keep_low(0x1234)
+                let set: u16 = set_high(0x1234)
+                let toggled: u16 = toggle_low(0x1234)
+                let anded: u16 = partial_and(0x1234)
+                let ored: u16 = partial_or(0x1234)
+            }
+        "#;
+        let nmos = emit_for_cpu(source, CpuFamily::Mos6502);
+        let cmos = emit_for_cpu(source, CpuFamily::Cmos65C02);
+        let body = |assembly: &str, name: &str| {
+            assembly
+                .split(&format!("_{name}:"))
+                .nth(1)
+                .unwrap()
+                .split("    rts")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+
+        assert!(!nmos.contains("    stz $"), "{nmos}");
+        assert!(body(&nmos, "keep_low").contains("    lda #$00"), "{nmos}");
+        assert!(body(&cmos, "keep_low").contains("    stz $"), "{cmos}");
+        for assembly in [&nmos, &cmos] {
+            let keep_low = body(assembly, "keep_low");
+            assert!(!keep_low.contains("    and #$FF"), "{keep_low}");
+            assert!(!keep_low.contains("    and $"), "{keep_low}");
+
+            let set_high = body(assembly, "set_high");
+            assert!(set_high.contains("    lda #$FF"), "{set_high}");
+            assert!(!set_high.contains("    ora #$00"), "{set_high}");
+            assert!(!set_high.contains("    ora $"), "{set_high}");
+
+            let toggle_low = body(assembly, "toggle_low");
+            assert!(toggle_low.contains("    eor #$FF"), "{toggle_low}");
+            assert!(!toggle_low.contains("    eor #$00"), "{toggle_low}");
+            assert!(!toggle_low.contains("    eor $"), "{toggle_low}");
+
+            let partial_and = body(assembly, "partial_and");
+            assert!(partial_and.contains("    and #$0F"), "{partial_and}");
+            let partial_or = body(assembly, "partial_or");
+            assert!(partial_or.contains("    ora #$12"), "{partial_or}");
+        }
+
+        for (assembly, cpu) in [
+            (&nmos, crate::target::AssemblerCpu::Mos6502),
+            (&cmos, crate::target::AssemblerCpu::Cmos65C02),
+        ] {
+            crate::vm::assemble_subset_with_symbols_at(cpu, assembly, 0x0200)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        }
+    }
+
+    #[test]
     fn keeps_cmos_mmio_access_widths_and_avoids_cmos_memory_forms() {
         let assembly = emit_for_cpu(
             r#"
@@ -3550,6 +3650,53 @@ mod tests {
         assert_eq!(memory.byte(0xFF02), 0x6B);
         assert_eq!(memory.byte(0xFF03), 0x18);
         assert_eq!(memory.byte(0xFF04), 255);
+    }
+
+    #[test]
+    fn executes_immediate_bitwise_after_one_volatile_u16_read() {
+        let source = r#"
+            volatile mmio INPUT: ptr<u16> = 0xD000
+            volatile mmio RESULT0: ptr<u8> = 0xFF00
+            volatile mmio RESULT1: ptr<u8> = 0xFF01
+            volatile mmio RESULT2: ptr<u8> = 0xFF02
+            global calls: u8 = 0
+
+            fn read_input() -> u16 {
+                calls += 1
+                return *(INPUT)
+            }
+
+            fn main() {
+                *(INPUT) = 0x1234
+                let masked: u16 = read_input() & 0x00FFu16
+                *(RESULT0) = cast<u8>(masked)
+                *(RESULT1) = cast<u8>(masked >> 8)
+                *(RESULT2) = calls
+            }
+        "#;
+        let assembly = emit(source);
+        let read_input = assembly
+            .split("_read_input:")
+            .nth(1)
+            .unwrap()
+            .split("    rts")
+            .next()
+            .unwrap();
+        assert_eq!(
+            read_input.matches("    lda ($F0),y").count(),
+            2,
+            "{assembly}"
+        );
+        assert_eq!(
+            assembly.matches("    jsr _read_input").count(),
+            1,
+            "{assembly}"
+        );
+
+        let memory = run(source, 5_000);
+        assert_eq!(memory.byte(0xFF00), 0x34);
+        assert_eq!(memory.byte(0xFF01), 0x00);
+        assert_eq!(memory.byte(0xFF02), 1);
     }
 
     #[test]
