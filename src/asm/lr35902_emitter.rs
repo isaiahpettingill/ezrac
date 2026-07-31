@@ -1035,19 +1035,24 @@ impl Emitter {
             return Ok(false);
         };
         let source_ty = self.model.resolved_type(&self.expr_type(source)?)?;
-        if self.model.type_width(&source_ty)? != 1 {
-            return Ok(false);
-        }
-        let (Ok(mask), Ok(expected)) = (u8::try_from(mask), u8::try_from(expected)) else {
+        let width = self.model.type_width(&source_ty)?;
+        let (Ok(mask), Ok(expected)) = (u32::try_from(mask), u32::try_from(expected)) else {
             return Ok(false);
         };
-        if !mask.is_power_of_two() || (expected != 0 && expected != mask) {
+        let bits = u32::from(width) * 8;
+        let width_mask = if bits >= u32::BITS {
+            u32::MAX
+        } else {
+            (1_u32 << bits) - 1
+        };
+        if mask > width_mask || !mask.is_power_of_two() || (expected != 0 && expected != mask) {
             return Ok(false);
         }
 
         self.emit_expr(source, &source_ty)?;
-        self.lda(self.r0.address);
-        self.line(&format!("    bit {}, a", mask.trailing_zeros()));
+        let byte_offset = mask.trailing_zeros() / 8;
+        self.lda(self.r0.address + byte_offset);
+        self.line(&format!("    bit {}, a", mask.trailing_zeros() % 8));
         let branch = if (*op == BinaryOp::Eq) == (expected == 0) {
             "jp nz,"
         } else {
@@ -2842,13 +2847,22 @@ mod tests {
                     while (byte & 0x20u8) == 0 { break }
                     while (byte & 0x20u8) != 0 { break }
                 }
+                fn wide_bit_tests(word: u16, wide: u24) {
+                    if (word & 0x0400u16) == 0 { }
+                    if (word & 0x0400u16) != 0 { }
+                    if (wide & 0x100000u24) == 0 { }
+                    if (wide & 0x100000u24) != 0 { }
+                }
                 fn main() {
                     bit_tests(0x20u8)
+                    wide_bit_tests(0x0400u16, 0x100000u24)
                 }
             "#,
         );
 
         assert_eq!(assembly.matches("    bit 5, a").count(), 4, "{assembly}");
+        assert_eq!(assembly.matches("    bit 2, a").count(), 2, "{assembly}");
+        assert_eq!(assembly.matches("    bit 4, a").count(), 2, "{assembly}");
         assert!(!assembly.contains("    and b"), "{assembly}");
         for branch in [
             "    bit 5, a\n    jp nz, .L_if_else_",
