@@ -1,0 +1,7 @@
+volatile mmio buffer: ptr<u8> = 0x2000
+
+fn main() {
+    // The constant ascii string should be embedded in the data segment
+    // This should just copy the string into the buffer
+    *buffer = "Hello world!"
+}

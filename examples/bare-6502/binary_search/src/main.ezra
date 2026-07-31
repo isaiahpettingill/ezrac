@@ -1,0 +1,38 @@
+// output is true or false
+volatile mmio output: ptr<u8> = 0x2401
+// the value to search for
+volatile mmio search: ptr<u8> = 0x23FF
+
+// We assume input is an ordered list of u8 values
+volatile mmio input: ptr<u8> = 0x2301
+// the length of the input list
+volatile mmio input_length: ptr<u8> = 0x2300
+
+fn main() {
+    let target: u8 = *search
+    let start: u8 = 0
+    let length: u8 = *input_length
+
+    loop {
+        if length == 0 {
+            *output = 0
+            return
+        }
+
+        let offset: u8 = length / 2
+        let mid: u8 = start + offset
+        let value: u8 = *(input + mid)
+
+        if value == target {
+            *output = 1
+            return
+        }
+
+        if value < target {
+            start = mid + 1
+            length = length - offset - 1
+        } else {
+            length = offset
+        }
+    }
+}
