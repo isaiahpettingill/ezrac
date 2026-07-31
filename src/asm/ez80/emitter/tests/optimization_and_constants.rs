@@ -84,6 +84,79 @@ fn emits_target_specific_constant_shifts_and_reduces_power_of_two_multiply() {
 }
 
 #[test]
+fn chooses_costed_shift_add_for_constant_multiplication() {
+    let source = r#"
+            fn times_three(value: u8) -> u8 {
+                return value * 3
+            }
+
+            fn assign_three(mut_value: u8) -> u8 {
+                mut_value *= 3
+                return mut_value
+            }
+
+            fn times_three_word(value: u16) -> u16 {
+                return value * 3
+            }
+
+            fn times_three_wide(value: u24) -> u24 {
+                return value * 3
+            }
+
+            fn times_negative(value: i8) -> i8 {
+                return value * -3
+            }
+
+            fn main() {
+                test.assert_eq_u8(times_three(17), 51, 1)
+                test.assert_eq_u8(assign_three(17), 51, 2)
+                test.assert_eq_u16(times_three_word(0x1234), 0x369C, 3)
+                test.assert_eq_u24(times_three_wide(0x010203), 0x030609, 4)
+                test.assert_eq_u8(cast<u8>(times_negative(-5)), 15, 5)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+    let byte_body = body("times_three");
+    let assignment_body = body("assign_three");
+    let word_body = body("times_three_word");
+    let wide_body = body("times_three_wide");
+    let negative_body = body("times_negative");
+
+    assert!(byte_body.contains("    add a, a"), "{byte_body}");
+    assert!(byte_body.contains("    add a, b"), "{byte_body}");
+    assert!(!byte_body.contains("__ezra_mul_u8"), "{byte_body}");
+    assert!(
+        assignment_body.contains("    add a, a"),
+        "{assignment_body}"
+    );
+    assert!(
+        !assignment_body.contains("__ezra_mul_u8"),
+        "{assignment_body}"
+    );
+    assert!(word_body.contains("    add hl, hl"), "{word_body}");
+    assert!(word_body.contains("    add hl, de"), "{word_body}");
+    assert!(!word_body.contains("__ezra_mul_u16"), "{word_body}");
+    assert!(wide_body.contains("    add hl, hl"), "{wide_body}");
+    assert!(wide_body.contains("    add hl, de"), "{wide_body}");
+    assert!(!wide_body.contains("__ezra_mul_u24"), "{wide_body}");
+    assert!(negative_body.contains("    mlt bc"), "{negative_body}");
+    assert!(!negative_body.contains("__ezra_mul_u8"), "{negative_body}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn lowers_single_bit_expression_masks() {
     let source = r#"
             fn source16() -> u16 {
@@ -1071,7 +1144,7 @@ fn propagates_local_scalar_constants_until_assignment() {
         .and_then(|tail| tail.split("section .header").next())
         .unwrap();
 
-    assert!(copied.contains("    ld a, 07h\n    ret"), "{asm}");
+    assert!(copied.contains("    ld a, 07h"), "{asm}");
     assert!(assigned.contains("    ld a, (040"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");

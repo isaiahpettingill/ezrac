@@ -41,10 +41,11 @@ pub(crate) fn parse_instruction(
     cpu: AssemblerCpu,
     instruction: &AssemblyInstruction,
 ) -> Result<ArchitectureInstruction, Diagnostic> {
-    if instruction
-        .operands
-        .iter()
-        .any(|operand| operand.trim().is_empty())
+    if cpu != AssemblerCpu::M6809
+        && instruction
+            .operands
+            .iter()
+            .any(|operand| operand.trim().is_empty())
     {
         return Err(Diagnostic::at_span(
             SourceSpan {
@@ -319,6 +320,18 @@ mod tests {
         assert_eq!(
             parse(AssemblerCpu::M6800, "ldaa", &["1", "x"]).encoder_text(),
             "ldaa 1,x"
+        );
+    }
+
+    #[test]
+    fn m6809_accepts_zero_offset_indexing_and_indirection() {
+        assert_eq!(
+            parse(AssemblerCpu::M6809, "lda", &["", "x"]).encoder_text(),
+            "lda ,x"
+        );
+        assert_eq!(
+            parse(AssemblerCpu::M6809, "lda", &["[8", "s]"]).encoder_text(),
+            "lda [8,s]"
         );
     }
 

@@ -1007,6 +1007,20 @@ fn shift_facts(
     effects: Effects,
 ) -> ValueFacts {
     let proof = shift_proof(&value, &count);
+    if proof.definitely_overshift {
+        let mask = mask_for_width(scalar.width);
+        if !right || !scalar.signed {
+            return facts_from_known_bits(scalar, mask, 0, effects);
+        }
+        let sign = 1u64 << (scalar.width - 1);
+        if value.known_zero & sign != 0 {
+            return facts_from_known_bits(scalar, mask, 0, effects);
+        }
+        if value.known_one & sign != 0 {
+            return facts_from_known_bits(scalar, 0, mask, effects);
+        }
+        return full_facts(scalar).with_effects(effects);
+    }
     if !proof.definitely_in_range {
         return full_facts(scalar).with_effects(effects);
     }

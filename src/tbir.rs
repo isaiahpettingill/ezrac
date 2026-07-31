@@ -7,6 +7,8 @@ use crate::{
 };
 
 pub mod bit_ops;
+pub mod bytes;
+pub mod cost;
 pub mod diagnostics;
 pub mod dump;
 pub mod ez80;

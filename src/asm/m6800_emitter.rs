@@ -40,7 +40,7 @@ pub fn emit_m6800_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    Emitter::new(model)?.emit(&tbir.lowered_program).map(|asm| {
+    Emitter::new(model, CpuFamily::M6800)?.emit(&tbir.lowered_program).map(|asm| {
         let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
         with_readability_comments(asm, program, &options, "m6800")
     })
@@ -70,8 +70,12 @@ pub fn emit_m6809_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    Emitter::new(model)?.emit(&tbir.lowered_program).map(|asm| {
+    Emitter::new(model, CpuFamily::M6809)?.emit(&tbir.lowered_program).map(|asm| {
         let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
+        let asm = asm.replace(
+            "; target: Motorola M6800 scalar RAM ABI",
+            "; target: Motorola M6809 scalar RAM ABI",
+        );
         with_readability_comments(asm, program, &options, "m6809")
     })
 }
@@ -90,6 +94,7 @@ struct LoopLabels {
 
 struct Emitter {
     model: SemanticModel,
+    cpu: CpuFamily,
     out: String,
     labels: usize,
     scopes: Vec<HashMap<String, Binding>>,
@@ -100,10 +105,11 @@ struct Emitter {
 }
 
 impl Emitter {
-    fn new(mut model: SemanticModel) -> Result<Self, Diagnostic> {
+    fn new(mut model: SemanticModel, cpu: CpuFamily) -> Result<Self, Diagnostic> {
         let r1 = model.allocate(1)?;
         Ok(Self {
             model,
+            cpu,
             out: String::new(),
             labels: 0,
             scopes: Vec::new(),
@@ -226,10 +232,10 @@ impl Emitter {
                     self.emit_expr(value, &binding.ty)?;
                 } else {
                     self.ldaa(binding.storage.address);
-                    self.line("    psha");
+                    self.push_a();
                     self.emit_expr(value, &binding.ty)?;
-                    self.line("    tab");
-                    self.line("    pula");
+                    self.transfer_a_to_b();
+                    self.pull_a();
                     self.emit_assign_op(*op)?;
                 }
                 self.staa(binding.storage.address);
@@ -381,10 +387,10 @@ impl Emitter {
                     return Ok(());
                 }
                 self.emit_expr(left, &operand_ty)?;
-                self.line("    psha");
+                self.push_a();
                 self.emit_expr(right, &operand_ty)?;
                 self.staa(self.r1.address);
-                self.line("    pula");
+                self.pull_a();
                 self.emit_binary(*op)?;
             }
             Expr::Call { path, args } => self.emit_call(path, args, expected)?,
@@ -498,6 +504,17 @@ impl Emitter {
         match op {
             BinaryOp::Add => self.line("    adda >__ezra_r1"),
             BinaryOp::Sub => self.line("    suba >__ezra_r1"),
+            BinaryOp::Mul if self.cpu == CpuFamily::M6809 => {
+                self.transfer_a_to_b();
+                self.line("    ldab >__ezra_r1");
+                self.line("    mul");
+                self.line("    tfr b,a");
+            }
+            BinaryOp::Mul => {
+                return Err(Diagnostic::new(
+                    "M6800 source emitter does not support non-strength-reduced multiplication",
+                ));
+            }
             BinaryOp::BitAnd => self.line("    anda >__ezra_r1"),
             BinaryOp::BitOr => self.line("    oraa >__ezra_r1"),
             BinaryOp::BitXor => self.line("    eora >__ezra_r1"),
@@ -682,6 +699,30 @@ impl Emitter {
             })
             .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))
     }
+    fn push_a(&mut self) {
+        if self.cpu == CpuFamily::M6809 {
+            self.line("    pshs a");
+        } else {
+            self.line("    psha");
+        }
+    }
+
+    fn pull_a(&mut self) {
+        if self.cpu == CpuFamily::M6809 {
+            self.line("    puls a");
+        } else {
+            self.line("    pula");
+        }
+    }
+
+    fn transfer_a_to_b(&mut self) {
+        if self.cpu == CpuFamily::M6809 {
+            self.line("    tfr a,b");
+        } else {
+            self.line("    tab");
+        }
+    }
+
     fn ldaa(&mut self, address: u32) {
         self.line(&format!("    ldaa >{:04X}h", address));
     }
@@ -845,6 +886,8 @@ mod tests {
     use std::path::Path;
 
     use super::emit_m6800_assembly_with_options;
+    #[cfg(feature = "m6809")]
+    use super::emit_m6809_assembly_with_options;
     use crate::{
         asm::AssemblyOptions,
         parser::parse_program,
@@ -858,6 +901,17 @@ mod tests {
     fn m6800_options() -> AssemblyOptions {
         AssemblyOptions {
             cpu: CpuFamily::M6800,
+            ram_base: Address24::new(0xA000),
+            rodata_base: Address24::new(0x8000),
+            asset_base: Address24::new(0xC000),
+            ..AssemblyOptions::default()
+        }
+    }
+
+    #[cfg(feature = "m6809")]
+    fn m6809_options() -> AssemblyOptions {
+        AssemblyOptions {
+            cpu: CpuFamily::M6809,
             ram_base: Address24::new(0xA000),
             rodata_base: Address24::new(0x8000),
             asset_base: Address24::new(0xC000),
@@ -889,6 +943,22 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
     }
 
+    #[cfg(feature = "m6809")]
+    #[test]
+    fn m6809_source_uses_tbir_strength_reduction_and_assembles() {
+        let program = parse_program(
+            Path::new("m6809_tbir_test.ezra"),
+            "fn shift(value: u8) -> u8 { return value * 8 } fn scale(value: u8) -> u8 { return value * 3 } fn main() { let shifted: u8 = shift(1) let scaled: u8 = scale(3) }",
+        )
+        .unwrap();
+        let assembly = emit_m6809_assembly_with_options(&program, m6809_options()).unwrap();
+        assert!(assembly.contains("    asla\n"), "{assembly}");
+        assert!(assembly.contains("    mul\n"), "{assembly}");
+        assert!(assembly.contains("target: Motorola M6809"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M6809, &assembly, 0)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    }
+
     #[test]
     fn emits_original_m6800_constant_shift_instructions_and_strength_reduces_multiply() {
         let program = parse_program(
@@ -898,7 +968,12 @@ mod tests {
                 fn unsigned_right(value: u8) -> u8 { return value >> 3 }
                 fn signed_right(value: i8) -> i8 { return value >> 2 }
                 fn times_eight(value: u8) -> u8 { return value * 8 }
-                fn main() {}
+                fn main() {
+                    let left_value: u8 = left(1)
+                    let unsigned_value: u8 = unsigned_right(1)
+                    let signed_value: i8 = signed_right(1i8)
+                    let times_eight_value: u8 = times_eight(1)
+                }
             "#,
         )
         .unwrap();
@@ -1000,10 +1075,10 @@ mod tests {
         assert_eq!(assembly.matches("jsr _next").count(), 2, "{assembly}");
         assert!(!assembly.contains("jsr _record_pair"), "{assembly}");
         assert!(!assembly.contains("jsr _nested_pair"), "{assembly}");
-        assert!(assembly.contains("_record_pair:"), "{assembly}");
-        assert!(assembly.contains("_nested_pair:"), "{assembly}");
+        assert!(!assembly.contains("_record_pair:"), "{assembly}");
+        assert!(!assembly.contains("_nested_pair:"), "{assembly}");
         assert!(assembly.contains("_ready:"), "{assembly}");
-        assert_eq!(assembly.matches("jsr _ready").count(), 2, "{assembly}");
+        assert_eq!(assembly.matches("jsr _ready").count(), 1, "{assembly}");
     }
 
     #[test]

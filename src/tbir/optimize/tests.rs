@@ -329,6 +329,53 @@ fn folds_fully_known_one_bits_for_supported_local_integer_widths() {
 }
 
 #[test]
+fn range_facts_fold_pure_overshifts_and_extend_known_bits_to_u32() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn unsigned(value: u8) -> u8 { let count: u8 = 8 return value << count } fn signed() -> i8 { let value: i8 = -1i8 return value >> 8 } fn wide(value: u32) -> u32 { let high: u32 = value | 0xffff0000u32 return high | 0x0000ffffu32 }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Ez80);
+
+    let unsigned = function_named(&program, "unsigned");
+    assert!(matches!(
+        unsigned.body.last(),
+        Some(Stmt::Return(Some(Expr::TypedInt(0, Type::Named(ty))))) if ty == "u8"
+    ));
+
+    let signed = function_named(&program, "signed");
+    assert!(matches!(
+        signed.body.last(),
+        Some(Stmt::Return(Some(Expr::TypedInt(0xff, Type::Named(ty))))) if ty == "i8"
+    ));
+
+    let wide = function_named(&program, "wide");
+    assert!(matches!(
+        wide.body.last(),
+        Some(Stmt::Return(Some(Expr::TypedInt(0xffff_ffff, Type::Named(ty))))) if ty == "u32"
+    ));
+}
+
+#[test]
+fn range_facts_do_not_narrow_volatile_memory_reads() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "volatile mmio STATUS: ptr<u16> = 0x080000 fn test() -> u8 { return cast<u8>(*STATUS + 1) }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::Ez80);
+    let test = function_named(&program, "test");
+
+    assert!(matches!(
+        test.body.last(),
+        Some(Stmt::Return(Some(Expr::Cast { expr, .. })))
+            if matches!(expr.as_ref(), Expr::Binary { op: BinaryOp::Add, left, .. }
+                if matches!(left.as_ref(), Expr::Deref(pointer)
+                    if matches!(pointer.as_ref(), Expr::Ident(name) if name == "STATUS")))
+    ));
+}
+
+#[test]
 fn known_bits_keeps_address_taken_locals_and_branch_facts_local() {
     let program = parse_program(
         Path::new("test.ezra"),

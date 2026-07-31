@@ -12,6 +12,8 @@ use ez80::{Cpu, CpuMode, Machine, Reg8, Reg16};
 use ::m6800::{Cpu as M6800Cpu, MemoryBus as M6800MemoryBus};
 #[cfg(feature = "m68k")]
 use ::m68000::{M68000, MemoryAccess as M68kMemoryAccess, cpu_details::Mc68000};
+#[cfg(feature = "m6809")]
+use ::mc6809_core::{Cpu as M6809Cpu, Memory as M6809Memory};
 
 #[cfg(feature = "dcpu")]
 use crate::asm::dcpu;
@@ -136,6 +138,8 @@ mod runner {
             backends.push(Box::new(DcpuEmulator));
             #[cfg(feature = "m6800")]
             backends.push(Box::new(M6800Emulator));
+            #[cfg(feature = "m6809")]
+            backends.push(Box::new(M6809Emulator));
             #[cfg(feature = "m68k")]
             backends.push(Box::new(M68kEmulator));
 
@@ -818,6 +822,129 @@ mod runner {
         }
     }
 
+    #[cfg(feature = "m6809")]
+    pub struct M6809Emulator;
+
+    #[cfg(feature = "m6809")]
+    struct M6809TestMemory {
+        data: Vec<u8>,
+        halted: bool,
+        result_code: u8,
+        debug_output: Vec<u8>,
+        ports: [u8; 256],
+    }
+
+    #[cfg(feature = "m6809")]
+    impl M6809TestMemory {
+        fn new() -> Self {
+            Self {
+                data: vec![0; 0x10000],
+                halted: false,
+                result_code: 0,
+                debug_output: Vec::new(),
+                ports: [0; 256],
+            }
+        }
+
+        fn load(&mut self, base: u16, bytes: &[u8]) {
+            for (offset, &byte) in bytes.iter().enumerate() {
+                self.data[base.wrapping_add(offset as u16) as usize] = byte;
+            }
+        }
+    }
+
+    #[cfg(feature = "m6809")]
+    impl M6809Memory for M6809TestMemory {
+        fn read(&mut self, address: u16) -> u8 {
+            self.data[address as usize]
+        }
+
+        fn write(&mut self, address: u16, value: u8) {
+            match address {
+                0xFFF0 => self.debug_output.push(value),
+                0xFFF1 => self.result_code = value,
+                0xFFF2 if value == 1 => self.halted = true,
+                _ => self.data[address as usize] = value,
+            }
+        }
+    }
+
+    #[cfg(feature = "m6809")]
+    impl EmulatorBackend for M6809Emulator {
+        fn supports(&self, cpu_family: CpuFamily) -> bool {
+            cpu_family == CpuFamily::M6809
+        }
+
+        fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+            if image.base_addr > 0xFFFF {
+                return Err(Diagnostic::new(format!(
+                    "test image base address 0x{:X} is outside the 16-bit address space",
+                    image.base_addr
+                )));
+            }
+            if options.stack_top > 0xFFFF {
+                return Err(Diagnostic::new(format!(
+                    "test stack top 0x{:X} is outside the 16-bit address space",
+                    options.stack_top
+                )));
+            }
+
+            let code_start = image.base_addr as u16;
+            let mut memory = M6809TestMemory::new();
+            for (port, value) in &options.initial_ports {
+                memory.ports[*port as usize] = *value;
+            }
+            for (address, value) in &options.initial_memory {
+                if *address <= 0xFFFF {
+                    memory.data[*address as usize] = *value;
+                }
+            }
+            memory.load(code_start, &image.bytes);
+
+            let mut cpu = M6809Cpu::new();
+            {
+                let mut registers = cpu.registers_mut();
+                registers.pc = code_start;
+                registers.s = options.stack_top as u16;
+            }
+
+            for instruction in 0..options.instruction_budget {
+                cpu.step(&mut memory);
+                if cpu.illegal() {
+                    return Ok(TestRun {
+                        halted: false,
+                        result_code: memory.result_code,
+                        instructions: instruction + 1,
+                        debug_output: memory.debug_output,
+                        ports: memory.ports,
+                        failure: Some(TestRunFailure::IllegalInstruction {
+                            pc: cpu.registers().pc as u32,
+                        }),
+                    });
+                }
+                if cpu.halted() || memory.halted {
+                    return Ok(TestRun {
+                        halted: true,
+                        result_code: memory.result_code,
+                        instructions: instruction + 1,
+                        debug_output: memory.debug_output,
+                        ports: memory.ports,
+                        failure: None,
+                    });
+                }
+            }
+
+            Ok(TestRun {
+                halted: false,
+                result_code: memory.result_code,
+                instructions: options.instruction_budget,
+                debug_output: memory.debug_output,
+                ports: memory.ports,
+                failure: Some(TestRunFailure::Timeout),
+            })
+        }
+    }
+
     #[cfg(feature = "mos6502-emulator")]
     mod mos6502_backend {
         use super::*;
@@ -1233,6 +1360,13 @@ pub fn assemble_program_with_options_at(
                 validate_assembly_pc(cpu, pc, "org target")
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
+            AssemblyItem::Reserve(expression) => {
+                let known = labels.clone().into_iter().collect::<HashMap<_, _>>();
+                let count = reserve_len(expression, &known, pc)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                pc = checked_assembly_pc_advance(cpu, pc, count)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+            }
             AssemblyItem::Data { width, values } => {
                 pc = checked_assembly_pc_advance(cpu, pc, data_len(cpu, *width, values) as u32)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
@@ -1323,6 +1457,18 @@ pub fn assemble_program_with_options_at(
                 append_org_padding(&mut bytes, pc, new_pc)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 pc = new_pc;
+            }
+            AssemblyItem::Reserve(expression) => {
+                let count = reserve_len(expression, &labels, pc)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                let count = usize::try_from(count)
+                    .map_err(|_| Diagnostic::new("reserve size exceeds host addressable memory"))?;
+                let new_len = bytes.len().checked_add(count).ok_or_else(|| {
+                    Diagnostic::new("reserve size exceeds host addressable memory")
+                })?;
+                bytes.resize(new_len, 0);
+                pc = checked_assembly_pc_advance(cpu, pc, count as u32)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
             AssemblyItem::Data { width, values } => {
                 emit_data(cpu, *width, values, &encoder_symbols, pc, &mut bytes)
@@ -1575,8 +1721,18 @@ pub fn measure_assembly_program(
 pub fn measure_assembly_program_with_options(
     cpu: AssemblerCpu,
     program: &AssemblyProgram,
-    _options: &AssemblerSourceOptions,
+    options: &AssemblerSourceOptions,
 ) -> Result<usize, Diagnostic> {
+    // Reserve expressions can refer to labels, so use the normal two-pass
+    // assembler to resolve their size instead of treating them as zero-width.
+    if program
+        .items
+        .iter()
+        .any(|item| matches!(&item.kind, AssemblyItem::Reserve(_)))
+    {
+        return assemble_program_with_options_at(cpu, program, 0, options)
+            .map(|assembled| assembled.bytes.len());
+    }
     let mut len = 0usize;
     for item in &program.items {
         let item_len = match &item.kind {
@@ -1590,7 +1746,8 @@ pub fn measure_assembly_program_with_options(
             AssemblyItem::Label(_)
             | AssemblyItem::Equ { .. }
             | AssemblyItem::Section(_)
-            | AssemblyItem::Org(_) => 0,
+            | AssemblyItem::Org(_)
+            | AssemblyItem::Reserve(_) => 0,
         };
         len = len
             .checked_add(item_len)
@@ -1745,6 +1902,20 @@ fn eval_instruction_expression(
         }
     };
     eval_assembly_expression(&expression, labels, pc)
+}
+
+fn reserve_len(
+    expression: &AssemblyExpression,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+) -> Result<u32, Diagnostic> {
+    eval_assembly_expression(expression, labels, pc).map_err(|error| {
+        Diagnostic::new(format!(
+            "invalid reserve size `{}`: {}",
+            expression_text(expression),
+            error.message
+        ))
+    })
 }
 
 fn eval_assembly_expression(

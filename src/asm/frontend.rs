@@ -34,6 +34,7 @@ pub enum AssemblyItem {
     },
     Section(String),
     Org(AssemblyExpression),
+    Reserve(AssemblyExpression),
     Data {
         width: DataWidth,
         values: Vec<AssemblyDataValue>,
@@ -168,6 +169,7 @@ pub enum ParsedAssemblyItem {
     },
     Section(String),
     Org(String),
+    Reserve(String),
     Data {
         width: DataWidth,
         values: Vec<ParsedAssemblyDataValue>,
@@ -236,6 +238,9 @@ pub fn lower_parsed_assembly(parsed: ParsedAssembly) -> Result<AssemblyProgram, 
             ParsedAssemblyItem::Section(name) => AssemblyItem::Section(name),
             ParsedAssemblyItem::Org(value) => {
                 AssemblyItem::Org(parse_expression_at(&parsed.source_name, &value, &location)?)
+            }
+            ParsedAssemblyItem::Reserve(value) => {
+                AssemblyItem::Reserve(parse_expression_at(&parsed.source_name, &value, &location)?)
             }
             ParsedAssemblyItem::Data { width, values } => {
                 let mut lowered = Vec::new();
@@ -540,6 +545,20 @@ fn append_statement_text(
         );
     }
 
+    if is_reserve_directive(normalized_head) {
+        if rest.trim().is_empty() {
+            return Err(Diagnostic::at(
+                location,
+                "reserve directive requires a byte count",
+            ));
+        }
+        return push_parsed(
+            output,
+            location,
+            ParsedAssemblyItem::Reserve(rest.trim().to_owned()),
+        );
+    }
+
     if let Some(width) = data_width(normalized_head) {
         let fields = split_delimited(rest, ',')
             .map_err(|message| Diagnostic::at(location.clone(), message))?;
@@ -838,6 +857,12 @@ fn is_named_generic_directive(name: &str) -> bool {
     .any(|directive| name.eq_ignore_ascii_case(directive))
 }
 
+fn is_reserve_directive(directive: &str) -> bool {
+    directive.eq_ignore_ascii_case("ds")
+        || directive.eq_ignore_ascii_case("defs")
+        || directive.eq_ignore_ascii_case("reserve")
+}
+
 fn data_width(directive: &str) -> Option<DataWidth> {
     if directive.eq_ignore_ascii_case("db")
         || directive.eq_ignore_ascii_case("dm")
@@ -1067,6 +1092,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn reserve_directive_lowers_to_a_label_aware_fill() {
+        let lowered =
+            lower_parsed_assembly(parse("start: db 1\nend:\n    ds 4 - (end - start)\n")).unwrap();
+        let reserve = lowered
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                AssemblyItem::Reserve(expression) => Some(expression),
+                _ => None,
+            })
+            .expect("expected reserve directive");
+        assert!(matches!(reserve, AssemblyExpression::Binary { .. }));
     }
 
     #[test]

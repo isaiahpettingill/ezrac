@@ -38,10 +38,12 @@ use ezra::asm::emit_dcpu_assembly_with_options;
 use ezra::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "m68k")]
 use ezra::asm::emit_m68k_assembly_with_options;
+#[cfg(feature = "m6800")]
+use ezra::asm::emit_m6800_assembly_with_options;
+#[cfg(feature = "m6809")]
+use ezra::asm::emit_m6809_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use ezra::asm::emit_tms9900_assembly_with_options;
-#[cfg(any(feature = "m6800", feature = "m6809"))]
-use ezra::asm::{emit_m6800_assembly_with_options, emit_m6809_assembly_with_options};
 
 #[cfg(feature = "lsp")]
 mod lsp_server;
@@ -714,6 +716,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
     let assembler_cpu = options
         .assembler_cpu
         .unwrap_or_else(|| AssemblerCpu::from(target.triple.cpu));
+    validate_assembler_cpu_for_target(&target, assembler_cpu)?;
     let settings = BuildSettings {
         sdk: SdkResolver {
             target: Some(target.triple.value.clone()),
@@ -947,6 +950,10 @@ fn resolve_build_settings(
             .transpose()?
             .unwrap_or_else(|| AssemblerCpu::from(target.triple.cpu)),
     };
+    validate_assembler_cpu_for_target(&target, assembler_cpu)?;
+    if target.triple.value.starts_with("nes-") && output_format != OutputFormat::NesRom {
+        return Err("NES targets require `.nes` output".to_owned());
+    }
     let layout_path = options.layout_path().map(PathBuf::from).or_else(|| {
         project
             .as_ref()
@@ -1198,6 +1205,20 @@ fn emit_source_assembly(
 
 fn validate_layout_for_target(settings: &BuildSettings) -> Result<(), String> {
     validate_layout_for_target_profile(&settings.target, &settings.layout)
+}
+
+fn validate_assembler_cpu_for_target(
+    target: &TargetProfile,
+    assembler_cpu: AssemblerCpu,
+) -> Result<(), String> {
+    if target.triple.value.starts_with("nes-") && assembler_cpu != AssemblerCpu::Ricoh2A03 {
+        return Err(format!(
+            "target `{}` requires assembler CPU `2a03`, not `{}`",
+            target.triple.value,
+            assembler_cpu.as_str()
+        ));
+    }
+    Ok(())
 }
 
 fn max_address_for_target(target: &TargetProfile) -> u32 {
@@ -2669,6 +2690,14 @@ fn print_targets() {
             output: "bin",
             sdk: "none",
             status: "bare eZ80 target",
+        },
+        TargetRow {
+            triple: "nes-2a03",
+            cpu: "2a03",
+            address_width_bits: 16,
+            output: "nes",
+            sdk: "none",
+            status: "raw assembly NROM-128 target",
         },
         #[cfg(feature = "tms9900")]
         TargetRow {

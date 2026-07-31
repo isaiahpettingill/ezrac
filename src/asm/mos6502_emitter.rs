@@ -15,6 +15,7 @@ use crate::{
     target::CpuFamily,
     tbir::{
         TbirProgram,
+        cost::{CostCandidate, CostModel, InstructionCost},
         model::{SemanticModel, Storage},
     },
 };
@@ -48,6 +49,32 @@ pub fn emit_mos6502_assembly_with_options(
 struct Binding {
     storage: Storage,
     ty: Type,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConstantMultiplyPlan {
+    Zero,
+    Identity,
+    Shift { count: u32 },
+    ShiftAdd { count: u32, subtract: bool },
+    Horner { magnitude: u64 },
+    Fallback,
+}
+
+impl ConstantMultiplyPlan {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Zero => "zero",
+            Self::Identity => "identity",
+            Self::Shift { .. } => "shift",
+            Self::ShiftAdd {
+                subtract: false, ..
+            } => "shift-add",
+            Self::ShiftAdd { subtract: true, .. } => "shift-sub",
+            Self::Horner { .. } => "horner",
+            Self::Fallback => "runtime-multiply",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -305,7 +332,7 @@ impl Emitter {
                         );
                     } else if *op == AssignOp::Mul
                         && let Ok(factor) = self.model.const_value(value)
-                        && self.multiply_constant(width, factor)
+                        && self.multiply_constant(width, factor, type_is_signed(&ty), false)
                     {
                     } else {
                         let left = self.model.allocate(u32::from(width))?;
@@ -604,7 +631,12 @@ impl Emitter {
                 }
                 if *op == BinaryOp::Mul
                     && let Ok(factor) = self.model.const_value(right)
-                    && self.multiply_constant(operand_width, factor)
+                    && self.multiply_constant(
+                        operand_width,
+                        factor,
+                        type_is_signed(&operand_ty),
+                        true,
+                    )
                 {
                     return Ok(());
                 }
@@ -1011,40 +1043,108 @@ impl Emitter {
         }
     }
 
-    fn multiply_constant(&mut self, width: u8, factor: i64) -> bool {
-        let magnitude = factor.unsigned_abs();
-        match magnitude {
-            0 => self.zero(self.r0),
-            1 => {}
-            value if value.is_power_of_two() => {
-                self.shift_constant(width, false, false, value.trailing_zeros());
+    fn multiply_constant(
+        &mut self,
+        width: u8,
+        factor: i64,
+        signed: bool,
+        preserve_left: bool,
+    ) -> bool {
+        let magnitude = truncated_magnitude(width, factor);
+        let plans = constant_multiply_plans(width, magnitude);
+        let candidates = plans
+            .iter()
+            .map(|plan| {
+                CostCandidate::new(
+                    plan.name(),
+                    self.constant_multiply_plan_cost(
+                        *plan,
+                        width,
+                        magnitude,
+                        factor < 0,
+                        signed,
+                        preserve_left,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected = self
+            .constant_multiply_cost_model()
+            .choose_index(&candidates)
+            .expect("constant multiply candidate");
+        let plan = plans[selected];
+        if plan == ConstantMultiplyPlan::Fallback {
+            return false;
+        }
+
+        match plan {
+            ConstantMultiplyPlan::Zero => self.zero(self.r0),
+            ConstantMultiplyPlan::Identity => {}
+            ConstantMultiplyPlan::Shift { count } => {
+                self.shift_constant(width, false, false, count);
             }
-            3 | 5 | 7 | 9 => {
+            ConstantMultiplyPlan::ShiftAdd { count, subtract } => {
                 let original = self
                     .model
                     .allocate(u32::from(width))
                     .expect("constant multiply scratch");
                 self.copy(self.r0, original, u32::from(width));
-                let shift = if magnitude == 7 { 3 } else { magnitude.ilog2() };
-                self.shift_constant(width, false, false, shift);
+                self.shift_constant(width, false, false, count);
                 self.copy(original, self.r1, u32::from(width));
-                if magnitude == 7 {
+                if subtract {
                     self.sub(width);
                 } else {
                     self.add(width);
                 }
             }
-            6 | 10 => {
-                let optimized = self.multiply_constant(width, (magnitude / 2) as i64);
-                debug_assert!(optimized);
-                self.shift_constant(width, false, false, 1);
+            ConstantMultiplyPlan::Horner { magnitude } => {
+                let original = self
+                    .model
+                    .allocate(u32::from(width))
+                    .expect("constant multiply scratch");
+                self.copy(self.r0, original, u32::from(width));
+                let highest_bit = magnitude.ilog2();
+                for bit in (0..highest_bit).rev() {
+                    self.shift_constant(width, false, false, 1);
+                    if magnitude & (1u64 << bit) != 0 {
+                        self.copy(original, self.r1, u32::from(width));
+                        self.add(width);
+                    }
+                }
             }
-            _ => return false,
+            ConstantMultiplyPlan::Fallback => unreachable!(),
         }
         if factor < 0 {
             self.emit_unary(UnaryOp::Neg, width);
         }
         true
+    }
+
+    fn constant_multiply_cost_model(&self) -> CostModel {
+        // Multiplication does not promise any particular flags to its caller.
+        // CPU-specific instruction costs still distinguish NMOS/2A03 from the
+        // CMOS variants, notably for STZ in byte moves and zeroing.
+        CostModel::balanced().with_live_flags(crate::tbir::cost::FlagSet::NONE)
+    }
+
+    fn constant_multiply_plan_cost(
+        &self,
+        plan: ConstantMultiplyPlan,
+        width: u8,
+        magnitude: u64,
+        negative: bool,
+        signed: bool,
+        preserve_left: bool,
+    ) -> InstructionCost {
+        constant_multiply_plan_cost(
+            plan,
+            width,
+            magnitude,
+            negative,
+            signed,
+            preserve_left,
+            self.supports_65c02(),
+        )
     }
 
     fn multiply(&mut self, width: u8, signed: bool) {
@@ -2182,6 +2282,303 @@ fn shift_cost(
     byte_moves + bit_count * per_bit
 }
 
+#[derive(Default)]
+struct CostAccumulator {
+    bytes: u32,
+    cycles: u32,
+    temporaries: u8,
+}
+
+impl CostAccumulator {
+    fn add(&mut self, cost: InstructionCost) {
+        self.bytes = self.bytes.saturating_add(u32::from(cost.bytes));
+        self.cycles = self.cycles.saturating_add(cost.cycles);
+        self.temporaries = self.temporaries.max(cost.temporaries);
+    }
+
+    fn add_repeated(&mut self, cost: InstructionCost, count: u32) {
+        self.bytes = self
+            .bytes
+            .saturating_add(u32::from(cost.bytes).saturating_mul(count));
+        self.cycles = self
+            .cycles
+            .saturating_add(cost.cycles.saturating_mul(count));
+        self.temporaries = self.temporaries.max(cost.temporaries);
+    }
+
+    fn finish(self) -> InstructionCost {
+        InstructionCost::new(
+            self.bytes.min(u32::from(u16::MAX)) as u16,
+            self.cycles,
+            self.temporaries,
+            crate::tbir::cost::FlagEffects::none(),
+        )
+    }
+}
+
+fn instruction_cost(bytes: u32, cycles: u32, temporaries: u8) -> InstructionCost {
+    InstructionCost::new(
+        bytes.min(u32::from(u16::MAX)) as u16,
+        cycles,
+        temporaries,
+        crate::tbir::cost::FlagEffects::none(),
+    )
+}
+
+fn truncated_magnitude(width: u8, factor: i64) -> u64 {
+    let magnitude = factor.unsigned_abs();
+    let bits = u32::from(width) * 8;
+    if bits >= 64 {
+        magnitude
+    } else {
+        magnitude & ((1u64 << bits) - 1)
+    }
+}
+
+fn constant_multiply_plans(width: u8, magnitude: u64) -> Vec<ConstantMultiplyPlan> {
+    let mut plans = Vec::new();
+    match magnitude {
+        0 => plans.push(ConstantMultiplyPlan::Zero),
+        1 => plans.push(ConstantMultiplyPlan::Identity),
+        value => {
+            if value.is_power_of_two() {
+                plans.push(ConstantMultiplyPlan::Shift {
+                    count: value.trailing_zeros(),
+                });
+            }
+            let bits = (u32::from(width) * 8).min(63);
+            for count in 2..=bits {
+                let power = 1u64 << count;
+                if value == power - 1 {
+                    plans.push(ConstantMultiplyPlan::ShiftAdd {
+                        count,
+                        subtract: true,
+                    });
+                } else if value == power + 1 {
+                    plans.push(ConstantMultiplyPlan::ShiftAdd {
+                        count,
+                        subtract: false,
+                    });
+                }
+            }
+            plans.push(ConstantMultiplyPlan::Horner { magnitude: value });
+        }
+    }
+    plans.push(ConstantMultiplyPlan::Fallback);
+    plans
+}
+
+fn constant_multiply_plan_cost(
+    plan: ConstantMultiplyPlan,
+    width: u8,
+    magnitude: u64,
+    negative: bool,
+    signed: bool,
+    preserve_left: bool,
+    cmos: bool,
+) -> InstructionCost {
+    let mut cost = CostAccumulator::default();
+    match plan {
+        ConstantMultiplyPlan::Zero => cost.add(zero_cost(width, cmos)),
+        ConstantMultiplyPlan::Identity => {}
+        ConstantMultiplyPlan::Shift { count } => {
+            cost.add(constant_shift_left_cost(width, count, cmos));
+        }
+        ConstantMultiplyPlan::ShiftAdd { count, subtract } => {
+            cost.add(copy_cost(width));
+            cost.add(constant_shift_left_cost(width, count, cmos));
+            cost.add(copy_cost(width));
+            cost.add(if subtract {
+                sub_cost(width)
+            } else {
+                add_cost(width)
+            });
+            cost.temporaries = 1;
+        }
+        ConstantMultiplyPlan::Horner { magnitude } => {
+            cost.add(copy_cost(width));
+            cost.temporaries = 1;
+            for bit in (0..magnitude.ilog2()).rev() {
+                cost.add(shift_once_left_cost(width));
+                if magnitude & (1u64 << bit) != 0 {
+                    cost.add(copy_cost(width));
+                    cost.add(add_cost(width));
+                }
+            }
+        }
+        ConstantMultiplyPlan::Fallback => {
+            cost.add(fallback_multiply_cost(
+                width,
+                magnitude,
+                signed,
+                preserve_left,
+                cmos,
+            ));
+        }
+    }
+    if negative
+        && !matches!(
+            plan,
+            ConstantMultiplyPlan::Zero | ConstantMultiplyPlan::Fallback
+        )
+    {
+        cost.add(negate_cost(width));
+    }
+    cost.finish()
+}
+
+fn fallback_multiply_cost(
+    width: u8,
+    magnitude: u64,
+    signed: bool,
+    preserve_left: bool,
+    cmos: bool,
+) -> InstructionCost {
+    let mut cost = CostAccumulator::default();
+    if preserve_left {
+        cost.add(copy_cost(width));
+    }
+    cost.add(load_constant_cost(width));
+    cost.add(copy_cost(width));
+    if preserve_left {
+        cost.add(copy_cost(width));
+    }
+
+    if width == 2 && !signed {
+        // The helper is emitted once when selected. Include its code and its
+        // fixed 16-iteration run so a long constant chain does not win only
+        // because the helper call itself is short.
+        cost.add(instruction_cost(3, 6, 0));
+        cost.add(instruction_cost(64, 800, 0));
+    } else {
+        cost.add(generic_multiply_cost(width, magnitude, signed, cmos));
+    }
+    cost.finish()
+}
+
+fn generic_multiply_cost(width: u8, magnitude: u64, signed: bool, cmos: bool) -> InstructionCost {
+    let mut cost = CostAccumulator::default();
+    if signed {
+        cost.add(zero_cost(1, cmos));
+        cost.add(signed_normalize_cost(width, false));
+        cost.add(signed_normalize_cost(width, true));
+    }
+    cost.add(copy_cost(width));
+    cost.add(copy_cost(width));
+    cost.add(zero_cost(width, cmos));
+
+    let check = instruction_cost(8, 9, 0);
+    let body = {
+        let mut body = CostAccumulator::default();
+        body.add(copy_cost(width));
+        body.add(add_cost(width));
+        body.add(decrement_cost(width));
+        body.add(instruction_cost(3, 3, 0));
+        body.finish()
+    };
+    let zero_check = {
+        let mut check_cost = CostAccumulator::default();
+        check_cost.add_repeated(check, u32::from(width));
+        check_cost.add(instruction_cost(3, 3, 0));
+        check_cost.finish()
+    };
+    let iterations = magnitude.min(u64::from(u32::MAX)) as u32;
+    cost.add(zero_check);
+    cost.add(body);
+    cost.cycles = cost.cycles.saturating_add(
+        body.cycles
+            .saturating_mul(iterations)
+            .saturating_add(zero_check.cycles.saturating_mul(iterations)),
+    );
+    if signed {
+        cost.add(signed_negate_if_flag_cost(width));
+        cost.temporaries = 3;
+    } else {
+        cost.temporaries = 2;
+    }
+    cost.finish()
+}
+
+fn signed_normalize_cost(width: u8, toggle: bool) -> InstructionCost {
+    let mut cost = CostAccumulator::default();
+    cost.add(instruction_cost(8, 9, 0));
+    cost.add(if toggle {
+        instruction_cost(8, 10, 0)
+    } else {
+        instruction_cost(5, 6, 0)
+    });
+    cost.add(negate_cost(width));
+    cost.finish()
+}
+
+fn signed_negate_if_flag_cost(width: u8) -> InstructionCost {
+    let mut cost = CostAccumulator::default();
+    cost.add(instruction_cost(8, 9, 0));
+    cost.add(negate_cost(width));
+    cost.finish()
+}
+
+fn zero_cost(width: u8, cmos: bool) -> InstructionCost {
+    let width = u32::from(width);
+    if cmos {
+        instruction_cost(3 * width, 4 * width, 0)
+    } else {
+        instruction_cost(2 + 3 * width, 2 + 4 * width, 0)
+    }
+}
+
+fn load_constant_cost(width: u8) -> InstructionCost {
+    let width = u32::from(width);
+    instruction_cost(5 * width, 6 * width, 0)
+}
+
+fn copy_cost(width: u8) -> InstructionCost {
+    let width = u32::from(width);
+    instruction_cost(6 * width, 8 * width, 0)
+}
+
+fn add_cost(width: u8) -> InstructionCost {
+    let width = u32::from(width);
+    instruction_cost(1 + 9 * width, 2 + 12 * width, 0)
+}
+
+fn sub_cost(width: u8) -> InstructionCost {
+    add_cost(width)
+}
+
+fn decrement_cost(width: u8) -> InstructionCost {
+    let width = u32::from(width);
+    instruction_cost(1 + 8 * width, 2 + 10 * width, 0)
+}
+
+fn negate_cost(width: u8) -> InstructionCost {
+    let width = u32::from(width);
+    instruction_cost(1 + 13 * width, 2 + 16 * width, 0)
+}
+
+fn shift_once_left_cost(width: u8) -> InstructionCost {
+    let width = u32::from(width);
+    instruction_cost(1 + 3 * width, 2 + 6 * width, 0)
+}
+
+fn constant_shift_left_cost(width: u8, count: u32, cmos: bool) -> InstructionCost {
+    let bits = u32::from(width) * 8;
+    let count = count.min(bits);
+    let byte_count = count / 8;
+    let bit_count = count % 8;
+    let bytewise_cost = shift_cost(width, byte_count, bit_count, false, false, cmos);
+    let carry_cost = shift_cost(width, 0, count, false, false, cmos);
+    let mut cost = CostAccumulator::default();
+    if byte_count != 0 && bytewise_cost < carry_cost {
+        cost.add(copy_cost((u32::from(width) - byte_count) as u8));
+        cost.add(zero_cost(byte_count as u8, cmos));
+        cost.add_repeated(shift_once_left_cost(width), bit_count);
+    } else {
+        cost.add_repeated(shift_once_left_cost(width), count);
+    }
+    cost.finish()
+}
+
 fn is_comparison(op: BinaryOp) -> bool {
     matches!(
         op,
@@ -2539,8 +2936,8 @@ mod structural_tests {
     fn selects_shift_add_instructions_for_small_constant_multiplication() {
         let assembly = emit(
             r#"
+                global value: u16 = 0x1234
                 fn main() {
-                    let value: u16 = 0x1234
                     let times_three: u16 = value * 3
                     let times_seven: u16 = value * 7
                     let times_eight: u16 = value * 8
@@ -2564,6 +2961,46 @@ mod structural_tests {
             0x0200,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn costed_constant_multiplication_accounts_for_cpu_variant() {
+        let source = r#"
+            global value: u16 = 0x1234
+            fn main() {
+                let times_seven: u16 = value * 7
+                let times_eight: u16 = value * 8
+                let byte_aligned: u16 = value * 256
+            }
+        "#;
+        let nmos = emit_for_cpu(source, CpuFamily::Mos6502);
+        let cmos = emit_for_cpu(source, CpuFamily::Cmos65C02);
+
+        for (assembly, cpu) in [
+            (&nmos, crate::target::AssemblerCpu::Mos6502),
+            (&cmos, crate::target::AssemblerCpu::Cmos65C02),
+        ] {
+            assert!(!assembly.contains(U16_MUL_HELPER), "{assembly}");
+            assert!(!assembly.contains("mul_loop"), "{assembly}");
+            assert!(assembly.contains("    sbc $"), "{assembly}");
+            assert!(assembly.contains("    rol $"), "{assembly}");
+            crate::vm::assemble_subset_with_symbols_at(cpu, assembly, 0x0200)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        }
+        assert!(!nmos.contains("    stz $"), "{nmos}");
+        assert!(cmos.contains("    stz $"), "{cmos}");
+
+        let large = emit(
+            r#"
+                global value: u16 = 0x1234
+                fn main() { let product: u16 = value * 0xFFFE }
+            "#,
+        );
+        assert!(
+            large.contains(&format!("    jsr {U16_MUL_HELPER}")),
+            "{large}"
+        );
+        assert_eq!(large.matches(&format!("{U16_MUL_HELPER}:")).count(), 1);
     }
 
     #[test]
@@ -3113,6 +3550,38 @@ mod tests {
         assert_eq!(memory.byte(0xFF02), 0x6B);
         assert_eq!(memory.byte(0xFF03), 0x18);
         assert_eq!(memory.byte(0xFF04), 255);
+    }
+
+    #[test]
+    fn executes_signed_constant_multiplication_after_volatile_u16_load() {
+        let source = r#"
+            volatile mmio INPUT: ptr<u16> = 0xD000
+            volatile mmio RESULT0: ptr<u8> = 0xFF00
+            volatile mmio RESULT1: ptr<u8> = 0xFF01
+            global calls: u8 = 0
+
+            fn read_input() -> i16 {
+                calls += 1
+                return cast<i16>(*(INPUT))
+            }
+
+            fn main() {
+                *(INPUT) = 3
+                let product: i16 = read_input() * -7
+                *(RESULT0) = cast<u8>(product)
+                *(RESULT1) = calls
+            }
+        "#;
+        let assembly = emit(source);
+        assert!(assembly.contains("    jsr _read_input"), "{assembly}");
+        assert!(
+            assembly.matches("    lda ($F0),y").count() >= 2,
+            "{assembly}"
+        );
+
+        let memory = run(source, 5_000);
+        assert_eq!(memory.byte(0xFF00), 0xEB);
+        assert_eq!(memory.byte(0xFF01), 1);
     }
 
     #[test]

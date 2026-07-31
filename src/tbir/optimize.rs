@@ -9,7 +9,9 @@ use crate::{
 
 use super::{
     TbirAccess, TbirObjectKind, TbirOptimizationDecision, TbirOptimizationKind,
-    TbirOptimizationOutcome, TbirOptimizationReport, provenance::OptimizationContext,
+    TbirOptimizationOutcome, TbirOptimizationReport,
+    provenance::OptimizationContext,
+    range::{RangeAnalysis, ValueFacts},
 };
 
 #[path = "demand.rs"]
@@ -2264,6 +2266,11 @@ fn known_bits_block(
             }
             Stmt::While { body, .. } | Stmt::Loop { body } => {
                 let mut body_facts = facts.clone();
+                let mut assigned = HashSet::new();
+                collect_assigned_names(body, &mut assigned);
+                for name in assigned {
+                    body_facts.remove(&name);
+                }
                 known_bits_block(body, address_taken, return_ty, &mut body_facts);
             }
             Stmt::Asm { outputs, .. } => {
@@ -2377,7 +2384,87 @@ fn known_bits_expr(
                 mask,
             )
         }
-        other => (other, None),
+        other => range_known_bits(other, facts, expected_ty, mask),
+    }
+}
+
+fn range_known_bits(
+    expr: Expr,
+    known_bits: &HashMap<String, KnownBits>,
+    expected_ty: &Type,
+    mask: i64,
+) -> (Expr, Option<KnownBits>) {
+    if !range_expression_is_local(&expr, known_bits)
+        || range_expression_has_invalid_literal(&expr, expected_ty)
+    {
+        return (expr, None);
+    }
+
+    let mut analysis = RangeAnalysis::new();
+    for (name, fact) in known_bits {
+        let Some(value) = ValueFacts::from_known_bits(&fact.ty, fact.zero as u64, fact.one as u64)
+        else {
+            continue;
+        };
+        analysis.bind(name.clone(), value);
+    }
+    let value = analysis.analyze(&expr, expected_ty);
+    if value.bit_width == 0 || !value.effects.is_pure() {
+        return (expr, None);
+    }
+
+    let fact = KnownBits {
+        ty: expected_ty.clone(),
+        zero: value.known_zero as i64 & mask,
+        one: value.known_one as i64 & mask,
+    };
+    known_bits_fold(expr, Some(fact), mask)
+}
+
+fn range_expression_has_invalid_literal(expr: &Expr, expected_ty: &Type) -> bool {
+    match expr {
+        Expr::Int(value) => known_bits_mask(expected_ty)
+            .is_some_and(|mask| !known_bits_value_fits(*value, expected_ty, mask)),
+        Expr::TypedInt(value, ty) => known_bits_mask(ty)
+            .is_some_and(|mask| !known_bits_value_fits(*value, ty, mask)),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            range_expression_has_invalid_literal(expr, expected_ty)
+        }
+        Expr::Binary { left, right, .. } => {
+            range_expression_has_invalid_literal(left, expected_ty)
+                || range_expression_has_invalid_literal(right, expected_ty)
+        }
+        _ => false,
+    }
+}
+
+fn range_expression_is_local(expr: &Expr, known_bits: &HashMap<String, KnownBits>) -> bool {
+    match expr {
+        Expr::Ident(name) => known_bits.contains_key(name),
+        Expr::Int(_) | Expr::TypedInt(_, _) => true,
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            range_expression_is_local(expr, known_bits)
+        }
+        Expr::Binary { left, right, .. } => {
+            range_expression_is_local(left, known_bits)
+                && range_expression_is_local(right, known_bits)
+        }
+        Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::In(_)
+        | Expr::Index { .. }
+        | Expr::AddressOfIndex { .. }
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. }
+        | Expr::Access(_)
+        | Expr::AddressOfAccess(_)
+        | Expr::AddressOf(_)
+        | Expr::Deref(_)
+        | Expr::BankedPointer { .. }
+        | Expr::Array(_)
+        | Expr::StructInit { .. }
+        | Expr::Call { .. } => false,
     }
 }
 
@@ -2422,6 +2509,7 @@ fn known_bits_mask(ty: &Type) -> Option<i64> {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => Some(0xff),
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Some(0xffff),
         Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Some(0xffffff),
+        Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Some(0xffff_ffff),
         _ => None,
     }
 }

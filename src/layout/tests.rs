@@ -93,6 +93,22 @@ fn ti99_4a_layout_reserves_console_io_and_uses_cartridge_rom() {
 }
 
 #[test]
+fn nes_2a03_layout_keeps_file_header_and_prg_in_the_16_bit_map() {
+    let layout = Layout::nes_2a03();
+
+    layout.validate().unwrap();
+    assert_eq!(layout.load.get(), 0xBFF0);
+    assert_eq!(layout.entry.get(), 0xC000);
+    assert_eq!(layout.stack.get(), 0x01FF);
+    assert!(layout.regions.iter().any(|region| {
+        region.name == "header" && region.start.get() == 0xBFF0 && region.end.get() == 0xBFFF
+    }));
+    assert!(layout.regions.iter().any(|region| {
+        region.name == "prg" && region.start.get() == 0xC000 && region.end.get() == 0xFFFF
+    }));
+}
+
+#[test]
 fn bare_6502_layout_reserves_zero_page_and_hardware_stack() {
     let layout = Layout::bare_6502();
     layout.validate().unwrap();

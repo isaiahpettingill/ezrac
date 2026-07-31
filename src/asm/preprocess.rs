@@ -682,6 +682,7 @@ fn substitute_item_fields(
         },
         ParsedAssemblyItem::Section(name) => ParsedAssemblyItem::Section(substitute(name)),
         ParsedAssemblyItem::Org(value) => ParsedAssemblyItem::Org(substitute(value)),
+        ParsedAssemblyItem::Reserve(value) => ParsedAssemblyItem::Reserve(substitute(value)),
         ParsedAssemblyItem::Data { width, values } => ParsedAssemblyItem::Data {
             width,
             values: values

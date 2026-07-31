@@ -6,4 +6,5 @@
 /examples/**/*.map
 /examples/**/*.bin
 /examples/**/*.gaem
+/examples/**/*.nes
 /examples/**/captures/

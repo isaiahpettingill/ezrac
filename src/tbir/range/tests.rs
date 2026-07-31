@@ -119,6 +119,49 @@ fn classifies_safe_maybe_overshift_and_definite_overshift() {
 }
 
 #[test]
+fn transfers_definite_overshift_to_zero_or_sign_fill() {
+    let unsigned_left = analyze_expr(
+        &binary(
+            Expr::Ident("value".to_owned()),
+            BinaryOp::Shl,
+            Expr::TypedInt(8, ty("u8")),
+        ),
+        &ty("u8"),
+    );
+    assert!(unsigned_left.is_known_zero());
+
+    let unsigned_right = analyze_expr(
+        &binary(
+            Expr::Ident("value".to_owned()),
+            BinaryOp::Shr,
+            Expr::TypedInt(8, ty("u8")),
+        ),
+        &ty("u8"),
+    );
+    assert!(unsigned_right.is_known_zero());
+
+    let signed_negative = analyze_expr(
+        &binary(
+            Expr::TypedInt(-1, ty("i8")),
+            BinaryOp::Shr,
+            Expr::TypedInt(8, ty("u8")),
+        ),
+        &ty("i8"),
+    );
+    assert_eq!(signed_negative.exact_unsigned(), Some(0xff));
+
+    let signed_unknown = analyze_expr(
+        &binary(
+            Expr::Ident("value".to_owned()),
+            BinaryOp::Shr,
+            Expr::TypedInt(8, ty("u8")),
+        ),
+        &ty("i8"),
+    );
+    assert!(!signed_unknown.is_exact());
+}
+
+#[test]
 fn keeps_alignment_conservative_when_shift_count_may_overshift() {
     let facts = analyze_expr(
         &binary(

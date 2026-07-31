@@ -54,6 +54,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
+| `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | none | Optional `mos6502` feature; raw assembly NROM-128 target |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
@@ -387,6 +388,18 @@ This MOS 6510 (6502-compatible) target has direct EZRA-to-6502 code generation a
 Bundled modules are `c64.vic` (VIC-II graphics, screen/color RAM, raster, IRQ, sprites), `c64.sid` (three SID voices and filters), `c64.cia` (keyboard, joysticks, timers, IRQ), and `c64.memory` (6510 `$0001` ROM/I/O banking). Call `memory.map_roms_and_io()` before hardware MMIO after changing bank state. See `docs/targets/commodore64.md` for register API details and Play96 real-core validation.
 
 Default layout reserves zero page and stack, loads code at `$080D`, uses `$4000..$7FFF` for read-only data, `$8000..$BFFF` for assets, `$C000..$CFFF` for RAM, and reserves `$D000..$DFFF` for volatile I/O.
+
+## Nintendo Entertainment System
+
+The `nes-2a03` target is an assembly-only Ricoh 2A03 target. It accepts a complete iNES NROM-128 image in raw assembly, including its own 16-byte header, 16 KiB PRG-ROM, interrupt vectors, and 8 KiB CHR-ROM. The target writes a validating `.nes` package and rejects other mapper/page layouts. The upstream hello-world example is under [`examples/nes-2a03/hello-world`](../examples/nes-2a03/hello-world).
+
+The source uses `$BFF0` as the file-coordinate load address for the iNES header and starts PRG code at `$C000`. Build it with:
+
+```sh
+cargo run -- build examples/nes-2a03/hello-world/helloWorld.asm
+```
+
+Run the resulting `target/nes-2a03/helloWorld.nes` in an NES emulator. The target currently has no EZRA source backend or emulator-backed NES test runner.
 
 ## Nintendo Game Boy
 

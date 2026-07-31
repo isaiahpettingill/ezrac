@@ -4,10 +4,12 @@ use crate::asm::emit_avr_assembly_with_options;
 use crate::asm::emit_dcpu_assembly_with_options;
 #[cfg(feature = "i8086")]
 use crate::asm::emit_i8086_assembly_with_options;
+#[cfg(feature = "m6800")]
+use crate::asm::emit_m6800_assembly_with_options;
+#[cfg(feature = "m6809")]
+use crate::asm::emit_m6809_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
-#[cfg(any(feature = "m6800", feature = "m6809"))]
-use crate::asm::{emit_m6800_assembly_with_options, emit_m6809_assembly_with_options};
 
 use std::{
     collections::{HashMap, HashSet},

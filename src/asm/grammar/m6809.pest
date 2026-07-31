@@ -6,5 +6,5 @@ architecture_operands = { m6809_operand ~ (architecture_ws ~ architecture_comma 
 m6809_operand = { m6809_element* }
 m6809_element = _{ m6809_parenthesized | m6809_bracketed | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
 m6809_nested_element = _{ m6809_parenthesized | m6809_bracketed | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
-m6809_parenthesized = { architecture_lparen ~ architecture_ws ~ m6809_nested_element* ~ architecture_ws ~ architecture_rparen }
-m6809_bracketed = { architecture_lbracket ~ architecture_ws ~ m6809_nested_element* ~ architecture_ws ~ architecture_rbracket }
+m6809_parenthesized = { architecture_lparen ~ architecture_ws ~ m6809_nested_element ~ (architecture_ws ~ m6809_nested_element)* ~ architecture_ws ~ architecture_rparen }
+m6809_bracketed = { architecture_lbracket ~ architecture_ws ~ m6809_nested_element ~ (architecture_ws ~ m6809_nested_element)* ~ architecture_ws ~ architecture_rbracket }

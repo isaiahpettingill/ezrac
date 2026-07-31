@@ -710,7 +710,7 @@ fn emits_and_runs_arithmetic_compound_assignments() {
     let asm = emit_ez80_assembly(&program).unwrap();
     let run = run_assembly_test(&asm, 1_000_000).unwrap();
 
-    assert!(asm.contains("    call __ezra_mul_u8"), "{asm}");
+    assert!(!asm.contains("    call __ezra_mul_u8"), "{asm}");
     assert!(asm.contains("    call __ezra_div_u8"), "{asm}");
     assert!(asm.contains("    call __ezra_mod_u8"), "{asm}");
     assert!(run.halted, "{asm}");

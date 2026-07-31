@@ -197,11 +197,60 @@ pub fn package_executable_with_context(
         OutputFormat::GameBoyGb => game_boy_rom_bytes(request, context, code),
         OutputFormat::Commodore64Prg => commodore64_prg_bytes(request, code),
         OutputFormat::Commodore64Crt => commodore64_crt_bytes(request, code),
+        OutputFormat::NesRom => nes_rom_bytes(request, code),
         OutputFormat::Ti8ek | OutputFormat::Ti8xk => Err(PackageError::new(format!(
             "TI flash application output `.{}` is not implemented; use `.8xp` protected-program output",
             request.output_format.extension()
         ))),
     }
+}
+
+fn nes_rom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
+    if !request.target.starts_with("nes-") {
+        return Err(PackageError::new(format!(
+            "target `{}` does not support NES `.nes` output",
+            request.target
+        )));
+    }
+    if request.load_addr != 0xBFF0 || request.entry_addr != 0xC000 {
+        return Err(PackageError::new(
+            "NES NROM layouts must load at 0xBFF0 and enter at 0xC000",
+        ));
+    }
+    const HEADER_SIZE: usize = 16;
+    const PRG_SIZE: usize = 0x4000;
+    const CHR_SIZE: usize = 0x2000;
+    const IMAGE_SIZE: usize = HEADER_SIZE + PRG_SIZE + CHR_SIZE;
+    if code.len() != IMAGE_SIZE {
+        return Err(PackageError::new(format!(
+            "NES NROM image must be exactly {IMAGE_SIZE} bytes (16 KiB PRG + 8 KiB CHR), got {}",
+            code.len()
+        )));
+    }
+    if &code[..4] != b"NES\x1A" {
+        return Err(PackageError::new(
+            "NES image is missing the iNES magic header `NES\\x1A`",
+        ));
+    }
+    if code[4] != 1 || code[5] != 1 {
+        return Err(PackageError::new(
+            "NES target currently supports only one 16 KiB PRG page and one 8 KiB CHR page",
+        ));
+    }
+    if code[6] != 0 || code[7] != 0 {
+        return Err(PackageError::new(
+            "NES target currently supports only mapper 0 without a trainer",
+        ));
+    }
+    for offset in [0x400A, 0x400C, 0x400E] {
+        let vector = u16::from_le_bytes([code[offset], code[offset + 1]]);
+        if !(0xC000..=0xFFFF).contains(&vector) {
+            return Err(PackageError::new(format!(
+                "NES interrupt vector at file offset 0x{offset:04X} points outside PRG-ROM: 0x{vector:04X}"
+            )));
+        }
+    }
+    Ok(code.to_vec())
 }
 
 fn commodore64_prg_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
@@ -1108,6 +1157,50 @@ fn game_boy_cartridge_header(options: &GameBoyPackageOptions) -> Result<(u8, u8)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packages_nes_nrom_image_without_adding_a_second_header() {
+        let mut image = vec![0; 0x6010];
+        image[..8].copy_from_slice(b"NES\x1A\x01\x01\0\0");
+        for (offset, vector) in [(0x400A, 0xC000u16), (0x400C, 0xC010), (0x400E, 0xC020)] {
+            image[offset..offset + 2].copy_from_slice(&vector.to_le_bytes());
+        }
+        let packaged = package_executable(
+            &PackageRequest::new("nes-2a03", OutputFormat::NesRom, 0xBFF0, 0xC000),
+            &image,
+        )
+        .unwrap();
+        assert_eq!(packaged, image);
+    }
+
+    #[test]
+    fn rejects_nes_images_with_the_wrong_mapper_or_size() {
+        let mut image = vec![0; 0x6010];
+        image[..8].copy_from_slice(b"NES\x1A\x01\x01\0\0");
+        for offset in [0x400A, 0x400C, 0x400E] {
+            image[offset..offset + 2].copy_from_slice(&0xC000u16.to_le_bytes());
+        }
+        image[6] = 0x10;
+        let error = package_executable(
+            &PackageRequest::new("nes-2a03", OutputFormat::NesRom, 0xBFF0, 0xC000),
+            &image,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("mapper 0"), "{}", error.message);
+
+        image[6] = 0;
+        let error = package_executable(
+            &PackageRequest::new("nes-2a03", OutputFormat::NesRom, 0xBFF0, 0xC000),
+            &image[..0x6010 - 1],
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("exactly 24592 bytes"),
+            "{}",
+            error.message
+        );
+    }
+
     #[test]
     fn packages_agon_mos_in_memory() {
         let image = package_executable(

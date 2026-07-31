@@ -1,0 +1,8 @@
+[project]
+name = "nes-hello-world"
+
+[build]
+input = "helloWorld.asm"
+input_kind = "assembly"
+target = "nes-2a03"
+executable = "helloWorld"

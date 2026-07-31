@@ -150,6 +150,18 @@ fn resolves_bare_targets_without_default_sdk_symbols() {
 
 #[cfg(feature = "mos6502")]
 #[test]
+fn resolves_nes_2a03_target_profile() {
+    let profile = resolve_target_profile(Some("nes-2a03")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Ricoh2A03);
+    assert_eq!(profile.output_format, OutputFormat::NesRom);
+    assert_eq!(profile.output_format.extension(), "nes");
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert!(!profile.default_sdk_symbols);
+}
+
+#[cfg(feature = "mos6502")]
+#[test]
 fn resolves_generic_bare_6502_target() {
     let profile = resolve_target_profile(Some("generic-6502-bare")).unwrap();
 
@@ -257,10 +269,11 @@ fn parses_output_formats() {
     assert_eq!(parse_output_format("gb"), Ok(OutputFormat::GameBoyGb));
     assert_eq!(parse_output_format("prg"), Ok(OutputFormat::Commodore64Prg));
     assert_eq!(parse_output_format("crt"), Ok(OutputFormat::Commodore64Crt));
+    assert_eq!(parse_output_format("nes"), Ok(OutputFormat::NesRom));
     let error = parse_output_format("bad").unwrap_err();
     assert!(
         error.contains(
-            "expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
+            "expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `8xp`, `8ek`, or `8xk`"
         ),
         "{error}"
     );

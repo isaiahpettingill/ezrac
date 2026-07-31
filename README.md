@@ -46,7 +46,7 @@ cargo run -- layout
 cargo run -- header
 ```
 
-`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, CP/M and MS-DOS `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
+`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, NES `.nes`, CP/M and MS-DOS `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
 
 `disk` creates M35FD images for DCPU-16, FAT12 floppy images for CP/M through IS-DOS, MOS, and DOS, and D64 images for C64. Each image can contain multiple named files. See `docs/disk-images.md`.
 
@@ -110,6 +110,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/platforms.md` documents supported target profiles and platform-specific coding guidance.
 - `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
+- `examples/nes-2a03/hello-world` contains the raw 2A03 NES hello-world assembly example.
 - `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
 - `docs/disk-images.md` documents the disk-image command, emulator profiles, and `no_std + alloc` API.
 - `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, limited source backend, operand forms, expressions, word data, and [`examples/dcpu-16`](examples/dcpu-16/).

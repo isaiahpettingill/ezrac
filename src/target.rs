@@ -351,6 +351,7 @@ pub enum OutputFormat {
     Arduboy,
     Commodore64Prg,
     Commodore64Crt,
+    NesRom,
 }
 
 impl OutputFormat {
@@ -369,12 +370,14 @@ impl OutputFormat {
             Self::Arduboy => "arduboy",
             Self::Commodore64Prg => "prg",
             Self::Commodore64Crt => "crt",
+            Self::NesRom => "nes",
         }
     }
 }
 
 pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
 pub const MSDOS_COM_I8086_TARGET: &str = "msdos-com-i8086";
+pub const NES_2A03_TARGET: &str = "nes-2a03";
 
 pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, String> {
     let triple = parse_target_triple(target.unwrap_or(DEFAULT_TARGET_TRIPLE))?;
@@ -414,6 +417,8 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
         Some(&[CpuFamily::Ez80][..])
     } else if target.starts_with("commodore64-") {
         Some(&[CpuFamily::Mos6502][..])
+    } else if target.starts_with("nes-") {
+        Some(&[CpuFamily::Ricoh2A03][..])
     } else if target.starts_with("arduboy-") {
         Some(&[CpuFamily::Avr][..])
     } else if target.starts_with("ti99-4a-") {
@@ -443,7 +448,7 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
 }
 
 fn is_bare_target(triple: &TargetTriple) -> bool {
-    triple.value.split('-').any(|part| part == "bare")
+    triple.value.split('-').any(|part| part == "bare") || triple.value.starts_with("nes-")
 }
 
 fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
@@ -470,6 +475,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::ArduinoHex
     } else if triple.value.starts_with("commodore64-6502") {
         OutputFormat::Commodore64Prg
+    } else if triple.value.starts_with("nes-2a03") {
+        OutputFormat::NesRom
     } else {
         OutputFormat::RawBin
     }
@@ -502,8 +509,9 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "arduboy" => Ok(OutputFormat::Arduboy),
         "prg" | "c64" | "commodore64-prg" => Ok(OutputFormat::Commodore64Prg),
         "crt" | "commodore64-crt" => Ok(OutputFormat::Commodore64Crt),
+        "nes" | "nes-rom" => Ok(OutputFormat::NesRom),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }

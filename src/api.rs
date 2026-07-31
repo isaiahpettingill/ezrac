@@ -47,10 +47,12 @@ use crate::asm::emit_dcpu_assembly_with_options;
 use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "m68k")]
 use crate::asm::emit_m68k_assembly_with_options;
+#[cfg(feature = "m6800")]
+use crate::asm::emit_m6800_assembly_with_options;
+#[cfg(feature = "m6809")]
+use crate::asm::emit_m6809_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
-#[cfg(any(feature = "m6800", feature = "m6809"))]
-use crate::asm::{emit_m6800_assembly_with_options, emit_m6809_assembly_with_options};
 
 /// Options for compiling in-memory EZRA source to target assembly.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -563,6 +565,12 @@ pub fn link_assembly_program(
         build.target.triple.cpu,
         &build.target.triple.value,
     )?;
+    if build.output_format == OutputFormat::NesRom {
+        // NES assembly is a complete iNES image. Its `org` directives use
+        // CPU/file coordinates, so section placement must not strip the gaps
+        // between the header, PRG vectors, and CHR data.
+        return link_assembly_program_at(source_path, program, build.layout.load.get(), build);
+    }
     let image = link_assembly_program_image(source_path, program, build)?;
     package_linked(build, image.bytes, image.map, image.symbols)
 }
@@ -602,7 +610,11 @@ pub fn link_assembly_program_at(
         base_addr,
         &assembly_source_options(source_path, &build.layout),
     )?;
-    let map = flat_assembly_map(&build.layout, assembled.bytes.len(), &assembled.symbols)?;
+    let map = if build.output_format == OutputFormat::NesRom {
+        flat_assembly_map_at(assembled.bytes.len(), &assembled.symbols, base_addr)?
+    } else {
+        flat_assembly_map(&build.layout, assembled.bytes.len(), &assembled.symbols)?
+    };
     package_linked(build, assembled.bytes, map, assembled.symbols)
 }
 
@@ -882,16 +894,22 @@ fn flat_assembly_map(
     code_len: usize,
     symbols: &[AssemblySymbol],
 ) -> Result<String, Diagnostic> {
+    flat_assembly_map_at(code_len, symbols, layout.entry.get())
+}
+
+fn flat_assembly_map_at(
+    code_len: usize,
+    symbols: &[AssemblySymbol],
+    base_addr: u32,
+) -> Result<String, Diagnostic> {
     let code_len = u32::try_from(code_len)
         .map_err(|_| Diagnostic::new("assembled program exceeds the 24-bit address space"))?;
-    let end = layout
-        .entry
-        .get()
+    let end = base_addr
         .checked_add(code_len.saturating_sub(1))
         .ok_or_else(|| Diagnostic::new("assembled program exceeds the 24-bit address space"))?;
     let mut out = format!(
-        "section      start      end        size\n{:<12} {} 0x{:06X} 0x{:06X}\n",
-        ".text", layout.entry, end, code_len
+        "section      start      end        size\n{:<12} 0x{:06X} 0x{:06X} 0x{:06X}\n",
+        ".text", base_addr, end, code_len
     );
     if !symbols.is_empty() {
         out.push_str("\nsymbol       address\n");
@@ -951,6 +969,7 @@ fn uses_flat_output_map(build: &BuildRequest) -> bool {
         || build.target.triple.value.starts_with("gameboy-")
         || build.target.triple.value.starts_with("arduboy-")
         || build.target.triple.value.starts_with("commodore64-6502")
+        || build.target.triple.value.starts_with("nes-")
         || build.target.triple.value.starts_with("ti84plusce-ez80")
         || build.target.triple.value.starts_with("ti83premiumce-ez80")
         || build.target.triple.value.starts_with("ti83-z80")

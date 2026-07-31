@@ -20,7 +20,10 @@ use crate::{
         EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP,
         EZRA_VRAM_BASE,
     },
-    tbir::TbirProgram,
+    tbir::{
+        TbirProgram,
+        cost::{CostCandidate, CostModel, FlagEffects, FlagSet, InstructionCost},
+    },
 };
 
 mod intel8080;
@@ -313,6 +316,124 @@ fn supports_z80_bit_instructions(cpu: CpuFamily) -> bool {
         cpu,
         CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::Ez80
     )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ConstantMulForm {
+    ShiftAdd { digits: Vec<i8>, negate: bool },
+    NativeU8,
+    Helper,
+}
+
+fn constant_mul_factor(value: i64, width: ValueWidth) -> Option<(u32, u32, bool)> {
+    let bits = u32::from(width.bytes()) * 8;
+    let modulus = 1_u64 << bits;
+    let mask = modulus - 1;
+    let raw = ((value as i128) & i128::from(mask)) as u32;
+    if raw <= 1 {
+        return None;
+    }
+    let half = 1_u32 << (bits - 1);
+    if raw > half {
+        Some((raw, (modulus as u32).wrapping_sub(raw), true))
+    } else {
+        Some((raw, raw, false))
+    }
+}
+
+fn binary_constant_mul_digits(value: u32) -> Vec<i8> {
+    let highest_bit = 31 - value.leading_zeros();
+    (0..highest_bit)
+        .rev()
+        .map(|bit| if value & (1 << bit) != 0 { 1 } else { 0 })
+        .collect()
+}
+
+fn naf_constant_mul_digits(value: u32) -> Vec<i8> {
+    let mut value = value;
+    let mut digits = Vec::new();
+    while value != 0 {
+        if value & 1 == 0 {
+            digits.push(0);
+            value >>= 1;
+        } else {
+            let digit = if value & 3 == 1 { 1 } else { -1 };
+            digits.push(digit);
+            value = if digit == 1 {
+                (value - 1) / 2
+            } else {
+                (value + 1) / 2
+            };
+        }
+    }
+    digits.reverse();
+    digits
+}
+
+fn constant_mul_shift_add_cost(width: ValueWidth, digits: &[i8], negate: bool) -> InstructionCost {
+    let (mut bytes, mut cycles) = if width == ValueWidth::U8 {
+        (1_u16, 4_u32)
+    } else {
+        (2_u16, 12_u32)
+    };
+    for digit in digits {
+        bytes = bytes.saturating_add(1);
+        cycles = cycles.saturating_add(4);
+        if *digit != 0 {
+            if width == ValueWidth::U8 || *digit == 1 {
+                bytes = bytes.saturating_add(1);
+                cycles = cycles.saturating_add(4);
+            } else {
+                bytes = bytes.saturating_add(3);
+                cycles = cycles.saturating_add(15);
+            }
+        }
+    }
+    if negate {
+        if width == ValueWidth::U8 {
+            bytes = bytes.saturating_add(3);
+            cycles = cycles.saturating_add(12);
+        } else {
+            bytes = bytes.saturating_add(9);
+            cycles = cycles.saturating_add(34);
+        }
+    }
+    InstructionCost::new(bytes, cycles, 0, FlagEffects::writes(FlagSet::ALL))
+}
+
+fn constant_mul_helper_cost(cpu: CpuFamily, width: ValueWidth, factor: u32) -> InstructionCost {
+    let (setup_bytes, setup_cycles) = if width == ValueWidth::U8 {
+        (2_u16, 7_u32)
+    } else {
+        (4_u16, 7_u32)
+    };
+    let (helper_bytes, helper_cycles) = match (cpu, width) {
+        (CpuFamily::Ez80, ValueWidth::U8) => (5_u16, 21_u32),
+        (CpuFamily::Ez80, ValueWidth::U16) => (25_u16, 90_u32),
+        (CpuFamily::Ez80, ValueWidth::U24) => {
+            (24_u16, 25_u32.saturating_add(factor.saturating_mul(55)))
+        }
+        (_, ValueWidth::U8) => (18_u16, 30_u32.saturating_add(factor.saturating_mul(24))),
+        (_, ValueWidth::U16) => (45_u16, 40_u32.saturating_add(factor.saturating_mul(45))),
+        (_, ValueWidth::U24) => (24_u16, 25_u32.saturating_add(factor.saturating_mul(55))),
+    };
+    InstructionCost::new(
+        setup_bytes.saturating_add(4).saturating_add(helper_bytes),
+        setup_cycles
+            .saturating_add(17)
+            .saturating_add(helper_cycles),
+        0,
+        FlagEffects::writes(FlagSet::ALL),
+    )
+}
+
+fn constant_mul_cost_model(cpu: CpuFamily) -> CostModel {
+    let model = if cpu.capabilities().prefer_code_size {
+        CostModel::code_size()
+    } else {
+        CostModel::balanced()
+    };
+    model.with_live_flags(FlagSet::NONE)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2093,6 +2214,13 @@ impl Emitter {
         width: ValueWidth,
         signed: bool,
     ) -> Result<(), Diagnostic> {
+        if let Some(factor) = self.constant_integer_value(value)?
+            && let Some((raw, form)) = self.constant_mul_choice(width, factor)
+        {
+            self.emit_load_width(variable);
+            self.emit_constant_mul_from_loaded(width, raw, signed, &form);
+            return Ok(());
+        }
         if width == ValueWidth::U8 {
             let left = self.alloc_var(width.bytes());
             self.emit_load_a(variable);
@@ -4233,6 +4361,160 @@ impl Emitter {
         Ok(())
     }
 
+    fn constant_integer_value(&self, expr: &Expr) -> Result<Option<i64>, Diagnostic> {
+        let is_constant = match expr {
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) | Expr::Bool(_) => true,
+            Expr::Ident(name) => {
+                self.local_constant(name).is_some() || self.symbols.constants.contains_key(name)
+            }
+            Expr::Unary { expr, .. } => self.constant_integer_value(expr)?.is_some(),
+            Expr::Binary { left, right, .. } => {
+                self.constant_integer_value(left)?.is_some()
+                    && self.constant_integer_value(right)?.is_some()
+            }
+            Expr::Cast { expr, .. } => self.constant_integer_value(expr)?.is_some(),
+            _ => false,
+        };
+        if is_constant {
+            Ok(Some(self.eval_i64_with_local_constants(expr)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn constant_mul_choice(
+        &self,
+        width: ValueWidth,
+        factor: i64,
+    ) -> Option<(u32, ConstantMulForm)> {
+        let (raw, magnitude, negate) = constant_mul_factor(factor, width)?;
+        let model = constant_mul_cost_model(self.cpu);
+        let binary_digits = binary_constant_mul_digits(magnitude);
+        let naf_digits = naf_constant_mul_digits(magnitude);
+        let mut forms = vec![
+            ConstantMulForm::ShiftAdd {
+                digits: binary_digits.clone(),
+                negate,
+            },
+            ConstantMulForm::ShiftAdd {
+                digits: naf_digits.clone(),
+                negate,
+            },
+        ];
+        let mut candidates = vec![
+            CostCandidate::new(
+                "shift-add-binary",
+                constant_mul_shift_add_cost(width, &binary_digits, negate),
+            ),
+            CostCandidate::new(
+                "shift-add-signed",
+                constant_mul_shift_add_cost(width, &naf_digits, negate),
+            ),
+        ];
+        if self.cpu == CpuFamily::Ez80 && width == ValueWidth::U8 {
+            forms.push(ConstantMulForm::NativeU8);
+            candidates.push(CostCandidate::new(
+                "native",
+                InstructionCost::new(6, 23, 0, FlagEffects::writes(FlagSet::ALL)),
+            ));
+        }
+        forms.push(ConstantMulForm::Helper);
+        candidates.push(CostCandidate::new(
+            "helper",
+            constant_mul_helper_cost(self.cpu, width, raw),
+        ));
+        model
+            .choose_index(&candidates)
+            .map(|index| (raw, forms[index].clone()))
+    }
+
+    fn emit_constant_mul_from_loaded(
+        &mut self,
+        width: ValueWidth,
+        raw: u32,
+        signed: bool,
+        form: &ConstantMulForm,
+    ) {
+        match form {
+            ConstantMulForm::ShiftAdd { digits, negate } => {
+                self.emit_constant_shift_add(width, digits, *negate);
+            }
+            ConstantMulForm::NativeU8 => {
+                debug_assert_eq!(width, ValueWidth::U8);
+                self.line("    ld b, a");
+                self.line(&format!("    ld c, {:02X}h", raw & 0xFF));
+                self.line("    mlt bc");
+                self.line("    ld a, c");
+            }
+            ConstantMulForm::Helper => match width {
+                ValueWidth::U8 => {
+                    self.line(&format!("    ld c, {:02X}h", raw & 0xFF));
+                    self.line("    call __ezra_mul_u8");
+                }
+                ValueWidth::U16 => {
+                    self.line(&format!("    ld bc, {:06X}h", raw & 0xFFFF));
+                    self.line("    call __ezra_mul_u16");
+                }
+                ValueWidth::U24 => {
+                    self.line(&format!("    ld bc, {:06X}h", raw & 0xFF_FFFF));
+                    if signed {
+                        self.line("    call __ezra_mul_i24");
+                    } else {
+                        self.line("    call __ezra_mul_u24");
+                    }
+                }
+            },
+        }
+    }
+
+    fn emit_constant_shift_add(&mut self, width: ValueWidth, digits: &[i8], negate: bool) {
+        match width {
+            ValueWidth::U8 => {
+                self.line("    ld b, a");
+                for digit in digits {
+                    self.line("    add a, a");
+                    match digit {
+                        1 => self.line("    add a, b"),
+                        -1 => self.line("    sub b"),
+                        0 => {}
+                        _ => unreachable!("constant multiplication digit is not -1, 0, or 1"),
+                    }
+                }
+                if negate {
+                    self.line("    ld b, a");
+                    self.line("    xor a");
+                    self.line("    sub b");
+                }
+            }
+            ValueWidth::U16 | ValueWidth::U24 => {
+                self.line("    push hl");
+                self.line("    pop de");
+                for digit in digits {
+                    self.line("    add hl, hl");
+                    match digit {
+                        1 => self.line("    add hl, de"),
+                        -1 => {
+                            self.line("    or a");
+                            self.line("    sbc hl, de");
+                        }
+                        0 => {}
+                        _ => unreachable!("constant multiplication digit is not -1, 0, or 1"),
+                    }
+                }
+                if negate {
+                    self.line("    push hl");
+                    self.line("    ld hl, 000000h");
+                    self.line("    pop bc");
+                    self.line("    or a");
+                    self.line("    sbc hl, bc");
+                }
+                if width == ValueWidth::U16 {
+                    self.zero_extend_hl16();
+                }
+            }
+        }
+    }
+
     fn emit_mul_to_width(
         &mut self,
         left: &Expr,
@@ -4240,6 +4522,13 @@ impl Emitter {
         width: ValueWidth,
         signed: bool,
     ) -> Result<(), Diagnostic> {
+        if let Some(factor) = self.constant_integer_value(right)?
+            && let Some((raw, form)) = self.constant_mul_choice(width, factor)
+        {
+            self.emit_expr_to_width(left, width)?;
+            self.emit_constant_mul_from_loaded(width, raw, signed, &form);
+            return Ok(());
+        }
         if width == ValueWidth::U8 {
             let left_var = self.alloc_var(1u32);
             self.emit_expr_to_a(left)?;
