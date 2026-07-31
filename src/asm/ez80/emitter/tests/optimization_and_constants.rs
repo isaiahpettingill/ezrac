@@ -404,6 +404,12 @@ fn lowers_byte_aligned_wide_temporary_shifts() {
                 return shifted
             }
 
+            fn assign_shr16_8(value: u16) -> u16 {
+                let shifted: u16 = value
+                shifted >>= 8
+                return shifted
+            }
+
             fn shl24_16(value: u24) -> u24 {
                 return value << 16
             }
@@ -424,6 +430,18 @@ fn lowers_byte_aligned_wide_temporary_shifts() {
                 return value >> 24
             }
 
+            fn assign_shl24_8(value: u24) -> u24 {
+                let shifted: u24 = value
+                shifted <<= 8
+                return shifted
+            }
+
+            fn assign_shr_i24_8(value: i24) -> i24 {
+                let shifted: i24 = value
+                shifted >>= 8
+                return shifted
+            }
+
             fn assign_shr_i24_16(value: i24) -> i24 {
                 let shifted: i24 = value
                 shifted >>= 16
@@ -437,12 +455,15 @@ fn lowers_byte_aligned_wide_temporary_shifts() {
                 test.assert_eq_u16(cast<u16>(shr_i16_8(-0x1234)), 0xFFED, 4)
                 test.assert_eq_u16(cast<u16>(shr_i16_16(-0x1234)), 0xFFFF, 5)
                 test.assert_eq_u16(assign_shl16_8(0x1234), 0x3400, 6)
-                test.assert_eq_u24(shl24_16(0x010203), 0x030000, 7)
-                test.assert_eq_u24(shr24_8(0x010203), 0x000102, 8)
-                test.assert_eq_u24(shr24_24(0x010203), 0, 9)
-                test.assert_eq_u24(cast<u24>(shr_i24_16(-0x012345)), 0xFFFFFE, 10)
-                test.assert_eq_u24(cast<u24>(shr_i24_24(-0x012345)), 0xFFFFFF, 11)
-                test.assert_eq_u24(cast<u24>(assign_shr_i24_16(-0x012345)), 0xFFFFFE, 12)
+                test.assert_eq_u16(assign_shr16_8(0x1234), 0x0012, 7)
+                test.assert_eq_u24(shl24_16(0x010203), 0x030000, 8)
+                test.assert_eq_u24(shr24_8(0x010203), 0x000102, 9)
+                test.assert_eq_u24(shr24_24(0x010203), 0, 10)
+                test.assert_eq_u24(cast<u24>(shr_i24_16(-0x012345)), 0xFFFFFE, 11)
+                test.assert_eq_u24(cast<u24>(shr_i24_24(-0x012345)), 0xFFFFFF, 12)
+                test.assert_eq_u24(assign_shl24_8(0x010203), 0x020300, 13)
+                test.assert_eq_u24(cast<u24>(assign_shr_i24_8(-0x012345)), 0xFFFEDC, 14)
+                test.assert_eq_u24(cast<u24>(assign_shr_i24_16(-0x012345)), 0xFFFFFE, 15)
                 test.pass()
             }
         "#;
@@ -458,12 +479,18 @@ fn lowers_byte_aligned_wide_temporary_shifts() {
             .unwrap()
     };
 
-    for name in ["shl16_8", "shl16_16", "assign_shl16_8", "shl24_16"] {
+    for name in [
+        "shl16_8",
+        "shl16_16",
+        "assign_shl16_8",
+        "shl24_16",
+        "assign_shl24_8",
+    ] {
         let function = body(name);
         assert!(!function.contains("    add a, a"), "{function}");
         assert!(!function.contains("    rl a"), "{function}");
     }
-    for name in ["shr16_8", "shr24_8", "shr24_24"] {
+    for name in ["shr16_8", "assign_shr16_8", "shr24_8", "shr24_24"] {
         let function = body(name);
         assert!(!function.contains("    srl a"), "{function}");
     }
@@ -472,12 +499,101 @@ fn lowers_byte_aligned_wide_temporary_shifts() {
         "shr_i16_16",
         "shr_i24_16",
         "shr_i24_24",
+        "assign_shr_i24_8",
         "assign_shr_i24_16",
     ] {
         let function = body(name);
         assert!(!function.contains("    sra a"), "{function}");
     }
 
+    for (name, expected_storage_bytes) in [
+        ("assign_shl16_8", 6),
+        ("assign_shr16_8", 6),
+        ("assign_shl24_8", 6),
+        ("assign_shr_i24_8", 6),
+        ("assign_shr_i24_16", 6),
+    ] {
+        let function = body(name);
+        let addresses = function
+            .lines()
+            .filter_map(|line| line.split_once('(')?.1.split_once("h)").map(|part| part.0))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(addresses.len(), expected_storage_bytes, "{function}");
+    }
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn preserves_volatile_wide_accesses_for_byte_aligned_compound_shifts() {
+    let source = r#"
+            volatile mmio STATUS16: ptr<u16> = 0x040180
+            volatile mmio STATUS24: ptr<i24> = 0x040190
+
+            fn shift_status16() {
+                *STATUS16 >>= 8
+            }
+
+            fn shift_status24() {
+                *STATUS24 >>= 8
+            }
+
+            fn main() {
+                shift_status16()
+                shift_status24()
+                test.assert_eq_u16(*STATUS16, 0x0012, 1)
+                test.assert_eq_u24(cast<u24>(*STATUS24), 0xFF8034, 2)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test_with_options(
+        &asm,
+        &TestRunOptions {
+            instruction_budget: 8_000,
+            initial_ports: Vec::new(),
+            initial_memory: vec![
+                (0x040180, 0x34),
+                (0x040181, 0x12),
+                (0x040190, 0x56),
+                (0x040191, 0x34),
+                (0x040192, 0x80),
+            ],
+            stack_top: EZRA_STACK_TOP.get(),
+        },
+    )
+    .unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+
+    assert_eq!(
+        body("shift_status16").matches("    ld a, (hl)").count(),
+        2,
+        "{asm}"
+    );
+    assert_eq!(
+        body("shift_status16").matches("    ld (hl), a").count(),
+        2,
+        "{asm}"
+    );
+    assert_eq!(
+        body("shift_status24").matches("    ld a, (hl)").count(),
+        3,
+        "{asm}"
+    );
+    assert_eq!(
+        body("shift_status24").matches("    ld (hl), a").count(),
+        3,
+        "{asm}"
+    );
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }

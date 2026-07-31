@@ -2726,7 +2726,22 @@ impl Emitter {
         signed: bool,
     ) -> Result<(), Diagnostic> {
         self.ensure_shift_count_compatible(value)?;
-        let temp = self.alloc_var(variable.width()?.bytes());
+        let width = variable.width()?;
+        if let Some(count) = self.maybe_const_shift_count(value)?
+            && cacheable_ranges_contain(&self.cacheable_ranges, variable.addr, variable.size)
+        {
+            if count == 0 {
+                self.emit_load_width(variable);
+                return Ok(());
+            }
+            if count % 8 == 0 {
+                self.emit_byte_aligned_shift_temporary(variable, op, count / 8, signed);
+                self.emit_load_width(variable);
+                return Ok(());
+            }
+        }
+
+        let temp = self.alloc_var(width.bytes());
         self.emit_load_width(variable);
         self.emit_store_width(temp);
         self.emit_shift_temporary_by_expr(temp, op, value, signed)?;
