@@ -681,6 +681,12 @@ impl Emitter {
         let source_is_narrow = self.expr_is_width_limited(source, &source_ty)?;
 
         self.emit_expr(source, &source_ty)?;
+        if expected == 0 {
+            let instruction = if *op == BinaryOp::Eq { "ifb" } else { "ifc" };
+            self.line(&format!("    {instruction} a, 0x{mask:04x}"));
+            self.line(&format!("    set pc, {false_label}"));
+            return Ok(true);
+        }
         if mask == 0 {
             self.line("    set a, 0");
         } else if mask != width_mask || !source_is_narrow {
@@ -1442,7 +1448,7 @@ mod tests {
     fn lowers_masked_conditions_without_materializing_booleans() {
         let assembly = emit(
             r#"
-            fn masked_conditions(word: u16, byte: u8) {
+            fn masked_conditions(word: u16, byte: u8) -> u16 {
                 if (word & 0x0300u16) == 0 {
                     let clear: u16 = word
                 }
@@ -1461,6 +1467,7 @@ mod tests {
                 while (byte & 0x20u8) != 0 {
                     break
                 }
+                return 0
             }
             fn main() {
                 masked_conditions(0x0300u16, 0x20u8)
@@ -1468,11 +1475,11 @@ mod tests {
             "#,
         );
         assert!(
-            assembly.contains("    and a, 0x0300\n    ifn a, 0x0000\n    set pc, __ezra_if_else_"),
+            assembly.contains("    ifb a, 0x0300\n    set pc, __ezra_if_else_"),
             "{assembly}"
         );
         assert!(
-            assembly.contains("    and a, 0x0300\n    ife a, 0x0000\n    set pc, __ezra_if_else_"),
+            assembly.contains("    ifc a, 0x0300\n    set pc, __ezra_if_else_"),
             "{assembly}"
         );
         assert!(
@@ -1484,13 +1491,11 @@ mod tests {
             "{assembly}"
         );
         assert!(
-            assembly
-                .contains("    and a, 0x0020\n    ifn a, 0x0000\n    set pc, __ezra_while_end_"),
+            assembly.contains("    ifb a, 0x0020\n    set pc, __ezra_while_end_"),
             "{assembly}"
         );
         assert!(
-            assembly
-                .contains("    and a, 0x0020\n    ife a, 0x0000\n    set pc, __ezra_while_end_"),
+            assembly.contains("    ifc a, 0x0020\n    set pc, __ezra_while_end_"),
             "{assembly}"
         );
         assert!(!assembly.contains("__ezra_true_"), "{assembly}");
@@ -1507,7 +1512,7 @@ mod tests {
             "{assembly}"
         );
         assert!(
-            assembly.contains("    set a, [0x9000]\n    and a, 0x0004\n    ife a, 0x0000"),
+            assembly.contains("    set a, [0x9000]\n    ifc a, 0x0004"),
             "{assembly}"
         );
     }
