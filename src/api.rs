@@ -47,10 +47,10 @@ use crate::asm::emit_dcpu_assembly_with_options;
 use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "m68k")]
 use crate::asm::emit_m68k_assembly_with_options;
-#[cfg(feature = "m6800")]
-use crate::asm::emit_m6800_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
+#[cfg(any(feature = "m6800", feature = "m6809"))]
+use crate::asm::{emit_m6800_assembly_with_options, emit_m6809_assembly_with_options};
 
 /// Options for compiling in-memory EZRA source to target assembly.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1294,6 +1294,18 @@ fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<S
             {
                 Err(Diagnostic::new(
                     "M6800 source compilation requires the `m6800` Cargo feature",
+                ))
+            }
+        }
+        CpuFamily::M6809 => {
+            #[cfg(feature = "m6809")]
+            {
+                emit_m6809_assembly_with_options(program, options)
+            }
+            #[cfg(not(feature = "m6809"))]
+            {
+                Err(Diagnostic::new(
+                    "M6809 source compilation requires the `m6809` Cargo feature",
                 ))
             }
         }

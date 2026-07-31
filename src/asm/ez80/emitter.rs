@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    asm::ez80::{analyze_instruction, is_unsupported_z80_family_instruction},
+    asm::ez80::{analyze_instruction, instruction_effects, is_unsupported_z80_family_instruction},
     ast::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
@@ -289,7 +289,7 @@ pub fn emit_ez80_assembly_from_checked(
         }
     }
     emitter.emit_required_sections();
-    let assembly = peephole_cleanup(&emitter.out);
+    let assembly = peephole_cleanup_with_ranges(&emitter.out, &emitter.cacheable_ranges);
     translate_assembly_for_cpu(cpu, &assembly).map(|asm| {
         let profile = if is_intel_8080_family(cpu) {
             RoutineProfile::Z80
@@ -315,24 +315,224 @@ fn supports_z80_bit_instructions(cpu: CpuFamily) -> bool {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn peephole_cleanup(assembly: &str) -> String {
+    peephole_cleanup_with_ranges(assembly, &[])
+}
+
+fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)]) -> String {
     let mut out = String::new();
-    let mut previous_redundant_load = None;
+    let mut register_values = HashMap::<&'static str, String>::new();
+    let mut last_memory_transfer: Option<AbsoluteMemoryTransfer> = None;
+    let mut in_inline_asm = false;
 
     for line in assembly.lines() {
-        if line.trim() == "ld hl, hl" {
+        let trimmed = line.trim();
+        if trimmed == "; end asm" {
+            in_inline_asm = false;
+            register_values.clear();
+            last_memory_transfer = None;
+            out.push_str(line);
+            out.push('\n');
             continue;
         }
-        let redundant_load = redundant_load_key(line);
-        if redundant_load.is_some() && redundant_load == previous_redundant_load {
+        if trimmed.starts_with("; asm") {
+            in_inline_asm = true;
+            register_values.clear();
+            last_memory_transfer = None;
+            out.push_str(line);
+            out.push('\n');
             continue;
         }
+        if !in_inline_asm && trimmed == "ld hl, hl" {
+            continue;
+        }
+        if is_peephole_block_boundary(trimmed) {
+            register_values.clear();
+            last_memory_transfer = None;
+        }
+
+        let immediate_load = immediate_register_load(line);
+        if !in_inline_asm
+            && let Some((register, value)) = immediate_load
+            && register_values
+                .get(register)
+                .is_some_and(|cached| cached == value)
+        {
+            continue;
+        }
+
+        let memory_transfer = if in_inline_asm {
+            None
+        } else {
+            parse_absolute_memory_transfer(trimmed)
+        };
+        let remove_line = if let Some(transfer) = memory_transfer {
+            if cacheable_ranges_contain(cacheable_ranges, transfer.address, transfer.width) {
+                let redundant = last_memory_transfer.is_some_and(|previous| {
+                    previous.address == transfer.address
+                        && previous.width == transfer.width
+                        && previous.register == transfer.register
+                        && previous.is_store != transfer.is_store
+                });
+                if !redundant {
+                    last_memory_transfer = Some(transfer);
+                }
+                redundant
+            } else {
+                last_memory_transfer = None;
+                false
+            }
+        } else {
+            if !trimmed.is_empty() && !trimmed.starts_with(';') {
+                last_memory_transfer = None;
+            }
+            false
+        };
+
+        if remove_line {
+            continue;
+        }
+
         out.push_str(line);
         out.push('\n');
-        previous_redundant_load = redundant_load;
+
+        if let Some((register, value)) = immediate_load {
+            invalidate_register_value_aliases(&mut register_values, register);
+            register_values.insert(register, value.to_owned());
+        } else if !trimmed.is_empty() && !trimmed.starts_with(';') {
+            let effects = instruction_effects(trimmed);
+            for register in effects.modified_registers {
+                invalidate_register_value_aliases(&mut register_values, register);
+            }
+        }
+
+        if is_peephole_block_terminator(trimmed) {
+            register_values.clear();
+            last_memory_transfer = None;
+        }
     }
 
     out
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AbsoluteMemoryTransfer {
+    address: u32,
+    width: u32,
+    register: &'static str,
+    is_store: bool,
+}
+
+fn immediate_register_load(line: &str) -> Option<(&'static str, &str)> {
+    let trimmed = line.trim();
+    let (target, value) = trimmed.strip_prefix("ld ")?.split_once(',')?;
+    let target = register_name(target.trim())?;
+    let value = value.trim();
+    (!value.is_empty() && !value.contains('(') && register_name(value).is_none())
+        .then_some((target, value))
+}
+
+fn register_name(register: &str) -> Option<&'static str> {
+    match register {
+        "a" => Some("a"),
+        "b" => Some("b"),
+        "c" => Some("c"),
+        "d" => Some("d"),
+        "e" => Some("e"),
+        "h" => Some("h"),
+        "l" => Some("l"),
+        "hl" => Some("hl"),
+        "de" => Some("de"),
+        "bc" => Some("bc"),
+        "ix" => Some("ix"),
+        "iy" => Some("iy"),
+        "sp" => Some("sp"),
+        _ => None,
+    }
+}
+
+fn invalidate_register_value_aliases(values: &mut HashMap<&'static str, String>, modified: &str) {
+    values.retain(|register, _| !registers_overlap(register, modified));
+}
+
+fn registers_overlap(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    matches!(
+        (left, right),
+        ("af", "a")
+            | ("a", "af")
+            | ("hl", "h" | "l")
+            | ("de", "d" | "e")
+            | ("bc", "b" | "c")
+            | ("h" | "l", "hl")
+            | ("d" | "e", "de")
+            | ("b" | "c", "bc")
+    )
+}
+
+fn parse_absolute_memory_transfer(line: &str) -> Option<AbsoluteMemoryTransfer> {
+    let (target, source) = line.strip_prefix("ld ")?.split_once(',')?;
+    let target = target.trim();
+    let source = source.trim();
+    if let Some(address) = absolute_memory_operand(target) {
+        let register = register_name(source)?;
+        let width = match register {
+            "a" => 1,
+            "hl" => 3,
+            _ => return None,
+        };
+        return Some(AbsoluteMemoryTransfer {
+            address,
+            width,
+            register,
+            is_store: true,
+        });
+    }
+    if let Some(address) = absolute_memory_operand(source) {
+        let register = register_name(target)?;
+        let width = match register {
+            "a" => 1,
+            "hl" => 3,
+            _ => return None,
+        };
+        return Some(AbsoluteMemoryTransfer {
+            address,
+            width,
+            register,
+            is_store: false,
+        });
+    }
+    None
+}
+
+fn absolute_memory_operand(operand: &str) -> Option<u32> {
+    let value = operand.strip_prefix('(')?.strip_suffix(')')?;
+    let value = value.strip_suffix('h')?;
+    u32::from_str_radix(value, 16).ok()
+}
+
+fn cacheable_ranges_contain(ranges: &[(u32, u32)], address: u32, width: u32) -> bool {
+    ranges.iter().any(|(start, size)| {
+        address >= *start
+            && address
+                .checked_add(width)
+                .is_some_and(|end| end <= start.saturating_add(*size))
+    })
+}
+
+fn is_peephole_block_boundary(line: &str) -> bool {
+    line.starts_with("section ") || (line.ends_with(':') && !line.starts_with(' '))
+}
+
+fn is_peephole_block_terminator(line: &str) -> bool {
+    let mnemonic = line.split_whitespace().next().unwrap_or_default();
+    matches!(
+        mnemonic,
+        "call" | "djnz" | "halt" | "jp" | "jr" | "ret" | "reti" | "retn" | "rst"
+    )
 }
 
 #[allow(dead_code)]
@@ -458,25 +658,6 @@ fn is_self_unit_pointer_increment(name: &str, expr: &Expr) -> bool {
     )
 }
 
-fn redundant_load_key(line: &str) -> Option<&str> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("ld ") || trimmed.contains('(') {
-        return None;
-    }
-    let (target, value) = trimmed.strip_prefix("ld ")?.split_once(',')?;
-    let target = target.trim();
-    if !matches!(
-        target,
-        "a" | "b" | "c" | "d" | "e" | "h" | "l" | "hl" | "de" | "bc" | "ix" | "iy" | "sp"
-    ) {
-        return None;
-    }
-    if value.trim().is_empty() {
-        return None;
-    }
-    Some(trimmed)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LoopLabels {
     continue_label: String,
@@ -507,6 +688,7 @@ struct Emitter {
     function_interrupt_stack: Vec<bool>,
     function_naked_stack: Vec<bool>,
     function_storage_stack: Vec<Vec<Variable>>,
+    cacheable_ranges: Vec<(u32, u32)>,
     assigned_names_stack: Vec<HashSet<String>>,
     recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
@@ -528,6 +710,11 @@ impl Emitter {
         tail_call_edges: HashSet<(String, String)>,
     ) -> Self {
         let string_literals = symbols.string_literals.clone();
+        let cacheable_ranges = symbols
+            .globals
+            .values()
+            .map(|variable| (variable.addr, variable.size))
+            .collect();
         Self {
             symbols,
             out: String::new(),
@@ -546,6 +733,7 @@ impl Emitter {
             function_interrupt_stack: Vec::new(),
             function_naked_stack: Vec::new(),
             function_storage_stack: Vec::new(),
+            cacheable_ranges,
             assigned_names_stack: Vec::new(),
             recursive_call_edges,
             tail_call_edges,
@@ -604,6 +792,7 @@ impl Emitter {
     }
 
     fn track_function_storage(&mut self, variable: Variable) {
+        self.cacheable_ranges.push((variable.addr, variable.size));
         if let Some(storage) = self.function_storage_stack.last_mut() {
             storage.push(variable);
         }
@@ -1561,6 +1750,7 @@ impl Emitter {
             self.invalidate_local_constant(&output.name);
             self.invalidate_readonly_pointer_alias(&output.name);
         }
+        self.line("    ; end asm");
         if asm_clobbers_include(clobbers, "memory") {
             self.invalidate_all_local_constants();
         }
@@ -4569,6 +4759,76 @@ impl Emitter {
         op: BinaryOp,
         signed: bool,
     ) -> Result<(), Diagnostic> {
+        if !supports_z80_bit_instructions(self.cpu) {
+            return self.emit_shift_memory_dynamic_bitwise(variable, op, signed);
+        }
+
+        let saturated_label = self.next_label("shift_saturated");
+        let byte_loop_label = self.next_label("shift_byte_loop");
+        let byte_done_label = self.next_label("shift_byte_done");
+        let bit_loop_label = self.next_label("shift_bit_loop");
+        let done_label = self.next_label("shift_done");
+        let after_saturated_label = self.next_label("shift_after_saturated");
+        let bit_width = variable.size * 8;
+
+        self.line("    ld a, b");
+        self.line(&format!("    cp {bit_width:02X}h"));
+        self.line(&format!("    jp nc, {saturated_label}"));
+
+        if variable.size > 1 {
+            self.line("    ld a, b");
+            self.line("    and 07h");
+            self.line("    ld d, a");
+            self.line("    ld a, b");
+            for _ in 0..3 {
+                self.line("    srl a");
+            }
+            self.line("    ld b, a");
+            self.line(&format!("{byte_loop_label}:"));
+            self.line("    ld a, b");
+            self.line("    or a");
+            self.line(&format!("    jp z, {byte_done_label}"));
+            match op {
+                BinaryOp::Shl => self.emit_shift_memory_left_byte(variable),
+                BinaryOp::Shr => self.emit_shift_memory_right_byte(variable, signed),
+                _ => unreachable!("not a shift op"),
+            }
+            self.line("    dec b");
+            self.line(&format!("    jp {byte_loop_label}"));
+            self.line(&format!("{byte_done_label}:"));
+            self.line("    ld b, d");
+        } else {
+            self.line("    ld a, b");
+            self.line("    and 07h");
+            self.line("    ld b, a");
+        }
+
+        self.line(&format!("{bit_loop_label}:"));
+        self.line("    ld a, b");
+        self.line("    or a");
+        self.line(&format!("    jp z, {done_label}"));
+        match op {
+            BinaryOp::Shl => self.emit_shift_memory_left_once(variable),
+            BinaryOp::Shr => self.emit_shift_memory_right_once(variable, signed),
+            _ => unreachable!("not a shift op"),
+        }
+        self.line("    dec b");
+        self.line(&format!("    jp {bit_loop_label}"));
+        self.line(&format!("{done_label}:"));
+        self.line(&format!("    jp {after_saturated_label}"));
+
+        self.line(&format!("{saturated_label}:"));
+        self.emit_saturated_shift_memory(variable, op, signed);
+        self.line(&format!("{after_saturated_label}:"));
+        Ok(())
+    }
+
+    fn emit_shift_memory_dynamic_bitwise(
+        &mut self,
+        variable: Variable,
+        op: BinaryOp,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
         let loop_label = self.next_label("shift_loop");
         let done_label = self.next_label("shift_done");
         self.line(&format!("{loop_label}:"));
@@ -4584,6 +4844,59 @@ impl Emitter {
         self.line(&format!("    jp {loop_label}"));
         self.line(&format!("{done_label}:"));
         Ok(())
+    }
+
+    fn emit_shift_memory_left_byte(&mut self, variable: Variable) {
+        for offset in (1..variable.size).rev() {
+            let source = variable.addr + offset - 1;
+            let destination = variable.addr + offset;
+            self.line(&format!("    ld a, ({source:06X}h)"));
+            self.line(&format!("    ld ({destination:06X}h), a"));
+        }
+        self.line("    xor a");
+        self.line(&format!("    ld ({:06X}h), a", variable.addr));
+    }
+
+    fn emit_shift_memory_right_byte(&mut self, variable: Variable, signed: bool) {
+        for offset in 0..variable.size.saturating_sub(1) {
+            let source = variable.addr + offset + 1;
+            let destination = variable.addr + offset;
+            self.line(&format!("    ld a, ({source:06X}h)"));
+            self.line(&format!("    ld ({destination:06X}h), a"));
+        }
+        if signed {
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                variable.addr + variable.size - 1
+            ));
+            self.line("    add a, a");
+            self.line("    sbc a, a");
+        } else {
+            self.line("    xor a");
+        }
+        self.line(&format!(
+            "    ld ({:06X}h), a",
+            variable.addr + variable.size - 1
+        ));
+    }
+
+    fn emit_saturated_shift_memory(&mut self, variable: Variable, op: BinaryOp, signed: bool) {
+        match op {
+            BinaryOp::Shl => self.line("    xor a"),
+            BinaryOp::Shr if signed => {
+                self.line(&format!(
+                    "    ld a, ({:06X}h)",
+                    variable.addr + variable.size - 1
+                ));
+                self.line("    add a, a");
+                self.line("    sbc a, a");
+            }
+            BinaryOp::Shr => self.line("    xor a"),
+            _ => unreachable!("not a shift op"),
+        }
+        for offset in 0..variable.size {
+            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+        }
     }
 
     fn emit_shift_memory_left_once(&mut self, variable: Variable) {
@@ -6036,7 +6349,7 @@ impl Emitter {
     }
 
     fn maybe_const_shift_count(&self, expr: &Expr) -> Result<Option<u8>, Diagnostic> {
-        match self.symbols.eval_i64(expr) {
+        match self.eval_i64_with_local_constants(expr) {
             Ok(value) => self.validate_shift_count(value).map(Some),
             Err(_) => Ok(None),
         }

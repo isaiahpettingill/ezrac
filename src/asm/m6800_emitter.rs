@@ -46,6 +46,36 @@ pub fn emit_m6800_assembly_with_options(
     })
 }
 
+#[cfg(feature = "m6809")]
+/// Emits the shared scalar source ABI for Motorola M6809.
+///
+/// M6809 accepts the M6800 accumulator spelling used by this backend while
+/// TBIR still sees the concrete M6809 target and applies its normal passes.
+pub fn emit_m6809_assembly_with_options(
+    program: &Program,
+    options: AssemblyOptions,
+) -> Result<String, Diagnostic> {
+    if options.cpu != CpuFamily::M6809 {
+        return Err(Diagnostic::new("M6809 emitter requires an M6809 target"));
+    }
+    if program.main_function().is_none() {
+        return Err(Diagnostic::new("M6809 programs require a `main` function"));
+    }
+    let hir = HirProgram::from_ast(program)?;
+    let tbir = TbirProgram::lower(&hir, program, &options)?;
+    let model = SemanticModel::from_program(
+        &tbir.lowered_program,
+        16,
+        options.ram_base.get(),
+        options.rodata_base.get(),
+        options.asset_base.get(),
+    )?;
+    Emitter::new(model)?.emit(&tbir.lowered_program).map(|asm| {
+        let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
+        with_readability_comments(asm, program, &options, "m6809")
+    })
+}
+
 #[derive(Clone)]
 struct Binding {
     storage: Storage,

@@ -4,10 +4,10 @@ use crate::asm::emit_avr_assembly_with_options;
 use crate::asm::emit_dcpu_assembly_with_options;
 #[cfg(feature = "i8086")]
 use crate::asm::emit_i8086_assembly_with_options;
-#[cfg(feature = "m6800")]
-use crate::asm::emit_m6800_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
+#[cfg(any(feature = "m6800", feature = "m6809"))]
+use crate::asm::{emit_m6800_assembly_with_options, emit_m6809_assembly_with_options};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -162,6 +162,7 @@ fn check_diagnostics_with_sdk_and_overrides(
             | CpuFamily::Lr35902
             | CpuFamily::Avr
             | CpuFamily::M6800
+            | CpuFamily::M6809
     ) {
         for diagnostic in collect_ez80_semantic_diagnostics(
             &resolved,
@@ -213,6 +214,7 @@ fn inefficient_integer_warnings(program: &Program, cpu: CpuFamily) -> Vec<Diagno
             | CpuFamily::Wdc65C816
             | CpuFamily::Ricoh2A03
             | CpuFamily::M6800
+            | CpuFamily::M6809
             | CpuFamily::Tms9900
     );
     let warn_24 = matches!(cpu, CpuFamily::Mos6502 | CpuFamily::Ricoh2A03);
@@ -546,6 +548,15 @@ pub fn check_source_with_sdk_and_overrides(
         #[cfg(not(feature = "m6800"))]
         {
             unreachable!("M6800 targets require the m6800 Cargo feature")
+        }
+    } else if cpu == CpuFamily::M6809 {
+        #[cfg(feature = "m6809")]
+        {
+            emit_m6809_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "m6809"))]
+        {
+            unreachable!("M6809 targets require the m6809 Cargo feature")
         }
     } else if cpu == CpuFamily::M68k {
         #[cfg(feature = "m68k")]

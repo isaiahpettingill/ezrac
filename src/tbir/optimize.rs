@@ -12,6 +12,9 @@ use super::{
     TbirOptimizationOutcome, TbirOptimizationReport, provenance::OptimizationContext,
 };
 
+#[path = "demand.rs"]
+mod demand;
+
 pub fn optimize_program(program: &Program, cpu: CpuFamily) -> (Program, TbirOptimizationReport) {
     optimize_program_with_context(program, cpu, &OptimizationContext::default())
 }
@@ -32,6 +35,7 @@ pub fn optimize_program_with_context(
     hoist_pure_loop_invariants_program(&mut program, &mut report);
     hoist_named_memory_reads_program(&mut program, context, &mut report);
     expand_inline_functions(&mut program, context, &mut report);
+    demand::apply_program(&mut program);
     run_tail_passes(&mut program, cpu, &mut report);
     (program, report)
 }

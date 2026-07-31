@@ -34,6 +34,8 @@ use crate::asm::grammar::{ArchitectureInstruction, parse_instruction};
 use crate::asm::m68k as asm_m68k;
 #[cfg(any(feature = "std", feature = "m6800"))]
 use crate::asm::m6800;
+#[cfg(any(feature = "std", feature = "m6809"))]
+use crate::asm::m6809;
 #[cfg(any(feature = "std", feature = "mos6502"))]
 use crate::asm::mos6502::Mos6502Variant;
 #[cfg(feature = "tms9900")]
@@ -1027,6 +1029,7 @@ mod runner {
             CpuFamily::I8086
             | CpuFamily::M68k
             | CpuFamily::M6800
+            | CpuFamily::M6809
             | CpuFamily::Mos6502
             | CpuFamily::Cmos65C02
             | CpuFamily::Wdc65C816
@@ -1892,6 +1895,14 @@ fn instruction_len(
             ))
         });
     }
+    #[cfg(any(feature = "std", feature = "m6809"))]
+    if cpu == AssemblerCpu::M6809 {
+        return m6809::instruction_len(text)?.ok_or_else(|| {
+            Diagnostic::new(format!(
+                "assembler does not support M6809 instruction `{diagnostic_text}`"
+            ))
+        });
+    }
     #[cfg(feature = "m68k")]
     if cpu == AssemblerCpu::M68k {
         return asm_m68k::instruction_len(text);
@@ -1949,6 +1960,16 @@ fn emit_instruction(
         let Some(encoded) = m6800::emit_instruction(text, labels, pc)? else {
             return Err(Diagnostic::new(format!(
                 "assembler does not support M6800 instruction `{diagnostic_text}`"
+            )));
+        };
+        bytes.extend(encoded);
+        return Ok(());
+    }
+    #[cfg(any(feature = "std", feature = "m6809"))]
+    if cpu == AssemblerCpu::M6809 {
+        let Some(encoded) = m6809::emit_instruction(text, labels, pc)? else {
+            return Err(Diagnostic::new(format!(
+                "assembler does not support M6809 instruction `{diagnostic_text}`"
             )));
         };
         bytes.extend(encoded);

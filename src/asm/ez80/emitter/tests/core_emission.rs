@@ -283,6 +283,7 @@ fn peephole_removes_adjacent_duplicate_register_loads() {
         r#"
 section .text
     ld a, 01h
+    ld b, a
     ld a, 01h
     ld hl, 040000h
     ld hl, 040000h
@@ -299,6 +300,37 @@ section .text
     assert_eq!(asm.matches("    ld e, 02h").count(), 1, "{asm}");
     assert_eq!(asm.matches("    ld iy, 040000h").count(), 1, "{asm}");
     assert!(asm.contains("    ld b, a"), "{asm}");
+}
+
+#[test]
+fn peephole_removes_proven_storage_reload_pairs_only() {
+    let asm = peephole_cleanup_with_ranges(
+        r#"
+    ld a, (040000h)
+    ld (040000h), a
+    ld (040001h), hl
+    ld hl, (040001h)
+    ld (040004h), a
+    ld hl, (040004h)
+    ; asm volatile
+    ld hl, hl
+    ld (040000h), a
+    ld a, (040000h)
+    ; end asm
+"#,
+        &[(0x040000, 1), (0x040001, 3), (0x040004, 1)],
+    );
+
+    assert_eq!(asm.matches("    ld a, (040000h)").count(), 2, "{asm}");
+    assert_eq!(asm.matches("    ld (040000h), a").count(), 1, "{asm}");
+    assert_eq!(asm.matches("    ld (040001h), hl").count(), 1, "{asm}");
+    assert_eq!(asm.matches("    ld hl, (040001h)").count(), 0, "{asm}");
+    assert_eq!(asm.matches("    ld (040004h), a").count(), 1, "{asm}");
+    assert_eq!(asm.matches("    ld hl, (040004h)").count(), 1, "{asm}");
+    assert!(
+        asm.contains("; asm volatile\n    ld hl, hl\n    ld (040000h), a\n    ld a, (040000h)"),
+        "{asm}"
+    );
 }
 
 #[test]

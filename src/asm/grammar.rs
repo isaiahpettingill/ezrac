@@ -77,6 +77,7 @@ pub(crate) fn parse_instruction(
         AssemblerCpu::Avr => avr::parse(cpu, &source),
         AssemblerCpu::Dcpu => dcpu::parse(cpu, &source),
         AssemblerCpu::M6800 => m6800::parse(cpu, &source),
+        AssemblerCpu::M6809 => m6809::parse(cpu, &source),
         AssemblerCpu::M68k => m68k::parse(cpu, &source),
         AssemblerCpu::Mos6502
         | AssemblerCpu::Cmos65C02
@@ -224,6 +225,7 @@ architecture_parser!(lr35902, "asm/grammar/lr35902.pest", lr35902_operand);
 architecture_parser!(avr, "asm/grammar/avr.pest", avr_operand);
 architecture_parser!(dcpu, "asm/grammar/dcpu.pest", dcpu_operand);
 architecture_parser!(m6800, "asm/grammar/m6800.pest", m6800_operand);
+architecture_parser!(m6809, "asm/grammar/m6809.pest", m6809_operand);
 architecture_parser!(m68k, "asm/grammar/m68k.pest", m68k_operand);
 architecture_parser!(mos6502, "asm/grammar/mos6502.pest", mos6502_operand);
 architecture_parser!(tms9900, "asm/grammar/tms9900.pest", tms9900_operand);

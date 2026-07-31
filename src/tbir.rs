@@ -6,12 +6,14 @@ use crate::{
     hir::HirProgram,
 };
 
+pub mod bit_ops;
 pub mod diagnostics;
 pub mod dump;
 pub mod ez80;
 pub mod model;
 pub mod optimize;
 pub mod provenance;
+pub mod range;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TbirProgram {

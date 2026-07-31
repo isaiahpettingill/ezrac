@@ -59,6 +59,7 @@ dependencies = [
  "lsp",
  "m6800",
  "m68000",
+ "mc6809-core",
  "mos6502",
  "pest",
  "pest_derive",
@@ -175,6 +176,12 @@ name = "m68000"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae608876c3e5b088c53d7b310dda17bae1b5aa33cb61a5824e7bc730a3f9c7fe"
+
+[[package]]
+name = "mc6809-core"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69a50d2cb9d715b36927a6c578bccba0a530330f4bc215a0f2c26818a45ab6bf"
 
 [[package]]
 name = "memchr"

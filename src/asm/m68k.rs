@@ -419,8 +419,12 @@ fn signed_val(s: &str, l: &HashMap<String, u32>, r: bool) -> Result<i64, Diagnos
 }
 fn val(s: &str, l: &HashMap<String, u32>, _pc: u32, r: bool) -> Result<u32, Diagnostic> {
     let s = s.trim().trim_start_matches('#');
-    if let Some(v) = l.get(s) {
-        return Ok(*v);
+    if let Some(v) = l.get(s).copied().or_else(|| {
+        l.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(s))
+            .map(|(_, value)| *value)
+    }) {
+        return Ok(v);
     }
     if !r && s.chars().any(|c| c.is_alphabetic() || c == '_') {
         return Ok(0);
@@ -907,6 +911,13 @@ mod tests {
             assert_eq!(instruction_len(source).unwrap(), expected.len(), "{source}");
         }
     }
+    #[test]
+    fn resolves_case_insensitive_labels_after_normalizing_instructions() {
+        let labels = HashMap::from([("Target".to_owned(), 0x1010)]);
+        assert!(encode("BNE target", &labels, 0x1000, true).is_ok());
+        assert!(encode("JMP TARGET", &labels, 0x1000, true).is_ok());
+    }
+
     #[test]
     fn every_official_family_has_a_table_driven_smoke_case() {
         let cases = [

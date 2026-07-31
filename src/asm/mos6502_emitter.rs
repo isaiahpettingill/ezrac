@@ -12,6 +12,7 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    target::CpuFamily,
     tbir::{
         TbirProgram,
         model::{SemanticModel, Storage},
@@ -73,6 +74,7 @@ struct Emitter {
     r1: Storage,
     r2: Storage,
     c64_executable: bool,
+    cpu: CpuFamily,
 }
 
 impl Emitter {
@@ -98,6 +100,7 @@ impl Emitter {
             r1,
             r2,
             c64_executable: options.c64_executable,
+            cpu: options.cpu,
         }
     }
 
@@ -282,7 +285,12 @@ impl Emitter {
                     return Ok(());
                 };
                 if *op == AssignOp::Set {
+                    if self.emit_65c02_store_zero(target, width, value)? {
+                        return Ok(());
+                    }
                     self.emit_expr(value, &ty)?;
+                } else if self.emit_65c02_bit_modify(target, width, *op, value)? {
+                    return Ok(());
                 } else {
                     self.emit_load_place(target, width)?;
                     if matches!(op, AssignOp::Shl | AssignOp::Shr)
@@ -468,8 +476,15 @@ impl Emitter {
             }
             (resolved, _) => {
                 let width = self.model.type_width(&resolved)?;
-                self.emit_expr(value, &resolved)?;
-                self.copy(self.r0, storage, u32::from(width));
+                if self.supports_65c02() && self.model.const_value(value).ok() == Some(0) {
+                    self.zero(Storage {
+                        address: storage.address,
+                        size: u32::from(width),
+                    });
+                } else {
+                    self.emit_expr(value, &resolved)?;
+                    self.copy(self.r0, storage, u32::from(width));
+                }
             }
         }
         Ok(())
@@ -932,6 +947,8 @@ impl Emitter {
         self.line(&format!("    sbc ${:04X}", r1 + 1));
         self.line(&format!("    sta ${:04X}", r2 + 1));
         self.line(&format!("    inc ${r0:04X}"));
+        self.line("    bne __ezra_u16_divmod_next");
+        self.line(&format!("    inc ${:04X}", r0 + 1));
         self.line("__ezra_u16_divmod_next:");
         self.line("    dex");
         self.line("    bne __ezra_u16_divmod_loop");
@@ -1113,42 +1130,84 @@ impl Emitter {
         let byte_count = count / 8;
         let bit_count = count % 8;
 
-        if byte_count != 0 {
-            if right {
-                if signed && byte_count == u32::from(width) {
-                    self.lda(self.r0.address + u32::from(width - 1));
+        // A byte-boundary move and its remaining carry chain are equivalent
+        // to the full carry chain, but are not always cheaper for narrow
+        // values. Keep the selection costed instead of assuming that every
+        // constant shift should be split at a byte boundary.
+        let bytewise_cost = self.shift_cost(width, byte_count, bit_count, right, signed);
+        let carry_cost = self.shift_cost(width, 0, count, right, signed);
+        if byte_count != 0 && bytewise_cost < carry_cost {
+            self.shift_bytes(width, right, byte_count, signed);
+            self.shift_bits(width, right, bit_count, signed);
+        } else {
+            self.shift_bits(width, right, count, signed);
+        }
+    }
+
+    fn shift_cost(
+        &self,
+        width: u8,
+        byte_count: u32,
+        bit_count: u32,
+        right: bool,
+        signed: bool,
+    ) -> u32 {
+        shift_cost(
+            width,
+            byte_count,
+            bit_count,
+            right,
+            signed,
+            self.supports_65c02(),
+        )
+    }
+
+    fn shift_bytes(&mut self, width: u8, right: bool, byte_count: u32, signed: bool) {
+        if byte_count == 0 {
+            return;
+        }
+        let width = u32::from(width);
+        if right {
+            if signed && byte_count == width {
+                self.lda(self.r0.address + width - 1);
+            }
+            for offset in 0..width - byte_count {
+                self.lda(self.r0.address + offset + byte_count);
+                self.sta(self.r0.address + offset);
+            }
+            if signed {
+                if byte_count != width {
+                    self.lda(self.r0.address + width - byte_count - 1);
                 }
-                for offset in 0..u32::from(width) - byte_count {
-                    self.lda(self.r0.address + offset + byte_count);
-                    self.sta(self.r0.address + offset);
-                }
-                if signed {
-                    if byte_count != u32::from(width) {
-                        self.lda(self.r0.address + u32::from(width) - byte_count - 1);
-                    }
-                    self.line("    asl a");
-                    self.line("    lda #$00");
-                    self.line("    sbc #$00");
-                    self.line("    eor #$FF");
-                } else {
-                    self.lda_imm(0);
-                }
-                for offset in u32::from(width) - byte_count..u32::from(width) {
-                    self.sta(self.r0.address + offset);
-                }
+                self.line("    asl a");
+                self.line("    lda #$00");
+                self.line("    sbc #$00");
+                self.line("    eor #$FF");
             } else {
-                for offset in (byte_count..u32::from(width)).rev() {
-                    self.lda(self.r0.address + offset - byte_count);
-                    self.sta(self.r0.address + offset);
-                }
-                self.lda_imm(0);
-                for offset in 0..byte_count {
+                self.zero(Storage {
+                    address: self.r0.address + width - byte_count,
+                    size: byte_count,
+                });
+            }
+            if signed {
+                for offset in width - byte_count..width {
                     self.sta(self.r0.address + offset);
                 }
             }
+        } else {
+            for offset in (byte_count..width).rev() {
+                self.lda(self.r0.address + offset - byte_count);
+                self.sta(self.r0.address + offset);
+            }
+            self.zero(Storage {
+                address: self.r0.address,
+                size: byte_count,
+            });
         }
+    }
 
-        for _ in 0..bit_count {
+    fn shift_bits(&mut self, width: u8, right: bool, count: u32, signed: bool) {
+        for _ in 0..count {
             self.shift_once(width, right, signed);
         }
     }
@@ -1327,6 +1386,65 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn emit_65c02_store_zero(
+        &mut self,
+        place: &Place,
+        width: u8,
+        value: &Expr,
+    ) -> Result<bool, Diagnostic> {
+        if !self.supports_65c02() || self.model.const_value(value).ok() != Some(0) {
+            return Ok(false);
+        }
+        let Some(address) = self.direct_place_address(place)? else {
+            return Ok(false);
+        };
+        for offset in 0..u32::from(width) {
+            self.line(&format!("    stz ${:04X}", address + offset));
+        }
+        Ok(true)
+    }
+
+    fn emit_65c02_bit_modify(
+        &mut self,
+        place: &Place,
+        width: u8,
+        op: AssignOp,
+        value: &Expr,
+    ) -> Result<bool, Diagnostic> {
+        if !self.supports_65c02() || !matches!(op, AssignOp::BitAnd | AssignOp::BitOr) {
+            return Ok(false);
+        }
+        let Ok(raw_value) = self.model.const_value(value) else {
+            return Ok(false);
+        };
+        let Some(address) = self.direct_place_address(place)? else {
+            return Ok(false);
+        };
+        for offset in 0..u32::from(width) {
+            let byte = (raw_value as u64 >> (offset * 8)) as u8;
+            self.lda_imm(if op == AssignOp::BitAnd { !byte } else { byte });
+            let mnemonic = if op == AssignOp::BitAnd { "trb" } else { "tsb" };
+            self.line(&format!("    {mnemonic} ${:04X}", address + offset));
+        }
+        Ok(true)
+    }
+
+    fn direct_place_address(&self, place: &Place) -> Result<Option<u32>, Diagnostic> {
+        match place {
+            Place::Ident(name) => Ok(Some(self.binding(name)?.storage.address)),
+            Place::Field { base, field } => {
+                let binding = self.binding(base)?;
+                let field = self.model.field(&binding.ty, field)?;
+                Ok(Some(binding.storage.address + field.offset))
+            }
+            Place::Index { .. } | Place::Access(_) | Place::Deref(_) => Ok(None),
+        }
+    }
+
+    fn supports_65c02(&self) -> bool {
+        matches!(self.cpu, CpuFamily::Cmos65C02 | CpuFamily::Wdc65C816)
     }
 
     fn emit_store_aggregate_place(
@@ -1685,9 +1803,15 @@ impl Emitter {
     }
 
     fn zero(&mut self, storage: Storage) {
-        self.lda_imm(0);
-        for offset in 0..storage.size {
-            self.sta(storage.address + offset);
+        if self.supports_65c02() {
+            for offset in 0..storage.size {
+                self.line(&format!("    stz ${:04X}", storage.address + offset));
+            }
+        } else {
+            self.lda_imm(0);
+            for offset in 0..storage.size {
+                self.sta(storage.address + offset);
+            }
         }
     }
 
@@ -1915,8 +2039,13 @@ impl Emitter {
         let byte_offset = bit_offset / 8;
         let byte_mask = (mask >> (byte_offset * 8)) as u8;
         self.emit_expr(value, &value_ty)?;
-        self.lda_imm(byte_mask);
-        self.line(&format!("    bit ${:04X}", self.r0.address + byte_offset));
+        if self.supports_65c02() {
+            self.lda(self.r0.address + byte_offset);
+            self.line(&format!("    bit #${byte_mask:02X}"));
+        } else {
+            self.lda_imm(byte_mask);
+            self.line(&format!("    bit ${:04X}", self.r0.address + byte_offset));
+        }
         let branch = if (*op == BinaryOp::Eq) == (expected == mask) {
             "beq"
         } else {
@@ -2021,6 +2150,36 @@ fn element_type(ty: &Type) -> Result<Type, Diagnostic> {
 
 fn type_is_signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if name.starts_with('i'))
+}
+
+fn shift_cost(
+    width: u8,
+    byte_count: u32,
+    bit_count: u32,
+    right: bool,
+    signed: bool,
+    cmos: bool,
+) -> u32 {
+    let width = u32::from(width);
+    let byte_moves = if byte_count == 0 {
+        0
+    } else {
+        let copied_bytes = 2 * (width - byte_count);
+        let fill_bytes = if right && signed {
+            5 + byte_count
+        } else if cmos {
+            byte_count
+        } else {
+            1 + byte_count
+        };
+        copied_bytes + fill_bytes
+    };
+    let per_bit = if right && signed {
+        width + 2
+    } else {
+        width + 1
+    };
+    byte_moves + bit_count * per_bit
 }
 
 fn is_comparison(op: BinaryOp) -> bool {
@@ -2300,12 +2459,12 @@ mod structural_tests {
 
     use super::*;
 
-    fn emit(source: &str) -> String {
+    fn emit_for_cpu(source: &str, cpu: CpuFamily) -> String {
         let program = parse_program(Path::new("test.ezra"), source).unwrap();
         emit_mos6502_assembly_with_options(
             &program,
             AssemblyOptions {
-                cpu: CpuFamily::Mos6502,
+                cpu,
                 ram_base: crate::target::Address24::new(0xA000),
                 rodata_base: crate::target::Address24::new(0x8000),
                 asset_base: crate::target::Address24::new(0xC000),
@@ -2314,6 +2473,10 @@ mod structural_tests {
             },
         )
         .unwrap()
+    }
+
+    fn emit(source: &str) -> String {
+        emit_for_cpu(source, CpuFamily::Mos6502)
     }
 
     #[test]
@@ -2365,6 +2528,11 @@ mod structural_tests {
             divide_and_remainder.contains("__ezra_u16_divmod_loop:\n"),
             "{divide_and_remainder}"
         );
+        assert!(
+            divide_and_remainder
+                .contains("    inc $A000\n    bne __ezra_u16_divmod_next\n    inc $A001"),
+            "{divide_and_remainder}"
+        );
     }
 
     #[test]
@@ -2414,8 +2582,83 @@ mod structural_tests {
 
         assert!(!assembly.contains("shift_loop"), "{assembly}");
         assert!(!assembly.contains("shift_done"), "{assembly}");
-        assert!(assembly.matches("    rol $").count() >= 3, "{assembly}");
+        assert!(
+            assembly.matches("    rol $").count() + assembly.matches("    ror $").count() >= 3,
+            "{assembly}"
+        );
         assert!(assembly.contains("    eor #$FF"), "{assembly}");
+    }
+
+    #[test]
+    fn selects_costed_byte_boundary_moves_and_short_carry_chains() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let value: u24 = 0x123456
+                    let boundary_left: u24 = value << 8
+                    let boundary_right: u24 = value >> 8
+                    let near_left: u24 = value << 15
+                    let near_right: u24 = value >> 15
+                }
+            "#,
+        );
+
+        assert_eq!(assembly.matches("    rol $").count(), 7, "{assembly}");
+        assert_eq!(assembly.matches("    ror $").count(), 7, "{assembly}");
+    }
+
+    #[test]
+    fn emits_cmos_bit_operations_only_for_a_cmos_target() {
+        let source = r#"
+            fn main() {
+                let zero: u8 = 1
+                zero = 0
+                let bits: u8 = 0
+                bits &= 0xFE
+                bits |= 1
+                if (bits & 0x80) == 0 { bits = 0 }
+            }
+        "#;
+        let nmos = emit(source);
+        let cmos = emit_for_cpu(source, CpuFamily::Cmos65C02);
+
+        for mnemonic in ["stz ", "trb ", "tsb ", "bit #"] {
+            assert!(!nmos.contains(mnemonic), "{mnemonic} in:\n{nmos}");
+        }
+        assert!(cmos.contains("    stz $"), "{cmos}");
+        assert!(cmos.contains("    trb $"), "{cmos}");
+        assert!(cmos.contains("    tsb $"), "{cmos}");
+        assert!(cmos.contains("    bit #$80"), "{cmos}");
+        crate::vm::assemble_subset_with_symbols_at(
+            crate::target::AssemblerCpu::Cmos65C02,
+            &cmos,
+            0x0200,
+        )
+        .unwrap_or_else(|error| panic!("{error}\n{cmos}"));
+    }
+
+    #[test]
+    fn keeps_cmos_mmio_access_widths_and_avoids_cmos_memory_forms() {
+        let assembly = emit_for_cpu(
+            r#"
+                volatile mmio status: ptr<u16> = 0xD000
+                fn main() {
+                    *(status) = 0
+                    if (*(status) & 0x0100) == 0 { }
+                }
+            "#,
+            CpuFamily::Cmos65C02,
+        );
+
+        assert!(!assembly.contains("    stz $"), "{assembly}");
+        assert!(!assembly.contains("    trb $"), "{assembly}");
+        assert!(!assembly.contains("    tsb $"), "{assembly}");
+        assert!(assembly.contains("    bit #$01"), "{assembly}");
+        assert!(
+            assembly.matches("    lda ($F0),y").count() >= 2,
+            "{assembly}"
+        );
+        assert!(assembly.contains("    ldy #$01"), "{assembly}");
     }
 
     #[test]

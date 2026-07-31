@@ -38,10 +38,10 @@ use ezra::asm::emit_dcpu_assembly_with_options;
 use ezra::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "m68k")]
 use ezra::asm::emit_m68k_assembly_with_options;
-#[cfg(feature = "m6800")]
-use ezra::asm::emit_m6800_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use ezra::asm::emit_tms9900_assembly_with_options;
+#[cfg(any(feature = "m6800", feature = "m6809"))]
+use ezra::asm::{emit_m6800_assembly_with_options, emit_m6809_assembly_with_options};
 
 #[cfg(feature = "lsp")]
 mod lsp_server;
@@ -1073,6 +1073,10 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
     if settings.target.triple.cpu == CpuFamily::M6800 {
         return Ok(());
     }
+    #[cfg(feature = "m6809")]
+    if settings.target.triple.cpu == CpuFamily::M6809 {
+        return Ok(());
+    }
     #[cfg(feature = "tms9900")]
     if settings.target.triple.cpu == CpuFamily::Tms9900 {
         return Ok(());
@@ -1159,6 +1163,15 @@ fn emit_source_assembly(
         #[cfg(not(feature = "m6800"))]
         {
             unreachable!("M6800 targets require the m6800 Cargo feature")
+        }
+    } else if options.cpu == CpuFamily::M6809 {
+        #[cfg(feature = "m6809")]
+        {
+            emit_m6809_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "m6809"))]
+        {
+            unreachable!("M6809 targets require the m6809 Cargo feature")
         }
     } else if options.cpu == CpuFamily::Tms9900 {
         #[cfg(feature = "tms9900")]

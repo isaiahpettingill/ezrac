@@ -53,6 +53,7 @@ pub fn emit_m68k_assembly_with_options(
 struct Binding {
     storage: Storage,
     ty: Type,
+    volatile: bool,
 }
 
 #[derive(Clone)]
@@ -242,6 +243,12 @@ impl Emitter {
                     let storage = self.model.allocate_type(&ty)?;
                     self.emit_initializer(storage, &ty, value)?;
                     self.store_aggregate_place(target, storage, storage.size)?;
+                    return Ok(());
+                }
+                if matches!(op, AssignOp::Shl | AssignOp::Shr)
+                    && let Some(count) = self.constant_shift_count(value)
+                    && self.emit_memory_shift_assignment(target, &ty, *op, count)?
+                {
                     return Ok(());
                 }
                 if *op == AssignOp::Set {
@@ -441,6 +448,33 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_memory_shift_assignment(
+        &mut self,
+        target: &Place,
+        ty: &Type,
+        op: AssignOp,
+        count: u32,
+    ) -> Result<bool, Diagnostic> {
+        let Place::Ident(name) = target else {
+            return Ok(false);
+        };
+        let binding = self.binding(name)?;
+        if binding.volatile || scalar_width(ty)? != 2 || !should_use_memory_shift(count) {
+            return Ok(false);
+        }
+        let instruction = match (op, type_is_signed(ty)) {
+            (AssignOp::Shl, _) => "lsl",
+            (AssignOp::Shr, true) => "asr",
+            (AssignOp::Shr, false) => "lsr",
+            _ => return Ok(false),
+        };
+        self.line(&format!(
+            "    {instruction} ${:06X}",
+            binding.storage.address
+        ));
+        Ok(true)
+    }
+
     fn emit_local_single_bit_compound_assignment(
         &mut self,
         target: &Place,
@@ -556,6 +590,9 @@ impl Emitter {
 
     fn emit_expr(&mut self, expr: &Expr, expected: &Type) -> Result<(), Diagnostic> {
         self.require_scalar(expected)?;
+        if self.emit_byte_swap_combine(expr, expected)? {
+            return Ok(());
+        }
         match expr {
             Expr::Int(value) | Expr::TypedInt(value, _) => self.load_constant(*value, expected)?,
             Expr::Bool(value) => self.load_constant(i64::from(*value), expected)?,
@@ -569,7 +606,9 @@ impl Emitter {
                     self.load_constant(value, expected)?;
                 } else {
                     let binding = self.binding(name)?;
-                    self.load_d0(binding.storage, &binding.ty)?;
+                    let source_ty = binding.ty.clone();
+                    self.load_d0(binding.storage, &source_ty)?;
+                    self.convert_d0(&source_ty, expected)?;
                 }
             }
             Expr::Field { base, field } => {
@@ -586,15 +625,18 @@ impl Emitter {
                         },
                         &field.ty,
                     )?;
+                    self.convert_d0(&field.ty, expected)?;
                 }
             }
             Expr::Index { name, index } => {
                 let element = self.emit_named_index_address(name, index)?;
                 self.load_from_a0(&element)?;
+                self.convert_d0(&element, expected)?;
             }
             Expr::Access(path) => {
                 let ty = self.emit_access_address(path)?;
                 self.load_from_a0(&ty)?;
+                self.convert_d0(&ty, expected)?;
             }
             Expr::AddressOf(name) => {
                 let binding = self.binding(name)?;
@@ -635,11 +677,8 @@ impl Emitter {
                 self.emit_expr(left, &operand_ty)?;
                 if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
                     && let Some(count) = self.constant_shift_count(right)
-                    && count <= 8
                 {
-                    if count != 0 {
-                        self.emit_immediate_shift(*op, &operand_ty, count)?;
-                    }
+                    self.emit_constant_shift(*op, &operand_ty, count)?;
                     return Ok(());
                 }
                 self.line(&format!("    move.{} d0,d1", size_suffix(&operand_ty)?));
@@ -658,8 +697,11 @@ impl Emitter {
             }
             Expr::Cast { ty, expr } => {
                 let ty = self.model.resolved_type(ty)?;
+                let source_ty = self.model.resolved_type(&self.expr_type(expr)?)?;
+                self.require_scalar(&source_ty)?;
                 self.require_scalar(&ty)?;
-                self.emit_expr(expr, &ty)?;
+                self.emit_expr(expr, &source_ty)?;
+                self.convert_d0(&source_ty, &ty)?;
             }
             Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
             Expr::Deref(pointer) => {
@@ -671,6 +713,7 @@ impl Emitter {
                 self.emit_expr(pointer, &pointer_ty)?;
                 self.line("    move.l d0,a0");
                 self.load_from_a0(&inner)?;
+                self.convert_d0(&inner, expected)?;
             }
             Expr::In(port) => {
                 return Err(Diagnostic::new(format!(
@@ -699,22 +742,200 @@ impl Emitter {
         }
     }
 
-    fn emit_immediate_shift(
+    fn emit_byte_swap_combine(&mut self, expr: &Expr, expected: &Type) -> Result<bool, Diagnostic> {
+        let expected = self.model.resolved_type(expected)?;
+        let width = scalar_width(&expected)?;
+        if !matches!(width, 2 | 4) {
+            return Ok(false);
+        }
+        let mut terms = Vec::new();
+        flatten_bit_or(expr, &mut terms);
+        let source = if width == 2 {
+            match_u16_byte_swap(&terms, |value| self.constant_shift_count(value))
+        } else {
+            match_u32_byte_swap(&terms, |value| self.constant_shift_count(value))
+        };
+        let Some(source) = source else {
+            return Ok(false);
+        };
+        if !self.can_reuse_without_memory_effects(source) {
+            return Ok(false);
+        }
+        let source_ty = self.model.resolved_type(&self.expr_type(source)?)?;
+        if scalar_width(&source_ty)? != width {
+            return Ok(false);
+        }
+        self.emit_expr(source, &source_ty)?;
+        if width == 2 {
+            self.line("    ror.w #8,d0");
+        } else {
+            self.line("    ror.w #8,d0");
+            self.line("    swap d0");
+            self.line("    ror.w #8,d0");
+        }
+        self.convert_d0(&source_ty, &expected)?;
+        Ok(true)
+    }
+
+    fn can_reuse_without_memory_effects(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Int(_)
+            | Expr::TypedInt(_, _)
+            | Expr::Bool(_)
+            | Expr::Char(_)
+            | Expr::String(_)
+            | Expr::AddressOf(_)
+            | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_) => true,
+            Expr::Ident(name) => !self.model.mmio.contains_key(name),
+            Expr::Unary { expr, .. }
+            | Expr::BankedPointer { pointer: expr, .. }
+            | Expr::Cast { expr, .. } => self.can_reuse_without_memory_effects(expr),
+            Expr::Binary { left, right, .. } => {
+                self.can_reuse_without_memory_effects(left)
+                    && self.can_reuse_without_memory_effects(right)
+            }
+            Expr::Field { .. }
+            | Expr::Index { .. }
+            | Expr::Access(_)
+            | Expr::Deref(_)
+            | Expr::Call { .. }
+            | Expr::In(_)
+            | Expr::Array(_)
+            | Expr::StructInit { .. } => false,
+        }
+    }
+
+    fn emit_constant_shift(
         &mut self,
         op: BinaryOp,
         ty: &Type,
         count: u32,
     ) -> Result<(), Diagnostic> {
+        let width = scalar_width(ty)?;
+        let bits = u32::from(width) * 8;
+        if count == 0 {
+            return Ok(());
+        }
+        if count >= bits {
+            if op == BinaryOp::Shr && type_is_signed(ty) {
+                self.extend_signed_to_long(ty)?;
+                for _ in 0..width {
+                    self.line("    asr.l #8,d0");
+                }
+            } else {
+                self.line("    moveq #0,d0");
+            }
+            return Ok(());
+        }
+        if count == 16 && matches!(width, 3 | 4) {
+            self.emit_word_boundary_shift(op, ty)?;
+            return Ok(());
+        }
         let instruction = match op {
             BinaryOp::Shl => "lsl",
             BinaryOp::Shr if type_is_signed(ty) => "asr",
             BinaryOp::Shr => "lsr",
-            _ => unreachable!("immediate shift called for a non-shift operation"),
+            _ => unreachable!("constant shift called for a non-shift operation"),
         };
-        self.line(&format!(
-            "    {instruction}.{} #{count},d0",
-            size_suffix(ty)?
-        ));
+        let suffix = size_suffix(ty)?;
+        let mut remaining = count;
+        while remaining > 8 {
+            self.line(&format!("    {instruction}.{suffix} #8,d0"));
+            remaining -= 8;
+        }
+        if remaining != 0 {
+            self.line(&format!("    {instruction}.{suffix} #{remaining},d0"));
+        }
+        self.normalize_d0(ty)?;
+        Ok(())
+    }
+
+    fn emit_word_boundary_shift(&mut self, op: BinaryOp, ty: &Type) -> Result<(), Diagnostic> {
+        let width = scalar_width(ty)?;
+        match (op, width, type_is_signed(ty)) {
+            (BinaryOp::Shl, 4, _) => {
+                self.line("    swap d0");
+                self.line("    clr.w d0");
+            }
+            (BinaryOp::Shl, 3, _) => {
+                self.line("    swap d0");
+                self.line("    andi.l #$FFFF00,d0");
+            }
+            (BinaryOp::Shr, 4, true) => {
+                self.line("    swap d0");
+                self.line("    ext.l d0");
+            }
+            (BinaryOp::Shr, 4, false) => {
+                self.line("    swap d0");
+                self.line("    andi.l #$FFFF,d0");
+            }
+            (BinaryOp::Shr, 3, true) => {
+                self.line("    swap d0");
+                self.line("    ext.w d0");
+                self.line("    ext.l d0");
+            }
+            (BinaryOp::Shr, 3, false) => {
+                self.line("    swap d0");
+                self.line("    andi.l #$FF,d0");
+            }
+            _ => unreachable!("word boundary shift called for an unsupported type"),
+        }
+        self.normalize_d0(ty)
+    }
+
+    fn convert_d0(&mut self, source: &Type, target: &Type) -> Result<(), Diagnostic> {
+        let source = self.model.resolved_type(source)?;
+        let target = self.model.resolved_type(target)?;
+        let source_width = scalar_width(&source)?;
+        let target_width = scalar_width(&target)?;
+        if source_width == target_width {
+            return Ok(());
+        }
+        if source_width > target_width {
+            self.line(&format!("    andi.l #${:X},d0", width_mask(target_width)));
+            if target_width == 3 {
+                self.normalize_d0(&target)?;
+            }
+            return Ok(());
+        }
+        if type_is_signed(&source) {
+            match source_width {
+                1 => {
+                    self.line("    ext.w d0");
+                    if target_width >= 3 {
+                        self.line("    ext.l d0");
+                    }
+                }
+                2 => {
+                    if target_width >= 3 {
+                        self.line("    ext.l d0");
+                    }
+                }
+                3 => self.normalize_d0(&source)?,
+                _ => unreachable!(),
+            }
+        } else {
+            self.line(&format!("    andi.l #${:X},d0", width_mask(source_width)));
+        }
+        if target_width == 3 {
+            self.normalize_d0(&target)?;
+        }
+        Ok(())
+    }
+
+    fn extend_signed_to_long(&mut self, ty: &Type) -> Result<(), Diagnostic> {
+        match scalar_width(ty)? {
+            1 => {
+                self.line("    ext.w d0");
+                self.line("    ext.l d0");
+            }
+            2 => self.line("    ext.l d0"),
+            3 => self.normalize_d0(ty)?,
+            4 => {}
+            _ => unreachable!(),
+        }
         Ok(())
     }
 
@@ -1557,10 +1778,14 @@ impl Emitter {
             )));
         }
         let ty = self.model.resolved_type(&ty)?;
-        self.scopes
-            .last_mut()
-            .expect("function scope")
-            .insert(name, Binding { storage, ty });
+        self.scopes.last_mut().expect("function scope").insert(
+            name,
+            Binding {
+                storage,
+                ty,
+                volatile: false,
+            },
+        );
         Ok(())
     }
 
@@ -1572,15 +1797,17 @@ impl Emitter {
             return Ok(Binding {
                 storage: *storage,
                 ty: self.model.resolved_type(&self.model.global_types[name])?,
+                volatile: false,
             });
         }
-        if let Some((address, ty, _)) = self.model.mmio.get(name) {
+        if let Some((address, ty, volatile)) = self.model.mmio.get(name) {
             return Ok(Binding {
                 storage: Storage {
                     address: *address,
                     size: self.model.type_size(ty)?,
                 },
                 ty: ty.clone(),
+                volatile: *volatile,
             });
         }
         Err(Diagnostic::new(format!("unknown variable `{name}`")))
@@ -1636,6 +1863,146 @@ fn scalar_width(ty: &Type) -> Result<u8, Diagnostic> {
         Type::Ptr(_) => Ok(3),
         _ => Err(Diagnostic::new("unsupported M68k scalar type")),
     }
+}
+
+fn width_mask(width: u8) -> u32 {
+    match width {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        3 => 0xFF_FFFF,
+        4 => 0xFFFF_FFFF,
+        _ => unreachable!(),
+    }
+}
+
+fn should_use_memory_shift(count: u32) -> bool {
+    if count == 0 {
+        return false;
+    }
+    let memory_cycles = 20 * count;
+    let register_cycles = 28 + 8 + 2 * count;
+    memory_cycles < register_cycles
+}
+
+fn flatten_bit_or<'a>(expr: &'a Expr, terms: &mut Vec<&'a Expr>) {
+    if let Expr::Binary {
+        left,
+        op: BinaryOp::BitOr,
+        right,
+    } = expr
+    {
+        flatten_bit_or(left, terms);
+        flatten_bit_or(right, terms);
+    } else {
+        terms.push(expr);
+    }
+}
+
+fn shifted_mask_term<'a, F>(
+    expr: &'a Expr,
+    shift_count: F,
+) -> Option<(&'a Expr, BinaryOp, u32, Option<u64>)>
+where
+    F: Fn(&Expr) -> Option<u32>,
+{
+    let Expr::Binary { left, op, right } = expr else {
+        return None;
+    };
+    if !matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+        return None;
+    }
+    let count = shift_count(right)?;
+    let (source, mask) = match left.as_ref() {
+        Expr::Binary {
+            left: source,
+            op: BinaryOp::BitAnd,
+            right: mask,
+        } => (
+            source.as_ref(),
+            Some(u64::try_from(const_expr_value(mask)?).ok()?),
+        ),
+        _ => (left.as_ref(), None),
+    };
+    Some((source, *op, count, mask))
+}
+
+fn const_expr_value(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(value) | Expr::TypedInt(value, _) => Some(*value),
+        _ => None,
+    }
+}
+
+fn match_u16_byte_swap<'a, F>(terms: &[&'a Expr], shift_count: F) -> Option<&'a Expr>
+where
+    F: Fn(&Expr) -> Option<u32> + Copy,
+{
+    if terms.len() != 2 {
+        return None;
+    }
+    let mut left_source = None;
+    let mut right_source = None;
+    for term in terms {
+        let (source, op, count, mask) = shifted_mask_term(term, shift_count)?;
+        if count != 8 {
+            return None;
+        }
+        match (op, mask) {
+            (BinaryOp::Shl, None | Some(0xFF) | Some(0xFFFF)) if left_source.is_none() => {
+                left_source = Some(source)
+            }
+            (BinaryOp::Shr, None | Some(0xFF00) | Some(0xFFFF)) if right_source.is_none() => {
+                right_source = Some(source)
+            }
+            _ => return None,
+        }
+    }
+    let left_source = left_source?;
+    let right_source = right_source?;
+    (left_source == right_source).then_some(left_source)
+}
+
+fn match_u32_byte_swap<'a, F>(terms: &[&'a Expr], shift_count: F) -> Option<&'a Expr>
+where
+    F: Fn(&Expr) -> Option<u32> + Copy,
+{
+    if terms.len() != 4 {
+        return None;
+    }
+    let expected = [
+        (BinaryOp::Shl, 24_u32, 0xFF_u64),
+        (BinaryOp::Shl, 8_u32, 0xFF00_u64),
+        (BinaryOp::Shr, 8_u32, 0xFF0000_u64),
+        (BinaryOp::Shr, 24_u32, 0xFF000000_u64),
+    ];
+    let mut source = None;
+    let mut found = [false; 4];
+    for term in terms {
+        let (term_source, op, count, Some(mask)) = shifted_mask_term(term, shift_count)? else {
+            return None;
+        };
+        let Some(index) =
+            expected
+                .iter()
+                .position(|(expected_op, expected_count, expected_mask)| {
+                    *expected_op == op && *expected_count == count && *expected_mask == mask
+                })
+        else {
+            return None;
+        };
+        if found[index] {
+            return None;
+        }
+        found[index] = true;
+        if let Some(source) = source {
+            if source != term_source {
+                return None;
+            }
+        } else {
+            source = Some(term_source);
+        }
+    }
+    found.into_iter().all(|found| found).then_some(source?)
 }
 
 fn element_type(ty: &Type) -> Result<Type, Diagnostic> {

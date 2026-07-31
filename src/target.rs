@@ -27,6 +27,7 @@ pub enum CpuFamily {
     Z180,
     M68k,
     M6800,
+    M6809,
     I8080,
     I8085,
     I8086,
@@ -52,6 +53,7 @@ pub enum AssemblerCpu {
     Lr35902,
     Avr,
     M6800,
+    M6809,
     M68k,
     Mos6502,
     Cmos65C02,
@@ -74,6 +76,7 @@ impl AssemblerCpu {
             "lr35902" | "gameboy" | "gb" => Self::Lr35902,
             "avr" | "atmega32u4" => Self::Avr,
             "m6800" | "6800" => Self::M6800,
+            "m6809" | "6809" | "6809e" => Self::M6809,
             "m68k" | "68000" | "m68000" => Self::M68k,
             "6502" | "mos6502" | "m6502" => Self::Mos6502,
             "65c02" | "cmos65c02" => Self::Cmos65C02,
@@ -83,7 +86,7 @@ impl AssemblerCpu {
             "dcpu" | "dcpu16" | "dcpu-16" => Self::Dcpu,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m68k, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m6809, m68k, or avr"
                 ));
             }
         };
@@ -106,6 +109,7 @@ impl AssemblerCpu {
             Self::Lr35902 => cfg!(feature = "lr35902"),
             Self::Avr => cfg!(feature = "avr"),
             Self::M6800 => cfg!(feature = "m6800"),
+            Self::M6809 => cfg!(feature = "m6809"),
             Self::M68k => cfg!(feature = "m68k"),
             Self::Mos6502 | Self::Cmos65C02 | Self::Wdc65C816 | Self::Ricoh2A03 => {
                 cfg!(feature = "mos6502")
@@ -123,6 +127,7 @@ impl AssemblerCpu {
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
             Self::M6800 => "m6800",
+            Self::M6809 => "m6809",
             Self::M68k => "m68k",
             Self::Mos6502 | Self::Cmos65C02 | Self::Wdc65C816 | Self::Ricoh2A03 => "mos6502",
             Self::Tms9900 => "tms9900",
@@ -142,6 +147,7 @@ impl AssemblerCpu {
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
             Self::M6800 => "m6800",
+            Self::M6809 => "m6809",
             Self::M68k => "m68k",
             Self::Mos6502 => "6502",
             Self::Cmos65C02 => "65c02",
@@ -161,6 +167,7 @@ impl AssemblerCpu {
             Self::I8080 | Self::I8085 | Self::I8086 => None,
             Self::Lr35902
             | Self::M6800
+            | Self::M6809
             | Self::M68k
             | Self::Mos6502
             | Self::Cmos65C02
@@ -195,6 +202,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::Lr35902 => Self::Lr35902,
             CpuFamily::Avr => Self::Avr,
             CpuFamily::M6800 => Self::M6800,
+            CpuFamily::M6809 => Self::M6809,
             CpuFamily::Mos6502 => Self::Mos6502,
             CpuFamily::Cmos65C02 => Self::Cmos65C02,
             CpuFamily::Wdc65C816 => Self::Wdc65C816,
@@ -261,6 +269,7 @@ impl CpuFamily {
             },
             Self::Lr35902
             | Self::M6800
+            | Self::M6809
             | Self::Avr
             | Self::Mos6502
             | Self::Cmos65C02
@@ -290,6 +299,7 @@ impl CpuFamily {
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
             Self::M6800 => "m6800",
+            Self::M6809 => "m6809",
             Self::Mos6502 => "6502",
             Self::Cmos65C02 => "65c02",
             Self::Wdc65C816 => "65c816",
@@ -521,6 +531,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "lr35902" => Some(CpuFamily::Lr35902),
             "avr" | "atmega32u4" => Some(CpuFamily::Avr),
             "m6800" | "6800" => Some(CpuFamily::M6800),
+            "m6809" | "6809" | "6809e" => Some(CpuFamily::M6809),
             "6502" | "mos6502" | "m6502" => Some(CpuFamily::Mos6502),
             "65c02" | "cmos65c02" => Some(CpuFamily::Cmos65C02),
             "65c816" | "wdc65c816" | "65816" => Some(CpuFamily::Wdc65C816),

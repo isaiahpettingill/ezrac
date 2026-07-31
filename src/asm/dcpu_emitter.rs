@@ -319,9 +319,11 @@ impl Emitter {
             } => {
                 let otherwise = self.next_label("if_else");
                 let done = self.next_label("if_end");
-                self.emit_expr(condition, &Type::Named("bool".into()))?;
-                self.line("    ife a, 0");
-                self.line(&format!("    set pc, {otherwise}"));
+                if !self.emit_jump_if_false(condition, &otherwise)? {
+                    self.emit_expr(condition, &Type::Named("bool".into()))?;
+                    self.line("    ife a, 0");
+                    self.line(&format!("    set pc, {otherwise}"));
+                }
                 self.emit_block(then_body)?;
                 self.line(&format!("    set pc, {done}"));
                 self.line(&format!("{otherwise}:"));
@@ -336,9 +338,11 @@ impl Emitter {
                     done: done.clone(),
                 });
                 self.line(&format!("{again}:"));
-                self.emit_expr(condition, &Type::Named("bool".into()))?;
-                self.line("    ife a, 0");
-                self.line(&format!("    set pc, {done}"));
+                if !self.emit_jump_if_false(condition, &done)? {
+                    self.emit_expr(condition, &Type::Named("bool".into()))?;
+                    self.line("    ife a, 0");
+                    self.line(&format!("    set pc, {done}"));
+                }
                 self.emit_block(body)?;
                 self.line(&format!("    set pc, {again}"));
                 self.line(&format!("{done}:"));
@@ -472,12 +476,14 @@ impl Emitter {
                 ));
             }
             Expr::Index { name, index } => {
+                let element = self.array_element(&self.named_type(name)?)?;
                 self.emit_named_address(name)?;
                 self.line("    set push, a");
                 self.emit_expr(index, &Type::Named("u16".into()))?;
                 self.line("    set i, pop");
                 self.line("    add i, a");
                 self.line("    set a, [i]");
+                self.mask(&element)?;
             }
             Expr::Access(path) => {
                 let ty = self.access_type(path)?;
@@ -551,9 +557,55 @@ impl Emitter {
             self.line(&format!("{done}:"));
             return Ok(());
         }
-        self.emit_expr(left, ty)?;
+        let operand_ty = if matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) {
+            self.expr_type(left)?
+        } else {
+            ty.clone()
+        };
+        self.emit_expr(left, &operand_ty)?;
+        if let Ok(value) = self.const_value(right) {
+            let value = value as u16 & self.type_mask(&operand_ty)?;
+            match op {
+                BinaryOp::Eq => {
+                    self.boolean_compare("ife", "a", &format!("0x{value:04x}"));
+                    return Ok(());
+                }
+                BinaryOp::Ne => {
+                    self.boolean_compare("ifn", "a", &format!("0x{value:04x}"));
+                    return Ok(());
+                }
+                BinaryOp::Lt => {
+                    self.boolean_compare(
+                        if signed(&operand_ty) { "ifa" } else { "ifl" },
+                        "a",
+                        &format!("0x{value:04x}"),
+                    );
+                    return Ok(());
+                }
+                BinaryOp::Gt => {
+                    self.boolean_compare(
+                        if signed(&operand_ty) { "ifa" } else { "ifg" },
+                        "a",
+                        &format!("0x{value:04x}"),
+                    );
+                    return Ok(());
+                }
+                BinaryOp::Le | BinaryOp::Ge => {}
+                _ => {
+                    let width_mask = self.type_mask(&operand_ty)?;
+                    self.emit_immediate_arithmetic(op, value, &operand_ty)?;
+                    if !matches!(op, BinaryOp::BitAnd) || width_mask == u16::MAX {
+                        self.mask(ty)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
         self.line("    set push, a");
-        self.emit_expr(right, ty)?;
+        self.emit_expr(right, &operand_ty)?;
         self.line("    set b, pop");
         match op {
             BinaryOp::Eq => {
@@ -564,33 +616,92 @@ impl Emitter {
                 self.boolean_compare("ifn", "b", "a");
                 return Ok(());
             }
-            BinaryOp::Lt => self.boolean_compare(if signed(ty) { "ifa" } else { "ifl" }, "b", "a"),
-            BinaryOp::Le => self.boolean_compare_le(ty, true),
-            BinaryOp::Gt => self.boolean_compare(if signed(ty) { "ifa" } else { "ifg" }, "a", "b"),
-            BinaryOp::Ge => self.boolean_compare_le(ty, false),
-            _ => self.emit_arithmetic(op, ty)?,
+            BinaryOp::Lt => {
+                self.boolean_compare(if signed(&operand_ty) { "ifa" } else { "ifl" }, "b", "a")
+            }
+            BinaryOp::Le => self.boolean_compare_le(&operand_ty, true),
+            BinaryOp::Gt => {
+                self.boolean_compare(if signed(&operand_ty) { "ifa" } else { "ifg" }, "a", "b")
+            }
+            BinaryOp::Ge => self.boolean_compare_le(&operand_ty, false),
+            _ => self.emit_arithmetic(op, &operand_ty)?,
         }
-        self.mask(ty)
+        if !matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) {
+            self.mask(ty)?;
+        }
+        Ok(())
+    }
+
+    fn emit_immediate_arithmetic(
+        &mut self,
+        op: BinaryOp,
+        value: u16,
+        ty: &Type,
+    ) -> Result<(), Diagnostic> {
+        if op == BinaryOp::BitAnd && value == 0 {
+            self.line("    set a, 0");
+            return Ok(());
+        }
+        let instruction = arithmetic_instruction(op, ty)?;
+        self.line(&format!("    {instruction} a, 0x{value:04x}"));
+        Ok(())
+    }
+
+    fn emit_jump_if_false(
+        &mut self,
+        condition: &Expr,
+        false_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let Expr::Binary { left, op, right } = condition else {
+            return Ok(false);
+        };
+        if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            return Ok(false);
+        }
+        let Expr::Binary {
+            left: source,
+            op: BinaryOp::BitAnd,
+            right: mask_expr,
+        } = left.as_ref()
+        else {
+            return Ok(false);
+        };
+        let (Ok(raw_mask), Ok(raw_expected)) =
+            (self.const_value(mask_expr), self.const_value(right))
+        else {
+            return Ok(false);
+        };
+        let source_ty = self.expr_type(source)?;
+        let width_mask = self.type_mask(&source_ty)?;
+        let mask = raw_mask as u16 & width_mask;
+        let expected = raw_expected as u16 & width_mask;
+        let source_is_narrow = self.expr_is_width_limited(source, &source_ty)?;
+
+        self.emit_expr(source, &source_ty)?;
+        if mask == 0 {
+            self.line("    set a, 0");
+        } else if mask != width_mask || !source_is_narrow {
+            self.line(&format!("    and a, 0x{mask:04x}"));
+        }
+
+        if expected & !mask != 0 {
+            if *op == BinaryOp::Eq {
+                self.line(&format!("    set pc, {false_label}"));
+            }
+            return Ok(true);
+        }
+
+        let branch = if *op == BinaryOp::Eq { "ifn" } else { "ife" };
+        self.line(&format!("    {branch} a, 0x{expected:04x}"));
+        self.line(&format!("    set pc, {false_label}"));
+        Ok(true)
     }
 
     fn emit_arithmetic(&mut self, op: BinaryOp, ty: &Type) -> Result<(), Diagnostic> {
-        let instruction = match op {
-            BinaryOp::Add => "add",
-            BinaryOp::Sub => "sub",
-            BinaryOp::Mul if signed(ty) => "mli",
-            BinaryOp::Mul => "mul",
-            BinaryOp::Div if signed(ty) => "dvi",
-            BinaryOp::Div => "div",
-            BinaryOp::Mod if signed(ty) => "mdi",
-            BinaryOp::Mod => "mod",
-            BinaryOp::Shl => "shl",
-            BinaryOp::Shr if signed(ty) => "asr",
-            BinaryOp::Shr => "shr",
-            BinaryOp::BitAnd => "and",
-            BinaryOp::BitOr => "bor",
-            BinaryOp::BitXor => "xor",
-            _ => return Err(Diagnostic::new("invalid DCPU arithmetic operation")),
-        };
+        let instruction = arithmetic_instruction(op, ty)?;
         self.line(&format!("    {instruction} b, a"));
         self.line("    set a, b");
         Ok(())
@@ -917,10 +1028,44 @@ impl Emitter {
         self.line(&format!("    set {register}, 0x{:04x}", value as u16));
         Ok(())
     }
+    fn expr_is_width_limited(&self, expr: &Expr, ty: &Type) -> Result<bool, Diagnostic> {
+        let width_mask = self.type_mask(ty)?;
+        if width_mask == u16::MAX {
+            return Ok(true);
+        }
+        Ok(match expr {
+            Expr::Ident(name) => self.type_mask(&self.named_type(name)?)? == width_mask,
+            Expr::Index { .. } | Expr::Access(_) | Expr::Deref(_) => true,
+            Expr::Unary { .. } | Expr::Binary { .. } => true,
+            Expr::Int(value) | Expr::TypedInt(value, _) => *value as u16 & !width_mask == 0,
+            Expr::Bool(_) | Expr::Char(_) => true,
+            Expr::BankedPointer { .. }
+            | Expr::Cast { .. }
+            | Expr::Field { .. }
+            | Expr::AddressOf(_)
+            | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_)
+            | Expr::String(_)
+            | Expr::Call { .. }
+            | Expr::In(_)
+            | Expr::Array(_)
+            | Expr::StructInit { .. } => false,
+        })
+    }
+    fn type_mask(&self, ty: &Type) -> Result<u16, Diagnostic> {
+        match self.resolve_type(ty)? {
+            Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => Ok(0x00ff),
+            Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok(u16::MAX),
+            Type::Ptr(_) | Type::Function { .. } => Ok(u16::MAX),
+            _ => {
+                self.scalar_words(ty)?;
+                Ok(u16::MAX)
+            }
+        }
+    }
     fn mask(&mut self, ty: &Type) -> Result<(), Diagnostic> {
-        if self.scalar_words(ty)? == 1
-            && matches!(self.resolve_type(ty)?, Type::Named(ref name) if matches!(name.as_str(), "u8" | "i8" | "bool"))
-        {
+        if self.type_mask(ty)? != u16::MAX {
             self.line("    and a, 0x00ff");
         }
         Ok(())
@@ -1215,6 +1360,25 @@ fn assign_binary(op: AssignOp) -> BinaryOp {
 fn signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16"))
 }
+fn arithmetic_instruction(op: BinaryOp, ty: &Type) -> Result<&'static str, Diagnostic> {
+    Ok(match op {
+        BinaryOp::Add => "add",
+        BinaryOp::Sub => "sub",
+        BinaryOp::Mul if signed(ty) => "mli",
+        BinaryOp::Mul => "mul",
+        BinaryOp::Div if signed(ty) => "dvi",
+        BinaryOp::Div => "div",
+        BinaryOp::Mod if signed(ty) => "mdi",
+        BinaryOp::Mod => "mod",
+        BinaryOp::Shl => "shl",
+        BinaryOp::Shr if signed(ty) => "asr",
+        BinaryOp::Shr => "shr",
+        BinaryOp::BitAnd => "and",
+        BinaryOp::BitOr => "bor",
+        BinaryOp::BitXor => "xor",
+        _ => return Err(Diagnostic::new("invalid DCPU arithmetic operation")),
+    })
+}
 fn function_label(name: &str) -> String {
     format!(
         "_{}",
@@ -1274,6 +1438,104 @@ mod tests {
         assert!(assembly.contains("    ifn b, a"));
         assert!(!assembly.contains("    and a, 0x00ff"));
     }
+    #[test]
+    fn lowers_masked_conditions_without_materializing_booleans() {
+        let assembly = emit(
+            r#"
+            fn masked_conditions(word: u16, byte: u8) {
+                if (word & 0x0300u16) == 0 {
+                    let clear: u16 = word
+                }
+                if (word & 0x0300u16) != 0 {
+                    let any_set: u16 = word
+                }
+                if (word & 0x0300u16) == 0x0300u16 {
+                    let all_set: u16 = word
+                }
+                if (word & 0x0300u16) != 0x0300u16 {
+                    let not_all_set: u16 = word
+                }
+                while (byte & 0x20u8) == 0 {
+                    break
+                }
+                while (byte & 0x20u8) != 0 {
+                    break
+                }
+            }
+            fn main() {
+                masked_conditions(0x0300u16, 0x20u8)
+            }
+            "#,
+        );
+        assert!(
+            assembly.contains("    and a, 0x0300\n    ifn a, 0x0000\n    set pc, __ezra_if_else_"),
+            "{assembly}"
+        );
+        assert!(
+            assembly.contains("    and a, 0x0300\n    ife a, 0x0000\n    set pc, __ezra_if_else_"),
+            "{assembly}"
+        );
+        assert!(
+            assembly.contains("    and a, 0x0300\n    ifn a, 0x0300\n    set pc, __ezra_if_else_"),
+            "{assembly}"
+        );
+        assert!(
+            assembly.contains("    and a, 0x0300\n    ife a, 0x0300\n    set pc, __ezra_if_else_"),
+            "{assembly}"
+        );
+        assert!(
+            assembly
+                .contains("    and a, 0x0020\n    ifn a, 0x0000\n    set pc, __ezra_while_end_"),
+            "{assembly}"
+        );
+        assert!(
+            assembly
+                .contains("    and a, 0x0020\n    ife a, 0x0000\n    set pc, __ezra_while_end_"),
+            "{assembly}"
+        );
+        assert!(!assembly.contains("__ezra_true_"), "{assembly}");
+    }
+
+    #[test]
+    fn keeps_mmio_mask_tests_to_one_word_read() {
+        let assembly = emit(
+            "volatile mmio STATUS: u16 = 0x9000 fn main() { if (STATUS & 0x0004u16) != 0 { STATUS = 1 } }",
+        );
+        assert_eq!(
+            assembly.matches("    set a, [0x9000]").count(),
+            1,
+            "{assembly}"
+        );
+        assert!(
+            assembly.contains("    set a, [0x9000]\n    and a, 0x0004\n    ife a, 0x0000"),
+            "{assembly}"
+        );
+    }
+
+    #[test]
+    fn uses_native_word_immediates_and_narrows_byte_masks() {
+        let assembly = emit(
+            r#"
+            fn operations(word: u16, byte: u8) -> u16 {
+                let masked: u16 = word & 0x00ffu16
+                let sum: u16 = word + 1u16
+                let narrow: u8 = byte & 0x0fu8
+                return masked + sum
+            }
+            fn main() {
+                let result: u16 = operations(0x1234u16, 0x2fu8)
+            }
+            "#,
+        );
+        assert!(assembly.contains("    and a, 0x00ff"), "{assembly}");
+        assert!(assembly.contains("    add a, 0x0001"), "{assembly}");
+        assert!(assembly.contains("    and a, 0x000f"), "{assembly}");
+        assert!(
+            !assembly.contains("    set push, a\n    set a, 0x0001\n    set b, pop\n    add b, a"),
+            "{assembly}"
+        );
+    }
+
     #[test]
     fn sdk_style_inline_operands_assemble() {
         let assembly = emit(

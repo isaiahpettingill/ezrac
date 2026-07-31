@@ -103,6 +103,7 @@ pub(crate) fn strip_unreachable_routines(
     let lines = assembly.split_inclusive('\n').collect::<Vec<_>>();
     let mut blocks = Vec::<RoutineBlock>::new();
     let mut open_block: Option<usize> = None;
+    let mut in_banked_payload = false;
 
     for (line_index, line) in lines.iter().enumerate() {
         if is_section_boundary(line) {
@@ -114,6 +115,23 @@ pub(crate) fn strip_unreachable_routines(
         let Some(label) = line_label(line) else {
             continue;
         };
+        if is_banked_payload_start(label) {
+            in_banked_payload = true;
+            if let Some(previous) = open_block.take() {
+                blocks[previous].end = line_index;
+            }
+            continue;
+        }
+        if is_banked_payload_end(label) {
+            in_banked_payload = false;
+            if let Some(previous) = open_block.take() {
+                blocks[previous].end = line_index;
+            }
+            continue;
+        }
+        if in_banked_payload {
+            continue;
+        }
         if is_static_data_label(label) {
             if let Some(previous) = open_block.take() {
                 blocks[previous].end = line_index;
@@ -291,6 +309,14 @@ fn is_generated_routine_label(label: &str) -> bool {
             || label.starts_with("__ezra_bank_")
             || label.starts_with("__ezra_far_")
     )
+}
+
+fn is_banked_payload_start(label: &str) -> bool {
+    label.starts_with("__ezra_bank_") && label.ends_with("_start")
+}
+
+fn is_banked_payload_end(label: &str) -> bool {
+    label.starts_with("__ezra_bank_") && label.ends_with("_end")
 }
 
 fn is_static_data_label(label: &str) -> bool {
@@ -560,6 +586,16 @@ mod tests {
             strip_unreachable_generated_routines(assembly, RoutineProfile::Ez80),
             "__ezra_start:\n    call _main\n__ezra_exit:\n    jp __ezra_exit\n_main:\n    ret\n__ezra_global_value:\n    db 1\n"
         );
+    }
+
+    #[test]
+    fn preserves_banked_payload_functions_and_symbols() {
+        let assembly = "__ezra_start:\n    call _main\n_main:\n    call __ezra_far_worker\n    ret\n__ezra_bank_2_start:\n_worker:\n    ret\n__ezra_bank_2_end:\n__ezra_far_worker:\n    ret\n__ezra_unused_helper:\n    ret\n";
+
+        let output = strip_unreachable_generated_routines(assembly, RoutineProfile::Lr35902);
+        assert!(output.contains("_worker:\n"), "{output}");
+        assert!(output.contains("__ezra_bank_2_end:\n"), "{output}");
+        assert!(!output.contains("__ezra_unused_helper:"), "{output}");
     }
 
     #[test]

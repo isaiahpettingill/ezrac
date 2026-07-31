@@ -348,6 +348,21 @@ fn semantic_model_layouts_aggregates_and_function_slots() {
 }
 
 #[test]
+fn semantic_model_rejects_circular_constants() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "const FIRST: u8 = SECOND + 1\nconst SECOND: u8 = FIRST + 1\nfn main() {}",
+    )
+    .unwrap();
+    let error = SemanticModel::from_program(&program, 16, 0xA000, 0x8000, 0xC000).unwrap_err();
+
+    assert!(
+        error.message.contains("circular constant reference"),
+        "{error}"
+    );
+}
+
+#[test]
 fn semantic_model_resolves_forward_constants_in_layouts() {
     let program = parse_program(
         Path::new("test.ezra"),
