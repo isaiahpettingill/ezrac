@@ -811,6 +811,7 @@ struct Emitter {
     function_storage_stack: Vec<Vec<Variable>>,
     cacheable_ranges: Vec<(u32, u32)>,
     assigned_names_stack: Vec<HashSet<String>>,
+    storage_required_names_stack: Vec<HashSet<String>>,
     recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
 
@@ -856,6 +857,7 @@ impl Emitter {
             function_storage_stack: Vec::new(),
             cacheable_ranges,
             assigned_names_stack: Vec::new(),
+            storage_required_names_stack: Vec::new(),
             recursive_call_edges,
             tail_call_edges,
 
@@ -1420,6 +1422,8 @@ impl Emitter {
         self.readonly_pointer_aliases.push(HashMap::new());
         self.assigned_names_stack
             .push(assigned_names_in_block(&function.body));
+        self.storage_required_names_stack
+            .push(storage_required_names_in_block(&function.body));
         if let Some(return_type) = &function.return_type {
             self.symbols.type_width(return_type)?;
         }
@@ -1452,6 +1456,7 @@ impl Emitter {
         self.function_storage_stack.pop();
         self.return_value_stack.pop();
         self.return_type_stack.pop();
+        self.storage_required_names_stack.pop();
         self.assigned_names_stack.pop();
         self.readonly_pointer_aliases.pop();
         self.local_constants.pop();
@@ -1619,10 +1624,15 @@ impl Emitter {
                         "local `{name}` shadows an existing name"
                     )));
                 }
-                let variable = self.alloc_storage(ty)?;
-                self.current_scope_mut().insert(name.clone(), variable);
                 self.current_scope_types_mut()
                     .insert(name.clone(), ty.clone());
+                if self.can_elide_constant_local_storage(name, ty, value)? {
+                    self.record_local_constant(name, ty, value);
+                    self.record_readonly_pointer_alias(name, value);
+                    return Ok(());
+                }
+                let variable = self.alloc_storage(ty)?;
+                self.current_scope_mut().insert(name.clone(), variable);
                 self.emit_storage_initializer(variable, ty, value)?;
                 self.record_local_constant(name, ty, value);
                 self.record_readonly_pointer_alias(name, value);
@@ -7352,6 +7362,33 @@ impl Emitter {
             .is_some_and(|names| names.contains(name))
     }
 
+    fn current_function_requires_storage(&self, name: &str) -> bool {
+        self.storage_required_names_stack
+            .last()
+            .is_some_and(|names| names.contains(name))
+    }
+
+    fn can_elide_constant_local_storage(
+        &self,
+        name: &str,
+        ty: &Type,
+        value: &Expr,
+    ) -> Result<bool, Diagnostic> {
+        if self.current_function_assigns(name)
+            || self.current_function_requires_storage(name)
+            || !self.local_constant_supported_type(ty)
+        {
+            return Ok(false);
+        }
+        self.validate_expr_arithmetic_compatibility(value)?;
+        self.validate_expr_assignable_to_type(value, ty)?;
+        let width = self.symbols.type_width(ty)?;
+        let Ok(value) = self.eval_i64_with_local_constants(value) else {
+            return Ok(false);
+        };
+        Ok(self.value_for_type(value, ty, width).is_ok())
+    }
+
     fn record_local_constant(&mut self, name: &str, ty: &Type, value: &Expr) {
         if self.current_function_assigns(name) {
             self.current_local_constants_mut().remove(name);
@@ -8361,6 +8398,136 @@ fn assigned_names_in_block(stmts: &[Stmt]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_assigned_names(stmts, &mut names);
     names
+}
+
+fn storage_required_names_in_block(stmts: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_storage_required_names(stmts, &mut names);
+    names
+}
+
+fn collect_storage_required_names(stmts: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Expr(value) => {
+                collect_expr_storage_required_names(value, names)
+            }
+            Stmt::Assign { target, value, .. } => {
+                collect_place_storage_required_names(target, names);
+                collect_expr_storage_required_names(value, names);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_storage_required_names(condition, names);
+                collect_storage_required_names(then_body, names);
+                collect_storage_required_names(else_body, names);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_storage_required_names(condition, names);
+                collect_storage_required_names(body, names);
+            }
+            Stmt::Loop { body } => collect_storage_required_names(body, names),
+            Stmt::Out { value, .. } => collect_expr_storage_required_names(value, names),
+            Stmt::Return(Some(value)) => collect_expr_storage_required_names(value, names),
+            Stmt::Asm {
+                inputs, outputs, ..
+            } => {
+                names.extend(
+                    inputs
+                        .iter()
+                        .filter(|input| input.class == "mem")
+                        .map(|input| input.name.clone()),
+                );
+                names.extend(outputs.iter().map(|output| output.name.clone()));
+            }
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+
+fn collect_place_storage_required_names(place: &Place, names: &mut HashSet<String>) {
+    match place {
+        Place::Ident(_) | Place::Field { .. } => {}
+        Place::Index { name, index } => {
+            names.insert(name.clone());
+            collect_expr_storage_required_names(index, names);
+        }
+        Place::Access(path) => collect_access_storage_required_names(path, names),
+        Place::Deref(pointer) => {
+            if let Expr::Ident(name) = pointer.as_ref() {
+                names.insert(name.clone());
+            }
+            collect_expr_storage_required_names(pointer, names);
+        }
+    }
+}
+
+fn collect_expr_storage_required_names(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::AddressOf(name) => {
+            names.insert(name.clone());
+        }
+        Expr::AddressOfIndex { name, index } => {
+            names.insert(name.clone());
+            collect_expr_storage_required_names(index, names);
+        }
+        Expr::AddressOfField { base, .. } => {
+            names.insert(base.clone());
+        }
+        Expr::AddressOfAccess(path) => {
+            names.insert(path.root.clone());
+            collect_access_storage_required_names(path, names);
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_storage_required_names(value, names);
+            }
+        }
+        Expr::Deref(pointer) => {
+            if let Expr::Ident(name) = pointer.as_ref() {
+                names.insert(name.clone());
+            }
+            collect_expr_storage_required_names(pointer, names);
+        }
+        Expr::Index { index, .. }
+        | Expr::BankedPointer { pointer: index, .. }
+        | Expr::Unary { expr: index, .. }
+        | Expr::Cast { expr: index, .. } => collect_expr_storage_required_names(index, names),
+        Expr::Access(path) => collect_access_storage_required_names(path, names),
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_storage_required_names(value, names);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_storage_required_names(arg, names);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_storage_required_names(left, names);
+            collect_expr_storage_required_names(right, names);
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. } => {}
+    }
+}
+
+fn collect_access_storage_required_names(path: &AccessPath, names: &mut HashSet<String>) {
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            collect_expr_storage_required_names(index, names);
+        }
+    }
 }
 
 fn assigned_names_in_program(program: &Program) -> HashSet<String> {

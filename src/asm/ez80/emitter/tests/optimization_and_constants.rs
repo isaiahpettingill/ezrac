@@ -1317,6 +1317,7 @@ fn propagates_local_scalar_constants_until_assignment() {
         .unwrap();
 
     assert!(copied.contains("    ld a, 07h"), "{asm}");
+    assert!(!copied.contains("    ld (040"), "{asm}");
     assert!(assigned.contains("    ld a, (040"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
@@ -1371,13 +1372,45 @@ fn propagates_local_pointer_constants_until_assignment() {
         .unwrap();
 
     assert!(copied_ptr.contains("    ld hl, 040"), "{asm}");
+    assert!(!copied_ptr.contains("    ld (040"), "{asm}");
     assert!(copied_ptr.contains("    ret"), "{asm}");
     assert!(copied_raw.contains("    ld hl, 040"), "{asm}");
+    assert!(!copied_raw.contains("    ld (040"), "{asm}");
     assert!(copied_raw.contains("    ret"), "{asm}");
     assert!(
         assigned_ptr.contains("    ld hl, 040") || assigned_ptr.contains("    ld hl, (040"),
         "{asm}"
     );
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn keeps_storage_for_addressed_constant_locals() {
+    let source = r#"
+            fn addressed() -> u8 {
+                let value: u8 = 7
+                let pointer: ptr<u8> = &value
+                return *pointer
+            }
+
+            fn main() {
+                test.assert_eq_u8(addressed(), 7, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+    let addressed = asm
+        .split("_addressed:")
+        .nth(1)
+        .and_then(|tail| tail.split("section .header").next())
+        .unwrap();
+
+    assert!(addressed.contains("    ld a, 07h"), "{asm}");
+    assert!(addressed.contains("    ld (040"), "{asm}");
+    assert!(addressed.contains("    ld a, (hl)"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }
@@ -1557,7 +1590,7 @@ fn emits_wide_branches_low_bit_masks_and_small_pointer_offsets() {
 
     assert!(asm.contains("    res 0, a"), "{asm}");
     assert!(asm.contains("    bit 0, a"), "{asm}");
-    assert!(asm.contains("    inc hl\n    inc hl\n    inc hl"), "{asm}");
+    assert!(asm.contains("    ld hl, 040003h"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }
