@@ -180,6 +180,8 @@ fn tbir_simplifies_power_of_two_multiplication_and_zero_division() {
         Path::new("test.ezra"),
         r#"
                 fn scale(x: u8) -> u8 { return x * 8 }
+                fn unsigned_division(x: u8) -> u8 { let result: u8 = x / 4 return result }
+                fn remainder(x: u16) -> u16 { let result: u16 = x % 8 return result }
                 fn signed_division(x: i8) -> i8 { return x / 4 }
                 fn zero(x: u8) -> u8 { return x / 0 }
             "#,
@@ -196,13 +198,28 @@ fn tbir_simplifies_power_of_two_multiplication_and_zero_division() {
         })
     ));
     assert!(matches!(
+        return_expr(&tbir, "unsigned_division"),
+        Some(Expr::Cast { expr, .. })
+            if matches!(expr.as_ref(), Expr::Binary { op: BinaryOp::Shr, right, .. }
+                if matches!(right.as_ref(), Expr::TypedInt(2, Type::Named(ty)) if ty == "u8"))
+    ));
+    assert!(matches!(
+        return_expr(&tbir, "remainder"),
+        Some(Expr::Cast { expr, .. })
+            if matches!(expr.as_ref(), Expr::Binary { op: BinaryOp::BitAnd, right, .. }
+                if matches!(right.as_ref(), Expr::TypedInt(7, Type::Named(ty)) if ty == "u16"))
+    ));
+    assert!(matches!(
         return_expr(&tbir, "signed_division"),
         Some(Expr::Binary {
             op: BinaryOp::Div,
             ..
         })
     ));
-    assert!(matches!(return_expr(&tbir, "zero"), Some(Expr::Int(0))));
+    assert!(matches!(
+        return_expr(&tbir, "zero"),
+        Some(Expr::Int(0) | Expr::TypedInt(0, _))
+    ));
     assert!(tbir.optimizations.algebraic_simplifications >= 1);
     assert!(tbir.optimizations.strength_reductions >= 1);
 }
@@ -403,7 +420,7 @@ fn tbir_retains_typed_memory_object_facts() {
     assert_eq!(mmio.kind, TbirObjectKind::Mmio);
     assert_eq!(mmio.region.as_deref(), Some("vram"));
     assert!(mmio.volatile);
-    assert_eq!(mmio.size, 3);
+    assert_eq!(mmio.size, 1);
 
     let embed = tbir
         .objects
@@ -415,6 +432,27 @@ fn tbir_retains_typed_memory_object_facts() {
     assert_eq!(embed.access, TbirAccess::ReadOnly);
     assert!(tbir.dump_text().contains("named_memory_reads_hoisted="));
     assert!(tbir.dump_text().contains("memory_object counter"));
+}
+
+#[test]
+fn mmio_uses_pointee_size_without_inheriting_read_only_region_access() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "volatile mmio CONTROL: ptr<u16> = 0x020040\nfn main() {}",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+    let control = tbir
+        .objects
+        .iter()
+        .find(|object| object.name == "CONTROL")
+        .unwrap();
+
+    assert_eq!(control.region.as_deref(), Some("rodata"));
+    assert_eq!(control.size, 2);
+    assert_eq!(control.access, TbirAccess::ReadWrite);
+    assert!(control.volatile);
 }
 
 #[test]

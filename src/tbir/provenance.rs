@@ -41,14 +41,18 @@ pub fn memory_objects(
         ));
     }
     for (name, (address, ty, volatile)) in &model.mmio {
-        // MMIO declarations denote pointer-valued registers. Conservatively describe the
-        // declaration itself as one pointer-width RW object; optimization still rejects MMIO.
+        let size = match ty {
+            Type::Ptr(pointee) => model
+                .type_size(pointee)
+                .unwrap_or_else(|_| u32::from(model.pointer_bytes())),
+            _ => u32::from(model.pointer_bytes()),
+        };
         objects.push(object(
             name,
             TbirObjectKind::Mmio,
             ty.clone(),
             *address,
-            u32::from(model.pointer_bytes()),
+            size,
             TbirAccess::ReadWrite,
             *volatile,
             memory,
@@ -108,8 +112,9 @@ fn object(
         address,
         size,
         region: region.map(|region| region.name.clone()),
-        access: match region.map(|region| region.access) {
-            Some(TbirAccess::ReadOnly) => TbirAccess::ReadOnly,
+        access: match (kind, region.map(|region| region.access)) {
+            (TbirObjectKind::Mmio, _) => access,
+            (_, Some(TbirAccess::ReadOnly)) => TbirAccess::ReadOnly,
             _ => access,
         },
         volatile: volatile || region.is_some_and(|region| region.volatile),

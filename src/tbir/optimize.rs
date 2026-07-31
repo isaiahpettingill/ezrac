@@ -38,6 +38,7 @@ pub fn optimize_program_with_context(
     hoist_named_memory_reads_program(&mut program, context, &mut report);
     expand_inline_functions(&mut program, context, &mut report);
     demand::apply_program(&mut program);
+    remove_unused_pure_lets_program(&mut program);
     run_tail_passes(&mut program, cpu, &mut report);
     (program, report)
 }
@@ -1044,11 +1045,14 @@ fn local_propagation_and_cse_program(
                     let mut assigned = HashSet::new();
                     collect_assigned_names(&function.body, &mut assigned);
                     collect_address_taken_names(&function.body, &mut assigned);
+                    let mut use_counts = HashMap::new();
+                    collect_name_uses_stmts(&function.body, &mut use_counts);
                     let mut values = HashMap::new();
                     let mut available = Vec::new();
                     function.body = propagate_block(
                         core::mem::take(&mut function.body),
                         &assigned,
+                        &use_counts,
                         &mut values,
                         &mut available,
                         context,
@@ -1198,6 +1202,112 @@ fn collect_address_taken_names_in_expr(expr: &Expr, names: &mut HashSet<String>)
     }
 }
 
+fn count_name_use(name: &str, uses: &mut HashMap<String, usize>) {
+    *uses.entry(name.to_owned()).or_default() += 1;
+}
+
+fn collect_name_uses_stmts(stmts: &[Stmt], uses: &mut HashMap<String, usize>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. }
+            | Stmt::Return(Some(value))
+            | Stmt::Out { value, .. }
+            | Stmt::Expr(value) => collect_name_uses_expr(value, uses),
+            Stmt::Assign { target, value, .. } => {
+                collect_name_uses_place(target, uses);
+                collect_name_uses_expr(value, uses);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_name_uses_expr(condition, uses);
+                collect_name_uses_stmts(then_body, uses);
+                collect_name_uses_stmts(else_body, uses);
+            }
+            Stmt::While { condition, body } => {
+                collect_name_uses_expr(condition, uses);
+                collect_name_uses_stmts(body, uses);
+            }
+            Stmt::Loop { body } => collect_name_uses_stmts(body, uses),
+            Stmt::Asm {
+                inputs, outputs, ..
+            } => {
+                for input in inputs {
+                    count_name_use(&input.name, uses);
+                }
+                for output in outputs {
+                    count_name_use(&output.name, uses);
+                }
+            }
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+
+fn collect_name_uses_place(place: &Place, uses: &mut HashMap<String, usize>) {
+    match place {
+        Place::Ident(name) | Place::Field { base: name, .. } => count_name_use(name, uses),
+        Place::Index { name, index } => {
+            count_name_use(name, uses);
+            collect_name_uses_expr(index, uses);
+        }
+        Place::Access(path) => collect_name_uses_access(path, uses),
+        Place::Deref(expr) => collect_name_uses_expr(expr, uses),
+    }
+}
+
+fn collect_name_uses_access(path: &AccessPath, uses: &mut HashMap<String, usize>) {
+    count_name_use(&path.root, uses);
+    for segment in &path.segments {
+        if let AccessSegment::Index(index) = segment {
+            collect_name_uses_expr(index, uses);
+        }
+    }
+}
+
+fn collect_name_uses_expr(expr: &Expr, uses: &mut HashMap<String, usize>) {
+    match expr {
+        Expr::Ident(name) | Expr::AddressOf(name) => count_name_use(name, uses),
+        Expr::Index { name, index } | Expr::AddressOfIndex { name, index } => {
+            count_name_use(name, uses);
+            collect_name_uses_expr(index, uses);
+        }
+        Expr::Field { base, .. } | Expr::AddressOfField { base, .. } => count_name_use(base, uses),
+        Expr::Access(path) | Expr::AddressOfAccess(path) => collect_name_uses_access(path, uses),
+        Expr::Array(values) => {
+            for value in values {
+                collect_name_uses_expr(value, uses);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_name_uses_expr(value, uses);
+            }
+        }
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => collect_name_uses_expr(value, uses),
+        Expr::Binary { left, right, .. } => {
+            collect_name_uses_expr(left, uses);
+            collect_name_uses_expr(right, uses);
+        }
+        Expr::Call { args, .. } => {
+            for argument in args {
+                collect_name_uses_expr(argument, uses);
+            }
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::In(_) => {}
+    }
+}
+
 #[derive(Clone)]
 struct PropagatedValue {
     ty: Type,
@@ -1207,6 +1317,7 @@ struct PropagatedValue {
 fn propagate_block(
     stmts: Vec<Stmt>,
     assigned: &HashSet<String>,
+    use_counts: &HashMap<String, usize>,
     values: &mut HashMap<String, PropagatedValue>,
     available: &mut Vec<(Expr, String)>,
     context: &OptimizationContext,
@@ -1234,7 +1345,13 @@ fn propagate_block(
                         available.push((value.clone(), name.clone()));
                     }
                 }
-                if !assigned.contains(&name) && is_pure_scalar(&value) && !references_memory {
+                let may_propagate = is_cheap_to_duplicate(&value)
+                    || use_counts.get(&name).copied().unwrap_or(0) <= 1;
+                if may_propagate
+                    && !assigned.contains(&name)
+                    && is_pure_scalar(&value)
+                    && !references_memory
+                {
                     values.insert(
                         name.clone(),
                         PropagatedValue {
@@ -1262,6 +1379,7 @@ fn propagate_block(
                 let then_body = propagate_block(
                     then_body,
                     assigned,
+                    use_counts,
                     &mut then_values,
                     &mut Vec::new(),
                     context,
@@ -1270,6 +1388,7 @@ fn propagate_block(
                 let else_body = propagate_block(
                     else_body,
                     assigned,
+                    use_counts,
                     &mut else_values,
                     &mut Vec::new(),
                     context,
@@ -1288,6 +1407,7 @@ fn propagate_block(
                 let body = propagate_block(
                     body,
                     assigned,
+                    use_counts,
                     &mut body_values,
                     &mut Vec::new(),
                     context,
@@ -1301,6 +1421,7 @@ fn propagate_block(
                 let body = propagate_block(
                     body,
                     assigned,
+                    use_counts,
                     &mut body_values,
                     &mut Vec::new(),
                     context,
@@ -1512,6 +1633,13 @@ fn reuse_available_expr(
     expr
 }
 
+fn is_cheap_to_duplicate(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_)
+    )
+}
+
 fn is_pure_scalar(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_) => {
@@ -1571,6 +1699,88 @@ fn is_cse_candidate(expr: &Expr) -> bool {
             expr,
             Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_)
         )
+}
+
+fn remove_unused_pure_lets_program(program: &mut Program) {
+    fn visit(declarations: &mut [Declaration]) {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Function(function) => {
+                    remove_unused_pure_lets_block(&mut function.body);
+                }
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    visit(core::slice::from_mut(declaration));
+                }
+                _ => {}
+            }
+        }
+    }
+    visit(&mut program.declarations);
+}
+
+fn remove_unused_pure_lets_block(stmts: &mut Vec<Stmt>) {
+    for stmt in stmts.iter_mut() {
+        match stmt {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                remove_unused_pure_lets_block(then_body);
+                remove_unused_pure_lets_block(else_body);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => remove_unused_pure_lets_block(body),
+            _ => {}
+        }
+    }
+
+    loop {
+        let mut uses = HashMap::new();
+        collect_name_uses_stmts(stmts, &mut uses);
+        let old_len = stmts.len();
+        stmts.retain(|stmt| {
+            !matches!(
+                stmt,
+                Stmt::Let { name, value, .. }
+                    if !uses.contains_key(name) && is_effect_free_expr(value)
+            )
+        });
+        if stmts.len() == old_len {
+            break;
+        }
+    }
+}
+
+fn is_effect_free_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::AddressOf(_)
+        | Expr::AddressOfField { .. } => true,
+        Expr::Array(values) => values.iter().all(is_effect_free_expr),
+        Expr::StructInit { fields, .. } => {
+            fields.iter().all(|(_, value)| is_effect_free_expr(value))
+        }
+        Expr::AddressOfIndex { index, .. } => is_effect_free_expr(index),
+        Expr::AddressOfAccess(path) => path.segments.iter().all(|segment| match segment {
+            AccessSegment::Index(index) => is_effect_free_expr(index),
+            AccessSegment::Field(_) => true,
+        }),
+        Expr::BankedPointer { pointer, .. }
+        | Expr::Unary { expr: pointer, .. }
+        | Expr::Cast { expr: pointer, .. } => is_effect_free_expr(pointer),
+        Expr::Binary { left, right, .. } => is_effect_free_expr(left) && is_effect_free_expr(right),
+        Expr::Index { .. }
+        | Expr::Field { .. }
+        | Expr::Access(_)
+        | Expr::Deref(_)
+        | Expr::Call { .. }
+        | Expr::In(_) => false,
+    }
 }
 
 fn hoist_pure_loop_invariants_program(program: &mut Program, report: &mut TbirOptimizationReport) {
@@ -2425,8 +2635,9 @@ fn range_expression_has_invalid_literal(expr: &Expr, expected_ty: &Type) -> bool
     match expr {
         Expr::Int(value) => known_bits_mask(expected_ty)
             .is_some_and(|mask| !known_bits_value_fits(*value, expected_ty, mask)),
-        Expr::TypedInt(value, ty) => known_bits_mask(ty)
-            .is_some_and(|mask| !known_bits_value_fits(*value, ty, mask)),
+        Expr::TypedInt(value, ty) => {
+            known_bits_mask(ty).is_some_and(|mask| !known_bits_value_fits(*value, ty, mask))
+        }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
             range_expression_has_invalid_literal(expr, expected_ty)
         }
@@ -2595,11 +2806,14 @@ fn optimize_stmts(
     let mut output = Vec::with_capacity(stmts.len());
     let mut terminated = false;
     for stmt in stmts {
-        if terminated && count_dead_statements {
-            report.dead_statements_marked += 1;
+        if terminated {
+            if count_dead_statements {
+                report.dead_statements_marked += 1;
+            }
+            continue;
         }
         let stmt = optimize_stmt(stmt, constants, report, count_dead_statements);
-        terminated |= terminates(&stmt);
+        terminated = terminates(&stmt);
         output.push(stmt);
     }
     output
@@ -2613,6 +2827,7 @@ fn optimize_stmt(
 ) -> Stmt {
     match stmt {
         Stmt::Let { name, ty, value } => {
+            let value = type_unsigned_power_of_two_divisor(value, &ty);
             let value = optimize_expr(value, constants, report);
             Stmt::Let { name, ty, value }
         }
@@ -2687,6 +2902,30 @@ fn optimize_place(
         Place::Access(path) => Place::Access(optimize_access(path, constants, report)),
         Place::Deref(expr) => Place::Deref(Box::new(optimize_expr(*expr, constants, report))),
         Place::Ident(_) | Place::Field { .. } => place,
+    }
+}
+
+fn type_unsigned_power_of_two_divisor(expr: Expr, ty: &Type) -> Expr {
+    let Expr::Binary {
+        left,
+        op: op @ (BinaryOp::Div | BinaryOp::Mod),
+        right,
+    } = expr
+    else {
+        return expr;
+    };
+    let right = match *right {
+        Expr::Int(value)
+            if type_is_unsigned_integer(ty) && value > 1 && (value as u64).is_power_of_two() =>
+        {
+            Expr::TypedInt(value, ty.clone())
+        }
+        right => right,
+    };
+    Expr::Binary {
+        left,
+        op,
+        right: Box::new(right),
     }
 }
 
@@ -2890,6 +3129,19 @@ fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<(Expr, boo
         {
             algebraic(Expr::Int(0))
         }
+        (value, BinaryOp::Div, divisor) => {
+            unsigned_power_of_two(divisor).and_then(|(shift, ty)| {
+                strength(typed_shift_expr(value.clone(), BinaryOp::Shr, shift, ty))
+            })
+        }
+        (value, BinaryOp::Mod, divisor) => unsigned_power_of_two(divisor).and_then(|(_, ty)| {
+            let mask = int_value(divisor)? - 1;
+            strength(Expr::Binary {
+                left: Box::new(value.clone()),
+                op: BinaryOp::BitAnd,
+                right: Box::new(Expr::TypedInt(mask, ty)),
+            })
+        }),
         (value_expr, BinaryOp::Mul, value) if power_of_two_shift(value_expr).is_some() => {
             power_of_two_shift(value_expr)
                 .and_then(|shift| strength(shift_expr(value.clone(), BinaryOp::Shl, shift)))
@@ -2981,6 +3233,16 @@ fn combine_bitwise_constants(
     })
 }
 
+fn unsigned_power_of_two(expr: &Expr) -> Option<(u32, Type)> {
+    let Expr::TypedInt(value, ty) = expr else {
+        return None;
+    };
+    if !type_is_unsigned_integer(ty) || *value <= 1 || !(*value as u64).is_power_of_two() {
+        return None;
+    }
+    Some(((*value as u64).trailing_zeros(), ty.clone()))
+}
+
 fn power_of_two_shift(expr: &Expr) -> Option<u32> {
     let value = int_value(expr)?;
     if value > 1 && (value as u64).is_power_of_two() {
@@ -2995,6 +3257,14 @@ fn shift_expr(value: Expr, op: BinaryOp, shift: u32) -> Expr {
         left: Box::new(value),
         op,
         right: Box::new(Expr::Int(i64::from(shift))),
+    }
+}
+
+fn typed_shift_expr(value: Expr, op: BinaryOp, shift: u32, ty: Type) -> Expr {
+    Expr::Binary {
+        left: Box::new(value),
+        op,
+        right: Box::new(Expr::TypedInt(i64::from(shift), ty)),
     }
 }
 
