@@ -1,0 +1,8 @@
+[project]
+name = "ezra-game"
+
+[build]
+input = "src/main.ezra"
+target = "bare-tms9900"
+output = "bin"
+executable = "ezra-game"

@@ -1,0 +1,22 @@
+volatile mmio INPUT: ptr<u8> = 0xFFA0
+volatile mmio OUTPUT: ptr<u8> = 0xFFF0
+
+fn bob(input: u8) -> u8 {
+    return (input % 8) + (3 * (input / 2))
+}
+
+fn main() {
+    let i : ptr<u8> = INPUT
+    let o : ptr<u8> = OUTPUT
+    while i < OUTPUT {
+        if (i % 3u16 == 0){
+            *o = bob(i)
+        }
+        else {
+            *o = *i/4 + ~(*i^0x99) | 0xF0
+            *o &= *o | 0x1A
+        }
+        o+=1;
+        i+=1;
+    }
+}

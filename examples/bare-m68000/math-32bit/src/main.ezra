@@ -1,0 +1,20 @@
+volatile mmio INPUT1 : ptr<i32> = 0x000090
+volatile mmio INPUT2 : ptr<i32> = 0x0000A0
+volatile mmio OUTPUT1 : ptr<i32> = 0x0000B0
+volatile mmio OUTPUT2 : ptr<i32> = 0x0000C0
+
+fn clamp(n: i32, min: i32, max: i32) -> i32 {
+    if n < min { return min }
+    if n > max { return max }
+    return n
+}
+
+fn euclid(a: i32, b: i32) -> i32 {
+    if b == 0 { return a }
+    return euclid(b, a % b)
+}
+
+fn main() {
+    *OUTPUT1 = euclid(*INPUT1, *INPUT2)
+    *OUTPUT2 = clamp(*OUTPUT1, 0, 6502)
+}
