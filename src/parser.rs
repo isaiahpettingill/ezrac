@@ -733,14 +733,16 @@ fn collect_pair_references_inner(
     pair: Pair<'_, Rule>,
     references: &mut Vec<crate::ast::SourceReference>,
 ) {
-    // Keep every parser node: semantic code can select the smallest exact source
-    // construct without re-tokenizing diagnostic text later.
-    references.push(crate::ast::SourceReference {
-        text: pair.as_str().to_owned(),
-        span: pair_span(file, &pair),
-    });
-    for inner in pair.into_inner() {
-        collect_pair_references_inner(file, inner, references);
+    let mut pending = vec![pair];
+    while let Some(pair) = pending.pop() {
+        // Keep every parser node: semantic code can select the smallest exact source
+        // construct without re-tokenizing diagnostic text later.
+        references.push(crate::ast::SourceReference {
+            text: pair.as_str().to_owned(),
+            span: pair_span(file, &pair),
+        });
+        let children = pair.into_inner().collect::<Vec<_>>();
+        pending.extend(children.into_iter().rev());
     }
 }
 
@@ -839,112 +841,168 @@ fn build_type(pair: Pair<'_, Rule>) -> Result<Type, Diagnostic> {
     }
 }
 
-fn build_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
-    match pair.as_rule() {
-        Rule::expr
-        | Rule::logical_or
-        | Rule::logical_and
-        | Rule::bit_or
-        | Rule::bit_xor
-        | Rule::bit_and
-        | Rule::equality
-        | Rule::comparison
-        | Rule::shift
-        | Rule::additive
-        | Rule::multiplicative => build_binary_chain(pair),
-        Rule::unary => build_unary(pair),
-        Rule::postfix_expr => {
-            let mut inner = pair.into_inner();
-            let pointer = build_expr(inner.next().unwrap())?;
-            match inner.next() {
-                Some(suffix) => Ok(Expr::BankedPointer {
-                    pointer: Box::new(pointer),
-                    bank: parse_bank_number(suffix.into_inner().next().unwrap())?,
-                }),
-                None => Ok(pointer),
+fn build_expr(mut pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
+    loop {
+        let result = match pair.as_rule() {
+            Rule::expr
+            | Rule::logical_or
+            | Rule::logical_and
+            | Rule::bit_or
+            | Rule::bit_xor
+            | Rule::bit_and
+            | Rule::equality
+            | Rule::comparison
+            | Rule::shift
+            | Rule::additive
+            | Rule::multiplicative => {
+                let mut inner = pair.into_inner();
+                let first = inner
+                    .next()
+                    .ok_or_else(|| Diagnostic::new("empty expression"))?;
+                let Some(mut op) = inner.next() else {
+                    pair = first;
+                    continue;
+                };
+                let mut expr = build_expr(first)?;
+                loop {
+                    let right = build_expr(inner.next().unwrap())?;
+                    expr = Expr::Binary {
+                        left: Box::new(expr),
+                        op: build_binary_op(op.as_str().trim()),
+                        right: Box::new(right),
+                    };
+                    let Some(next_op) = inner.next() else {
+                        break;
+                    };
+                    op = next_op;
+                }
+                return Ok(expr);
             }
-        }
-        Rule::primary => build_expr(pair.into_inner().next().unwrap()),
-        Rule::cast_expr => {
-            let mut inner = pair.into_inner();
-            Ok(Expr::Cast {
-                ty: build_type(inner.next().unwrap())?,
-                expr: Box::new(build_expr(inner.next().unwrap())?),
-            })
-        }
-        Rule::in_expr => Ok(Expr::In(parse_in_port(pair.as_str())?)),
-        Rule::addr_access_expr => Ok(Expr::AddressOfAccess(build_access_path(pair)?)),
-        Rule::addr_index_expr => {
-            let mut inner = pair.into_inner();
-            Ok(Expr::AddressOfIndex {
-                name: inner.next().unwrap().as_str().to_owned(),
-                index: Box::new(build_expr(inner.next().unwrap())?),
-            })
-        }
-        Rule::addr_field_expr => {
-            let mut inner = pair.into_inner();
-            Ok(Expr::AddressOfField {
-                base: inner.next().unwrap().as_str().to_owned(),
-                field: inner.next().unwrap().as_str().to_owned(),
-            })
-        }
-        Rule::addr_expr => Ok(Expr::AddressOf(
-            pair.into_inner().next().unwrap().as_str().to_owned(),
-        )),
-        Rule::deref_expr => Ok(Expr::Deref(Box::new(build_deref_operand(
-            pair.into_inner().next().unwrap(),
-        )?))),
-        Rule::struct_lit => {
-            let mut inner = pair.into_inner();
-            let ty = inner.next().unwrap().as_str().to_owned();
-            let fields = inner
-                .next()
-                .map(|fields| {
-                    fields
-                        .into_inner()
-                        .map(|field| {
-                            let mut parts = field.into_inner();
-                            Ok((
-                                parts.next().unwrap().as_str().to_owned(),
-                                build_expr(parts.next().unwrap())?,
-                            ))
-                        })
-                        .collect()
+            Rule::unary => {
+                let mut inner = pair.into_inner();
+                let mut ops = Vec::new();
+                let primary = loop {
+                    let next = inner.next().unwrap();
+                    if next.as_rule() == Rule::unary_op {
+                        ops.push(next.as_str().to_owned());
+                    } else {
+                        break next;
+                    }
+                };
+                if ops.is_empty() {
+                    pair = primary;
+                    continue;
+                }
+                let mut expr = build_expr(primary)?;
+                for op in ops.into_iter().rev() {
+                    expr = Expr::Unary {
+                        op: match op.as_str() {
+                            "-" => UnaryOp::Neg,
+                            "~" => UnaryOp::BitNot,
+                            "!" => UnaryOp::Not,
+                            _ => unreachable!("unknown unary op {op}"),
+                        },
+                        expr: Box::new(expr),
+                    };
+                }
+                return Ok(expr);
+            }
+            Rule::postfix_expr => {
+                let mut inner = pair.into_inner();
+                let pointer = build_expr(inner.next().unwrap())?;
+                match inner.next() {
+                    Some(suffix) => Ok(Expr::BankedPointer {
+                        pointer: Box::new(pointer),
+                        bank: parse_bank_number(suffix.into_inner().next().unwrap())?,
+                    }),
+                    None => Ok(pointer),
+                }
+            }
+            Rule::primary | Rule::literal => {
+                pair = pair.into_inner().next().unwrap();
+                continue;
+            }
+            Rule::cast_expr => {
+                let mut inner = pair.into_inner();
+                Ok(Expr::Cast {
+                    ty: build_type(inner.next().unwrap())?,
+                    expr: Box::new(build_expr(inner.next().unwrap())?),
                 })
-                .unwrap_or_else(|| Ok(Vec::new()))?;
-            Ok(Expr::StructInit { ty, fields })
-        }
-        Rule::access_expr => Ok(Expr::Access(build_access_path(pair)?)),
-        Rule::index_expr => {
-            let mut inner = pair.into_inner();
-            Ok(Expr::Index {
-                name: inner.next().unwrap().as_str().to_owned(),
-                index: Box::new(build_expr(inner.next().unwrap())?),
-            })
-        }
-        Rule::field_expr => {
-            let mut inner = pair.into_inner();
-            Ok(Expr::Field {
-                base: inner.next().unwrap().as_str().to_owned(),
-                field: inner.next().unwrap().as_str().to_owned(),
-            })
-        }
-        Rule::array_lit => {
-            let values = pair
-                .into_inner()
-                .next()
-                .map(|args| args.into_inner().map(build_expr).collect())
-                .unwrap_or_else(|| Ok(Vec::new()))?;
-            Ok(Expr::Array(values))
-        }
-        Rule::call_expr => build_call_expr(pair),
-        Rule::path_expr => Ok(Expr::Ident(pair.as_str().to_owned())),
-        Rule::literal => build_expr(pair.into_inner().next().unwrap()),
-        Rule::bool_lit => Ok(Expr::Bool(pair.as_str() == "true")),
-        Rule::int_lit => build_int_lit(pair.as_str()),
-        Rule::char_lit => Ok(Expr::Char(parse_char(pair.as_str())?)),
-        Rule::string_lit => Ok(Expr::String(parse_string(pair.as_str())?)),
-        _ => unreachable!("unexpected expr rule {:?}", pair.as_rule()),
+            }
+            Rule::in_expr => Ok(Expr::In(parse_in_port(pair.as_str())?)),
+            Rule::addr_access_expr => Ok(Expr::AddressOfAccess(build_access_path(pair)?)),
+            Rule::addr_index_expr => {
+                let mut inner = pair.into_inner();
+                Ok(Expr::AddressOfIndex {
+                    name: inner.next().unwrap().as_str().to_owned(),
+                    index: Box::new(build_expr(inner.next().unwrap())?),
+                })
+            }
+            Rule::addr_field_expr => {
+                let mut inner = pair.into_inner();
+                Ok(Expr::AddressOfField {
+                    base: inner.next().unwrap().as_str().to_owned(),
+                    field: inner.next().unwrap().as_str().to_owned(),
+                })
+            }
+            Rule::addr_expr => Ok(Expr::AddressOf(
+                pair.into_inner().next().unwrap().as_str().to_owned(),
+            )),
+            Rule::deref_expr => Ok(Expr::Deref(Box::new(build_deref_operand(
+                pair.into_inner().next().unwrap(),
+            )?))),
+            Rule::struct_lit => {
+                let mut inner = pair.into_inner();
+                let ty = inner.next().unwrap().as_str().to_owned();
+                let fields = inner
+                    .next()
+                    .map(|fields| {
+                        fields
+                            .into_inner()
+                            .map(|field| {
+                                let mut parts = field.into_inner();
+                                Ok((
+                                    parts.next().unwrap().as_str().to_owned(),
+                                    build_expr(parts.next().unwrap())?,
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| Ok(Vec::new()))?;
+                Ok(Expr::StructInit { ty, fields })
+            }
+            Rule::access_expr => Ok(Expr::Access(build_access_path(pair)?)),
+            Rule::index_expr => {
+                let mut inner = pair.into_inner();
+                Ok(Expr::Index {
+                    name: inner.next().unwrap().as_str().to_owned(),
+                    index: Box::new(build_expr(inner.next().unwrap())?),
+                })
+            }
+            Rule::field_expr => {
+                let mut inner = pair.into_inner();
+                Ok(Expr::Field {
+                    base: inner.next().unwrap().as_str().to_owned(),
+                    field: inner.next().unwrap().as_str().to_owned(),
+                })
+            }
+            Rule::array_lit => {
+                let values = pair
+                    .into_inner()
+                    .next()
+                    .map(|args| args.into_inner().map(build_expr).collect())
+                    .unwrap_or_else(|| Ok(Vec::new()))?;
+                Ok(Expr::Array(values))
+            }
+            Rule::call_expr => build_call_expr(pair),
+            Rule::path_expr => Ok(Expr::Ident(pair.as_str().to_owned())),
+            Rule::bool_lit => Ok(Expr::Bool(pair.as_str() == "true")),
+            Rule::int_lit => build_int_lit(pair.as_str()),
+            Rule::char_lit => Ok(Expr::Char(parse_char(pair.as_str())?)),
+            Rule::string_lit => Ok(Expr::String(parse_string(pair.as_str())?)),
+            _ => unreachable!("unexpected expr rule {:?}", pair.as_rule()),
+        };
+        return result;
     }
 }
 
@@ -985,48 +1043,6 @@ fn build_call_expr(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
         .map(|args| args.into_inner().map(build_expr).collect())
         .unwrap_or_else(|| Ok(Vec::new()))?;
     Ok(Expr::Call { path, args })
-}
-
-fn build_binary_chain(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
-    let mut inner = pair.into_inner();
-    let Some(first) = inner.next() else {
-        return Err(Diagnostic::new("empty expression"));
-    };
-    let mut expr = build_expr(first)?;
-    while let Some(op) = inner.next() {
-        let right = build_expr(inner.next().unwrap())?;
-        expr = Expr::Binary {
-            left: Box::new(expr),
-            op: build_binary_op(op.as_str().trim()),
-            right: Box::new(right),
-        };
-    }
-    Ok(expr)
-}
-
-fn build_unary(pair: Pair<'_, Rule>) -> Result<Expr, Diagnostic> {
-    let mut ops = Vec::new();
-    let mut primary = None;
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::unary_op {
-            ops.push(inner.as_str().to_owned());
-        } else {
-            primary = Some(build_expr(inner)?);
-        }
-    }
-    let mut expr = primary.unwrap();
-    for op in ops.into_iter().rev() {
-        expr = Expr::Unary {
-            op: match op.as_str() {
-                "-" => UnaryOp::Neg,
-                "~" => UnaryOp::BitNot,
-                "!" => UnaryOp::Not,
-                _ => unreachable!("unknown unary op {op}"),
-            },
-            expr: Box::new(expr),
-        };
-    }
-    Ok(expr)
 }
 
 fn build_binary_op(op: &str) -> BinaryOp {

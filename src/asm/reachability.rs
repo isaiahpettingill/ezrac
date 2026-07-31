@@ -58,31 +58,24 @@ pub(crate) enum RoutineProfile {
 
 /// Remove unreachable generated function and runtime blocks.
 ///
-/// The discovery deliberately recognizes only generated callable labels: source
-/// functions use a single leading underscore and runtime labels use
-/// `__ezra_`. Static-storage labels are excluded. Startup, exit, reset, and
-/// interrupt/vector labels are roots so platform entry paths remain intact.
+/// Source functions, roots, direct call targets, and externally referenced
+/// generated labels are routine entries. Other generated labels stay inside the
+/// nearest known routine, so compiler-created control-flow labels cannot be
+/// removed independently from their owner. Static-storage labels are excluded.
 pub(crate) fn strip_unreachable_generated_routines(
     assembly: &str,
     profile: RoutineProfile,
 ) -> String {
-    let routine_labels = assembly
-        .lines()
-        .filter_map(line_label)
-        .filter(|label| is_generated_routine_label(label))
-        .collect::<Vec<_>>();
+    let profile = transfer_profile(profile);
+    let routine_labels = discover_generated_routine_labels(assembly, profile);
+    let banked_payload_roots = labels_referenced_from_banked_payload(assembly, &routine_labels);
     let root_labels = routine_labels
         .iter()
         .copied()
-        .filter(|label| is_routine_root(label))
+        .filter(|label| is_routine_root(label) || banked_payload_roots.contains(label))
         .collect::<Vec<_>>();
 
-    strip_unreachable_routines(
-        assembly,
-        &routine_labels,
-        &root_labels,
-        transfer_profile(profile),
-    )
+    strip_unreachable_routines(assembly, &routine_labels, &root_labels, profile)
 }
 
 /// Strip routine blocks that cannot be reached from `root_labels`.
@@ -178,20 +171,13 @@ pub(crate) fn strip_unreachable_routines(
         let block = blocks[block_index];
 
         for line in &lines[block.start..block.end] {
-            let Some((mnemonic, operands)) = instruction_parts(line) else {
+            let Some((_, operands)) = instruction_parts(line) else {
                 continue;
             };
-            let Some(target_operand) = direct_transfer(mnemonic, operands, profile) else {
-                continue;
-            };
-            let Some(target) = operand_at(operands, target_operand) else {
-                continue;
-            };
-            if let Some(target_block) = blocks
-                .iter()
-                .position(|candidate| target_matches(routine_labels[candidate.label_index], target))
-            {
-                pending.push(target_block);
+            for (target_block, candidate) in blocks.iter().enumerate() {
+                if operands_reference_label(operands, routine_labels[candidate.label_index]) {
+                    pending.push(target_block);
+                }
             }
         }
 
@@ -242,20 +228,6 @@ fn block_ends_transfer(
     false
 }
 
-fn direct_transfer(
-    mnemonic: &str,
-    operands: &str,
-    profile: TransferParsingProfile<'_>,
-) -> Option<usize> {
-    match transfer_kind(mnemonic, operands, profile)? {
-        TransferKind::Direct {
-            target_operand,
-            falls_through: _,
-        } => Some(target_operand),
-        TransferKind::Return => None,
-    }
-}
-
 fn transfer_kind(
     mnemonic: &str,
     operands: &str,
@@ -276,39 +248,139 @@ fn transfer_kind(
     })
 }
 
-fn target_matches(label: &str, operand: &str) -> bool {
-    let target = operand
-        .trim()
-        .trim_start_matches(['@', '#'])
-        .strip_prefix("near ")
-        .or_else(|| {
-            operand
-                .trim()
-                .trim_start_matches(['@', '#'])
-                .strip_prefix("far ")
-        })
-        .or_else(|| {
-            operand
-                .trim()
-                .trim_start_matches(['@', '#'])
-                .strip_prefix("short ")
-        })
-        .unwrap_or_else(|| operand.trim().trim_start_matches(['@', '#']));
-    label.eq_ignore_ascii_case(target.trim())
+#[derive(Clone, Copy)]
+struct LabelDefinition<'a> {
+    name: &'a str,
+    line: usize,
 }
 
-fn is_generated_routine_label(label: &str) -> bool {
-    if !label.starts_with('_') {
-        return matches!(label, "main" | "start" | "exit" | "reset");
+fn discover_generated_routine_labels<'a>(
+    assembly: &'a str,
+    profile: TransferParsingProfile<'_>,
+) -> Vec<&'a str> {
+    let lines = assembly.lines().collect::<Vec<_>>();
+    let labels = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line, text)| {
+            let name = line_label(text)?;
+            (!is_static_data_label(name) && !is_banked_payload_start(name))
+                .then_some(LabelDefinition { name, line })
+        })
+        .collect::<Vec<_>>();
+
+    let mut routine = labels
+        .iter()
+        .map(|label| is_source_routine_label(label.name) || is_routine_root(label.name))
+        .collect::<Vec<_>>();
+
+    for line in &lines {
+        let Some((mnemonic, operands)) = instruction_parts(line) else {
+            continue;
+        };
+        if !is_call_mnemonic(mnemonic) {
+            continue;
+        }
+        for (index, label) in labels.iter().enumerate() {
+            if operands_reference_label(operands, label.name) {
+                routine[index] = true;
+            }
+        }
     }
-    !matches!(
-        label,
-        label if label.starts_with("__ezra_global_")
-            || label.starts_with("__ezra_embed_")
-            || label.starts_with("__ezra_banked_data_")
-            || label.starts_with("__ezra_bank_")
-            || label.starts_with("__ezra_far_")
-    )
+
+    for (index, label) in labels.iter().enumerate() {
+        if routine[index] || !label.name.starts_with("__ezra_") {
+            continue;
+        }
+        let region_start = labels[..index]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(candidate, label)| routine[candidate].then_some(label.line))
+            .unwrap_or(0);
+        let region_end = labels[index + 1..]
+            .iter()
+            .enumerate()
+            .find_map(|(offset, label)| routine[index + 1 + offset].then_some(label.line))
+            .unwrap_or(lines.len());
+        let referenced_inside_region = lines[region_start..region_end].iter().any(|line| {
+            instruction_parts(line)
+                .is_some_and(|(_, operands)| operands_reference_label(operands, label.name))
+        });
+        let referenced_elsewhere = lines[..region_start]
+            .iter()
+            .chain(&lines[region_end..])
+            .any(|line| {
+                instruction_parts(line)
+                    .is_some_and(|(_, operands)| operands_reference_label(operands, label.name))
+            });
+        let follows_return = lines[..label.line].iter().rev().find_map(|line| {
+            let (mnemonic, operands) = instruction_parts(line)?;
+            Some(matches!(
+                transfer_kind(mnemonic, operands, profile),
+                Some(TransferKind::Return)
+            ))
+        }) == Some(true);
+
+        if referenced_elsewhere || (!referenced_inside_region && follows_return) {
+            routine[index] = true;
+        }
+    }
+
+    labels
+        .iter()
+        .zip(routine)
+        .filter_map(|(label, routine)| routine.then_some(label.name))
+        .collect()
+}
+
+fn is_source_routine_label(label: &str) -> bool {
+    label.starts_with('_') && !label.starts_with("__")
+        || matches!(label, "main" | "start" | "exit" | "reset")
+}
+
+fn is_call_mnemonic(mnemonic: &str) -> bool {
+    ["call", "jsr", "bsr", "rcall", "bl"]
+        .iter()
+        .any(|call| mnemonic.eq_ignore_ascii_case(call))
+}
+
+fn operands_reference_label(operands: &str, label: &str) -> bool {
+    operands
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.')))
+        .any(|token| token.eq_ignore_ascii_case(label))
+}
+
+fn labels_referenced_from_banked_payload<'a>(
+    assembly: &str,
+    routine_labels: &[&'a str],
+) -> HashSet<&'a str> {
+    let mut in_banked_payload = false;
+    let mut referenced = HashSet::new();
+    for line in assembly.lines() {
+        if let Some(label) = line_label(line) {
+            if is_banked_payload_start(label) {
+                in_banked_payload = true;
+                continue;
+            }
+            if is_banked_payload_end(label) {
+                in_banked_payload = false;
+                continue;
+            }
+        }
+        if !in_banked_payload {
+            continue;
+        }
+        let Some((_, operands)) = instruction_parts(line) else {
+            continue;
+        };
+        for label in routine_labels {
+            if operands_reference_label(operands, label) {
+                referenced.insert(*label);
+            }
+        }
+    }
+    referenced
 }
 
 fn is_banked_payload_start(label: &str) -> bool {
@@ -613,6 +685,49 @@ mod tests {
             strip_unreachable_generated_routines(assembly, RoutineProfile::Avr)
                 .contains("_avr_timer0_ovf:")
         );
+    }
+
+    #[test]
+    fn compiler_control_flow_labels_stay_inside_their_routine() {
+        let assembly = "__ezra_start:\n    jsr _main\n    rts\n_main:\n    cmp.l d1,d0\n    bne __ezra_true_3\n    moveq #0,d0\n    bra __ezra_done_4\n__ezra_true_3:\n    moveq #1,d0\n__ezra_done_4:\n    rts\n__ezra_unused_helper:\n    rts\n";
+
+        let output = strip_unreachable_generated_routines(assembly, RoutineProfile::M68k);
+
+        assert!(output.contains("__ezra_true_3:"), "{output}");
+        assert!(output.contains("__ezra_done_4:"), "{output}");
+        assert!(!output.contains("__ezra_unused_helper:"), "{output}");
+    }
+
+    #[test]
+    fn generated_indirect_return_label_stays_with_called_runtime() {
+        let assembly = "__ezra_start:\n    call __ezra_gb_far_call\n    ret\n__ezra_gb_far_call:\n    ld de, __ezra_gb_far_return\n    push de\n    jp hl\n__ezra_gb_far_return:\n    pop af\n    ret\n__ezra_unused_helper:\n    ret\n";
+
+        let output = strip_unreachable_generated_routines(assembly, RoutineProfile::Lr35902);
+
+        assert!(output.contains("__ezra_gb_far_call:"), "{output}");
+        assert!(output.contains("__ezra_gb_far_return:"), "{output}");
+        assert!(!output.contains("__ezra_unused_helper:"), "{output}");
+    }
+
+    #[test]
+    fn address_taken_trampoline_and_callee_survive() {
+        let assembly = "__ezra_start:\n    mov ax,__ezra_fn_ptr_callback\n    ret\n_callback:\n    ret\n__ezra_fn_ptr_callback:\n    call near _callback\n    ret\n__ezra_unused_helper:\n    ret\n";
+
+        let output = strip_unreachable_generated_routines(assembly, RoutineProfile::I8086);
+
+        assert!(output.contains("_callback:"), "{output}");
+        assert!(output.contains("__ezra_fn_ptr_callback:"), "{output}");
+        assert!(!output.contains("__ezra_unused_helper:"), "{output}");
+    }
+
+    #[test]
+    fn resident_routines_called_from_banked_payloads_are_roots() {
+        let assembly = "__ezra_start:\n    call _main\n    ret\n_main:\n    call __ezra_far_draw\n    ret\n__ezra_bank_2_start:\n_draw:\n    call _video.begin_update\n    ret\n__ezra_bank_2_end:\n_video.begin_update:\n    ret\n_unused:\n    ret\n__ezra_far_draw:\n    ret\n";
+
+        let output = strip_unreachable_generated_routines(assembly, RoutineProfile::Lr35902);
+
+        assert!(output.contains("_video.begin_update:"), "{output}");
+        assert!(!output.contains("_unused:"), "{output}");
     }
 
     #[test]

@@ -262,7 +262,11 @@ impl SemanticModel {
             .declarations
             .iter()
             .filter_map(|declaration| match unwrapped_declaration(declaration) {
-                Declaration::Const(declaration) => Some(declaration),
+                Declaration::Const(declaration)
+                    if !matches!(declaration.ty, Type::Array { .. }) =>
+                {
+                    Some(declaration)
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -321,7 +325,9 @@ impl SemanticModel {
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
             if let Declaration::Const(declaration) = declaration {
-                if self.constants.contains_key(&declaration.name) {
+                if self.constants.contains_key(&declaration.name)
+                    || matches!(declaration.ty, Type::Array { .. })
+                {
                     continue;
                 }
                 let value = self.const_value(&declaration.value)?;
@@ -333,6 +339,15 @@ impl SemanticModel {
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
             match declaration {
+                Declaration::Const(declaration) if matches!(declaration.ty, Type::Array { .. }) => {
+                    let size = self.type_size(&declaration.ty)?;
+                    let storage = allocate_from(&mut self.next_rodata, size, 1, self.max_address)?;
+                    self.globals.insert(declaration.name.clone(), storage);
+                    self.global_types
+                        .insert(declaration.name.clone(), declaration.ty.clone());
+                    self.constant_types
+                        .insert(declaration.name.clone(), declaration.ty.clone());
+                }
                 Declaration::Mmio(declaration) => {
                     let address = u32::try_from(self.const_value(&declaration.value)?)
                         .ok()

@@ -301,9 +301,16 @@ impl Emitter {
             }
         }
         for declaration in &program.declarations {
-            if let Declaration::Global(global) = declaration {
-                let storage = self.model.globals[&global.name];
-                self.emit_initializer(storage, &global.ty, &global.value)?;
+            match declaration {
+                Declaration::Global(global) => {
+                    let storage = self.model.globals[&global.name];
+                    self.emit_initializer(storage, &global.ty, &global.value)?;
+                }
+                Declaration::Const(constant) if matches!(constant.ty, Type::Array { .. }) => {
+                    let storage = self.model.globals[&constant.name];
+                    self.emit_initializer(storage, &constant.ty, &constant.value)?;
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -1424,8 +1431,12 @@ impl Emitter {
     fn place_address(&mut self, place: &Place) -> Result<Address, Diagnostic> {
         match place {
             Place::Ident(name) => {
-                let binding = self.binding(name)?;
-                Ok(Address::Direct(binding.storage.address))
+                if let Some((address, Type::Ptr(_), _)) = self.model.mmio.get(name) {
+                    Ok(Address::Direct(*address))
+                } else {
+                    let binding = self.binding(name)?;
+                    Ok(Address::Direct(binding.storage.address))
+                }
             }
             Place::Index { name, index } => {
                 self.emit_named_index_address(name, index)?;
@@ -1453,7 +1464,13 @@ impl Emitter {
 
     fn place_type(&self, place: &Place) -> Result<Type, Diagnostic> {
         match place {
-            Place::Ident(name) => Ok(self.binding(name)?.ty),
+            Place::Ident(name) => {
+                if let Some((_, Type::Ptr(inner), _)) = self.model.mmio.get(name) {
+                    Ok((**inner).clone())
+                } else {
+                    Ok(self.binding(name)?.ty)
+                }
+            }
             Place::Index { name, .. } => {
                 element_type(&self.model.resolved_type(&self.binding(name)?.ty)?)
             }
@@ -2332,6 +2349,22 @@ mod tests {
         assert!(assembly.contains("lds r30, 0100h"));
         assert!(!assembly.contains("00F0h"));
         assert!(assembly.contains("ld r16, z\n    tst r16"));
+    }
+
+    #[test]
+    fn aggregate_constants_have_addressable_storage_and_mmio_names_are_writable_places() {
+        let assembly = emit(
+            r#"
+            volatile mmio OUTPUT: ptr<u16> = 0x0A00
+            const VALUES: [u16; 2] = [0x1234, 0x5678]
+            fn main() {
+                let pointer: ptr<u16> = &VALUES
+                OUTPUT = pointer[1]
+            }
+        "#,
+        );
+        assert!(assembly.contains("sts 0A00h, r16"), "{assembly}");
+        assert!(assembly.contains("sts 0800h, r16"), "{assembly}");
     }
 
     #[test]

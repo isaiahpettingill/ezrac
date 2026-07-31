@@ -365,6 +365,26 @@ fn semantic_model_layouts_aggregates_and_function_slots() {
 }
 
 #[test]
+fn semantic_model_allocates_aggregate_constants_in_rodata() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "const VALUES: [u16; 2] = [1, 2]\nfn main() { let p: ptr<u16> = &VALUES }",
+    )
+    .unwrap();
+    let model = model::SemanticModel::from_program(&program, 16, 0xA000, 0x8000, 0xC000).unwrap();
+
+    assert_eq!(model.globals["VALUES"].address, 0x8000);
+    assert_eq!(model.globals["VALUES"].size, 4);
+    assert_eq!(
+        model.global_types["VALUES"],
+        Type::Array {
+            element: Box::new(Type::Named("u16".to_owned())),
+            len: Box::new(Expr::Int(2)),
+        }
+    );
+}
+
+#[test]
 fn semantic_model_rejects_circular_constants() {
     let program = parse_program(
         Path::new("test.ezra"),

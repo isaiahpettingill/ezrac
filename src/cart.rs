@@ -1246,6 +1246,12 @@ fn collect_embed_constants(program: &Program) -> Result<HashMap<String, i64>, Di
     for declaration in &program.declarations {
         match unwrapped_declaration(declaration) {
             Declaration::Const(decl) => {
+                if matches!(
+                    resolve_embed_const_type(&decl.ty, &aliases)?,
+                    Type::Array { .. }
+                ) {
+                    continue;
+                }
                 evaluate_embed_constant(
                     &decl.name,
                     &decl.value,
@@ -1800,6 +1806,55 @@ fn write_addr24(bytes: &mut [u8], offset: usize, addr: Address24) {
 
 fn write_optional_addr24(bytes: &mut [u8], offset: usize, addr: Option<Address24>) {
     write_addr24(bytes, offset, addr.unwrap_or(Address24::new(0)));
+}
+
+#[cfg(test)]
+mod aggregate_const_tests {
+    use std::path::Path;
+
+    use crate::{layout::default_layout_for_target, parser::parse_program};
+
+    use super::*;
+
+    #[test]
+    fn layout_planning_ignores_unrelated_aggregate_constants() {
+        let program = parse_program(
+            Path::new("aggregate-const.ezra"),
+            r#"
+                const MATRIX: [u16; 4] = [1, 2, 3, 4]
+                const BASE: u8 = 2
+                const COUNT: u8 = BASE + 1
+                global values: [u8; COUNT] = [0, 0, 0]
+                fn main() {}
+            "#,
+        )
+        .unwrap();
+
+        let constants = collect_embed_constants(&program).unwrap();
+        assert_eq!(constants.get("BASE"), Some(&2));
+        assert_eq!(constants.get("COUNT"), Some(&3));
+        assert!(!constants.contains_key("MATRIX"));
+
+        layout_section_bases(&program, &default_layout_for_target("bare-avr")).unwrap();
+    }
+
+    #[test]
+    fn required_invalid_scalar_constant_still_errors() {
+        let program = parse_program(
+            Path::new("invalid-scalar-const.ezra"),
+            r#"
+                const MATRIX: [u8; 2] = [1, 2]
+                const COUNT: u8 = missing()
+                global values: [u8; COUNT] = []
+                fn main() {}
+            "#,
+        )
+        .unwrap();
+
+        let error =
+            layout_section_bases(&program, &default_layout_for_target("bare-avr")).unwrap_err();
+        assert_eq!(error.message, "embed expressions must be integer constants");
+    }
 }
 
 #[cfg(test)]

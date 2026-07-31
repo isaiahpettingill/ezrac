@@ -401,6 +401,7 @@ impl Emitter {
                     "DCPU-16 does not support port write `{port}`; use MMIO or asm"
                 )));
             }
+            Stmt::Expr(Expr::Call { path, args }) => self.emit_call(path, args)?,
             Stmt::Expr(expr) => {
                 let ty = self.expr_type(expr)?;
                 if !self.is_aggregate(&ty) {
@@ -503,7 +504,10 @@ impl Emitter {
             Expr::BankedPointer { pointer, .. } | Expr::Cast { expr: pointer, .. } => {
                 self.emit_expr(pointer, ty)?
             }
-            Expr::Call { path, args } => self.emit_call(path, args)?,
+            Expr::Call { path, args } => {
+                self.expr_type(expr)?;
+                self.emit_call(path, args)?;
+            }
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, ty)?;
                 match op {
@@ -1548,6 +1552,26 @@ mod tests {
         );
         assert!(assembly.contains("hwi 2"));
     }
+
+    #[test]
+    fn void_calls_remain_invalid_in_value_contexts() {
+        let program = parse_program(
+            Path::new("dcpu.ezra"),
+            "fn command() {} fn main() { let value: u16 = command() }",
+        )
+        .unwrap();
+        let error = emit_dcpu_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::Dcpu,
+                ram_base: crate::target::Address24::new(0x8000),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "DCPU function `command` has no value return");
+    }
+
     #[test]
     fn ports_remain_rejected() {
         let program = parse_program(Path::new("dcpu.ezra"), "port P: u8 = 1 fn main() {}").unwrap();

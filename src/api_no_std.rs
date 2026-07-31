@@ -206,7 +206,7 @@ pub fn build_workspace(
         &compilation.assembly,
         layout.entry.get(),
     )?;
-    validate_text_section_fit(&layout, assembled.bytes.len())?;
+    validate_text_section_fit(&layout, assembled_text_len(&assembled))?;
     let root = normalize_virtual_path(root);
     let package_request = PackageRequest {
         target: request.target.clone(),
@@ -646,7 +646,16 @@ fn validate_generated_assembly(
     layout: &Layout,
 ) -> Result<(), Diagnostic> {
     let assembled = assemble_subset_with_symbols_at(cpu.into(), assembly, layout.entry.get())?;
-    validate_text_section_fit(layout, assembled.bytes.len())
+    validate_text_section_fit(layout, assembled_text_len(&assembled))
+}
+
+fn assembled_text_len(assembled: &crate::vm::AssembledProgram) -> usize {
+    assembled
+        .section_ranges
+        .iter()
+        .find(|section| section.name == ".text")
+        .map(|section| section.end.saturating_sub(section.start) as usize)
+        .unwrap_or(assembled.bytes.len())
 }
 
 fn validate_text_section_fit(layout: &Layout, code_len: usize) -> Result<(), Diagnostic> {

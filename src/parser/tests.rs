@@ -821,3 +821,26 @@ fn parses_embed_byte_declarations() {
     ));
     assert!(program.main_function().is_some());
 }
+
+#[test]
+fn parses_nested_c64_bitmap_address_expressions_without_exhausting_the_stack() {
+    let program = parse_program(
+        Path::new("c64-vic.ezra"),
+        r#"
+            const BITMAP_RAM: u16 = 0x6000
+            fn set_pixel(x: u16, y: u8, lit: u8) {
+                let address: u16 = BITMAP_RAM + (cast<u16>(y) >> 3) * 320 + (x >> 3) * 8 + cast<u16>(y & 7)
+                let mask: u8 = 0x80 >> cast<u8>(x & 7)
+                let value: u8 = *(cast<ptr<u8>>(cast<u24>(address)))
+                if lit != 0 {
+                    *(cast<ptr<u8>>(cast<u24>(address))) = value | mask
+                } else {
+                    *(cast<ptr<u8>>(cast<u24>(address))) = value & ~mask
+                }
+            }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(program.declarations.len(), 2);
+}

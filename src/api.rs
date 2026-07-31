@@ -421,15 +421,12 @@ pub fn link_generated_assembly(
             .section_ranges
             .iter()
             .find(|section| section.name == ".text");
-        validate_assembled_section_fit(
-            &build.layout,
-            ".text",
-            text.map_or(build.layout.entry.get(), |section| section.start),
-            text.map_or(assembled.bytes.len(), |section| {
-                section.end.saturating_sub(section.start) as usize
-            }),
-        )?;
-        let map = build_output_map(build, program, assembled.bytes.len(), &assembled.symbols)?;
+        let text_start = text.map_or(build.layout.entry.get(), |section| section.start);
+        let text_len = text.map_or(assembled.bytes.len(), |section| {
+            section.end.saturating_sub(section.start) as usize
+        });
+        validate_assembled_section_fit(&build.layout, ".text", text_start, text_len)?;
+        let map = build_output_map(build, program, text_len, &assembled.symbols)?;
         (assembled.bytes, map, assembled.symbols)
     };
     package_generated_linked(build, program, machine_code, map, symbols)
@@ -1567,7 +1564,15 @@ mod tests {
 
     #[test]
     fn builds_and_packages_virtual_workspace_for_agon() {
-        let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+        let files = [WorkspaceFile::text(
+            "main.ezra",
+            r#"
+                fn main() {
+                    let text: ptr<u8> = "OK"
+                    test.assert_eq_u8(*text, 'O', 1)
+                }
+            "#,
+        )];
         let build = build_workspace(
             &Workspace::new(&files),
             "main.ezra",
@@ -1577,7 +1582,8 @@ mod tests {
 
         assert_eq!(build.executable_extension, "bin");
         assert_eq!(&build.executable[64..69], b"MOS\0\x01");
-        assert!(!build.machine_code.is_empty());
+        assert!(build.assembly.contains("section .rodata\norg 060000h"));
+        assert!(build.machine_code.len() > 0x05_FFFF - 0x04_0045 + 1);
     }
 
     #[test]
