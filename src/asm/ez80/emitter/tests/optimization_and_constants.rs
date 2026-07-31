@@ -275,6 +275,62 @@ fn lowers_single_bit_expression_masks() {
 }
 
 #[test]
+fn lowers_u16_immediate_bitwise_operations_by_byte() {
+    let source = r#"
+            fn keep_low(value: u16) -> u16 {
+                return value & 0x00FFu16
+            }
+
+            fn set_high(value: u16) -> u16 {
+                return value | 0xFF00u16
+            }
+
+            fn toggle_low(value: u16) -> u16 {
+                return value ^ 0x00FFu16
+            }
+
+            fn main() {
+                test.assert_eq_u16(keep_low(0x1234), 0x0034, 1)
+                test.assert_eq_u16(set_high(0x1234), 0xFF34, 2)
+                test.assert_eq_u16(toggle_low(0x1234), 0x12CB, 3)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 6_000).unwrap();
+    let body = |name: &str| {
+        asm.split(&format!("_{name}:"))
+            .nth(1)
+            .unwrap()
+            .split("    ret")
+            .next()
+            .unwrap()
+    };
+
+    let keep_low = body("keep_low");
+    assert!(keep_low.contains("    ld h, 00h"), "{keep_low}");
+    assert!(!keep_low.contains("    and FFh"), "{keep_low}");
+
+    let set_high = body("set_high");
+    assert!(set_high.contains("    ld h, FFh"), "{set_high}");
+    assert!(!set_high.contains("    or 00h"), "{set_high}");
+
+    let toggle_low = body("toggle_low");
+    assert!(toggle_low.contains("    ld a, l"), "{toggle_low}");
+    assert!(toggle_low.contains("    xor FFh"), "{toggle_low}");
+    assert!(toggle_low.contains("    ld l, a"), "{toggle_low}");
+
+    for name in ["keep_low", "set_high", "toggle_low"] {
+        let function = body(name);
+        assert!(!function.contains("    push hl"), "{function}");
+        assert!(!function.contains("    pop bc"), "{function}");
+    }
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn lowers_single_bit_compound_assignments_for_local_scalars() {
     let source = r#"
         global global_value: u8 = 0

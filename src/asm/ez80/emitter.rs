@@ -3449,6 +3449,9 @@ impl Emitter {
                     if self.emit_single_bit_mask(left, *op, right, width)? {
                         return Ok(());
                     }
+                    if self.emit_u16_immediate_bitwise(left, *op, right, width)? {
+                        return Ok(());
+                    }
                     if *op == BinaryOp::Mul {
                         self.emit_mul_to_width(
                             left,
@@ -5310,6 +5313,54 @@ impl Emitter {
     fn emit_comparison(&mut self, op: BinaryOp) {
         self.line("    cp c");
         self.emit_comparison_from_flags(op);
+    }
+
+    fn emit_u16_immediate_bitwise(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+        width: ValueWidth,
+    ) -> Result<bool, Diagnostic> {
+        if width != ValueWidth::U16
+            || !matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor)
+        {
+            return Ok(false);
+        }
+        self.validate_typed_literal_ranges(right)?;
+        let Ok(mask) = self.eval_i64_with_local_constants(right) else {
+            return Ok(false);
+        };
+
+        self.emit_expr_to_hl(left, width)?;
+        self.emit_u8_immediate_bitwise_register("l", op, mask as u8);
+        self.emit_u8_immediate_bitwise_register("h", op, (mask >> 8) as u8);
+        Ok(true)
+    }
+
+    fn emit_u8_immediate_bitwise_register(&mut self, register: &str, op: BinaryOp, mask: u8) {
+        let is_identity = matches!(
+            (op, mask),
+            (BinaryOp::BitAnd, 0xFF) | (BinaryOp::BitOr, 0x00) | (BinaryOp::BitXor, 0x00)
+        );
+        if is_identity {
+            return;
+        }
+
+        match (op, mask) {
+            (BinaryOp::BitAnd, 0x00) => self.line(&format!("    ld {register}, 00h")),
+            (BinaryOp::BitOr, 0xFF) => self.line(&format!("    ld {register}, FFh")),
+            _ => {
+                self.line(&format!("    ld a, {register}"));
+                match op {
+                    BinaryOp::BitAnd => self.line(&format!("    and {mask:02X}h")),
+                    BinaryOp::BitOr => self.line(&format!("    or {mask:02X}h")),
+                    BinaryOp::BitXor => self.line(&format!("    xor {mask:02X}h")),
+                    _ => unreachable!("not a bitwise operation"),
+                }
+                self.line(&format!("    ld {register}, a"));
+            }
+        }
     }
 
     fn emit_single_bit_mask(
