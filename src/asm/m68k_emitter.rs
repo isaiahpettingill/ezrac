@@ -684,7 +684,7 @@ impl Emitter {
                     self.emit_constant_shift(*op, &operand_ty, count)?;
                     return Ok(());
                 }
-                self.line(&format!("    move.{} d0,d1", size_suffix(&operand_ty)?));
+                self.line("    move.l d0,-(sp)");
                 self.emit_expr(right, &operand_ty)?;
                 self.line(&format!("    move.{} d0,d2", size_suffix(&operand_ty)?));
                 if matches!(op, BinaryOp::Add | BinaryOp::Sub)
@@ -695,7 +695,7 @@ impl Emitter {
                         self.line(&format!("    mulu #${size:X},d2"));
                     }
                 }
-                self.line(&format!("    move.{} d1,d0", size_suffix(&operand_ty)?));
+                self.line("    move.l (sp)+,d0");
                 self.emit_binary(*op, &operand_ty)?;
             }
             Expr::Cast { ty, expr } => {
@@ -1025,14 +1025,24 @@ impl Emitter {
                 if size == "b" {
                     return Err(Diagnostic::new("M68k division requires u16 or i16 values"));
                 }
-                self.line(if type_is_signed(ty) {
-                    "    divs d2,d0"
+                let zero = self.next_label("div_u16_zero");
+                let done = self.next_label("div_u16_done");
+                self.line("    tst.w d2");
+                self.line(&format!("    beq {zero}"));
+                if type_is_signed(ty) {
+                    self.line("    ext.l d0");
+                    self.line("    divs d2,d0");
                 } else {
-                    "    divu d2,d0"
-                });
+                    self.line("    andi.l #$FFFF,d0");
+                    self.line("    divu d2,d0");
+                }
                 if op == BinaryOp::Mod {
                     self.line("    swap d0");
                 }
+                self.line(&format!("    bra {done}"));
+                self.line(&format!("{zero}:"));
+                self.line("    moveq #0,d0");
+                self.line(&format!("{done}:"));
             }
             BinaryOp::Eq
             | BinaryOp::Ne
@@ -1103,6 +1113,7 @@ impl Emitter {
         let width = scalar_width(ty)? * 8;
         let divisor_zero = self.next_label(&format!("div_u{width}_zero"));
         let loop_label = self.next_label(&format!("div_u{width}_loop"));
+        let result_ready = self.next_label(&format!("div_u{width}_result_ready"));
         let done = self.next_label(&format!("div_u{width}_done"));
         let positive_left = self.next_label(&format!("div_u{width}_left_positive"));
         let positive_right = self.next_label(&format!("div_u{width}_right_positive"));
@@ -1112,7 +1123,8 @@ impl Emitter {
             self.line("    tst.l d0");
             self.line(&format!("    bpl {positive_left}"));
             self.line("    neg.l d0");
-            self.line("    moveq #1,d5");
+            // Bit 0 is the quotient sign; bit 1 is the dividend/remainder sign.
+            self.line("    moveq #3,d5");
             self.line(&format!("{positive_left}:"));
             self.line("    tst.l d2");
             self.line(&format!("    bpl {positive_right}"));
@@ -1123,25 +1135,48 @@ impl Emitter {
         self.line("    tst.l d2");
         self.line(&format!("    beq {divisor_zero}"));
         self.line("    moveq #0,d1");
+        self.line(&format!("    moveq #{width},d4"));
         self.line(&format!("{loop_label}:"));
-        self.line("    cmp.l d2,d0");
-        self.line(&format!("    bcs {done}"));
-        self.line("    sub.l d2,d0");
-        self.line("    addq.l #1,d1");
-        self.line(&format!("    bra {loop_label}"));
+        self.line("    move.l d0,d6");
+        self.line("    rol.l #1,d6");
+        self.line("    andi.l #1,d6");
+        self.line("    move.l d1,d3");
+        self.line("    rol.l #1,d3");
+        self.line("    andi.l #1,d3");
+        self.line("    add.l d0,d0");
+        self.line("    add.l d1,d1");
+        self.line("    add.l d6,d1");
+        self.line("    move.l d1,d6");
+        self.line("    eori.l #$80000000,d6");
+        self.line("    move.l d2,d7");
+        self.line("    eori.l #$80000000,d7");
+        self.line("    cmp.l d7,d6");
+        self.line("    sge d6");
+        self.line("    andi.l #1,d6");
+        self.line("    or.l d3,d6");
+        self.line("    neg.l d6");
+        self.line("    move.l d2,d3");
+        self.line("    and.l d6,d3");
+        self.line("    sub.l d3,d1");
+        self.line("    andi.l #1,d6");
+        self.line("    add.l d6,d0");
+        self.line("    subq.w #1,d4");
+        self.line(&format!("    bne {loop_label}"));
+        if remainder {
+            self.line("    move.l d1,d0");
+        }
+        self.line(&format!("    bra {result_ready}"));
         self.line(&format!("{divisor_zero}:"));
         self.line("    moveq #0,d0");
         self.line(&format!("    bra {done}"));
-        self.line(&format!("{done}:"));
-        if !remainder {
-            self.line("    move.l d1,d0");
-        }
+        self.line(&format!("{result_ready}:"));
         if signed {
-            self.line("    tst.b d5");
+            self.line(&format!("    btst #{},d5", if remainder { 1 } else { 0 }));
             self.line(&format!("    beq {positive_result}"));
             self.line("    neg.l d0");
             self.line(&format!("{positive_result}:"));
         }
+        self.line(&format!("{done}:"));
         self.normalize_d0(ty)
     }
 
@@ -1754,16 +1789,16 @@ impl Emitter {
     fn load_d0(&mut self, storage: Storage, ty: &Type) -> Result<(), Diagnostic> {
         if scalar_width(ty)? == 3 {
             self.line("    moveq #0,d0");
-            self.line(&format!("    move.b ${:06X},d0", storage.address));
+            self.line(&format!("    move.b ${:06X}.l,d0", storage.address));
             self.line("    lsl.l #8,d0");
-            self.line(&format!("    move.b ${:06X},d0", storage.address + 1));
+            self.line(&format!("    move.b ${:06X}.l,d0", storage.address + 1));
             self.line("    lsl.l #8,d0");
-            self.line(&format!("    move.b ${:06X},d0", storage.address + 2));
+            self.line(&format!("    move.b ${:06X}.l,d0", storage.address + 2));
             self.normalize_d0(ty)?;
             return Ok(());
         }
         self.line(&format!(
-            "    move.{} ${:06X},d0",
+            "    move.{} ${:06X}.l,d0",
             size_suffix(ty)?,
             storage.address
         ));
@@ -1775,15 +1810,15 @@ impl Emitter {
             self.line("    move.l d0,d1");
             self.line("    lsr.l #8,d1");
             self.line("    lsr.l #8,d1");
-            self.line(&format!("    move.b d1,${:06X}", storage.address));
+            self.line(&format!("    move.b d1,${:06X}.l", storage.address));
             self.line("    move.l d0,d1");
             self.line("    lsr.l #8,d1");
-            self.line(&format!("    move.b d1,${:06X}", storage.address + 1));
-            self.line(&format!("    move.b d0,${:06X}", storage.address + 2));
+            self.line(&format!("    move.b d1,${:06X}.l", storage.address + 1));
+            self.line(&format!("    move.b d0,${:06X}.l", storage.address + 2));
             return Ok(());
         }
         self.line(&format!(
-            "    move.{} d0,${:06X}",
+            "    move.{} d0,${:06X}.l",
             size_suffix(ty)?,
             storage.address
         ));
@@ -2157,6 +2192,165 @@ mod tests {
         vm::assemble_subset_with_symbols_at,
     };
     use std::path::Path;
+
+    #[cfg(feature = "test-runner")]
+    fn emit_and_run(source: &str, instruction_budget: u64) -> (String, crate::vm::TestRun) {
+        use crate::vm::{TestImage, TestRunOptions, TestRunner, assemble_subset_at};
+
+        let program = parse_program(Path::new("test.ezra"), source).unwrap();
+        let options = AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        };
+        let base_addr = options.code_base.get();
+        let stack_top = options.stack_top.get();
+        let assembly = emit_m68k_assembly_with_options(&program, options).unwrap();
+        assemble_subset_at(CpuFamily::M68k, &assembly, base_addr).unwrap();
+        let main = &assembly[assembly
+            .find("_main:\n")
+            .expect("missing M68k main function")..];
+        let bytes = assemble_subset_at(CpuFamily::M68k, main, base_addr).unwrap();
+        let run = TestRunner::default()
+            .run(
+                &TestImage {
+                    cpu_family: CpuFamily::M68k,
+                    base_addr,
+                    bytes,
+                },
+                &TestRunOptions {
+                    instruction_budget,
+                    initial_ports: Vec::new(),
+                    initial_memory: Vec::new(),
+                    stack_top,
+                },
+            )
+            .unwrap();
+        (assembly, run)
+    }
+
+    #[cfg(feature = "test-runner")]
+    #[test]
+    fn nested_binary_right_expressions_preserve_outer_operands() {
+        let (assembly, run) = emit_and_run(
+            r#"
+            volatile mmio DEBUG: u8 = 0xFFFFF0
+            volatile mmio HALT: u8 = 0xFFFFF2
+            fn main() {
+                let a: u32 = 10
+                let b: u32 = 7
+                let c: u32 = 6
+                let d: u32 = 3
+                DEBUG = cast<u8>(a + (b * (c - d)))
+                DEBUG = cast<u8>(a - (b + (c * d)))
+                HALT = 1
+            }
+        "#,
+            2_000,
+        );
+        assert!(run.halted, "{run:?}\n{assembly}");
+        assert_eq!(run.debug_output, [31, 0xF1], "{assembly}");
+        let pushes = assembly.matches("    move.l d0,-(sp)").count();
+        assert!(pushes >= 6, "{assembly}");
+        assert_eq!(pushes, assembly.matches("    move.l (sp)+,d0").count());
+    }
+
+    #[cfg(feature = "test-runner")]
+    #[test]
+    fn signed_wide_division_uses_xor_for_quotient_and_dividend_for_remainder() {
+        for (expression, expected) in [
+            ("left / right", 0xFE),
+            ("left / negative_right", 2),
+            ("positive / negative_right", 0xFE),
+            ("left % right", 0xFD),
+            ("left % negative_right", 0xFD),
+            ("positive % negative_right", 3),
+        ] {
+            let source = format!(
+                r#"
+                volatile mmio DEBUG: u8 = 0xFFFFF0
+                volatile mmio HALT: u8 = 0xFFFFF2
+                global left: i32 = 0
+                global positive: i32 = 0
+                global right: i32 = 0
+                global negative_right: i32 = 0
+                fn main() {{
+                    left = -13
+                    positive = 13
+                    right = 5
+                    negative_right = -5
+                    DEBUG = cast<u8>({expression})
+                    HALT = 1
+                }}
+            "#
+            );
+            let (assembly, run) = emit_and_run(&source, 2_000);
+            assert!(run.halted, "{run:?}\n{assembly}");
+            assert_eq!(run.debug_output, [expected], "{assembly}");
+        }
+    }
+
+    #[cfg(feature = "test-runner")]
+    #[test]
+    fn division_by_zero_returns_zero_for_native_and_wide_results() {
+        let (assembly, run) = emit_and_run(
+            r#"
+            volatile mmio DEBUG: u8 = 0xFFFFF0
+            volatile mmio HALT: u8 = 0xFFFFF2
+            global value16: u16 = 12345
+            global zero16: u16 = 0
+            global value32: i32 = -1234567
+            global zero32: i32 = 0
+            fn main() {
+                value16 = 12345
+                zero16 = 0
+                value32 = -1234567
+                zero32 = 0
+                DEBUG = cast<u8>(value16 / zero16)
+                DEBUG = cast<u8>(value16 % zero16)
+                DEBUG = cast<u8>(value32 / zero32)
+                DEBUG = cast<u8>(value32 % zero32)
+                HALT = 1
+            }
+        "#,
+            3_000,
+        );
+        assert!(run.halted, "{run:?}\n{assembly}");
+        assert_eq!(run.debug_output, [0, 0, 0, 0], "{assembly}");
+        assert!(assembly.contains("__ezra_div_u16_zero"), "{assembly}");
+        assert!(assembly.contains("__ezra_div_u32_zero"), "{assembly}");
+    }
+
+    #[cfg(feature = "test-runner")]
+    #[test]
+    fn wide_division_has_bounded_runtime_for_large_values() {
+        for expression in ["dividend / divisor", "dividend % divisor"] {
+            let source = format!(
+                r#"
+                volatile mmio DEBUG: u8 = 0xFFFFF0
+                volatile mmio HALT: u8 = 0xFFFFF2
+                global dividend: u32 = 0
+                global one: u32 = 0
+                global divisor: u32 = 0
+                fn main() {{
+                    dividend = 0x7FFFFF80u32
+                    one = 1
+                    divisor = 0x00808080u32
+                    DEBUG = cast<u8>({expression})
+                    HALT = 1
+                }}
+            "#
+            );
+            let (assembly, run) = emit_and_run(&source, 2_000);
+            assert!(run.halted, "{run:?}\n{assembly}");
+            assert_eq!(run.debug_output.len(), 1, "{expression}\n{assembly}");
+            assert!(assembly.contains("    moveq #32,d4"), "{assembly}");
+            assert!(assembly.contains("    subq.w #1,d4"), "{assembly}");
+            assert!(
+                assembly.contains("    bne __ezra_div_u32_loop"),
+                "{assembly}"
+            );
+        }
+    }
 
     #[test]
     fn emits_and_assembles_scalar_control_flow() {

@@ -152,10 +152,56 @@ impl Emitter {
                 self.emit_function(function)?;
             }
         }
-        for section in [".header", ".rodata", ".data", ".bss", ".assets", ".scratch"] {
+        for section in [".header", ".rodata", ".data", ".bss"] {
             self.line(&format!("section {section}"));
         }
+        if self.is_ti_cartridge() {
+            self.emit_rom_embeds()?;
+        } else {
+            self.line("section .assets");
+        }
+        self.line("section .scratch");
         Ok(self.out)
+    }
+
+    fn is_ti_cartridge(&self) -> bool {
+        self.options.load_addr.get() == 0x6000
+    }
+
+    fn emit_rom_embeds(&mut self) -> Result<(), Diagnostic> {
+        self.line("section .assets");
+        let mut embeds = self
+            .model
+            .embeds
+            .iter()
+            .map(|(name, embed)| (name.clone(), embed.clone()))
+            .collect::<Vec<_>>();
+        embeds.sort_by_key(|(_, embed)| embed.storage.address);
+        let mut offset = 0u32;
+        for (name, embed) in embeds {
+            let embed_offset = embed
+                .storage
+                .address
+                .checked_sub(self.options.asset_base.get())
+                .ok_or_else(|| Diagnostic::new("TMS9900 embed is below the asset base"))?;
+            if embed_offset > offset {
+                self.line(&format!("    ds {}", embed_offset - offset));
+            }
+            self.line(&format!("{}:", embed_label(&name)));
+            for bytes in embed.bytes.chunks(16) {
+                let values = bytes
+                    .iter()
+                    .map(|byte| format!(">{byte:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!("    db {values}"));
+            }
+            self.line(&format!("{}:", embed_end_label(&name)));
+            offset = embed_offset
+                .checked_add(embed.storage.size)
+                .ok_or_else(|| Diagnostic::new("TMS9900 embed section is too large"))?;
+        }
+        Ok(())
     }
 
     fn prepare_runtime_strings(
@@ -177,14 +223,16 @@ impl Emitter {
     }
 
     fn emit_static_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
-        let embeds = self.model.embeds.values().cloned().collect::<Vec<_>>();
-        for embed in embeds {
-            for (offset, byte) in embed.bytes.iter().copied().enumerate() {
-                self.load_immediate(i64::from(byte))?;
-                self.store_r0_address(
-                    embed.storage.address + offset as u32,
-                    &Type::Named("u8".to_owned()),
-                )?;
+        if !self.is_ti_cartridge() {
+            let embeds = self.model.embeds.values().cloned().collect::<Vec<_>>();
+            for embed in embeds {
+                for (offset, byte) in embed.bytes.iter().copied().enumerate() {
+                    self.load_immediate(i64::from(byte))?;
+                    self.store_r0_address(
+                        embed.storage.address + offset as u32,
+                        &Type::Named("u8".to_owned()),
+                    )?;
+                }
             }
         }
         let strings = self
@@ -430,18 +478,22 @@ impl Emitter {
             }
             Expr::Ident(name) => self.load_ident(name, ty)?,
             Expr::AddressOf(name) => {
-                let storage = self
-                    .model
-                    .globals
-                    .get(name)
-                    .copied()
-                    .or_else(|| self.model.embeds.get(name).map(|embed| embed.storage))
-                    .ok_or_else(|| {
-                        Diagnostic::new(format!(
-                            "TMS9900 backend can only take the address of a global or embed, not `{name}`"
-                        ))
-                    })?;
-                self.line(&format!("    li r0, >{:04X}", storage.address));
+                if self.is_ti_cartridge() && self.model.embeds.contains_key(name) {
+                    self.line(&format!("    li r0, {}", embed_label(name)));
+                } else {
+                    let storage = self
+                        .model
+                        .globals
+                        .get(name)
+                        .copied()
+                        .or_else(|| self.model.embeds.get(name).map(|embed| embed.storage))
+                        .ok_or_else(|| {
+                            Diagnostic::new(format!(
+                                "TMS9900 backend can only take the address of a global or embed, not `{name}`"
+                            ))
+                        })?;
+                    self.line(&format!("    li r0, >{:04X}", storage.address));
+                }
             }
             Expr::Deref(pointer) => {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
@@ -468,19 +520,55 @@ impl Emitter {
                 }
             }
             Expr::Binary { left, op, right } => {
-                self.emit_expr(left, ty)?;
-                self.line("    mov r0, r1");
-                if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
-                    && let Some(count) = constant_shift_count(right)?
-                {
-                    self.emit_shift(*op, ty, Some(count))?;
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    self.emit_logical_expr(left, *op, right)?;
                 } else {
-                    self.emit_expr(right, ty)?;
-                    self.emit_binary(*op, ty)?;
+                    let operand_ty = if matches!(
+                        op,
+                        BinaryOp::Eq
+                            | BinaryOp::Ne
+                            | BinaryOp::Lt
+                            | BinaryOp::Le
+                            | BinaryOp::Gt
+                            | BinaryOp::Ge
+                    ) {
+                        self.model.resolved_type(&self.expr_type(left)?)?
+                    } else {
+                        ty.clone()
+                    };
+                    self.emit_expr(left, &operand_ty)?;
+                    self.line("    mov r0, r1");
+                    if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                        && let Some(count) = constant_shift_count(right)?
+                    {
+                        self.emit_shift(*op, &operand_ty, Some(count))?;
+                    } else {
+                        self.line("    dect r10");
+                        self.line("    mov r0, *r10");
+                        self.emit_expr(right, &operand_ty)?;
+                        self.line("    mov *r10+, r1");
+                        self.emit_binary(*op, &operand_ty)?;
+                    }
                 }
             }
             Expr::Cast { expr, .. } => self.emit_expr(expr, ty)?,
             Expr::Field { base, field } => self.load_ident(&format!("{base}.{field}"), ty)?,
+            Expr::Access(path)
+                if path
+                    .segments
+                    .iter()
+                    .all(|segment| matches!(segment, AccessSegment::Field(_))) =>
+            {
+                let mut name = path.root.clone();
+                for segment in &path.segments {
+                    let AccessSegment::Field(field) = segment else {
+                        unreachable!()
+                    };
+                    name.push('.');
+                    name.push_str(field);
+                }
+                self.load_ident(&name, ty)?;
+            }
             Expr::Access(_)
             | Expr::AddressOfAccess(_)
             | Expr::Index { .. }
@@ -570,6 +658,28 @@ impl Emitter {
         Ok(true)
     }
 
+    fn emit_logical_expr(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let short = self.next_label("logical_short");
+        let done = self.next_label("logical_done");
+        self.emit_expr(left, &Type::Named("bool".to_owned()))?;
+        self.line("    ci r0, 0");
+        let jump = if op == BinaryOp::And { "jeq" } else { "jne" };
+        self.line(&format!("    {jump} {short}"));
+        self.emit_expr(right, &Type::Named("bool".to_owned()))?;
+        self.line("    ci r0, 0");
+        self.emit_boolean_from_jump("jne");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{short}:"));
+        self.load_immediate(i64::from(op == BinaryOp::Or))?;
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
     fn emit_binary(&mut self, op: BinaryOp, ty: &Type) -> Result<(), Diagnostic> {
         match op {
             BinaryOp::Add => {
@@ -600,30 +710,24 @@ impl Emitter {
             | BinaryOp::Le
             | BinaryOp::Gt
             | BinaryOp::Ge => {
-                self.line("    c r0, r1");
-                let jump = match op {
-                    BinaryOp::Eq => "jeq",
-                    BinaryOp::Ne => "jne",
-                    BinaryOp::Lt => "jlt",
-                    BinaryOp::Le => "jle",
-                    BinaryOp::Gt => "jgt",
-                    BinaryOp::Ge => "jhe",
+                self.line("    c r1, r0");
+                let signed = type_is_signed(ty);
+                match (op, signed) {
+                    (BinaryOp::Eq, _) => self.emit_boolean_from_jump("jeq"),
+                    (BinaryOp::Ne, _) => self.emit_boolean_from_jump("jne"),
+                    (BinaryOp::Lt, true) => self.emit_boolean_from_jump("jlt"),
+                    (BinaryOp::Le, true) => self.emit_boolean_from_jumps(&["jlt", "jeq"]),
+                    (BinaryOp::Gt, true) => self.emit_boolean_from_jump("jgt"),
+                    (BinaryOp::Ge, true) => self.emit_boolean_from_jumps(&["jgt", "jeq"]),
+                    (BinaryOp::Lt, false) => self.emit_boolean_from_jump("jl"),
+                    (BinaryOp::Le, false) => self.emit_boolean_from_jump("jle"),
+                    (BinaryOp::Gt, false) => self.emit_boolean_from_jump("jh"),
+                    (BinaryOp::Ge, false) => self.emit_boolean_from_jump("jhe"),
                     _ => unreachable!(),
-                };
-                self.emit_boolean_from_jump(jump);
+                }
             }
             BinaryOp::And | BinaryOp::Or => {
-                self.line("    ci r1, 0");
-                let short = self.next_label("logical_short");
-                let done = self.next_label("logical_done");
-                let jump = if op == BinaryOp::And { "jeq" } else { "jne" };
-                self.line(&format!("    {jump} {short}"));
-                self.line("    ci r0, 0");
-                self.emit_boolean_from_jump("jne");
-                self.line(&format!("    b @{done}"));
-                self.line(&format!("{short}:"));
-                self.load_immediate(i64::from(op == BinaryOp::Or))?;
-                self.line(&format!("{done}:"));
+                unreachable!("logical expressions are emitted before evaluating the right operand")
             }
             BinaryOp::Mul => self.multiply(type_is_signed(ty)),
             BinaryOp::Div | BinaryOp::Mod => self.divide(
@@ -813,9 +917,15 @@ impl Emitter {
     }
 
     fn emit_boolean_from_jump(&mut self, jump: &str) {
+        self.emit_boolean_from_jumps(&[jump]);
+    }
+
+    fn emit_boolean_from_jumps(&mut self, jumps: &[&str]) {
         let yes = self.next_label("comparison_true");
         let done = self.next_label("comparison_done");
-        self.line(&format!("    {jump} {yes}"));
+        for jump in jumps {
+            self.line(&format!("    {jump} {yes}"));
+        }
         self.line("    clr r0");
         self.line(&format!("    b @{done}"));
         self.line(&format!("{yes}:"));
@@ -826,6 +936,20 @@ impl Emitter {
     fn load_ident(&mut self, name: &str, expected: &Type) -> Result<(), Diagnostic> {
         if let Some(binding) = self.binding(name) {
             return self.load_frame_r0(binding.offset, &binding.ty);
+        }
+        if self.is_ti_cartridge() {
+            if let Some(embed_name) = name.strip_suffix(".ptr")
+                && self.model.embeds.contains_key(embed_name)
+            {
+                self.line(&format!("    li r0, {}", embed_label(embed_name)));
+                return Ok(());
+            }
+            if let Some(embed_name) = name.strip_suffix(".end")
+                && self.model.embeds.contains_key(embed_name)
+            {
+                self.line(&format!("    li r0, {}", embed_end_label(embed_name)));
+                return Ok(());
+            }
         }
         if let Some(value) = self.model.constants.get(name) {
             return self.load_immediate(*value);
@@ -1536,11 +1660,20 @@ fn tms_compact_wrapper_candidate(function: &Function) -> bool {
         )
 }
 
+fn sanitize_label(name: &str) -> String {
+    name.replace(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_', "_")
+}
+
 fn function_label(name: &str) -> String {
-    format!(
-        "_{}",
-        name.replace(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_', "_")
-    )
+    format!("_{}", sanitize_label(name))
+}
+
+fn embed_label(name: &str) -> String {
+    format!("__ezra_embed_{}", sanitize_label(name))
+}
+
+fn embed_end_label(name: &str) -> String {
+    format!("{}_end", embed_label(name))
 }
 
 #[cfg(test)]
@@ -1931,8 +2064,8 @@ mod tests {
         assert!(!assembly.contains("_nested:"), "{assembly}");
         assert!(!assembly.contains("_pair:"), "{assembly}");
         assert!(assembly.contains("_add_one:"), "{assembly}");
-        assert!(assembly.contains("_guarded:"), "{assembly}");
-        assert!(assembly.contains("    bl @_guarded"), "{assembly}");
+        assert!(!assembly.contains("_guarded:"), "{assembly}");
+        assert!(!assembly.contains("    bl @_guarded"), "{assembly}");
 
         let image =
             crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
@@ -1947,6 +2080,7 @@ mod tests {
 
         assert_eq!(ram.read_word(0xA000), 12);
         assert_eq!(ram.read_word(0xA002), 44);
+        assert_eq!(ram.read_word(0xA004), 0);
     }
 
     #[test]
@@ -2033,6 +2167,152 @@ mod tests {
         assert_eq!(ram.read_word(0xA002), 303);
         assert_eq!(ram.read_word(0x8312), 0);
         assert_eq!(ram.read_word(0x8314), 0xFFFE);
+    }
+
+    #[test]
+    fn bare_tms_bob_preserves_outer_operands_in_nested_expressions() {
+        let assembly = emit(
+            r#"
+                global bob: u16 = 7
+                global result: u16 = 0
+                fn main() { result = (bob + 1) * (bob + 2) }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                stack_top: crate::target::Address24::new(0xFFFE),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..300 {
+            cpu.step(&mut ram);
+        }
+        assert_eq!(ram.read_word(0xA002), 72);
+    }
+
+    #[test]
+    fn uses_operand_signedness_for_relational_boundaries() {
+        let assembly = emit(
+            r#"
+                global flags: u16 = 0
+                fn main() {
+                    if cast<u16>(0xFFFF) > 0x7FFF { flags += 1 }
+                    if cast<u16>(0x8000) >= 0x8000 { flags += 2 }
+                    if cast<i16>(0xFFFF) < 0 { flags += 4 }
+                    if cast<i16>(0x8000) <= -1 { flags += 8 }
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                stack_top: crate::target::Address24::new(0xFFFE),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        assert!(assembly.contains("    jh "), "{assembly}");
+        assert!(assembly.contains("    jhe "), "{assembly}");
+        assert!(assembly.contains("    jlt "), "{assembly}");
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..700 {
+            cpu.step(&mut ram);
+        }
+        assert_eq!(ram.read_word(0xA000), 15);
+    }
+
+    #[test]
+    fn logical_operators_short_circuit_side_effects() {
+        let assembly = emit(
+            r#"
+                global calls: u16 = 0
+                fn mark() -> bool { calls += 1; return true }
+                fn main() {
+                    let first: bool = false && mark()
+                    let second: bool = true || mark()
+                    let third: bool = true && mark()
+                    let fourth: bool = false || mark()
+                }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x0100),
+                entry_addr: crate::target::Address24::new(0x0100),
+                code_base: crate::target::Address24::new(0x0100),
+                stack_top: crate::target::Address24::new(0xFFFE),
+                ram_base: crate::target::Address24::new(0xA000),
+                ..AssemblyOptions::default()
+            },
+        );
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..700 {
+            cpu.step(&mut ram);
+        }
+        assert_eq!(ram.read_word(0xA000), 2);
+    }
+
+    #[test]
+    fn ti_embeds_are_rom_bytes_with_linked_pointer_labels() {
+        let assembly = emit(
+            r#"
+                embed blob: bytes = bytes [0xCA, 0xFE, 0x42]
+                global first: u8 = 0
+                fn main() { first = *blob.ptr }
+            "#,
+            AssemblyOptions {
+                cpu: CpuFamily::Tms9900,
+                load_addr: crate::target::Address24::new(0x6000),
+                entry_addr: crate::target::Address24::new(0x6000),
+                code_base: crate::target::Address24::new(0x6000),
+                ram_base: crate::target::Address24::new(0xA000),
+                rodata_base: crate::target::Address24::new(0x6000),
+                asset_base: crate::target::Address24::new(0x6000),
+                ..AssemblyOptions::default()
+            },
+        );
+        assert!(assembly.contains("section .assets\n"), "{assembly}");
+        assert!(assembly.contains("__ezra_embed_blob:\n"), "{assembly}");
+        assert!(assembly.contains("    db >CA, >FE, >42"), "{assembly}");
+        assert!(
+            assembly.contains("    li r0, __ezra_embed_blob"),
+            "{assembly}"
+        );
+        assert!(!assembly.contains("    movb r0, @>6000"), "{assembly}");
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x6000)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        let address = image
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "__ezra_embed_blob")
+            .expect("embed label")
+            .addr;
+        let offset = usize::try_from(address - 0x6000).unwrap();
+        assert!(address > 0x601A);
+        assert_eq!(&image.bytes[offset..offset + 3], &[0xCA, 0xFE, 0x42]);
     }
 
     #[test]

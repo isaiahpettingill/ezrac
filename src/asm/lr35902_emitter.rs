@@ -482,9 +482,11 @@ impl Emitter {
         gameboy_banking: Option<GameBoyBankingOptions>,
         banked_layout: BankedLayout,
     ) -> Self {
-        let r0 = model.allocate(3).expect("6502 result scratch allocation");
-        let r1 = model.allocate(3).expect("6502 rhs scratch allocation");
-        let r2 = model.allocate(3).expect("6502 work scratch allocation");
+        let r0 = model
+            .allocate(4)
+            .expect("LR35902 result scratch allocation");
+        let r1 = model.allocate(4).expect("LR35902 rhs scratch allocation");
+        let r2 = model.allocate(4).expect("LR35902 work scratch allocation");
         Self {
             model,
             out: String::new(),
@@ -2000,19 +2002,41 @@ impl Emitter {
         self.lda(POINTER_ZP + 1);
         self.sta(saved_lo.address + 1);
         self.emit_expr(index, &Type::Named("u16".to_owned()))?;
+        self.lda(self.r0.address);
+        self.line("    ld l, a");
+        self.lda(self.r0.address + 1);
+        self.line("    ld h, a");
+        self.scale_index_register(element_size);
         self.lda(saved_lo.address);
-        self.sta(POINTER_ZP);
+        self.line("    ld c, a");
         self.lda(saved_lo.address + 1);
+        self.line("    ld b, a");
+        self.line("    add hl, bc");
+        self.line("    ld a, l");
+        self.sta(POINTER_ZP);
+        self.line("    ld a, h");
         self.sta(POINTER_ZP + 1);
-        let loop_label = self.next_label("index_scale");
-        let done = self.next_label("index_done");
-        self.line(&format!("{loop_label}:"));
-        self.jump_storage_zero(self.r0, 2, &done);
-        self.add_pointer_constant(element_size);
-        self.decrement(self.r0, 2);
-        self.line(&format!("    jmp {loop_label}"));
-        self.line(&format!("{done}:"));
         Ok(())
+    }
+
+    fn scale_index_register(&mut self, scale: u32) {
+        let scale = scale as u16;
+        if scale == 0 {
+            self.line("    ld hl, 0000h");
+            return;
+        }
+        if scale == 1 {
+            return;
+        }
+        self.line("    ld d, h");
+        self.line("    ld e, l");
+        let highest_bit = u16::BITS - 1 - scale.leading_zeros();
+        for bit in (0..highest_bit).rev() {
+            self.line("    add hl, hl");
+            if scale & (1 << bit) != 0 {
+                self.line("    add hl, de");
+            }
+        }
     }
 
     fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
@@ -2895,6 +2919,54 @@ mod tests {
     }
 
     #[test]
+    fn four_byte_scratch_slots_do_not_overlap_u32_i32_operations() {
+        let program = parse_program(Path::new("lr35902-scratch.ezra"), "fn main() {}").unwrap();
+        let options = AssemblyOptions {
+            cpu: CpuFamily::Lr35902,
+            stack_top: Address24::new(0x0aff),
+            ram_base: Address24::new(0x0100),
+            rodata_base: Address24::new(0x0800),
+            asset_base: Address24::new(0x0900),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        };
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let tbir = TbirProgram::lower(&hir, &program, &options).unwrap();
+        let model = SemanticModel::from_program(
+            &tbir.lowered_program,
+            16,
+            options.ram_base.get(),
+            options.rodata_base.get(),
+            options.asset_base.get(),
+        )
+        .unwrap();
+        let mut emitter = Emitter::new(model, None, BankedLayout::default());
+
+        assert_eq!(emitter.r0.size, 4);
+        assert_eq!(emitter.r1.size, 4);
+        assert_eq!(emitter.r2.size, 4);
+        assert!(emitter.r0.address + emitter.r0.size <= emitter.r1.address);
+        assert!(emitter.r1.address + emitter.r1.size <= emitter.r2.address);
+
+        emitter.add(4);
+        emitter.sub(4);
+        for offset in 0..4 {
+            let r0_byte = format!("({:04X}h)", emitter.r0.address + offset);
+            let r1_byte = format!("({:04X}h)", emitter.r1.address + offset);
+            assert!(
+                emitter.out.contains(&r0_byte),
+                "missing u32/i32 lhs byte {offset}:\n{}",
+                emitter.out
+            );
+            assert!(
+                emitter.out.contains(&r1_byte),
+                "missing u32/i32 rhs byte {offset}:\n{}",
+                emitter.out
+            );
+        }
+    }
+
+    #[test]
     fn small_constant_multiplication_uses_shift_add_sequences() {
         let assembly = emit(
             r#"
@@ -2953,6 +3025,99 @@ mod tests {
         "#,
         );
         assert!(assembly.contains("ld a, (hl)") || assembly.contains("ld (hl), a"));
+    }
+
+    #[test]
+    fn variable_indices_use_direct_scaled_pointer_arithmetic() {
+        let assembly = emit(
+            r#"
+            global bytes: [u8; 4] = [1, 2, 3, 4]
+            global words: [u16; 4] = [1, 2, 3, 4]
+            global triples: [u24; 4] = [1, 2, 3, 4]
+            global byte_result: u8 = 0
+            global word_result: u16 = 0
+            global triple_result: u24 = 0
+            fn read(index: u16) {
+                byte_result = bytes[index]
+                word_result = words[index]
+                triple_result = triples[index]
+            }
+            fn main() { read(1) }
+        "#,
+        );
+
+        assert!(!assembly.contains("index_scale"), "{assembly}");
+        assert!(!assembly.contains("index_done"), "{assembly}");
+        assert_eq!(assembly.matches("    add hl, bc").count(), 3, "{assembly}");
+        assert_eq!(assembly.matches("    add hl, hl").count(), 2, "{assembly}");
+        assert_eq!(assembly.matches("    add hl, de").count(), 1, "{assembly}");
+    }
+
+    #[test]
+    fn volatile_index_expression_is_evaluated_once_before_pointer_math() {
+        let assembly = emit(
+            r#"
+            global words: [u16; 4] = [1, 2, 3, 4]
+            global result: u16 = 0
+            fn volatile_index() -> u16 {
+                asm volatile(clobber memory) { "nop" }
+                return 1
+            }
+            fn read() { result = words[volatile_index()] }
+            fn main() { read() }
+        "#,
+        );
+
+        assert_eq!(
+            assembly.matches("    call _volatile_index").count(),
+            1,
+            "{assembly}"
+        );
+        assert!(assembly.contains("    add hl, hl"), "{assembly}");
+        assert!(assembly.contains("    add hl, bc"), "{assembly}");
+        assert!(
+            assembly.matches("    ld a, (hl)").count() >= 2,
+            "{assembly}"
+        );
+        assert!(!assembly.contains("index_scale"), "{assembly}");
+    }
+
+    #[test]
+    fn banked_array_variable_index_uses_banked_base_pointer() {
+        let program = parse_program(
+            Path::new("banked-variable-index.ezra"),
+            r#"
+            @cfg(bank(2)) global words: [u16; 4] = [1, 2, 3, 4]
+            global result: u16 = 0
+            fn read(index: u16) { result = words[index] }
+            fn main() {
+                asm volatile { "ld a, 2" "call __ezra_gb_select_bank" }
+                read(1)
+            }
+        "#,
+        )
+        .unwrap();
+        let assembly = emit_lr35902_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::Lr35902,
+                ram_base: Address24::new(0xC000),
+                rodata_base: Address24::new(0xD000),
+                asset_base: Address24::new(0xE000),
+                gameboy_banking: Some(GameBoyBankingOptions {
+                    mapper: GameBoyBankingMapper::Mbc1,
+                }),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(assembly.contains("__ezra_banked_data_words:"), "{assembly}");
+        assert!(assembly.contains("    ld a, 40h"), "{assembly}");
+        assert!(assembly.contains("    add hl, hl"), "{assembly}");
+        assert!(assembly.contains("    add hl, bc"), "{assembly}");
+        assert!(!assembly.contains("index_scale"), "{assembly}");
+        assemble_subset_with_symbols_at(CpuFamily::Lr35902.into(), &assembly, 0x0150).unwrap();
     }
 
     #[test]

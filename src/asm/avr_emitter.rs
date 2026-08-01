@@ -79,9 +79,9 @@ struct Emitter {
 
 impl Emitter {
     fn new(mut model: SemanticModel, options: AssemblyOptions) -> Self {
-        let r0 = model.allocate(3).expect("6502 result scratch allocation");
-        let r1 = model.allocate(3).expect("6502 rhs scratch allocation");
-        let r2 = model.allocate(3).expect("6502 work scratch allocation");
+        let r0 = model.allocate(4).expect("AVR result scratch allocation");
+        let r1 = model.allocate(4).expect("AVR rhs scratch allocation");
+        let r2 = model.allocate(4).expect("AVR work scratch allocation");
         Self {
             model,
             out: String::new(),
@@ -1552,14 +1552,10 @@ impl Emitter {
         self.sta(POINTER_ZP);
         self.lda(saved_lo.address + 1);
         self.sta(POINTER_ZP + 1);
-        let loop_label = self.next_label("index_scale");
-        let done = self.next_label("index_done");
-        self.line(&format!("{loop_label}:"));
-        self.jump_storage_zero(self.r0, 2, &done);
-        self.add_pointer_constant(element_size);
-        self.decrement(self.r0, 2);
-        self.line(&format!("    jmp {loop_label}"));
-        self.line(&format!("{done}:"));
+        self.scale_storage(self.r0, 2, element_size);
+        self.copy(saved_lo, self.r1, 2);
+        self.add(2);
+        self.copy_result_to_zp();
         Ok(())
     }
 
@@ -1762,10 +1758,17 @@ impl Emitter {
         }
     }
 
-    fn scale_storage(&mut self, storage: Storage, width: u8, scale: u32) {
+    fn scale_storage(&mut self, storage: Storage, width: u8, mut scale: u32) {
         if scale <= 1 {
             return;
         }
+        if scale.is_power_of_two() {
+            self.copy(storage, self.r0, u32::from(width));
+            self.constant_shift(width, false, false, scale.trailing_zeros() as u8);
+            self.copy(self.r0, storage, u32::from(width));
+            return;
+        }
+
         let source = self
             .model
             .allocate(u32::from(width))
@@ -1776,11 +1779,19 @@ impl Emitter {
             .expect("pointer scale result");
         self.copy(storage, source, u32::from(width));
         self.zero(result);
-        for _ in 0..scale {
-            self.copy(result, self.r0, u32::from(width));
-            self.copy(source, self.r1, u32::from(width));
-            self.add(width);
-            self.copy(self.r0, result, u32::from(width));
+        while scale != 0 {
+            if scale & 1 != 0 {
+                self.copy(result, self.r0, u32::from(width));
+                self.copy(source, self.r1, u32::from(width));
+                self.add(width);
+                self.copy(self.r0, result, u32::from(width));
+            }
+            scale >>= 1;
+            if scale != 0 {
+                self.copy(source, self.r0, u32::from(width));
+                self.constant_shift(width, false, false, 1);
+                self.copy(self.r0, source, u32::from(width));
+            }
         }
         self.copy(result, storage, u32::from(width));
     }
@@ -2328,6 +2339,76 @@ mod tests {
         );
         assert!(assembly.contains("call _fib"));
         assert!(!assembly.contains("6502"));
+    }
+
+    #[test]
+    fn i32_operations_use_non_overlapping_four_byte_scratch() {
+        let assembly = emit(
+            r#"
+            global sink: i32 = 0
+            fn main() {
+                let left: i32 = 0x12345678
+                let right: i32 = 0x10203040
+                sink = left + right
+            }
+        "#,
+        );
+        assert!(
+            assembly.contains(
+                "lds r16, 010Bh\n    tst r16\n    lds r17, 010Fh\n    adc r16, r17\n    sts 010Bh, r16"
+            ),
+            "{assembly}"
+        );
+        assert!(assembly.contains("sts 0114h, r16"), "{assembly}");
+    }
+
+    #[test]
+    fn variable_indexing_scales_and_adds_without_pointer_increment_loops() {
+        let byte_assembly = emit(
+            r#"
+            global bytes: [u8; 4] = [1, 2, 3, 4]
+            global byte_sink: u8 = 0
+            fn read(index: u16) -> u8 { return bytes[index] }
+            fn main() { byte_sink = read(3) }
+        "#,
+        );
+        assert!(!byte_assembly.contains("index_scale"), "{byte_assembly}");
+        assert!(!byte_assembly.contains("index_done"), "{byte_assembly}");
+        assert!(!byte_assembly.contains("lsl r16"), "{byte_assembly}");
+
+        let word_assembly = emit(
+            r#"
+            global words: [u16; 4] = [1, 2, 3, 4]
+            global word_sink: u16 = 0
+            fn read(index: u16) -> u16 { return words[index] }
+            fn main() { word_sink = read(3) }
+        "#,
+        );
+        assert!(word_assembly.contains("lsl r16"), "{word_assembly}");
+        assert!(word_assembly.contains("rol r16"), "{word_assembly}");
+        assert!(!word_assembly.contains("index_scale"), "{word_assembly}");
+
+        let triple_assembly = emit(
+            r#"
+            struct Triple { first: u8 second: u8 third: u8 }
+            global triples: [Triple; 2] = [
+                Triple { first: 1, second: 2, third: 3 },
+                Triple { first: 4, second: 5, third: 6 }
+            ]
+            global triple_sink: u8 = 0
+            fn read(index: u16) -> u8 { return triples[index].third }
+            fn main() { triple_sink = read(1) }
+        "#,
+        );
+        assert!(triple_assembly.contains("lsl r16"), "{triple_assembly}");
+        assert!(
+            triple_assembly.contains("adc r16, r17"),
+            "{triple_assembly}"
+        );
+        assert!(
+            !triple_assembly.contains("index_scale"),
+            "{triple_assembly}"
+        );
     }
 
     #[test]

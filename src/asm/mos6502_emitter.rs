@@ -105,9 +105,9 @@ struct Emitter {
 
 impl Emitter {
     fn new(mut model: SemanticModel, options: AssemblyOptions) -> Self {
-        let r0 = model.allocate(3).expect("6502 result scratch allocation");
-        let r1 = model.allocate(3).expect("6502 rhs scratch allocation");
-        let r2 = model.allocate(3).expect("6502 work scratch allocation");
+        let r0 = model.allocate(4).expect("6502 result scratch allocation");
+        let r1 = model.allocate(4).expect("6502 rhs scratch allocation");
+        let r2 = model.allocate(4).expect("6502 work scratch allocation");
         Self {
             model,
             out: String::new(),
@@ -2006,15 +2006,40 @@ impl Emitter {
         self.sta(POINTER_ZP);
         self.lda(saved_lo.address + 1);
         self.sta(POINTER_ZP + 1);
-        let loop_label = self.next_label("index_scale");
-        let done = self.next_label("index_done");
-        self.line(&format!("{loop_label}:"));
-        self.jump_storage_zero(self.r0, 2, &done);
-        self.add_pointer_constant(element_size);
-        self.decrement(self.r0, 2);
-        self.line(&format!("    jmp {loop_label}"));
-        self.line(&format!("{done}:"));
+        self.scale_pointer_index(element_size)?;
+        self.line("    clc");
+        self.lda(saved_lo.address);
+        self.line(&format!("    adc ${:04X}", self.r0.address));
+        self.sta(POINTER_ZP);
+        self.lda(saved_lo.address + 1);
+        self.line(&format!("    adc ${:04X}", self.r0.address + 1));
+        self.sta(POINTER_ZP + 1);
         Ok(())
+    }
+
+    fn scale_pointer_index(&mut self, element_size: u32) -> Result<(), Diagnostic> {
+        let scale = element_size & 0xFFFF;
+        if scale == 0 {
+            self.zero(self.r0);
+            return Ok(());
+        }
+        if scale == 1 {
+            return Ok(());
+        }
+        if scale.is_power_of_two() {
+            self.shift_constant(2, false, false, scale.trailing_zeros());
+            return Ok(());
+        }
+        if self.multiply_constant(2, i64::from(scale), false, false) {
+            return Ok(());
+        }
+
+        let index = self.model.allocate(2)?;
+        self.copy(self.r0, index, 2);
+        self.load_constant(i64::from(scale), 2);
+        self.copy(self.r0, self.r1, 2);
+        self.copy(index, self.r0, 2);
+        self.emit_binary_op(BinaryOp::Mul, 2, false)
     }
 
     fn expr_type(&self, expr: &Expr) -> Result<Type, Diagnostic> {
@@ -3701,6 +3726,54 @@ mod structural_tests {
     }
 
     #[test]
+    fn four_byte_scratch_slots_do_not_overlap_u32_i32_operations() {
+        let program = parse_program(Path::new("mos6502-scratch.ezra"), "fn main() {}").unwrap();
+        let options = AssemblyOptions {
+            cpu: CpuFamily::Mos6502,
+            stack_top: crate::target::Address24::new(0x01FF),
+            ram_base: crate::target::Address24::new(0xA000),
+            rodata_base: crate::target::Address24::new(0x8000),
+            asset_base: crate::target::Address24::new(0xC000),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        };
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let tbir = TbirProgram::lower(&hir, &program, &options).unwrap();
+        let model = SemanticModel::from_program(
+            &tbir.lowered_program,
+            16,
+            options.ram_base.get(),
+            options.rodata_base.get(),
+            options.asset_base.get(),
+        )
+        .unwrap();
+        let mut emitter = Emitter::new(model, options);
+
+        assert_eq!(emitter.r0.size, 4);
+        assert_eq!(emitter.r1.size, 4);
+        assert_eq!(emitter.r2.size, 4);
+        assert!(emitter.r0.address + emitter.r0.size <= emitter.r1.address);
+        assert!(emitter.r1.address + emitter.r1.size <= emitter.r2.address);
+
+        emitter.add(4);
+        emitter.sub(4);
+        for offset in 0..4 {
+            let r0_byte = format!("${:04X}", emitter.r0.address + offset);
+            let r1_byte = format!("${:04X}", emitter.r1.address + offset);
+            assert!(
+                emitter.out.contains(&r0_byte),
+                "missing u32/i32 lhs byte {offset}:\n{}",
+                emitter.out
+            );
+            assert!(
+                emitter.out.contains(&r1_byte),
+                "missing u32/i32 rhs byte {offset}:\n{}",
+                emitter.out
+            );
+        }
+    }
+
+    #[test]
     fn emits_cmos_bit_operations_only_for_a_cmos_target() {
         let source = r#"
             fn main() {
@@ -3866,6 +3939,41 @@ mod structural_tests {
             );
         }
         assert!(!assembly.contains("($F0),y"), "{assembly}");
+    }
+
+    #[test]
+    fn emits_direct_scaled_variable_index_arithmetic() {
+        let assembly = emit(
+            r#"
+                struct Three { byte: u8 word: u16 }
+                global byte_result: u8 = 0
+                global wide_result: u32 = 0
+                global three_result: u16 = 0
+                fn read(index: u16) {
+                    let bytes: ptr<u8> = 0x3000
+                    let wides: ptr<u32> = 0x4000
+                    let threes: [Three; 2] = [
+                        Three { byte: 1, word: 2 },
+                        Three { byte: 3, word: 4 }
+                    ]
+                    byte_result = bytes[index]
+                    wide_result = wides[index]
+                    three_result = threes[index].word
+                }
+                fn main() { read(257) }
+            "#,
+        );
+
+        assert!(!assembly.contains("index_scale"), "{assembly}");
+        assert!(!assembly.contains("index_done"), "{assembly}");
+        assert!(!assembly.contains("mul_loop"), "{assembly}");
+        assert!(!assembly.contains(U16_MUL_HELPER), "{assembly}");
+        assert!(
+            assembly.matches("    clc\n    lda $").count() >= 3,
+            "{assembly}"
+        );
+        assert!(assembly.matches("    rol $").count() >= 4, "{assembly}");
+        assert!(assembly.contains("    adc $"), "{assembly}");
     }
 
     #[test]
@@ -4668,6 +4776,40 @@ mod tests {
         assert_eq!(memory.byte(0xFF02), 0x01);
         assert_eq!(memory.byte(0xFF03), 0xFA);
         assert_eq!(memory.byte(0xFF04), 0xFE);
+    }
+
+    #[test]
+    fn executes_wrapping_scaled_indexes_above_255() {
+        let source = r#"
+            volatile mmio INDEX: ptr<u16> = 0xFF10
+            volatile mmio RESULT0: ptr<u8> = 0xFF00
+            volatile mmio RESULT1: ptr<u8> = 0xFF01
+            volatile mmio RESULT2: ptr<u8> = 0xFF02
+            fn main() {
+                let index: u16 = *INDEX
+                let bytes: ptr<u8> = 0xFFFE
+                let words: ptr<u16> = 0xFE80
+                let word: u16 = words[index]
+                *(RESULT0) = bytes[index]
+                *(RESULT1) = cast<u8>(word)
+                *(RESULT2) = cast<u8>(word >> 8)
+            }
+        "#;
+        let (memory, assembly, _) = run_with_setup(source, 20_000, |bus| {
+            bus.set_byte(0xFF10, 0x01);
+            bus.set_byte(0xFF11, 0x01);
+            bus.set_byte(0x00FF, 0xA1);
+            bus.set_byte(0x0082, 0xC3);
+            bus.set_byte(0x0083, 0xB2);
+        });
+
+        assert_eq!(memory.byte(0xFF00), 0xA1);
+        assert_eq!(memory.byte(0xFF01), 0xC3);
+        assert_eq!(memory.byte(0xFF02), 0xB2);
+        assert_eq!(assembly.matches("    lda $FF10").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("    lda $FF11").count(), 1, "{assembly}");
+        assert!(!assembly.contains("index_scale"), "{assembly}");
+        assert!(!assembly.contains("mul_loop"), "{assembly}");
     }
 
     #[test]
