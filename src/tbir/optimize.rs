@@ -738,7 +738,12 @@ fn decide_tail_calls_in_declarations(
             }
             Declaration::Function(function) => {
                 let mut targets = Vec::new();
-                collect_tail_targets(&function.body, &mut targets);
+                collect_tail_targets(
+                    &function.body,
+                    &function.name,
+                    function.return_type.is_none(),
+                    &mut targets,
+                );
                 let mut seen = HashSet::new();
                 for callee in targets {
                     if !seen.insert(callee.clone()) {
@@ -773,26 +778,91 @@ fn decide_tail_calls_in_declarations(
     }
 }
 
-fn collect_tail_targets(stmts: &[Stmt], targets: &mut Vec<String>) {
-    for stmt in stmts {
+fn collect_tail_targets(
+    stmts: &[Stmt],
+    function_name: &str,
+    allow_void_tail: bool,
+    targets: &mut Vec<String>,
+) {
+    let mut reachable = true;
+    for (index, stmt) in stmts.iter().enumerate() {
+        if !reachable {
+            break;
+        }
         match stmt {
             Stmt::Return(Some(Expr::Call { path, .. })) => {
                 if let Some(name) = path.last() {
                     targets.push(name.clone());
                 }
             }
+            Stmt::Expr(Expr::Call { path, .. })
+                if allow_void_tail
+                    && index + 1 == stmts.len()
+                    && path.last().is_some_and(|name| name == function_name) =>
+            {
+                targets.push(function_name.to_owned());
+            }
             Stmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                collect_tail_targets(then_body, targets);
-                collect_tail_targets(else_body, targets);
+                let branch_is_tail = allow_void_tail && index + 1 == stmts.len();
+                collect_tail_targets(then_body, function_name, branch_is_tail, targets);
+                collect_tail_targets(else_body, function_name, branch_is_tail, targets);
             }
             Stmt::While { .. } | Stmt::Loop { .. } => {}
             _ => {}
         }
+        reachable = stmt_can_fall_through(stmt);
     }
+}
+
+fn block_can_fall_through(stmts: &[Stmt]) -> bool {
+    let mut reachable = true;
+    for stmt in stmts {
+        if !reachable {
+            return false;
+        }
+        reachable = stmt_can_fall_through(stmt);
+    }
+    reachable
+}
+
+fn stmt_can_fall_through(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Break | Stmt::Continue => false,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => block_can_fall_through(then_body) || block_can_fall_through(else_body),
+        Stmt::Loop { body } => block_can_reach_break(body),
+        _ => true,
+    }
+}
+
+fn block_can_reach_break(stmts: &[Stmt]) -> bool {
+    let mut reachable = true;
+    for stmt in stmts {
+        if !reachable {
+            break;
+        }
+        if matches!(stmt, Stmt::Break) {
+            return true;
+        }
+        if let Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } = stmt
+            && (block_can_reach_break(then_body) || block_can_reach_break(else_body))
+        {
+            return true;
+        }
+        reachable = stmt_can_fall_through(stmt);
+    }
+    false
 }
 
 fn tail_recursion_rejection(function: &Function) -> Option<&'static str> {
@@ -866,14 +936,19 @@ fn rewrite_tail_recursion(function: &mut Function) {
     }
     collect_local_names(&function.body, &mut used_names);
     let mut next_temp = 0usize;
-    let (body, rewritten) = rewrite_tail_stmts(
+    let allow_void_tail = function.return_type.is_none();
+    let (mut body, rewritten) = rewrite_tail_stmts(
         core::mem::take(&mut function.body),
         &function.name,
         &function.params,
         &mut used_names,
         &mut next_temp,
+        allow_void_tail,
     );
     function.body = if rewritten {
+        if allow_void_tail && block_can_fall_through(&body) {
+            body.push(Stmt::Break);
+        }
         vec![Stmt::Loop { body }]
     } else {
         body
@@ -886,31 +961,34 @@ fn rewrite_tail_stmts(
     params: &[crate::ast::Param],
     used_names: &mut HashSet<String>,
     next_temp: &mut usize,
+    allow_void_tail: bool,
 ) -> (Vec<Stmt>, bool) {
     let mut output = Vec::new();
     let mut any_rewritten = false;
-    for stmt in stmts {
+    let mut reachable = true;
+    let statement_count = stmts.len();
+    for (index, stmt) in stmts.into_iter().enumerate() {
+        if !reachable {
+            output.push(stmt);
+            continue;
+        }
+        let can_fall_through = stmt_can_fall_through(&stmt);
         match stmt {
             Stmt::Return(Some(Expr::Call { path, args }))
-                if path.last().is_some_and(|name| name == function_name) =>
+                if path.last().is_some_and(|name| name == function_name)
+                    && args.len() == params.len() =>
             {
-                let mut temps = Vec::new();
-                for (arg, param) in args.into_iter().zip(params) {
-                    let name = unique_temp_name(used_names, next_temp);
-                    output.push(Stmt::Let {
-                        name: name.clone(),
-                        ty: param.ty.clone(),
-                        value: arg,
-                    });
-                    temps.push(name);
-                }
-                for (param, temp) in params.iter().zip(temps) {
-                    output.push(Stmt::Assign {
-                        target: Place::Ident(param.name.clone()),
-                        op: AssignOp::Set,
-                        value: Expr::Ident(temp),
-                    });
-                }
+                rewrite_tail_call_args(args, params, used_names, next_temp, &mut output);
+                output.push(Stmt::Continue);
+                any_rewritten = true;
+            }
+            Stmt::Expr(Expr::Call { path, args })
+                if allow_void_tail
+                    && index + 1 == statement_count
+                    && path.last().is_some_and(|name| name == function_name)
+                    && args.len() == params.len() =>
+            {
+                rewrite_tail_call_args(args, params, used_names, next_temp, &mut output);
                 output.push(Stmt::Continue);
                 any_rewritten = true;
             }
@@ -919,10 +997,23 @@ fn rewrite_tail_stmts(
                 then_body,
                 else_body,
             } => {
-                let (then_body, then_rewritten) =
-                    rewrite_tail_stmts(then_body, function_name, params, used_names, next_temp);
-                let (else_body, else_rewritten) =
-                    rewrite_tail_stmts(else_body, function_name, params, used_names, next_temp);
+                let branch_is_tail = allow_void_tail && index + 1 == statement_count;
+                let (then_body, then_rewritten) = rewrite_tail_stmts(
+                    then_body,
+                    function_name,
+                    params,
+                    used_names,
+                    next_temp,
+                    branch_is_tail,
+                );
+                let (else_body, else_rewritten) = rewrite_tail_stmts(
+                    else_body,
+                    function_name,
+                    params,
+                    used_names,
+                    next_temp,
+                    branch_is_tail,
+                );
                 any_rewritten |= then_rewritten || else_rewritten;
                 output.push(Stmt::If {
                     condition,
@@ -932,8 +1023,35 @@ fn rewrite_tail_stmts(
             }
             stmt => output.push(stmt),
         }
+        reachable = can_fall_through;
     }
     (output, any_rewritten)
+}
+
+fn rewrite_tail_call_args(
+    args: Vec<Expr>,
+    params: &[crate::ast::Param],
+    used_names: &mut HashSet<String>,
+    next_temp: &mut usize,
+    output: &mut Vec<Stmt>,
+) {
+    let mut temps = Vec::new();
+    for (arg, param) in args.into_iter().zip(params) {
+        let name = unique_temp_name(used_names, next_temp);
+        output.push(Stmt::Let {
+            name: name.clone(),
+            ty: param.ty.clone(),
+            value: arg,
+        });
+        temps.push(name);
+    }
+    for (param, temp) in params.iter().zip(temps) {
+        output.push(Stmt::Assign {
+            target: Place::Ident(param.name.clone()),
+            op: AssignOp::Set,
+            value: Expr::Ident(temp),
+        });
+    }
 }
 
 fn unique_temp_name(used_names: &mut HashSet<String>, next_temp: &mut usize) -> String {

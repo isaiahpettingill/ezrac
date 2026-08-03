@@ -2,7 +2,7 @@
 volatile mmio input: ptr<u8> = 0x2301
 volatile mmio input_length: ptr<u8> = 0x2300
 
-fn swap(a: ptr<u8>, b: ptr<u8>) {
+@inline fn swap(a: ptr<u8>, b: ptr<u8>) {
     let temporary: u8 = *a
     *a = *b
     *b = temporary
@@ -14,38 +14,43 @@ fn swap(a: ptr<u8>, b: ptr<u8>) {
 //
 // Using a length avoids unsigned index underflow.
 fn quicksort(start: u8, length: u8) {
-    if length <= 1 {
-        return
-    }
+    while length > 1 {
+        // Use the final element as the pivot.
+        let pivot_index: u8 = start + length - 1
+        let pivot: u8 = *(input + pivot_index)
 
-    // Use the final element as the pivot.
-    let pivot_index: u8 = start + length - 1
-    let pivot: u8 = *(input + pivot_index)
+        // Elements before boundary are less than the pivot.
+        let boundary: u8 = start
+        let index: u8 = start
 
-    // Elements before boundary are less than the pivot.
-    let boundary: u8 = start
-    let index: u8 = start
+        while index < pivot_index {
+            let value: u8 = *(input + index)
 
-    while index < pivot_index {
-        let value: u8 = *(input + index)
+            if value < pivot {
+                swap(input + index, input + boundary)
+                boundary = boundary + 1
+            }
 
-        if value < pivot {
-            swap(input + index, input + boundary)
-            boundary = boundary + 1
+            index = index + 1
         }
 
-        index = index + 1
+        // Put the pivot between the two partitions.
+        swap(input + boundary, input + pivot_index)
+
+        let left_length: u8 = boundary - start
+        let right_start: u8 = boundary + 1
+        let right_length: u8 = length - left_length - 1
+
+        // Recurse into the smaller partition and iterate over the larger one.
+        if left_length < right_length {
+            quicksort(start, left_length)
+            start = right_start
+            length = right_length
+        } else {
+            quicksort(right_start, right_length)
+            length = left_length
+        }
     }
-
-    // Put the pivot between the two partitions.
-    swap(input + boundary, input + pivot_index)
-
-    let left_length: u8 = boundary - start
-    let right_start: u8 = boundary + 1
-    let right_length: u8 = length - left_length - 1
-
-    quicksort(start, left_length)
-    quicksort(right_start, right_length)
 }
 
 fn main() {

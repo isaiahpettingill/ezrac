@@ -1,6 +1,6 @@
 use crate::{
     asm::AssemblyOptions,
-    ast::{Declaration, Program, Stmt},
+    ast::{AccessPath, AccessSegment, Declaration, Expr, Place, Program, Stmt, Type},
     compat::prelude::*,
     diagnostic::Diagnostic,
     hir::{HirDeclaration, HirProgram},
@@ -29,6 +29,7 @@ pub fn lower(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
+    validate_constant_array_indices(&semantic, lowered_program)?;
     let objects = provenance::memory_objects(lowered_program, &semantic, &memory);
     let context = provenance::OptimizationContext::from_objects(&objects);
     let (lowered_program, optimizations) =
@@ -55,6 +56,223 @@ pub fn lower(
         optimizations,
         lowered_program,
     })
+}
+
+fn validate_constant_array_indices(
+    model: &SemanticModel,
+    program: &Program,
+) -> Result<(), Diagnostic> {
+    fn root_type(
+        model: &SemanticModel,
+        locals: &HashMap<String, Type>,
+        name: &str,
+    ) -> Option<Type> {
+        locals
+            .get(name)
+            .cloned()
+            .or_else(|| model.global_types.get(name).cloned())
+            .or_else(|| model.constant_types.get(name).cloned())
+            .or_else(|| model.mmio.get(name).map(|(_, ty, _)| ty.clone()))
+            .or_else(|| model.embeds.get(name).map(|embed| embed.ty.clone()))
+    }
+
+    fn validate_index(
+        model: &SemanticModel,
+        index: &Expr,
+        ty: &Type,
+        root: &str,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let resolved = model.resolved_type(ty)?;
+        match resolved {
+            Type::Array { element, len } => {
+                if let Ok(index_value) = model.const_value(index) {
+                    let len_value = model.const_value(&len)?;
+                    if index_value < 0 || index_value >= len_value {
+                        return Err(Diagnostic::new(format!(
+                            "array index {index_value} is out of bounds for `{root}` with length {len_value}"
+                        )));
+                    }
+                }
+                Ok(Some(*element))
+            }
+            Type::Ptr(element) => Ok(Some(*element)),
+            _ => Ok(None),
+        }
+    }
+
+    fn validate_access(
+        model: &SemanticModel,
+        path: &AccessPath,
+        locals: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostic> {
+        let mut current = root_type(model, locals, &path.root);
+        for segment in &path.segments {
+            match segment {
+                AccessSegment::Field(field) => {
+                    let Some(ty) = current.take() else {
+                        continue;
+                    };
+                    current = model.field(&ty, field).ok().map(|layout| layout.ty.clone());
+                }
+                AccessSegment::Index(index) => {
+                    if let Some(ty) = current.take() {
+                        current = validate_index(model, index, &ty, &path.root)?;
+                    }
+                    validate_expr(model, index, locals)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_place(
+        model: &SemanticModel,
+        place: &Place,
+        locals: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostic> {
+        match place {
+            Place::Index { name, index } => {
+                if let Some(ty) = root_type(model, locals, name) {
+                    let _ = validate_index(model, index, &ty, name)?;
+                }
+                validate_expr(model, index, locals)
+            }
+            Place::Access(path) => validate_access(model, path, locals),
+            Place::Deref(pointer) => validate_expr(model, pointer, locals),
+            Place::Ident(_) | Place::Field { .. } => Ok(()),
+        }
+    }
+
+    fn validate_expr(
+        model: &SemanticModel,
+        expr: &Expr,
+        locals: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostic> {
+        match expr {
+            Expr::Index { name, index } | Expr::AddressOfIndex { name, index } => {
+                if let Some(ty) = root_type(model, locals, name) {
+                    let _ = validate_index(model, index, &ty, name)?;
+                }
+                validate_expr(model, index, locals)?;
+            }
+            Expr::Access(path) | Expr::AddressOfAccess(path) => {
+                validate_access(model, path, locals)?;
+            }
+            Expr::Array(values) => {
+                for value in values {
+                    validate_expr(model, value, locals)?;
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, value) in fields {
+                    validate_expr(model, value, locals)?;
+                }
+            }
+            Expr::Deref(value)
+            | Expr::BankedPointer { pointer: value, .. }
+            | Expr::Unary { expr: value, .. }
+            | Expr::Cast { expr: value, .. } => validate_expr(model, value, locals)?,
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    validate_expr(model, arg, locals)?;
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                validate_expr(model, left, locals)?;
+                validate_expr(model, right, locals)?;
+            }
+            Expr::Int(_)
+            | Expr::TypedInt(_, _)
+            | Expr::Bool(_)
+            | Expr::Char(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::In(_)
+            | Expr::Field { .. }
+            | Expr::AddressOf(_)
+            | Expr::AddressOfField { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn validate_stmts(
+        model: &SemanticModel,
+        stmts: &[Stmt],
+        locals: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostic> {
+        let mut locals = locals.clone();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let { name, ty, value } => {
+                    validate_expr(model, value, &locals)?;
+                    locals.insert(name.clone(), ty.clone());
+                }
+                Stmt::Assign { target, value, .. } => {
+                    validate_place(model, target, &locals)?;
+                    validate_expr(model, value, &locals)?;
+                }
+                Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    validate_expr(model, condition, &locals)?;
+                    validate_stmts(model, then_body, &locals)?;
+                    validate_stmts(model, else_body, &locals)?;
+                }
+                Stmt::While { condition, body } => {
+                    validate_expr(model, condition, &locals)?;
+                    validate_stmts(model, body, &locals)?;
+                }
+                Stmt::Loop { body } => validate_stmts(model, body, &locals)?,
+                Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                    validate_expr(model, value, &locals)?;
+                }
+                Stmt::Out { value, .. } => validate_expr(model, value, &locals)?,
+                Stmt::Asm { .. } | Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_declarations(
+        model: &SemanticModel,
+        declarations: &[Declaration],
+    ) -> Result<(), Diagnostic> {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    validate_declarations(model, core::slice::from_ref(declaration))?;
+                }
+                Declaration::Const(declaration) => {
+                    validate_expr(model, &declaration.value, &HashMap::new())?;
+                }
+                Declaration::Global(declaration) => {
+                    validate_expr(model, &declaration.value, &HashMap::new())?;
+                }
+                Declaration::Mmio(declaration) => {
+                    validate_expr(model, &declaration.value, &HashMap::new())?;
+                }
+                Declaration::Function(function) => {
+                    let locals = function
+                        .params
+                        .iter()
+                        .map(|param| (param.name.clone(), param.ty.clone()))
+                        .collect();
+                    validate_stmts(model, &function.body, &locals)?;
+                }
+                Declaration::Embed(_)
+                | Declaration::Import(_)
+                | Declaration::Alias(_)
+                | Declaration::Port(_)
+                | Declaration::Struct(_)
+                | Declaration::ExternAsmFunction(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    validate_declarations(model, &program.declarations)
 }
 
 fn memory_model(options: &AssemblyOptions) -> Result<TbirMemoryModel, Diagnostic> {

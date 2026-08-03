@@ -4020,7 +4020,7 @@ mod structural_tests {
     }
 
     #[test]
-    fn recursive_calls_do_not_restore_direct_pointer_out_arguments() {
+    fn void_self_tail_calls_do_not_use_recursive_stack_frames() {
         let assembly = emit(
             r#"
                 fn recurse(output: ptr<u8>) {
@@ -4034,8 +4034,12 @@ mod structural_tests {
             "#,
         );
 
-        assert_eq!(assembly.matches("    pha").count(), 4, "{assembly}");
-        assert_eq!(assembly.matches("    pla").count(), 4, "{assembly}");
+        assert_eq!(
+            assembly.matches("    jsr _recurse").count(),
+            1,
+            "{assembly}"
+        );
+        assert!(assembly.contains(".L_loop_body_"), "{assembly}");
     }
 
     #[test]

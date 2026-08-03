@@ -962,6 +962,129 @@ fn rewrites_self_tail_recursion_with_simultaneous_temporaries() {
 }
 
 #[test]
+fn rewrites_void_self_tail_calls_after_if_with_ordered_temporaries() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn walk(first: u8, second: u8) { if first == 0 { return } walk(second, first) }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::I8086);
+    let walk = function_named(&program, "walk");
+    let Stmt::Loop { body } = &walk.body[0] else {
+        panic!("void tail recursion was not rewritten");
+    };
+
+    assert!(matches!(body[0], Stmt::If { .. }));
+    assert!(matches!(
+        &body[1],
+        Stmt::Let {
+            name,
+            value: Expr::Ident(value),
+            ..
+        } if name == "__tbir_tail_arg_0" && value == "second"
+    ));
+    assert!(matches!(
+        &body[2],
+        Stmt::Let {
+            name,
+            value: Expr::Ident(value),
+            ..
+        } if name == "__tbir_tail_arg_1" && value == "first"
+    ));
+    assert!(matches!(
+        &body[3],
+        Stmt::Assign {
+            target: Place::Ident(name),
+            value: Expr::Ident(value),
+            ..
+        } if name == "first" && value == "__tbir_tail_arg_0"
+    ));
+    assert!(matches!(
+        &body[4],
+        Stmt::Assign {
+            target: Place::Ident(name),
+            value: Expr::Ident(value),
+            ..
+        } if name == "second" && value == "__tbir_tail_arg_1"
+    ));
+    assert!(matches!(body[5], Stmt::Continue));
+    assert!(report.decisions.iter().any(|decision| {
+        decision.kind == TbirOptimizationKind::TailRecursion
+            && decision.caller.as_deref() == Some("walk")
+            && decision.outcome == TbirOptimizationOutcome::Applied
+    }));
+}
+
+#[test]
+fn keeps_void_self_calls_out_of_non_tail_positions_and_loops() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn after(value: u8) { after(value) test.pass() } fn inside(value: u8) { while value > 0 { inside(value - 1) } } fn unreachable(value: u8) { loop { return } unreachable(value) }",
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::I8086);
+
+    let after = function_named(&program, "after");
+    assert!(
+        !after
+            .body
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::Loop { .. }))
+    );
+    assert!(matches!(
+        after.body.first(),
+        Some(Stmt::Expr(Expr::Call { path, .. })) if path.last().is_some_and(|name| name == "after")
+    ));
+    assert!(matches!(
+        after.body.get(1),
+        Some(Stmt::Expr(Expr::Call { .. }))
+    ));
+
+    let inside = function_named(&program, "inside");
+    assert!(matches!(inside.body.first(), Some(Stmt::While { body, .. })
+        if matches!(body.first(), Some(Stmt::Expr(Expr::Call { path, .. }))
+            if path.last().is_some_and(|name| name == "inside"))));
+
+    let unreachable = function_named(&program, "unreachable");
+    assert!(matches!(
+        unreachable.body.get(1),
+        Some(Stmt::Expr(Expr::Call { path, .. }))
+            if path.last().is_some_and(|name| name == "unreachable")
+    ));
+    assert!(!report.decisions.iter().any(|decision| {
+        decision.kind == TbirOptimizationKind::TailRecursion
+            && decision
+                .caller
+                .as_deref()
+                .is_some_and(|caller| caller == "after" || caller == "inside")
+    }));
+}
+
+#[test]
+fn preserves_void_tail_fallthrough_after_a_final_if_branch() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn maybe(value: u8) { if value > 0 { maybe(value - 1) } }",
+    )
+    .unwrap();
+    let (program, _) = optimize_program(&program, CpuFamily::I8086);
+    let maybe = function_named(&program, "maybe");
+    let Stmt::Loop { body } = &maybe.body[0] else {
+        panic!("void tail recursion was not rewritten");
+    };
+
+    assert!(matches!(body.last(), Some(Stmt::Break)));
+    assert!(matches!(
+        body.first(),
+        Some(Stmt::If {
+            then_body,
+            else_body,
+            ..
+        }) if matches!(then_body.last(), Some(Stmt::Continue)) && else_body.is_empty()
+    ));
+}
+
+#[test]
 fn approves_and_rejects_sibling_tail_edges() {
     let program = parse_program(
         Path::new("test.ezra"),
