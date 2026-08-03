@@ -308,6 +308,50 @@ fn generic_m68k_source_build_writes_raw_binary_with_24_bit_layout() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "m68k")]
+#[test]
+fn generic_m68k_build_accepts_dereference_assignment_from_call() {
+    let root = temp_root("generic_m68k_deref_call_assignment");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(
+        &source_path,
+        r#"
+            volatile mmio OUTPUT: ptr<i32> = 0x0000C0
+
+            fn clamp(n: i32, min: i32, max: i32) -> i32 {
+                if n < min { return min }
+                if n > max { return max }
+                return n
+            }
+
+            fn main() {
+                *OUTPUT = clamp(7, 0, 6502)
+            }
+        "#,
+    )
+    .unwrap();
+
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
+        path: Some(source_path.to_string_lossy().into_owned()),
+        debug_comments: false,
+        default_sdk_symbols: false,
+        input_kind: Some(InputKind::Ezra),
+        assembler_cpu: None,
+        layout_path: None,
+        target: Some("generic-m68k-bare".to_owned()),
+    })
+    .unwrap();
+    let assembly = std::fs::read_to_string(outputs.asm).unwrap();
+    let binary = std::fs::read(outputs.executable).unwrap();
+
+    assert!(assembly.contains("jsr _clamp"), "{assembly}");
+    assert!(assembly.contains("move.l d3,(a0)"), "{assembly}");
+    assert!(!binary.is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn bare_z80n_source_build_accepts_z80n_inline_asm() {
     let root = temp_root("bare_z80n_source_inline_asm");

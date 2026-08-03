@@ -70,6 +70,59 @@ fn tbir_uses_cpu_capabilities_for_target_metadata() {
 }
 
 #[test]
+fn tbir_lowers_port_read_and_write_for_each_supported_cpu() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+                port INPUT: u8 = 0x10
+                port OUTPUT: u8 = 0x11
+                fn main() { out OUTPUT, in INPUT }
+            "#,
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+
+    for cpu in [
+        crate::target::CpuFamily::Ez80,
+        crate::target::CpuFamily::Z80,
+        crate::target::CpuFamily::Z80N,
+        crate::target::CpuFamily::Z180,
+        crate::target::CpuFamily::I8080,
+        crate::target::CpuFamily::I8085,
+    ] {
+        let tbir = TbirProgram::lower(
+            &hir,
+            &program,
+            &AssemblyOptions {
+                cpu,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        let TbirDeclaration::Function { body, effects, .. } = tbir
+            .declarations
+            .iter()
+            .find(|declaration| matches!(declaration, TbirDeclaration::Function { .. }))
+            .unwrap()
+        else {
+            unreachable!();
+        };
+
+        assert!(matches!(
+            body.as_slice(),
+            [TbirStmt::PortWrite {
+                port,
+                value: Expr::In(input),
+            }] if port == "OUTPUT" && input == "INPUT"
+        ));
+        assert!(
+            effects.contains(&TbirEffect::PortIo),
+            "{cpu:?}: {effects:?}"
+        );
+    }
+}
+
+#[test]
 fn tbir_lowers_declaration_kinds() {
     let program = parse_program(
         Path::new("test.ezra"),

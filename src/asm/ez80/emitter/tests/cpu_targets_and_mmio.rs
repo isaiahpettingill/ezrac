@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+fn z80_uses_standard_port_instructions() {
+    let source = r#"
+            port INPUT: u8 = 0x10
+            port OUTPUT: u8 = 0x11
+
+            fn main() {
+                let value: u8 = in INPUT
+                out OUTPUT, value
+            }
+        "#;
+    let program = parse_program(Path::new("ports.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Z80,
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(asm.contains("in a, (10h)"), "{asm}");
+    assert!(asm.contains("out (11h), a"), "{asm}");
+    assert!(!asm.contains("in0"), "{asm}");
+    assert!(!asm.contains("out0"), "{asm}");
+}
+
+#[test]
+fn emits_and_runs_port_io_for_each_supported_cpu_form() {
+    let source = r#"
+            port INPUT: u8 = 0x10
+            port OUTPUT: u8 = 0x11
+
+            fn main() {
+                out OUTPUT, in INPUT
+                test.pass()
+            }
+        "#;
+    let cases = [
+        (CpuFamily::Ez80, "in0 a, (10h)", "out0 (11h), a"),
+        (CpuFamily::Z80, "in a, (10h)", "out (11h), a"),
+        (CpuFamily::Z80N, "in a, (10h)", "out (11h), a"),
+        (CpuFamily::Z180, "in a, (10h)", "out (11h), a"),
+        (CpuFamily::I8080, "in 10h", "out 11h"),
+        (CpuFamily::I8085, "in 10h", "out 11h"),
+    ];
+
+    for (cpu, input, output) in cases {
+        let program = parse_program(Path::new("ports.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu,
+                default_sdk_symbols: true,
+                stack_top: Address24::new(0xF000),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(asm.contains(input), "{cpu:?} input form missing:\n{asm}");
+        assert!(asm.contains(output), "{cpu:?} output form missing:\n{asm}");
+        let run = crate::vm::run_assembly_test_with_cpu_options_at(
+            cpu,
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 8_000,
+                initial_ports: vec![(0x10, 0x5A)],
+                initial_memory: Vec::new(),
+                stack_top: 0xF000,
+            },
+            0x0100,
+        )
+        .unwrap();
+        assert!(run.halted, "{cpu:?}: {asm}");
+        assert_eq!(run.result_code, 0, "{cpu:?}: {asm}");
+        assert_eq!(run.ports[0x11], 0x5A, "{cpu:?}: {asm}");
+    }
+}
+
+#[test]
 fn emits_and_runs_generic_hardware_port_examples() {
     let source = r#"
             port PAD1_LO: u8 = 0x01

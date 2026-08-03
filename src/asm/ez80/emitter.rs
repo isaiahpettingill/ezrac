@@ -4061,7 +4061,7 @@ impl Emitter {
             }
             Expr::In(port) => {
                 let port = self.port(port)?;
-                self.line(&format!("    in0 a, ({port:02X}h)"));
+                self.emit_in_a(port);
             }
             Expr::Index { name, index } => {
                 self.emit_load_indexed_element_to_a(name, index)?;
@@ -5911,6 +5911,14 @@ impl Emitter {
     fn emit_out(&mut self, port: u8, value: u8) {
         self.line(&format!("    ld a, {:02X}h", value));
         self.emit_out_a(port);
+    }
+
+    fn emit_in_a(&mut self, port: u8) {
+        if is_z80_family_16bit(self.cpu) {
+            self.line(&format!("    in a, ({:02X}h)", port));
+        } else {
+            self.line(&format!("    in0 a, ({:02X}h)", port));
+        }
     }
 
     fn emit_out_a(&mut self, port: u8) {
