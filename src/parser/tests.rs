@@ -240,6 +240,7 @@ fn parses_pointer_dereference_expression_and_assignment() {
     EzraParser::parse(Rule::assign_stmt, "*pointers[0] = 7").unwrap();
     EzraParser::parse(Rule::assign_stmt, "*next_ptr() = 7").unwrap();
     EzraParser::parse(Rule::assign_stmt, "*(byte_ptr) = [4, 5, 6]").unwrap();
+    EzraParser::parse(Rule::assign_stmt, "*output = clamp(*input, 0, 6502)").unwrap();
     EzraParser::parse(Rule::stmt, "*p += 7").unwrap();
     EzraParser::parse(Rule::stmt, "*module.PTR += 7").unwrap();
     EzraParser::parse(Rule::stmt, "*next_ptr() += 7").unwrap();

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     asm::{
         AssemblyOptions,
-        comments::with_readability_comments,
+        comments::{stmt_summary, with_readability_comments},
         reachability::{RoutineProfile, strip_unreachable_generated_routines},
     },
     ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, Type, UnaryOp},
@@ -226,6 +226,7 @@ impl Emitter {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
+        self.line(&format!("    ; source: {}", stmt_summary(stmt)));
         match stmt {
             Stmt::Let { name, ty, value } => {
                 self.require_scalar(ty, "local")?;

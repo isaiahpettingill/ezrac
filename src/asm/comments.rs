@@ -1,4 +1,11 @@
-use crate::{asm::AssemblyOptions, ast::Program, compat::prelude::*, tbir::TbirSourceComment};
+use crate::{
+    asm::AssemblyOptions,
+    ast::{
+        AccessPath, AccessSegment, AssignOp, BinaryOp, Expr, Place, Program, Stmt, Type, UnaryOp,
+    },
+    compat::prelude::*,
+    tbir::TbirSourceComment,
+};
 
 pub fn with_readability_comments(
     assembly: String,
@@ -32,8 +39,13 @@ pub fn with_readability_comments(
         }
     }
     out.push('\n');
-    let annotated = annotate_assembly(&assembly, marker, inline_comments);
-    if let Some((first, rest)) = annotated.split_once('\n')
+    let annotated = annotate_assembly(&assembly, marker, inline_comments, options.debug_comments);
+    let starts_with_source_anchor = assembly
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim().starts_with("; source:"));
+    if !starts_with_source_anchor
+        && let Some((first, rest)) = annotated.split_once('\n')
         && first.trim_start().starts_with(marker)
     {
         let mut preserved = String::new();
@@ -46,6 +58,189 @@ pub fn with_readability_comments(
     } else {
         out.push_str(&annotated);
         out
+    }
+}
+
+pub(crate) fn stmt_summary(stmt: &Stmt) -> String {
+    match stmt {
+        Stmt::Let { name, ty, value } => {
+            format!("let {name}: {} = {}", type_display(ty), expr_summary(value))
+        }
+        Stmt::Assign { target, op, value } => {
+            format!(
+                "{} {} {}",
+                place_summary(target),
+                assign_op_summary(*op),
+                expr_summary(value)
+            )
+        }
+        Stmt::If { condition, .. } => format!("if {}", expr_summary(condition)),
+        Stmt::While { condition, .. } => format!("while {}", expr_summary(condition)),
+        Stmt::Loop { .. } => "loop".to_owned(),
+        Stmt::Break => "break".to_owned(),
+        Stmt::Continue => "continue".to_owned(),
+        Stmt::Return(Some(expr)) => format!("return {}", expr_summary(expr)),
+        Stmt::Return(None) => "return".to_owned(),
+        Stmt::Asm { volatile, .. } => {
+            if *volatile {
+                "asm volatile".to_owned()
+            } else {
+                "asm".to_owned()
+            }
+        }
+        Stmt::Out { port, value } => format!("out {port}, {}", expr_summary(value)),
+        Stmt::Expr(expr) => expr_summary(expr),
+    }
+}
+
+fn place_summary(place: &Place) -> String {
+    match place {
+        Place::Ident(name) => name.clone(),
+        Place::Index { name, index } => format!("{name}[{}]", expr_summary(index)),
+        Place::Field { base, field } => format!("{base}.{field}"),
+        Place::Access(path) => access_path_summary(path),
+        Place::Deref(expr) => format!("*{}", expr_summary(expr)),
+    }
+}
+
+fn expr_summary(expr: &Expr) -> String {
+    match expr {
+        Expr::Int(value) => value.to_string(),
+        Expr::TypedInt(value, ty) => format!("{value}{}", type_display(ty)),
+        Expr::Bool(value) => value.to_string(),
+        Expr::Char(value) => format!("'{}'", char::from(*value).escape_default()),
+        Expr::String(value) => format!("{value:?}"),
+        Expr::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(expr_summary)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Ident(name) => name.clone(),
+        Expr::In(port) => format!("in {port}"),
+        Expr::Index { name, index } => format!("{name}[{}]", expr_summary(index)),
+        Expr::Field { base, field } => format!("{base}.{field}"),
+        Expr::AddressOfIndex { name, index } => format!("&{name}[{}]", expr_summary(index)),
+        Expr::AddressOfField { base, field } => format!("&{base}.{field}"),
+        Expr::Access(path) => access_path_summary(path),
+        Expr::AddressOfAccess(path) => format!("&{}", access_path_summary(path)),
+        Expr::AddressOf(name) => format!("&{name}"),
+        Expr::StructInit { ty, fields } => format!(
+            "{ty} {{ {} }}",
+            fields
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", expr_summary(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Deref(expr) => format!("*{}", expr_summary(expr)),
+        Expr::Call { path, args } => format!(
+            "{}({})",
+            path.join("."),
+            args.iter().map(expr_summary).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::Unary { op, expr } => format!("{}{}", unary_op_summary(*op), expr_summary(expr)),
+        Expr::Binary { left, op, right } => format!(
+            "{} {} {}",
+            expr_summary(left),
+            binary_op_summary(*op),
+            expr_summary(right)
+        ),
+        Expr::Cast { ty, expr } => format!("cast<{}>({})", type_display(ty), expr_summary(expr)),
+        Expr::BankedPointer { pointer, bank } => {
+            format!("banked_ptr<{bank}>({})", expr_summary(pointer))
+        }
+    }
+}
+
+pub(crate) fn access_path_summary(path: &AccessPath) -> String {
+    let mut out = path.root.clone();
+    for segment in &path.segments {
+        match segment {
+            AccessSegment::Field(field) => {
+                out.push('.');
+                out.push_str(field);
+            }
+            AccessSegment::Index(index) => {
+                out.push('[');
+                out.push_str(&expr_summary(index));
+                out.push(']');
+            }
+        }
+    }
+    out
+}
+
+fn assign_op_summary(op: AssignOp) -> &'static str {
+    match op {
+        AssignOp::Set => "=",
+        AssignOp::Add => "+=",
+        AssignOp::Sub => "-=",
+        AssignOp::Mul => "*=",
+        AssignOp::Div => "/=",
+        AssignOp::Mod => "%=",
+        AssignOp::BitAnd => "&=",
+        AssignOp::BitOr => "|=",
+        AssignOp::BitXor => "^=",
+        AssignOp::Shl => "<<=",
+        AssignOp::Shr => ">>=",
+    }
+}
+
+fn unary_op_summary(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Neg => "-",
+        UnaryOp::BitNot => "~",
+        UnaryOp::Not => "!",
+    }
+}
+
+fn binary_op_summary(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitXor => "^",
+        BinaryOp::BitOr => "|",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+    }
+}
+
+pub(crate) fn type_display(ty: &Type) -> String {
+    match ty {
+        Type::Named(name) => name.clone(),
+        Type::Ptr(inner) => format!("ptr<{}>", type_display(inner)),
+        Type::Function {
+            params,
+            return_type,
+        } => {
+            let params = params
+                .iter()
+                .map(type_display)
+                .collect::<Vec<_>>()
+                .join(", ");
+            match return_type {
+                Some(ty) => format!("fn({params}){}", type_display(ty)),
+                None => format!("fn({params})"),
+            }
+        }
+        Type::Array { element, len } => {
+            format!("[{}; {}]", type_display(element), expr_summary(len))
+        }
     }
 }
 
@@ -84,29 +279,33 @@ fn annotate_assembly(
     assembly: &str,
     marker: &str,
     inline_comments: &[TbirSourceComment],
+    debug_comments: bool,
 ) -> String {
     let mut out = String::with_capacity(assembly.len() + assembly.lines().count() * 12);
     let mut emitted_comments = vec![false; inline_comments.len()];
     for line in assembly.lines() {
         let trimmed = line.trim();
-        if trimmed.ends_with(':') && !trimmed.starts_with('.') {
-            let label = trimmed.trim_end_matches(':');
-            let kind = if label == "main" || label.starts_with("__ezra_") {
-                "compiler/runtime label"
-            } else if label.contains("sdk") || label.contains("mos") || label.contains("vdp") {
-                "SDK-related label"
-            } else {
-                "EZRA function or local label"
-            };
-            out.push_str(&format!("{marker} {kind}: {label}\n"));
-        } else if is_call(trimmed) {
-            out.push_str(&format!("{marker} call into EZRA/compiler/SDK routine\n"));
-        } else if is_inline_asm_boundary(trimmed) {
-            out.push_str(&format!("{marker} inline assembly from EZRA source\n"));
+        let source = trimmed.strip_prefix("; source:");
+        if !(source.is_some() && !debug_comments) {
+            if trimmed.ends_with(':') && !trimmed.starts_with('.') {
+                let label = trimmed.trim_end_matches(':');
+                let kind = if label == "main" || label.starts_with("__ezra_") {
+                    "compiler/runtime label"
+                } else if label.contains("sdk") || label.contains("mos") || label.contains("vdp") {
+                    "SDK-related label"
+                } else {
+                    "EZRA function or local label"
+                };
+                out.push_str(&format!("{marker} {kind}: {label}\n"));
+            } else if is_call(trimmed) {
+                out.push_str(&format!("{marker} call into EZRA/compiler/SDK routine\n"));
+            } else if is_inline_asm_boundary(trimmed) {
+                out.push_str(&format!("{marker} inline assembly from EZRA source\n"));
+            }
+            out.push_str(line);
+            out.push('\n');
         }
-        out.push_str(line);
-        out.push('\n');
-        if let Some(source) = trimmed.strip_prefix("; source:") {
+        if let Some(source) = source {
             let source = normalize_statement(source);
             for (index, comment) in inline_comments.iter().enumerate() {
                 if !emitted_comments[index] && statements_match(&comment.statement_text, &source) {
@@ -159,4 +358,55 @@ fn is_call(trimmed: &str) -> bool {
 
 fn is_inline_asm_boundary(trimmed: &str) -> bool {
     trimmed.contains("inline asm") || trimmed.contains("inline assembly")
+}
+
+#[cfg(all(feature = "std", test))]
+mod tests {
+    use super::*;
+    use crate::{
+        diagnostic::{SourcePosition, SourceSpan},
+        parser::parse_program,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn places_comments_and_hides_source_anchors_in_normal_output() {
+        let program = parse_program(Path::new("comments.ezra"), "fn main() {}\n").unwrap();
+        let inline_comments = [TbirSourceComment {
+            text: "increment the value".to_owned(),
+            statement_text: "value += 1".to_owned(),
+            statement_span: SourceSpan {
+                file: program.source_path.clone(),
+                start: SourcePosition { line: 1, column: 1 },
+                end: SourcePosition { line: 1, column: 1 },
+            },
+        }];
+        let assembly = "    ; source: value += 1\n    add a, b\n".to_owned();
+
+        let normal = with_readability_comments(
+            assembly.clone(),
+            &program,
+            &AssemblyOptions::default(),
+            "test",
+            &inline_comments,
+        );
+        assert!(!normal.contains("; source:"), "{normal}");
+        assert!(
+            normal.contains("; increment the value\n    add a, b"),
+            "{normal}"
+        );
+
+        let debug = with_readability_comments(
+            assembly,
+            &program,
+            &AssemblyOptions {
+                debug_comments: true,
+                ..AssemblyOptions::default()
+            },
+            "test",
+            &inline_comments,
+        );
+        assert!(debug.contains("; source: value += 1"), "{debug}");
+        assert!(debug.contains("; increment the value"), "{debug}");
+    }
 }

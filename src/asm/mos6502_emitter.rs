@@ -1,7 +1,7 @@
 use crate::{
     asm::{
         AssemblyOptions,
-        comments::with_readability_comments,
+        comments::{stmt_summary, with_readability_comments},
         reachability::{RoutineProfile, strip_unreachable_generated_routines},
     },
     ast::{
@@ -302,6 +302,7 @@ impl Emitter {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
+        self.line(&format!("    ; source: {}", stmt_summary(stmt)));
         match stmt {
             Stmt::Let { name, ty, value } => {
                 let binding = self

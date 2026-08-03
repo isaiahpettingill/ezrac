@@ -485,6 +485,51 @@ fn collect_source_comments(program: &Program) -> Vec<TbirSourceComment> {
         }
     }
 
+    fn source_line(source: &str, line_number: usize) -> Option<&str> {
+        source.lines().nth(line_number.saturating_sub(1))
+    }
+
+    fn statement_start_byte(line: &str, column: usize) -> usize {
+        line.char_indices()
+            .nth(column.saturating_sub(1))
+            .map_or(line.len(), |(byte, _)| byte)
+    }
+
+    fn statement_line_text(source: &str, statement: &crate::ast::StmtSpan) -> Option<String> {
+        let line = source_line(source, statement.span.start.line)?;
+        let start = statement_start_byte(line, statement.span.start.column);
+        let end = inline_comment_start(line).unwrap_or(line.len());
+        Some(
+            line[start..end]
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .to_owned(),
+        )
+    }
+
+    fn only_comment_or_function_header_lines(
+        source: &str,
+        first_line: usize,
+        last_line: usize,
+    ) -> bool {
+        let mut saw_function_header = false;
+        (first_line..last_line).all(|line_number| {
+            let Some(line) = source_line(source, line_number) else {
+                return false;
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                return true;
+            }
+            if !saw_function_header && trimmed.contains("fn ") && trimmed.ends_with('{') {
+                saw_function_header = true;
+                return true;
+            }
+            false
+        })
+    }
+
     let mut spans = Vec::new();
     collect_declaration_spans(&program.declarations, &mut spans);
 
@@ -499,30 +544,63 @@ fn collect_source_comments(program: &Program) -> Vec<TbirSourceComment> {
                 continue;
             }
             let line_number = line_index + 1;
-            let comment_column = line[..comment_byte].chars().count() + 1;
-            let Some(statement) = spans
-                .iter()
-                .copied()
-                .filter(|statement| {
-                    statement.span.file == unit.path
-                        && statement.span.start.line == line_number
-                        && statement.span.start.column < comment_column
-                })
-                .max_by_key(|statement| statement.span.start.column)
-            else {
+            let standalone = line[..comment_byte].trim().is_empty();
+            let statement = if standalone {
+                spans
+                    .iter()
+                    .copied()
+                    .filter(|statement| {
+                        statement.span.file == unit.path && statement.span.start.line > line_number
+                    })
+                    .min_by_key(|statement| {
+                        (statement.span.start.line, statement.span.start.column)
+                    })
+                    .filter(|statement| {
+                        let Some(statement_line) =
+                            source_line(&unit.text, statement.span.start.line)
+                        else {
+                            return false;
+                        };
+                        let start =
+                            statement_start_byte(statement_line, statement.span.start.column);
+                        statement_line[..start].trim().is_empty()
+                            && only_comment_or_function_header_lines(
+                                &unit.text,
+                                line_number + 1,
+                                statement.span.start.line,
+                            )
+                    })
+            } else {
+                let comment_column = line[..comment_byte].chars().count() + 1;
+                spans
+                    .iter()
+                    .copied()
+                    .filter(|statement| {
+                        statement.span.file == unit.path
+                            && statement.span.start.line == line_number
+                            && statement.span.start.column < comment_column
+                    })
+                    .max_by_key(|statement| statement.span.start.column)
+            };
+            let Some(statement) = statement else {
                 continue;
             };
-            let statement_start = line
-                .char_indices()
-                .nth(statement.span.start.column.saturating_sub(1))
-                .map_or(line.len(), |(byte, _)| byte);
-            comments.push(TbirSourceComment {
-                text: text.to_owned(),
-                statement_text: line[statement_start..comment_byte]
+            let statement_text = if standalone {
+                let Some(statement_text) = statement_line_text(&unit.text, statement) else {
+                    continue;
+                };
+                statement_text
+            } else {
+                let statement_start = statement_start_byte(line, statement.span.start.column);
+                line[statement_start..comment_byte]
                     .trim()
                     .trim_end_matches(';')
                     .trim()
-                    .to_owned(),
+                    .to_owned()
+            };
+            comments.push(TbirSourceComment {
+                text: text.to_owned(),
+                statement_text,
                 statement_span: statement.span.clone(),
             });
         }

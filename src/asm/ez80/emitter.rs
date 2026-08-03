@@ -35,7 +35,7 @@ mod intel8080;
 mod symbols;
 
 use crate::asm::{
-    comments::with_readability_comments,
+    comments::{access_path_summary, stmt_summary, type_display, with_readability_comments},
     data::terminated_text_data_line,
     reachability::{RoutineProfile, strip_unreachable_generated_routines_with_roots},
 };
@@ -914,7 +914,6 @@ struct Emitter {
     recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
 
-    debug_comments: bool,
     cpu: CpuFamily,
     mos_executable: bool,
     ti_os_executable: bool,
@@ -962,7 +961,6 @@ impl Emitter {
             recursive_call_edges,
             tail_call_edges,
 
-            debug_comments: options.debug_comments,
             cpu: options.cpu,
             mos_executable: options.mos_executable,
             ti_os_executable: options.ti_os_executable,
@@ -1929,9 +1927,7 @@ impl Emitter {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
-        if self.debug_comments {
-            self.line(&format!("    ; source: {}", stmt_summary(stmt)));
-        }
+        self.line(&format!("    ; source: {}", stmt_summary(stmt)));
         match stmt {
             Stmt::Let { name, ty, value } => {
                 if self.name_in_current_function(name) {
@@ -8967,118 +8963,6 @@ fn stmt_can_break_current_loop(stmt: &Stmt) -> bool {
     }
 }
 
-fn stmt_summary(stmt: &Stmt) -> String {
-    match stmt {
-        Stmt::Let { name, ty, value } => {
-            format!("let {name}: {} = {}", type_display(ty), expr_summary(value))
-        }
-        Stmt::Assign { target, op, value } => {
-            format!(
-                "{} {} {}",
-                place_summary(target),
-                assign_op_summary(*op),
-                expr_summary(value)
-            )
-        }
-        Stmt::If { condition, .. } => format!("if {}", expr_summary(condition)),
-        Stmt::While { condition, .. } => format!("while {}", expr_summary(condition)),
-        Stmt::Loop { .. } => "loop".to_owned(),
-        Stmt::Break => "break".to_owned(),
-        Stmt::Continue => "continue".to_owned(),
-        Stmt::Return(Some(expr)) => format!("return {}", expr_summary(expr)),
-        Stmt::Return(None) => "return".to_owned(),
-        Stmt::Asm { volatile, .. } => {
-            if *volatile {
-                "asm volatile".to_owned()
-            } else {
-                "asm".to_owned()
-            }
-        }
-        Stmt::Out { port, value } => format!("out {port}, {}", expr_summary(value)),
-        Stmt::Expr(expr) => expr_summary(expr),
-    }
-}
-
-fn place_summary(place: &Place) -> String {
-    match place {
-        Place::Ident(name) => name.clone(),
-        Place::Index { name, index } => format!("{name}[{}]", expr_summary(index)),
-        Place::Field { base, field } => format!("{base}.{field}"),
-        Place::Access(path) => access_path_summary(path),
-        Place::Deref(expr) => format!("*{}", expr_summary(expr)),
-    }
-}
-
-fn expr_summary(expr: &Expr) -> String {
-    match expr {
-        Expr::Int(value) => value.to_string(),
-        Expr::TypedInt(value, ty) => format!("{value}{}", type_display(ty)),
-        Expr::Bool(value) => value.to_string(),
-        Expr::Char(value) => format!("'{}'", char::from(*value).escape_default()),
-        Expr::String(value) => format!("{value:?}"),
-        Expr::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(expr_summary)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Expr::Ident(name) => name.clone(),
-        Expr::In(port) => format!("in {port}"),
-        Expr::Index { name, index } => format!("{name}[{}]", expr_summary(index)),
-        Expr::Field { base, field } => format!("{base}.{field}"),
-        Expr::AddressOfIndex { name, index } => format!("&{name}[{}]", expr_summary(index)),
-        Expr::AddressOfField { base, field } => format!("&{base}.{field}"),
-        Expr::Access(path) => access_path_summary(path),
-        Expr::AddressOfAccess(path) => format!("&{}", access_path_summary(path)),
-        Expr::AddressOf(name) => format!("&{name}"),
-        Expr::StructInit { ty, fields } => format!(
-            "{ty} {{ {} }}",
-            fields
-                .iter()
-                .map(|(name, value)| format!("{name}: {}", expr_summary(value)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Expr::Deref(expr) => format!("*{}", expr_summary(expr)),
-        Expr::Call { path, args } => format!(
-            "{}({})",
-            path_text(path),
-            args.iter().map(expr_summary).collect::<Vec<_>>().join(", ")
-        ),
-        Expr::Unary { op, expr } => format!("{}{}", unary_op_summary(*op), expr_summary(expr)),
-        Expr::Binary { left, op, right } => format!(
-            "{} {} {}",
-            expr_summary(left),
-            binary_op_summary(*op),
-            expr_summary(right)
-        ),
-        Expr::Cast { ty, expr } => format!("cast<{}>({})", type_display(ty), expr_summary(expr)),
-        Expr::BankedPointer { pointer, bank } => {
-            format!("banked_ptr<{bank}>({})", expr_summary(pointer))
-        }
-    }
-}
-
-fn access_path_summary(path: &AccessPath) -> String {
-    let mut out = path.root.clone();
-    for segment in &path.segments {
-        match segment {
-            AccessSegment::Field(field) => {
-                out.push('.');
-                out.push_str(field);
-            }
-            AccessSegment::Index(index) => {
-                out.push('[');
-                out.push_str(&expr_summary(index));
-                out.push(']');
-            }
-        }
-    }
-    out
-}
-
 fn const_access_name(path: &AccessPath) -> Result<String, Diagnostic> {
     if path
         .segments
@@ -9090,77 +8974,6 @@ fn const_access_name(path: &AccessPath) -> Result<String, Diagnostic> {
         Err(Diagnostic::new(
             "expression is not supported in a constant declaration",
         ))
-    }
-}
-
-fn assign_op_summary(op: AssignOp) -> &'static str {
-    match op {
-        AssignOp::Set => "=",
-        AssignOp::Add => "+=",
-        AssignOp::Sub => "-=",
-        AssignOp::Mul => "*=",
-        AssignOp::Div => "/=",
-        AssignOp::Mod => "%=",
-        AssignOp::BitAnd => "&=",
-        AssignOp::BitOr => "|=",
-        AssignOp::BitXor => "^=",
-        AssignOp::Shl => "<<=",
-        AssignOp::Shr => ">>=",
-    }
-}
-
-fn unary_op_summary(op: UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Neg => "-",
-        UnaryOp::BitNot => "~",
-        UnaryOp::Not => "!",
-    }
-}
-
-fn binary_op_summary(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::Mul => "*",
-        BinaryOp::Div => "/",
-        BinaryOp::Mod => "%",
-        BinaryOp::Add => "+",
-        BinaryOp::Sub => "-",
-        BinaryOp::Shl => "<<",
-        BinaryOp::Shr => ">>",
-        BinaryOp::Lt => "<",
-        BinaryOp::Le => "<=",
-        BinaryOp::Gt => ">",
-        BinaryOp::Ge => ">=",
-        BinaryOp::Eq => "==",
-        BinaryOp::Ne => "!=",
-        BinaryOp::BitAnd => "&",
-        BinaryOp::BitXor => "^",
-        BinaryOp::BitOr => "|",
-        BinaryOp::And => "&&",
-        BinaryOp::Or => "||",
-    }
-}
-
-fn type_display(ty: &Type) -> String {
-    match ty {
-        Type::Named(name) => name.clone(),
-        Type::Ptr(inner) => format!("ptr<{}>", type_display(inner)),
-        Type::Function {
-            params,
-            return_type,
-        } => {
-            let params = params
-                .iter()
-                .map(type_display)
-                .collect::<Vec<_>>()
-                .join(", ");
-            match return_type {
-                Some(ty) => format!("fn({params}){}", type_display(ty)),
-                None => format!("fn({params})"),
-            }
-        }
-        Type::Array { element, len } => {
-            format!("[{}; {}]", type_display(element), expr_summary(len))
-        }
     }
 }
 

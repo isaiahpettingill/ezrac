@@ -129,6 +129,25 @@ fn tbir_keeps_inline_comments_attached_to_source_statements() {
 }
 
 #[test]
+fn tbir_attaches_standalone_comments_to_the_next_statement() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn main() {\n    // initialize value\n    let value: u8 = 1\n    // increment value\n    value += 1\n}\n",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+
+    assert_eq!(tbir.source_comments.len(), 2);
+    assert_eq!(tbir.source_comments[0].text, "initialize value");
+    assert_eq!(tbir.source_comments[0].statement_text, "let value: u8 = 1");
+    assert_eq!(tbir.source_comments[0].statement_span.start.line, 3);
+    assert_eq!(tbir.source_comments[1].text, "increment value");
+    assert_eq!(tbir.source_comments[1].statement_text, "value += 1");
+    assert_eq!(tbir.source_comments[1].statement_span.start.line, 5);
+}
+
+#[test]
 fn tbir_preserves_function_analysis() {
     let program = parse_program(
         Path::new("test.ezra"),

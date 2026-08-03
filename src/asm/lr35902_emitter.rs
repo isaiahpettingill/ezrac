@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     asm::{
         AssemblyOptions, GameBoyBankingMapper, GameBoyBankingOptions,
-        comments::with_readability_comments,
+        comments::{stmt_summary, with_readability_comments},
         data::{ByteLiteralStyle, byte_data_lines},
         reachability::{RoutineProfile, strip_unreachable_generated_routines},
     },
@@ -807,6 +807,7 @@ impl Emitter {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
+        self.line(&format!("    ; source: {}", stmt_summary(stmt)));
         match stmt {
             Stmt::Let { name, ty, value } => {
                 let binding = self
