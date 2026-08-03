@@ -1,0 +1,29 @@
+global input_a: u8 = 9
+global input_b: u8 = 4
+global result: u8 = 0
+
+fn bump(value: u8) -> u8 {
+    return value + 1
+}
+
+fn main() {
+    // Overlapping mutable locals exercise physical-register selection and pressure.
+    let left: u8 = input_a
+    let right: u8 = input_b
+    let total: u8 = left
+    total += right
+    result = total
+
+    // `saved` is live across a call and must not remain in a caller-clobbered register.
+    let saved: u8 = total
+    let called: u8 = bump(input_b)
+    result = saved + called
+
+
+
+    // These lifetimes do not overlap, so memory-only targets may share one spill slot.
+    let first: u8 = input_a
+    result = first
+    let second: u8 = input_b
+    result = second
+}

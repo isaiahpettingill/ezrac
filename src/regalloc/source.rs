@@ -102,6 +102,7 @@ pub fn lower_source_function(
     opaque_clobbers: &[PhysReg],
 ) -> Result<LoweredSourceFunction, Vec<Diagnostic>> {
     let mappings = build_mappings(locals)?;
+    validate_loop_control(body)?;
     let virtual_registers = locals
         .iter()
         .map(|local| {
@@ -116,11 +117,16 @@ pub fn lower_source_function(
         opaque_clobbers: deduplicate_clobbers(opaque_clobbers),
         blocks: vec![BasicBlock::default()],
         address_taken: BTreeSet::new(),
+        opaque_locals: BTreeSet::new(),
     };
     builder.lower_statements(body, Some(BlockId(0)), None);
 
     let mut function = Function::new(virtual_registers, builder.blocks);
     for vreg in builder.address_taken {
+        function.virtual_registers[vreg.0].must_spill = true;
+        function.virtual_registers[vreg.0].spill_slot_reusable = false;
+    }
+    for vreg in builder.opaque_locals {
         function.virtual_registers[vreg.0].must_spill = true;
     }
 
@@ -174,6 +180,43 @@ fn build_mappings(locals: &[SourceLocal]) -> Result<SourceLocalMap, Vec<Diagnost
     }
 }
 
+fn validate_loop_control(body: &[Stmt]) -> Result<(), Vec<Diagnostic>> {
+    fn visit(statements: &[Stmt], loop_depth: usize, diagnostics: &mut Vec<Diagnostic>) {
+        for statement in statements {
+            match statement {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    visit(then_body, loop_depth, diagnostics);
+                    visit(else_body, loop_depth, diagnostics);
+                }
+                Stmt::While { body, .. } | Stmt::Loop { body } => {
+                    visit(body, loop_depth + 1, diagnostics);
+                }
+                Stmt::Break if loop_depth == 0 => diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::InvalidFunction,
+                    message: "break appears outside a loop".into(),
+                }),
+                Stmt::Continue if loop_depth == 0 => diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::InvalidFunction,
+                    message: "continue appears outside a loop".into(),
+                }),
+                _ => {}
+            }
+        }
+    }
+
+    let mut diagnostics = Vec::new();
+    visit(body, 0, &mut diagnostics);
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(diagnostics)
+    }
+}
+
 fn deduplicate_clobbers(clobbers: &[PhysReg]) -> Vec<PhysReg> {
     let mut result = Vec::new();
     for clobber in clobbers {
@@ -193,6 +236,7 @@ struct Builder<'a> {
     opaque_clobbers: Vec<PhysReg>,
     blocks: Vec<BasicBlock>,
     address_taken: BTreeSet<VReg>,
+    opaque_locals: BTreeSet<VReg>,
 }
 
 impl Builder<'_> {
@@ -206,7 +250,16 @@ impl Builder<'_> {
         push_unique(&mut self.blocks[block.0].successors, successor);
     }
 
-    fn push_instruction(&mut self, block: BlockId, instruction: Instruction) {
+    fn push_instruction(
+        &mut self,
+        block: BlockId,
+        instruction: Instruction,
+        has_opaque_effect: bool,
+    ) {
+        if has_opaque_effect {
+            self.opaque_locals
+                .extend(instruction.uses.iter().chain(&instruction.defs).copied());
+        }
         self.blocks[block.0].instructions.push(instruction);
     }
 
@@ -234,16 +287,17 @@ impl Builder<'_> {
         match statement {
             Stmt::Let { name, value, .. } => {
                 let mut instruction = Instruction::new();
-                self.collect_expr(value, &mut instruction);
+                let has_call = self.collect_expr(value, &mut instruction);
                 self.add_def(name, &mut instruction);
-                self.push_instruction(block, instruction);
+                self.push_instruction(block, instruction, has_call);
                 Some(block)
             }
             Stmt::Assign { target, op, value } => {
                 let mut instruction = Instruction::new();
-                self.collect_expr(value, &mut instruction);
-                self.collect_place(target, *op != AssignOp::Set, &mut instruction);
-                self.push_instruction(block, instruction);
+                let value_has_call = self.collect_expr(value, &mut instruction);
+                let place_has_call =
+                    self.collect_place(target, *op != AssignOp::Set, &mut instruction);
+                self.push_instruction(block, instruction, value_has_call || place_has_call);
                 Some(block)
             }
             Stmt::If {
@@ -252,8 +306,8 @@ impl Builder<'_> {
                 else_body,
             } => {
                 let mut instruction = Instruction::new();
-                self.collect_expr(condition, &mut instruction);
-                self.push_instruction(block, instruction);
+                let has_call = self.collect_expr(condition, &mut instruction);
+                self.push_instruction(block, instruction, has_call);
 
                 let then_block = self.new_block();
                 let else_block = self.new_block();
@@ -274,8 +328,8 @@ impl Builder<'_> {
             Stmt::While { condition, body } => {
                 let condition_block = block;
                 let mut instruction = Instruction::new();
-                self.collect_expr(condition, &mut instruction);
-                self.push_instruction(condition_block, instruction);
+                let has_call = self.collect_expr(condition, &mut instruction);
+                self.push_instruction(condition_block, instruction, has_call);
 
                 let body_block = self.new_block();
                 let after_block = self.new_block();
@@ -320,8 +374,8 @@ impl Builder<'_> {
             Stmt::Return(value) => {
                 if let Some(value) = value {
                     let mut instruction = Instruction::new();
-                    self.collect_expr(value, &mut instruction);
-                    self.push_instruction(block, instruction);
+                    let has_call = self.collect_expr(value, &mut instruction);
+                    self.push_instruction(block, instruction, has_call);
                 }
                 None
             }
@@ -336,29 +390,42 @@ impl Builder<'_> {
                     self.add_def(&output.name, &mut instruction);
                 }
                 instruction.clobbers = self.opaque_clobbers.clone();
-                self.push_instruction(block, instruction);
+                self.push_instruction(block, instruction, true);
                 Some(block)
             }
             Stmt::Out { value, .. } | Stmt::Expr(value) => {
                 let mut instruction = Instruction::new();
-                self.collect_expr(value, &mut instruction);
-                self.push_instruction(block, instruction);
+                let has_call = self.collect_expr(value, &mut instruction);
+                self.push_instruction(block, instruction, has_call);
                 Some(block)
             }
         }
     }
 
-    fn collect_place(&mut self, place: &Place, compound: bool, instruction: &mut Instruction) {
+    fn collect_place(
+        &mut self,
+        place: &Place,
+        compound: bool,
+        instruction: &mut Instruction,
+    ) -> bool {
         match place {
-            Place::Ident(name) => self.add_place_root(name, compound, instruction),
-            Place::Index { name, index } => {
-                self.collect_expr(index, instruction);
+            Place::Ident(name) => {
                 self.add_place_root(name, compound, instruction);
+                false
             }
-            Place::Field { base, .. } => self.add_place_root(base, compound, instruction),
+            Place::Index { name, index } => {
+                let has_call = self.collect_expr(index, instruction);
+                self.add_place_root(name, compound, instruction);
+                has_call
+            }
+            Place::Field { base, .. } => {
+                self.add_place_root(base, compound, instruction);
+                false
+            }
             Place::Access(path) => {
-                self.collect_access_indices(path, instruction);
+                let has_call = self.collect_access_indices(path, instruction);
                 self.add_place_root(&path.root, compound, instruction);
+                has_call
             }
             Place::Deref(pointer) => self.collect_expr(pointer, instruction),
         }
@@ -371,67 +438,76 @@ impl Builder<'_> {
         self.add_def(name, instruction);
     }
 
-    fn collect_expr(&mut self, expression: &Expr, instruction: &mut Instruction) {
+    fn collect_expr(&mut self, expression: &Expr, instruction: &mut Instruction) -> bool {
         match expression {
-            Expr::Ident(name) | Expr::In(name) => self.add_use(name, instruction),
+            Expr::Ident(name) | Expr::In(name) => {
+                self.add_use(name, instruction);
+                false
+            }
             Expr::Index { name, index } => {
                 self.add_use(name, instruction);
-                self.collect_expr(index, instruction);
+                self.collect_expr(index, instruction)
             }
-            Expr::Field { base, .. } => self.add_use(base, instruction),
+            Expr::Field { base, .. } => {
+                self.add_use(base, instruction);
+                false
+            }
             Expr::AddressOfIndex { name, index } => {
                 self.add_address_use(name, instruction);
-                self.collect_expr(index, instruction);
+                self.collect_expr(index, instruction)
             }
             Expr::AddressOfField { base, .. } | Expr::AddressOf(base) => {
                 self.add_address_use(base, instruction);
+                false
             }
             Expr::Access(path) => {
                 self.add_use(&path.root, instruction);
-                self.collect_access_indices(path, instruction);
+                self.collect_access_indices(path, instruction)
             }
             Expr::AddressOfAccess(path) => {
                 self.add_address_use(&path.root, instruction);
-                self.collect_access_indices(path, instruction);
+                self.collect_access_indices(path, instruction)
             }
-            Expr::Array(values) => {
-                for value in values {
-                    self.collect_expr(value, instruction);
-                }
-            }
-            Expr::StructInit { fields, .. } => {
-                for (_, value) in fields {
-                    self.collect_expr(value, instruction);
-                }
-            }
+            Expr::Array(values) => values.iter().fold(false, |has_call, value| {
+                self.collect_expr(value, instruction) || has_call
+            }),
+            Expr::StructInit { fields, .. } => fields.iter().fold(false, |has_call, (_, value)| {
+                self.collect_expr(value, instruction) || has_call
+            }),
             Expr::Deref(pointer)
             | Expr::BankedPointer { pointer, .. }
             | Expr::Unary { expr: pointer, .. }
             | Expr::Cast { expr: pointer, .. } => self.collect_expr(pointer, instruction),
-            Expr::Call { args, .. } => {
+            Expr::Call { path, args } => {
+                if let Some(root) = path.first() {
+                    self.add_use(root, instruction);
+                }
                 for argument in args {
                     self.collect_expr(argument, instruction);
                 }
                 instruction.clobbers = self.opaque_clobbers.clone();
+                true
             }
             Expr::Binary { left, right, .. } => {
-                self.collect_expr(left, instruction);
-                self.collect_expr(right, instruction);
+                let left_has_call = self.collect_expr(left, instruction);
+                self.collect_expr(right, instruction) || left_has_call
             }
             Expr::Int(_)
             | Expr::TypedInt(_, _)
             | Expr::Bool(_)
             | Expr::Char(_)
-            | Expr::String(_) => {}
+            | Expr::String(_) => false,
         }
     }
 
-    fn collect_access_indices(&mut self, path: &AccessPath, instruction: &mut Instruction) {
-        for segment in &path.segments {
+    fn collect_access_indices(&mut self, path: &AccessPath, instruction: &mut Instruction) -> bool {
+        path.segments.iter().fold(false, |has_call, segment| {
             if let AccessSegment::Index(index) = segment {
-                self.collect_expr(index, instruction);
+                self.collect_expr(index, instruction) || has_call
+            } else {
+                has_call
             }
-        }
+        })
     }
 
     fn add_use(&self, name: &str, instruction: &mut Instruction) {
@@ -596,6 +672,17 @@ mod tests {
             result.allocation.location(VReg(1)),
             Some(Location::Spill(_))
         ));
+        let addressed_slot = match result.allocation.location(VReg(0)) {
+            Some(Location::Spill(slot)) => slot,
+            _ => unreachable!(),
+        };
+        let aggregate_slot = match result.allocation.location(VReg(1)) {
+            Some(Location::Spill(slot)) => slot,
+            _ => unreachable!(),
+        };
+        assert_ne!(addressed_slot, aggregate_slot);
+        assert!(!result.allocation.spill_slots[addressed_slot].reusable);
+        assert!(result.allocation.spill_slots[aggregate_slot].reusable);
     }
 
     #[test]
@@ -632,6 +719,115 @@ mod tests {
     }
 
     #[test]
+    fn locals_on_either_side_of_a_nested_call_force_memory() {
+        for expression in [
+            Expr::Binary {
+                left: Box::new(Expr::Call {
+                    path: vec!["callee".to_string()],
+                    args: vec![],
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Ident("local".to_string())),
+            },
+            Expr::Binary {
+                left: Box::new(Expr::Ident("local".to_string())),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Call {
+                    path: vec!["callee".to_string()],
+                    args: vec![],
+                }),
+            },
+        ] {
+            let lowered =
+                lower_source_function(&[local("local")], &[Stmt::Expr(expression)], &[PhysReg(0)])
+                    .expect("lowering should succeed");
+            assert!(lowered.function.virtual_registers[0].must_spill);
+        }
+    }
+
+    #[test]
+    fn compound_assignment_with_a_call_forces_its_target_to_memory() {
+        let body = vec![Stmt::Assign {
+            target: Place::Ident("target".to_string()),
+            op: AssignOp::Add,
+            value: Expr::Call {
+                path: vec!["callee".to_string()],
+                args: vec![],
+            },
+        }];
+        let lowered = lower_source_function(&[local("target")], &body, &[PhysReg(0)])
+            .expect("lowering should succeed");
+
+        assert_eq!(
+            lowered.function.blocks[0].instructions[0].uses,
+            vec![VReg(0)]
+        );
+        assert_eq!(
+            lowered.function.blocks[0].instructions[0].defs,
+            vec![VReg(0)]
+        );
+        assert!(lowered.function.virtual_registers[0].must_spill);
+    }
+
+    #[test]
+    fn indexed_target_with_a_call_forces_all_statement_locals_to_memory() {
+        let body = vec![Stmt::Assign {
+            target: Place::Index {
+                name: "array".to_string(),
+                index: Box::new(Expr::Ident("index".to_string())),
+            },
+            op: AssignOp::Set,
+            value: Expr::Call {
+                path: vec!["callee".to_string()],
+                args: vec![Expr::Ident("argument".to_string())],
+            },
+        }];
+        let lowered = lower_source_function(
+            &[local("array"), local("index"), local("argument")],
+            &body,
+            &[PhysReg(0)],
+        )
+        .expect("lowering should succeed");
+
+        assert!(
+            lowered
+                .function
+                .virtual_registers
+                .iter()
+                .all(|vreg| vreg.must_spill)
+        );
+    }
+
+    #[test]
+    fn local_function_pointer_call_records_and_spills_the_path_root() {
+        let body = vec![Stmt::Expr(Expr::Call {
+            path: vec!["callback".to_string()],
+            args: vec![],
+        })];
+        let lowered = lower_source_function(&[local("callback")], &body, &[PhysReg(0)])
+            .expect("lowering should succeed");
+
+        assert_eq!(
+            lowered.function.blocks[0].instructions[0].uses,
+            vec![VReg(0)]
+        );
+        assert!(lowered.function.virtual_registers[0].must_spill);
+    }
+
+    #[test]
+    fn break_and_continue_outside_loops_are_diagnostics() {
+        let errors = lower_source_function(&[], &[Stmt::Break, Stmt::Continue], &[])
+            .expect_err("invalid loop control should fail");
+
+        assert_eq!(errors.len(), 2);
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.code == DiagnosticCode::InvalidFunction)
+        );
+    }
+
+    #[test]
     fn asm_names_are_effects_and_asm_is_opaque() {
         let body = vec![Stmt::Asm {
             volatile: false,
@@ -656,5 +852,12 @@ mod tests {
         assert_eq!(instruction.uses, vec![VReg(0)]);
         assert_eq!(instruction.defs, vec![VReg(1)]);
         assert_eq!(instruction.clobbers, vec![PhysReg(0)]);
+        assert!(
+            lowered
+                .function
+                .virtual_registers
+                .iter()
+                .all(|vreg| vreg.must_spill)
+        );
     }
 }

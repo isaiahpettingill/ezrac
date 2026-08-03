@@ -1,0 +1,16 @@
+[project]
+name = "register-allocation"
+
+[build]
+input = "main.ezra"
+target = [
+    "agonlight-mos-ez80",
+    "commodore64-6502",
+    "gameboy-dmg-lr35902",
+    "msdos-com-i8086",
+    "ti99-4a-tms9900",
+    "generic-dcpu-bare",
+    "bare-avr",
+    "generic-m68k-bare",
+]
+executable = "register-allocation"

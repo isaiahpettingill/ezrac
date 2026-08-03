@@ -12,6 +12,11 @@ use crate::{
     },
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::CpuFamily,
     tbir::{
         TbirProgram,
@@ -46,14 +51,24 @@ pub fn emit_avr_assembly_with_options(
         .emit(&tbir.lowered_program)
         .map(|asm| {
             let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Avr);
-            with_readability_comments(asm, program, &options, "avr")
+            with_readability_comments(asm, program, &options, "avr", &tbir.source_comments)
         })
 }
 
 #[derive(Clone)]
+enum BindingLocation {
+    Register(Vec<u8>),
+    Storage(Storage),
+}
+
+#[derive(Clone)]
 struct Binding {
-    storage: Storage,
+    location: BindingLocation,
     ty: Type,
+}
+
+struct FunctionLocals {
+    bindings: HashMap<String, Binding>,
 }
 
 #[derive(Clone)]
@@ -343,11 +358,13 @@ impl Emitter {
                 function.name
             )));
         }
+        let function_ram_base = self.model.next_ram_address();
+        let locals = plan_function_locals(function, &mut self.model)?;
         self.line(&format!("{}:", function_label(&function.name)));
-        self.scopes.push(HashMap::new());
+        self.scopes.push(locals.bindings);
         self.return_labels.push(return_label.clone());
         self.return_types.push(function.return_type.clone());
-        self.function_ram_bases.push(self.model.next_ram_address());
+        self.function_ram_bases.push(function_ram_base);
 
         if interrupt && !naked {
             self.emit_interrupt_prologue();
@@ -372,7 +389,7 @@ impl Emitter {
                 }
             }
             let storage = self.model.allocate_type(&param.ty)?;
-            self.bind(param.name.clone(), storage, param.ty.clone())?;
+            self.bind_storage(param.name.clone(), storage, param.ty.clone())?;
             self.copy(slot, storage, size);
         }
         self.emit_block(&function.body)?;
@@ -412,9 +429,8 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match stmt {
             Stmt::Let { name, ty, value } => {
-                let storage = self.model.allocate_type(ty)?;
-                self.bind(name.clone(), storage, ty.clone())?;
-                self.emit_initializer(storage, ty, value)?;
+                let binding = self.binding(name)?;
+                self.emit_binding_initializer(&binding, ty, value)?;
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
@@ -539,6 +555,21 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_binding_initializer(
+        &mut self,
+        binding: &Binding,
+        ty: &Type,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        if self.model.type_width(ty).is_ok() {
+            self.emit_expr(value, ty)?;
+            self.store_binding_result(binding)?;
+            return Ok(());
+        }
+        let storage = self.binding_storage(binding, "initialize aggregate local")?;
+        self.emit_initializer(storage, ty, value)
+    }
+
     fn emit_initializer(
         &mut self,
         storage: Storage,
@@ -548,7 +579,8 @@ impl Emitter {
         match (self.model.resolved_type(ty)?, value) {
             (Type::Array { .. }, Expr::Ident(name)) => {
                 let source = self.binding(name)?;
-                self.copy(source.storage, storage, storage.size);
+                let source = self.binding_storage(&source, "copy aggregate local")?;
+                self.copy(source, storage, storage.size);
             }
             (Type::Array { element, len }, Expr::Array(values)) => {
                 let element_size = self.model.type_size(&element)?;
@@ -588,7 +620,8 @@ impl Emitter {
             }
             (Type::Named(name), Expr::Ident(source)) if self.model.structs.contains_key(&name) => {
                 let source = self.binding(source)?;
-                self.copy(source.storage, storage, storage.size);
+                let source = self.binding_storage(&source, "copy aggregate local")?;
+                self.copy(source, storage, storage.size);
             }
             (resolved @ (Type::Array { .. } | Type::Named(_)), Expr::Deref(pointer)) => {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(resolved)))?;
@@ -620,7 +653,7 @@ impl Emitter {
                 } else {
                     let binding = self.binding(name)?;
                     let source_width = self.model.type_width(&binding.ty)?;
-                    self.copy(binding.storage, self.r0, u32::from(source_width));
+                    self.load_binding_result(&binding)?;
                     self.extend_result(source_width, width, type_is_signed(&binding.ty));
                 }
             }
@@ -631,7 +664,8 @@ impl Emitter {
             }
             Expr::AddressOf(name) => {
                 let binding = self.binding(name)?;
-                self.load_constant(i64::from(binding.storage.address), width);
+                let storage = self.binding_storage(&binding, "take address of register local")?;
+                self.load_constant(i64::from(storage.address), width);
             }
             Expr::AddressOfIndex { name, index } => {
                 self.emit_named_index_address(name, index)?;
@@ -640,7 +674,8 @@ impl Emitter {
             Expr::AddressOfField { base, field } => {
                 let binding = self.binding(base)?;
                 let field = self.model.field(&binding.ty, field)?;
-                self.load_constant(i64::from(binding.storage.address + field.offset), width);
+                let storage = self.binding_storage(&binding, "take address of register local")?;
+                self.load_constant(i64::from(storage.address + field.offset), width);
             }
             Expr::AddressOfAccess(path) => {
                 let (_, _) = self.emit_access_address(path)?;
@@ -660,9 +695,10 @@ impl Emitter {
                     let binding = self.binding(base)?;
                     let field = self.model.field(&binding.ty, field)?.clone();
                     let source_width = self.model.type_width(&field.ty)?;
+                    let storage = self.binding_storage(&binding, "load aggregate field")?;
                     self.copy(
                         Storage {
-                            address: binding.storage.address + field.offset,
+                            address: storage.address + field.offset,
                             size: field.size,
                         },
                         self.r0,
@@ -750,7 +786,12 @@ impl Emitter {
             .filter_map(|arg| match arg {
                 // The callee can mutate this storage through its pointer parameter.
                 // Restoring a pre-call snapshot would discard that mutation.
-                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
+                Expr::AddressOf(name) => self.binding(name).ok().and_then(|binding| match binding
+                    .location
+                {
+                    BindingLocation::Storage(storage) => Some(storage),
+                    BindingLocation::Register(_) => None,
+                }),
                 _ => None,
             })
             .filter_map(|storage| {
@@ -1367,6 +1408,7 @@ impl Emitter {
                 self.r0,
                 u32::from(width),
             ),
+            Address::Register(registers) => self.load_register_result(&registers),
             Address::Indirect => self.load_indirect(width),
         }
         Ok(())
@@ -1384,6 +1426,10 @@ impl Emitter {
                 },
                 u32::from(width),
             ),
+            Address::Register(registers) => {
+                self.copy(saved, self.r0, u32::from(width));
+                self.store_result_registers(&registers);
+            }
             Address::Indirect => {
                 for offset in 0..u32::from(width) {
                     self.lda(saved.address + offset);
@@ -1403,6 +1449,11 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         match self.place_address(place)? {
             Address::Direct(address) => self.copy(source, Storage { address, size }, size),
+            Address::Register(_) => {
+                return Err(Diagnostic::new(
+                    "aggregate local cannot use a register home",
+                ));
+            }
             Address::Indirect => {
                 for offset in 0..size {
                     self.lda(source.address + offset);
@@ -1435,7 +1486,10 @@ impl Emitter {
                     Ok(Address::Direct(*address))
                 } else {
                     let binding = self.binding(name)?;
-                    Ok(Address::Direct(binding.storage.address))
+                    Ok(match binding.location {
+                        BindingLocation::Storage(storage) => Address::Direct(storage.address),
+                        BindingLocation::Register(registers) => Address::Register(registers),
+                    })
                 }
             }
             Place::Index { name, index } => {
@@ -1445,7 +1499,8 @@ impl Emitter {
             Place::Field { base, field } => {
                 let binding = self.binding(base)?;
                 let layout = self.model.field(&binding.ty, field)?;
-                Ok(Address::Direct(binding.storage.address + layout.offset))
+                let storage = self.binding_storage(&binding, "address register local field")?;
+                Ok(Address::Direct(storage.address + layout.offset))
             }
             Place::Access(path) => {
                 self.emit_access_address(path)?;
@@ -1491,9 +1546,12 @@ impl Emitter {
         let element = element_type(&resolved)?;
         let element_size = self.model.type_size(&element)?;
         match resolved {
-            Type::Array { .. } => self.set_pointer(binding.storage.address),
+            Type::Array { .. } => {
+                let storage = self.binding_storage(&binding, "index register local as array")?;
+                self.set_pointer(storage.address);
+            }
             Type::Ptr(_) => {
-                self.copy(binding.storage, self.r0, 2);
+                self.load_binding_result(&binding)?;
                 self.copy_result_to_zp();
             }
             _ => return Err(Diagnostic::new("indexing requires array or pointer")),
@@ -1507,13 +1565,16 @@ impl Emitter {
         let mut ty = self.model.resolved_type(&binding.ty)?;
         match &ty {
             Type::Ptr(_) => {
-                self.copy(binding.storage, self.r0, 2);
+                self.load_binding_result(&binding)?;
                 self.copy_result_to_zp();
                 if let Type::Ptr(inner) = ty {
                     ty = *inner;
                 }
             }
-            _ => self.set_pointer(binding.storage.address),
+            _ => {
+                let storage = self.binding_storage(&binding, "address register local access")?;
+                self.set_pointer(storage.address);
+            }
         }
         for segment in &path.segments {
             match segment {
@@ -1650,17 +1711,13 @@ impl Emitter {
         let mut operands = HashMap::new();
         for input in inputs {
             let binding = self.binding(&input.name)?;
-            operands.insert(
-                input.name.clone(),
-                format!("{:04X}h", binding.storage.address),
-            );
+            let storage = self.binding_storage(&binding, "use register local in inline asm")?;
+            operands.insert(input.name.clone(), format!("{:04X}h", storage.address));
         }
         for output in outputs {
             let binding = self.binding(&output.name)?;
-            operands.insert(
-                output.name.clone(),
-                format!("{:04X}h", binding.storage.address),
-            );
+            let storage = self.binding_storage(&binding, "use register local in inline asm")?;
+            operands.insert(output.name.clone(), format!("{:04X}h", storage.address));
         }
         let local_label_prefix = self.next_label("asm");
         for line in lines {
@@ -1678,7 +1735,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn bind(&mut self, name: String, storage: Storage, ty: Type) -> Result<(), Diagnostic> {
+    fn bind_storage(&mut self, name: String, storage: Storage, ty: Type) -> Result<(), Diagnostic> {
         if self
             .scopes
             .iter()
@@ -1689,10 +1746,13 @@ impl Emitter {
                 "local `{name}` shadows an existing name"
             )));
         }
-        self.scopes
-            .last_mut()
-            .expect("function scope")
-            .insert(name, Binding { storage, ty });
+        self.scopes.last_mut().expect("function scope").insert(
+            name,
+            Binding {
+                location: BindingLocation::Storage(storage),
+                ty,
+            },
+        );
         Ok(())
     }
 
@@ -1702,17 +1762,68 @@ impl Emitter {
         }
         if let Some(storage) = self.model.globals.get(name) {
             return Ok(Binding {
-                storage: *storage,
+                location: BindingLocation::Storage(*storage),
                 ty: self.model.global_types[name].clone(),
             });
         }
         if let Some(embed) = self.model.embeds.get(name) {
             return Ok(Binding {
-                storage: embed.storage,
+                location: BindingLocation::Storage(embed.storage),
                 ty: embed.ty.clone(),
             });
         }
         Err(Diagnostic::new(format!("unknown variable `{name}`")))
+    }
+
+    fn binding_storage(&self, binding: &Binding, operation: &str) -> Result<Storage, Diagnostic> {
+        match binding.location {
+            BindingLocation::Storage(storage) => Ok(storage),
+            BindingLocation::Register(_) => Err(Diagnostic::new(format!(
+                "cannot {operation}; register allocator should have forced this local to memory"
+            ))),
+        }
+    }
+
+    fn load_binding_result(&mut self, binding: &Binding) -> Result<(), Diagnostic> {
+        match &binding.location {
+            BindingLocation::Storage(storage) => {
+                let width = self.model.type_width(&binding.ty)?;
+                self.copy(*storage, self.r0, u32::from(width));
+            }
+            BindingLocation::Register(registers) => self.load_register_result(registers),
+        }
+        Ok(())
+    }
+
+    fn store_binding_result(&mut self, binding: &Binding) -> Result<(), Diagnostic> {
+        match &binding.location {
+            BindingLocation::Storage(storage) => {
+                let width = self.model.type_width(&binding.ty)?;
+                self.copy(self.r0, *storage, u32::from(width));
+            }
+            BindingLocation::Register(registers) => self.store_result_registers(registers),
+        }
+        Ok(())
+    }
+
+    fn load_register_result(&mut self, registers: &[u8]) {
+        for (offset, register) in registers.iter().enumerate() {
+            self.line(&format!("    mov r16, r{register}"));
+            self.line(&format!(
+                "    sts {:04X}h, r16",
+                self.r0.address + offset as u32
+            ));
+        }
+    }
+
+    fn store_result_registers(&mut self, registers: &[u8]) {
+        for (offset, register) in registers.iter().enumerate() {
+            self.line(&format!(
+                "    lds r16, {:04X}h",
+                self.r0.address + offset as u32
+            ));
+            self.line(&format!("    mov r{register}, r16"));
+        }
     }
 
     fn copy(&mut self, source: Storage, target: Storage, size: u32) {
@@ -2007,6 +2118,179 @@ impl Emitter {
     }
 }
 
+const AVR_LOCAL_FIRST_REGISTER: u8 = 2;
+const AVR_LOCAL_LAST_REGISTER: u8 = 15;
+const AVR_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+
+fn avr_local_target() -> Target {
+    let units = (AVR_LOCAL_FIRST_REGISTER..=AVR_LOCAL_LAST_REGISTER)
+        .map(|register| RegisterUnit::new(format!("r{register}")))
+        .collect::<Vec<_>>();
+    let mut registers = Vec::new();
+    let mut classes = Vec::new();
+
+    for width in 1..=4_usize {
+        let mut class_registers = Vec::new();
+        for first_unit in (0..units.len()).step_by(width) {
+            if first_unit + width > units.len() {
+                break;
+            }
+            let physical = PhysReg(registers.len());
+            let first_register = AVR_LOCAL_FIRST_REGISTER + first_unit as u8;
+            let last_register = first_register + width as u8 - 1;
+            registers.push(PhysicalRegister::new(
+                if width == 1 {
+                    format!("r{first_register}")
+                } else {
+                    format!("r{first_register}:r{last_register}")
+                },
+                (first_unit..first_unit + width).map(RegUnit).collect(),
+            ));
+            class_registers.push(physical);
+        }
+        classes.push(RegisterClass::new(
+            format!("scalar-{width}-byte"),
+            class_registers,
+        ));
+    }
+
+    Target {
+        units,
+        registers,
+        register_classes: classes,
+        spill_classes: vec![
+            SpillClass::new("static", None, 1).for_register_classes(vec![
+                RegClass(0),
+                RegClass(1),
+                RegClass(2),
+                RegClass(3),
+            ]),
+        ],
+    }
+}
+
+fn plan_function_locals(
+    function: &Function,
+    model: &mut SemanticModel,
+) -> Result<FunctionLocals, Diagnostic> {
+    let mut source_locals = Vec::new();
+    let mut local_types = HashMap::new();
+    collect_avr_locals(&function.body, model, &mut source_locals, &mut local_types)?;
+
+    let target = avr_local_target();
+    let clobbers = (0..target.registers.len()).map(PhysReg).collect::<Vec<_>>();
+    let planned = allocate_source_locals(&target, &source_locals, &function.body, &clobbers)
+        .map_err(|diagnostics| {
+            Diagnostic::new(
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| diagnostic.message)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
+    let spill_bytes = planned
+        .allocation
+        .spill_slots
+        .iter()
+        .map(|slot| slot.offset.saturating_add(slot.size))
+        .max()
+        .unwrap_or(0);
+    let spill_storage = (spill_bytes != 0)
+        .then(|| model.allocate(spill_bytes))
+        .transpose()?;
+
+    let mut bindings = HashMap::new();
+    for (name, ty) in local_types {
+        let vreg = planned
+            .locals
+            .vreg(&name)
+            .ok_or_else(|| Diagnostic::new(format!("missing allocation for local `{name}`")))?;
+        let location = match planned.allocation.location(vreg) {
+            Some(Location::Register(register)) => {
+                let physical = target.registers.get(register.0).ok_or_else(|| {
+                    Diagnostic::new(format!("invalid AVR local register for `{name}`"))
+                })?;
+                BindingLocation::Register(
+                    physical
+                        .units
+                        .iter()
+                        .map(|unit| AVR_LOCAL_FIRST_REGISTER + unit.0 as u8)
+                        .collect(),
+                )
+            }
+            Some(Location::Spill(slot_index)) => {
+                let slot = planned
+                    .allocation
+                    .spill_slots
+                    .get(slot_index)
+                    .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for `{name}`")))?;
+                debug_assert_eq!(slot.class, AVR_STATIC_SPILL_CLASS);
+                let backing = spill_storage.ok_or_else(|| {
+                    Diagnostic::new(format!("missing AVR spill storage for `{name}`"))
+                })?;
+                BindingLocation::Storage(Storage {
+                    address: backing.address + slot.offset,
+                    size: model.type_size(&ty)?,
+                })
+            }
+            Some(Location::Unused) | None => {
+                return Err(Diagnostic::new(format!(
+                    "source allocator did not place local `{name}`"
+                )));
+            }
+        };
+        bindings.insert(name, Binding { location, ty });
+    }
+    Ok(FunctionLocals { bindings })
+}
+
+fn collect_avr_locals(
+    body: &[Stmt],
+    model: &SemanticModel,
+    locals: &mut Vec<SourceLocal>,
+    local_types: &mut HashMap<String, Type>,
+) -> Result<(), Diagnostic> {
+    for stmt in body {
+        match stmt {
+            Stmt::Let { name, ty, .. } => {
+                let ty = model.resolved_type(ty)?;
+                let width = model.type_width(&ty).ok();
+                let size = match width {
+                    Some(width) => u32::from(width),
+                    None => model.type_size(&ty)?,
+                };
+                if local_types.insert(name.clone(), ty).is_some() {
+                    return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                }
+                locals.push(
+                    SourceLocal::new(
+                        name.clone(),
+                        size,
+                        1,
+                        RegClass(usize::from(width.unwrap_or(1) - 1)),
+                    )
+                    .with_spill_classes(vec![AVR_STATIC_SPILL_CLASS])
+                    .with_force_memory(width.is_none()),
+                );
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_avr_locals(then_body, model, locals, local_types)?;
+                collect_avr_locals(else_body, model, locals, local_types)?;
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_avr_locals(body, model, locals, local_types)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn translate_avr_line(line: &str) -> String {
     let indent = if line.starts_with("    ") { "    " } else { "" };
     let text = line.trim();
@@ -2064,6 +2348,7 @@ fn translate_avr_line(line: &str) -> String {
 
 enum Address {
     Direct(u32),
+    Register(Vec<u8>),
     Indirect,
 }
 
@@ -2323,6 +2608,235 @@ mod tests {
         assembly
     }
 
+    fn plan(source: &str, function_name: &str) -> FunctionLocals {
+        let program = parse_program(Path::new("avr.ezra"), source).unwrap();
+        let options = AssemblyOptions {
+            cpu: CpuFamily::Avr,
+            ram_base: Address24::new(0x0104),
+            rodata_base: Address24::new(0x0800),
+            asset_base: Address24::new(0x0900),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        };
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let tbir = TbirProgram::lower(&hir, &program, &options).unwrap();
+        let mut model = SemanticModel::from_program(
+            &tbir.lowered_program,
+            16,
+            options.ram_base.get(),
+            options.rodata_base.get(),
+            options.asset_base.get(),
+        )
+        .unwrap();
+        let function = tbir
+            .lowered_program
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Function(function) if function.name == function_name => Some(function),
+                _ => None,
+            })
+            .unwrap();
+        plan_function_locals(function, &mut model).unwrap()
+    }
+
+    fn storage_address(locals: &FunctionLocals, name: &str) -> u32 {
+        match &locals.bindings[name].location {
+            BindingLocation::Storage(storage) => storage.address,
+            BindingLocation::Register(_) => panic!("`{name}` should have a static home"),
+        }
+    }
+
+    #[test]
+    fn local_target_has_legal_consecutive_aliasing_groups() {
+        let target = avr_local_target();
+        let diagnostics = crate::regalloc::validate(
+            &target,
+            &crate::regalloc::Function::new(vec![], vec![crate::regalloc::BasicBlock::default()]),
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(target.units.len(), 14);
+        assert_eq!(target.register_classes.len(), 4);
+        assert_eq!(target.register_classes[0].registers.len(), 14);
+        assert_eq!(target.register_classes[1].registers.len(), 7);
+        assert_eq!(target.register_classes[2].registers.len(), 4);
+        assert_eq!(target.register_classes[3].registers.len(), 3);
+        let byte_r2 = target.register_classes[0].registers[0];
+        let pair_r2_r3 = target.register_classes[1].registers[0];
+        let pair_r4_r5 = target.register_classes[1].registers[1];
+        assert!(target.registers_alias(byte_r2, pair_r2_r3));
+        assert!(!target.registers_alias(byte_r2, pair_r4_r5));
+    }
+
+    #[test]
+    fn scalar_locals_use_low_register_movs_without_local_static_traffic() {
+        let source = r#"
+            global input8: u8 = 1
+            global input16: u16 = 0x0203
+            global input24: u24 = 0x040506
+            global input32: u32 = 0x0708090A
+            global sink: u32 = 0
+            fn byte_local() { let byte: u8 = input8; sink = cast<u32>(byte) }
+            fn word_local() { let word: u16 = input16; sink = cast<u32>(word) }
+            fn triple_local() { let triple: u24 = input24; sink = cast<u32>(triple) }
+            fn long_local() { let long: u32 = input32; sink = long }
+            fn main() { byte_local(); word_local(); triple_local(); long_local() }
+        "#;
+        for (function, name) in [
+            ("byte_local", "byte"),
+            ("word_local", "word"),
+            ("triple_local", "triple"),
+            ("long_local", "long"),
+        ] {
+            let locals = plan(source, function);
+            assert!(
+                matches!(
+                    &locals.bindings[name].location,
+                    BindingLocation::Register(_)
+                ),
+                "{name} did not get a register home"
+            );
+        }
+        let assembly = emit(source);
+        assert!(assembly.contains("    mov r2, r16"), "{assembly}");
+        assert!(assembly.contains("    mov r16, r2"), "{assembly}");
+        for register in AVR_LOCAL_FIRST_REGISTER..=AVR_LOCAL_LAST_REGISTER {
+            assert!(
+                !assembly.contains(&format!("lds r{register},")),
+                "{assembly}"
+            );
+            assert!(
+                !assembly.contains(&format!("sts r{register},")),
+                "{assembly}"
+            );
+        }
+    }
+
+    #[test]
+    fn pressure_calls_asm_addresses_and_aggregates_spill_to_reused_static_storage() {
+        let pressure = plan(
+            r#"
+                global input: u16 = 1
+                global sink: u16 = 0
+                fn main() {
+                    let a: u16 = input; let b: u16 = input; let c: u16 = input; let d: u16 = input
+                    let e: u16 = input; let f: u16 = input; let g: u16 = input; let h: u16 = input
+                    sink = a + b + c + d + e + f + g + h
+                }
+            "#,
+            "main",
+        );
+        assert!(
+            pressure
+                .bindings
+                .values()
+                .any(|binding| matches!(&binding.location, BindingLocation::Storage(_)))
+        );
+
+        let call_live = plan(
+            r#"
+                global input: u8 = 1
+                global sink: u8 = 0
+                fn value() -> u8 { return 2 }
+                fn main() { let live: u8 = input; let result: u8 = value(); sink = live + result }
+            "#,
+            "main",
+        );
+        assert!(matches!(
+            &call_live.bindings["live"].location,
+            BindingLocation::Storage(_)
+        ));
+
+        let asm_live = plan(
+            r#"
+                global input: u8 = 1
+                global sink: u8 = 0
+                fn main() {
+                    let live: u8 = input
+                    asm volatile(clobber memory) { "nop" }
+                    sink = live
+                }
+            "#,
+            "main",
+        );
+        assert!(matches!(
+            &asm_live.bindings["live"].location,
+            BindingLocation::Storage(_)
+        ));
+
+        let forced = plan(
+            r#"
+                global sink: u8 = 0
+                fn main() {
+                    let addressed: u8 = 1
+                    let aggregate: [u8; 2] = [2, 3]
+                    let p: ptr<u8> = &addressed
+                    asm volatile(in addressed: u8 as mem, clobber memory) { "lds r16, {addressed}" }
+                    sink = *p + aggregate[0]
+                }
+            "#,
+            "main",
+        );
+        assert!(matches!(
+            &forced.bindings["addressed"].location,
+            BindingLocation::Storage(_)
+        ));
+        assert!(matches!(
+            &forced.bindings["aggregate"].location,
+            BindingLocation::Storage(_)
+        ));
+        let _ = emit(
+            r#"
+                global sink: u8 = 0
+                fn main() {
+                    let addressed: u8 = 1
+                    let aggregate: [u8; 2] = [2, 3]
+                    let p: ptr<u8> = &addressed
+                    asm volatile(in addressed: u8 as mem, clobber memory) { "lds r16, {addressed}" }
+                    sink = *p + aggregate[0]
+                }
+            "#,
+        );
+
+        let reused = plan(
+            r#"
+                global sink: u8 = 0
+                fn main() {
+                    let first: u8 = 1; let first_ptr: ptr<u8> = &first; sink = *first_ptr
+                    let second: u8 = 2; let second_ptr: ptr<u8> = &second; sink = *second_ptr
+                }
+            "#,
+            "main",
+        );
+        assert_ne!(
+            storage_address(&reused, "first"),
+            storage_address(&reused, "second"),
+            "address-taken locals keep dedicated spill slots"
+        );
+    }
+
+    #[test]
+    fn generated_code_uses_low_registers_only_for_allocated_locals() {
+        let assembly = emit(
+            r#"
+                global left: u32 = 0x12345678
+                global right: u32 = 0x01020304
+                global sink: u32 = 0
+                fn main() { sink = left * right + (left >> 3) }
+            "#,
+        );
+        for register in AVR_LOCAL_FIRST_REGISTER..=AVR_LOCAL_LAST_REGISTER {
+            let name = format!("r{register}");
+            assert!(
+                !assembly.lines().any(|line| {
+                    line.split(|ch: char| !ch.is_ascii_alphanumeric())
+                        .any(|word| word == name)
+                }),
+                "ordinary generated code used r{register}:\n{assembly}"
+            );
+        }
+    }
+
     #[test]
     fn scalars_operators_control_flow_calls_and_recursion_assemble() {
         let assembly = emit(
@@ -2342,24 +2856,30 @@ mod tests {
     }
 
     #[test]
-    fn i32_operations_use_non_overlapping_four_byte_scratch() {
+    fn i32_operations_use_non_overlapping_four_byte_register_groups() {
         let assembly = emit(
             r#"
+            global left_input: i32 = 0x12345678
+            global right_input: i32 = 0x10203040
             global sink: i32 = 0
             fn main() {
-                let left: i32 = 0x12345678
-                let right: i32 = 0x10203040
+                let left: i32 = left_input
+                let right: i32 = right_input
                 sink = left + right
             }
         "#,
         );
-        assert!(
-            assembly.contains(
-                "lds r16, 010Bh\n    tst r16\n    lds r17, 010Fh\n    adc r16, r17\n    sts 010Bh, r16"
-            ),
-            "{assembly}"
-        );
-        assert!(assembly.contains("sts 0114h, r16"), "{assembly}");
+        for register in 2..=9 {
+            assert!(
+                assembly.contains(&format!("    mov r{register}, r16")),
+                "{assembly}"
+            );
+            assert!(
+                assembly.contains(&format!("    mov r16, r{register}")),
+                "{assembly}"
+            );
+        }
+        assert!(assembly.contains("    adc r16, r17"), "{assembly}");
     }
 
     #[test]

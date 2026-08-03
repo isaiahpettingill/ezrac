@@ -17,6 +17,11 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::CpuFamily,
     tbir::TbirProgram,
 };
@@ -43,13 +48,23 @@ pub fn emit_dcpu_assembly_with_options(
     let tbir = TbirProgram::lower(&hir, program, &options)?;
     Emitter::new().emit(&tbir.lowered_program).map(|assembly| {
         let assembly = strip_unreachable_generated_routines(&assembly, RoutineProfile::Dcpu);
-        with_readability_comments(assembly, program, &options, "dcpu")
+        with_readability_comments(assembly, program, &options, "dcpu", &tbir.source_comments)
     })
+}
+
+const DCPU_LOCAL_REGISTERS: [&str; 4] = ["c", "x", "y", "z"];
+const DCPU_SCALAR_CLASS: RegClass = RegClass(0);
+const DCPU_STACK_SPILL_CLASS: SpillClassId = SpillClassId(0);
+
+#[derive(Clone)]
+enum BindingLocation {
+    Frame(i16),
+    Register(&'static str),
 }
 
 #[derive(Clone)]
 struct Binding {
-    offset: i16,
+    location: BindingLocation,
     ty: Type,
 }
 #[derive(Clone)]
@@ -257,15 +272,18 @@ impl Emitter {
             }
             return Ok(());
         }
-        self.locals = plan_locals(&function.body, self)?;
+        let (locals, frame_words) = plan_locals(&function.body, self)?;
+        self.locals = locals;
         self.bindings.clear();
         for (index, param) in function.params.iter().enumerate() {
             // [J+0] saved J, [J+1] return PC, then arguments in source order.
             self.bindings.insert(
                 param.name.clone(),
                 Binding {
-                    offset: i16::try_from(index + 2)
-                        .map_err(|_| Diagnostic::new("too many DCPU parameters"))?,
+                    location: BindingLocation::Frame(
+                        i16::try_from(index + 2)
+                            .map_err(|_| Diagnostic::new("too many DCPU parameters"))?,
+                    ),
                     ty: param.ty.clone(),
                 },
             );
@@ -274,11 +292,8 @@ impl Emitter {
         self.return_type = function.return_type.clone();
         self.line("    set push, j");
         self.line("    set j, sp");
-        let words = self.locals.values().try_fold(0usize, |total, binding| {
-            Ok::<_, Diagnostic>(total + self.type_words(&binding.ty)?)
-        })?;
-        if words != 0 {
-            self.line(&format!("    sub sp, {words}"));
+        if frame_words != 0 {
+            self.line(&format!("    sub sp, {frame_words}"));
         }
         self.emit_block(&function.body)?;
         self.line(&format!("{}:", self.return_label));
@@ -305,10 +320,11 @@ impl Emitter {
                     .ok_or_else(|| Diagnostic::new(format!("missing DCPU local `{name}`")))?;
                 self.bindings.insert(name.clone(), binding.clone());
                 if self.is_aggregate(ty) {
-                    self.emit_aggregate(value, ty, &self.frame_operand(binding.offset))?
+                    let base = self.binding_address_operand(&binding, name)?;
+                    self.emit_aggregate(value, ty, &base)?
                 } else {
                     self.emit_expr(value, ty)?;
-                    self.store_frame(binding.offset);
+                    self.store_binding(&binding);
                 }
             }
             Stmt::Assign { target, op, value } => self.emit_assign(target, *op, value)?,
@@ -423,8 +439,8 @@ impl Emitter {
             if self.is_aggregate(&ty) {
                 let base = match target {
                     Place::Ident(name) => {
-                        if let Some(binding) = self.bindings.get(name) {
-                            self.frame_operand(binding.offset)
+                        if let Some(binding) = self.bindings.get(name).cloned() {
+                            self.binding_address_operand(&binding, name)?
                         } else if self.globals.contains_key(name) {
                             format!("__ezra_global_{name}")
                         } else {
@@ -793,7 +809,7 @@ impl Emitter {
             ));
         }
         let mut operands = HashMap::new();
-        for (index, input) in inputs.iter().enumerate() {
+        for input in inputs {
             if input.class != "reg16" {
                 return Err(Diagnostic::new(format!(
                     "DCPU inline asm input `{}` must use reg16",
@@ -801,7 +817,10 @@ impl Emitter {
                 )));
             }
             self.load_ident(&input.name, &input.ty)?;
-            self.line(&format!("    set {}, a", registers[index]));
+            self.line("    set push, a");
+        }
+        for (index, input) in inputs.iter().enumerate().rev() {
+            self.line(&format!("    set {}, pop", registers[index]));
             operands.insert(input.name.clone(), registers[index]);
         }
         for (index, output) in outputs.iter().enumerate() {
@@ -825,8 +844,14 @@ impl Emitter {
             }
             self.line(&format!("    {line}"));
         }
-        for (index, output) in outputs.iter().enumerate() {
-            self.line(&format!("    set a, {}", registers[inputs.len() + index]));
+        for (index, _) in outputs.iter().enumerate() {
+            self.line(&format!(
+                "    set push, {}",
+                registers[inputs.len() + index]
+            ));
+        }
+        for output in outputs.iter().rev() {
+            self.line("    set a, pop");
             self.store_named(&output.name, &output.ty)?;
         }
         Ok(())
@@ -834,10 +859,14 @@ impl Emitter {
 
     fn load_ident(&mut self, name: &str, expected: &Type) -> Result<(), Diagnostic> {
         if let Some(binding) = self.bindings.get(name).cloned() {
-            self.line(&format!(
-                "    set a, {}",
-                self.frame_operand(binding.offset)
-            ));
+            match binding.location {
+                BindingLocation::Frame(offset) => {
+                    self.line(&format!("    set a, {}", self.frame_operand(offset)));
+                }
+                BindingLocation::Register(register) => {
+                    self.line(&format!("    set a, {register}"));
+                }
+            }
             return self.mask(&binding.ty);
         }
         if let Some(value) = self.constants.get(name).copied() {
@@ -860,8 +889,13 @@ impl Emitter {
 
     fn emit_named_address(&mut self, name: &str) -> Result<(), Diagnostic> {
         if let Some(binding) = self.bindings.get(name).cloned() {
+            let BindingLocation::Frame(offset) = binding.location else {
+                return Err(Diagnostic::new(format!(
+                    "cannot take address of register local `{name}`"
+                )));
+            };
             self.line("    set a, j");
-            self.line(&format!("    add a, {}", binding.offset));
+            self.line(&format!("    add a, {offset}"));
         } else if self.globals.contains_key(name) {
             self.line(&format!("    set a, __ezra_global_{name}"));
         } else if self.embeds.contains_key(name) {
@@ -896,7 +930,7 @@ impl Emitter {
     }
     fn store_named(&mut self, name: &str, ty: &Type) -> Result<(), Diagnostic> {
         if let Some(binding) = self.bindings.get(name).cloned() {
-            self.store_frame(binding.offset);
+            self.store_binding(&binding);
             Ok(())
         } else if self.globals.contains_key(name) {
             self.line(&format!("    set [__ezra_global_{name}], a"));
@@ -910,8 +944,24 @@ impl Emitter {
             )))
         }
     }
-    fn store_frame(&mut self, offset: i16) {
-        self.line(&format!("    set {}, a", self.frame_operand(offset)));
+    fn store_binding(&mut self, binding: &Binding) {
+        match binding.location {
+            BindingLocation::Frame(offset) => {
+                self.line(&format!("    set {}, a", self.frame_operand(offset)));
+            }
+            BindingLocation::Register(register) => {
+                self.line(&format!("    set {register}, a"));
+            }
+        }
+    }
+
+    fn binding_address_operand(&self, binding: &Binding, name: &str) -> Result<String, Diagnostic> {
+        match binding.location {
+            BindingLocation::Frame(offset) => Ok(format!("j + {offset}")),
+            BindingLocation::Register(_) => Err(Diagnostic::new(format!(
+                "cannot take address of register local `{name}`"
+            ))),
+        }
     }
 
     fn emit_place_address(&mut self, place: &Place) -> Result<(), Diagnostic> {
@@ -1303,54 +1353,140 @@ fn return_type_params_none(
         args.len()
     )))
 }
-fn plan_locals(body: &[Stmt], emitter: &Emitter) -> Result<HashMap<String, Binding>, Diagnostic> {
+fn plan_locals(
+    body: &[Stmt],
+    emitter: &Emitter,
+) -> Result<(HashMap<String, Binding>, usize), Diagnostic> {
     fn collect(
         body: &[Stmt],
         emitter: &Emitter,
-        locals: &mut HashMap<String, Binding>,
-        next: &mut i16,
+        locals: &mut Vec<(String, Type)>,
+        names: &mut HashSet<String>,
     ) -> Result<(), Diagnostic> {
         for stmt in body {
             match stmt {
                 Stmt::Let { name, ty, .. } => {
-                    if locals
-                        .insert(
-                            name.clone(),
-                            Binding {
-                                offset: *next,
-                                ty: ty.clone(),
-                            },
-                        )
-                        .is_some()
-                    {
+                    if !names.insert(name.clone()) {
                         return Err(Diagnostic::new(format!("duplicate DCPU local `{name}`")));
                     }
-                    let words = i16::try_from(emitter.type_words(ty)?)
-                        .map_err(|_| Diagnostic::new("DCPU local frame is too large"))?;
-                    *next = next
-                        .checked_sub(words)
-                        .ok_or_else(|| Diagnostic::new("DCPU local frame is too large"))?;
+                    emitter.type_words(ty)?;
+                    locals.push((name.clone(), ty.clone()));
                 }
                 Stmt::If {
                     then_body,
                     else_body,
                     ..
                 } => {
-                    collect(then_body, emitter, locals, next)?;
-                    collect(else_body, emitter, locals, next)?;
+                    collect(then_body, emitter, locals, names)?;
+                    collect(else_body, emitter, locals, names)?;
                 }
                 Stmt::While { body, .. } | Stmt::Loop { body } => {
-                    collect(body, emitter, locals, next)?
+                    collect(body, emitter, locals, names)?
                 }
                 _ => {}
             }
         }
         Ok(())
     }
-    let mut locals = HashMap::new();
-    let mut next = -1;
-    collect(body, emitter, &mut locals, &mut next)?;
-    Ok(locals)
+
+    let mut declared = Vec::new();
+    collect(body, emitter, &mut declared, &mut HashSet::new())?;
+    let source_locals = declared
+        .iter()
+        .map(|(name, ty)| {
+            Ok(SourceLocal::new(
+                name.clone(),
+                u32::try_from(emitter.type_words(ty)?)
+                    .map_err(|_| Diagnostic::new("DCPU local frame is too large"))?,
+                1,
+                DCPU_SCALAR_CLASS,
+            )
+            .with_spill_classes(vec![DCPU_STACK_SPILL_CLASS])
+            .with_force_memory(emitter.is_aggregate(ty)))
+        })
+        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    let allocation = allocate_source_locals(
+        &dcpu_regalloc_target(),
+        &source_locals,
+        body,
+        &[PhysReg(0), PhysReg(1), PhysReg(2), PhysReg(3)],
+    )
+    .map_err(|diagnostics| {
+        Diagnostic::new(format!(
+            "DCPU local register allocation failed: {}",
+            diagnostics
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    })?;
+
+    let frame_words = allocation
+        .allocation
+        .spill_slots
+        .iter()
+        .map(|slot| slot.offset + slot.size)
+        .max()
+        .unwrap_or(0);
+    let frame_words = usize::try_from(frame_words)
+        .map_err(|_| Diagnostic::new("DCPU local frame is too large"))?;
+    let mut bindings = HashMap::new();
+    for (name, ty) in declared {
+        let vreg = allocation.locals.vreg(&name).ok_or_else(|| {
+            Diagnostic::new(format!("missing DCPU local allocation for `{name}`"))
+        })?;
+        let location = match allocation.allocation.location(vreg) {
+            Some(Location::Register(register)) => BindingLocation::Register(
+                *DCPU_LOCAL_REGISTERS
+                    .get(register.0)
+                    .ok_or_else(|| Diagnostic::new("invalid DCPU allocated register"))?,
+            ),
+            Some(Location::Spill(slot_index)) => {
+                let slot = allocation
+                    .allocation
+                    .spill_slots
+                    .get(slot_index)
+                    .ok_or_else(|| Diagnostic::new("invalid DCPU spill slot"))?;
+                let end = slot
+                    .offset
+                    .checked_add(slot.size)
+                    .ok_or_else(|| Diagnostic::new("DCPU local frame is too large"))?;
+                BindingLocation::Frame(
+                    i16::try_from(end)
+                        .map_err(|_| Diagnostic::new("DCPU local frame is too large"))?
+                        .checked_neg()
+                        .ok_or_else(|| Diagnostic::new("DCPU local frame is too large"))?,
+                )
+            }
+            Some(Location::Unused) | None => {
+                return Err(Diagnostic::new(format!(
+                    "DCPU local `{name}` has no storage allocation"
+                )));
+            }
+        };
+        bindings.insert(name, Binding { location, ty });
+    }
+    Ok((bindings, frame_words))
+}
+
+fn dcpu_regalloc_target() -> Target {
+    Target {
+        units: DCPU_LOCAL_REGISTERS
+            .iter()
+            .map(|name| RegisterUnit::new(*name))
+            .collect(),
+        registers: DCPU_LOCAL_REGISTERS
+            .iter()
+            .enumerate()
+            .map(|(index, name)| PhysicalRegister::new(*name, vec![RegUnit(index)]))
+            .collect(),
+        register_classes: vec![RegisterClass::new(
+            "word",
+            (0..DCPU_LOCAL_REGISTERS.len()).map(PhysReg).collect(),
+        )],
+        spill_classes: vec![SpillClass::new("stack-words", None, 1).with_base_alignment(1)],
+    }
 }
 fn assign_binary(op: AssignOp) -> BinaryOp {
     match op {
@@ -1408,8 +1544,13 @@ fn function_label(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        asm::AssemblyOptions, parser::parse_program, target::CpuFamily,
-        vm::assemble_subset_with_symbols_at,
+        asm::AssemblyOptions,
+        parser::parse_program,
+        target::CpuFamily,
+        vm::{
+            TestImage, TestRunOptions, TestRunner, assemble_subset_at,
+            assemble_subset_with_symbols_at,
+        },
     };
     use std::path::Path;
     fn emit(source: &str) -> String {
@@ -1440,7 +1581,7 @@ mod tests {
     #[test]
     fn globals_arrays_structs_pointers_strings_and_mmio_assemble() {
         let assembly = emit(
-            "struct Pair { left: u16 right: u16 } global values: [u16; 2] = [1, 2] global pair: Pair = Pair { left: 3, right: 4 } mmio SCREEN: u16 = 0x8000 fn main() { values[1] = 7; let equal: bool = values[0] == values[1]; let unequal: bool = values[0] != values[1]; pair.right += 1; let p: ptr<u16> = &values[0]; *p = 9; SCREEN = values[1]; let s: ptr<u8> = \"ok\" }",
+            "struct Pair { left: u16 right: u16 } global values: [u16; 2] = [1, 2] global pair: Pair = Pair { left: 3, right: 4 } mmio SCREEN: u16 = 0x8000 fn main() { values[1] = 7; let equal: bool = values[0] == values[1]; let unequal: bool = values[0] != values[1]; pair.right += 1; let p: ptr<u16> = &values[0]; *p = 9; let s: ptr<u8> = \"ok\"; SCREEN = cast<u16>(*s) }",
         );
         assert!(assembly.contains("__ezra_global_values:"));
         assert!(assembly.contains("__ezra_string_"));
@@ -1529,7 +1670,7 @@ mod tests {
                 let masked: u16 = word & 0x00ffu16
                 let sum: u16 = word + 1u16
                 let narrow: u8 = byte & 0x0fu8
-                return masked + sum
+                return masked + sum + cast<u16>(narrow)
             }
             fn main() {
                 let result: u16 = operations(0x1234u16, 0x2fu8)
@@ -1543,6 +1684,124 @@ mod tests {
             !assembly.contains("    set push, a\n    set a, 0x0001\n    set b, pop\n    add b, a"),
             "{assembly}"
         );
+    }
+
+    #[test]
+    fn keeps_straight_scalar_locals_in_registers_without_a_local_frame() {
+        let assembly = emit(
+            "volatile mmio INPUT: u16 = 0x8000 volatile mmio OUTPUT: u16 = 0x8001 fn main() { let first: u16 = INPUT; let second: u16 = INPUT; first += second; OUTPUT = first; OUTPUT = second }",
+        );
+
+        assert!(!assembly.contains("    sub sp,"), "{assembly}");
+        assert!(assembly.contains("    set c, a"), "{assembly}");
+        assert!(assembly.contains("    set x, a"), "{assembly}");
+        assert!(assembly.contains("    set a, c"), "{assembly}");
+        assert!(assembly.contains("    set a, x"), "{assembly}");
+    }
+
+    #[test]
+    fn spills_values_live_across_calls() {
+        let assembly = emit(
+            "volatile mmio INPUT: u16 = 0x8000 volatile mmio OUTPUT: u16 = 0x8001 fn touch(value: u16) -> u16 { return value } fn main() { let live: u16 = INPUT; touch(0); OUTPUT = live }",
+        );
+
+        assert!(
+            assembly.contains("_main:\n    set push, j\n    set j, sp\n    sub sp, 1"),
+            "{assembly}"
+        );
+        assert!(assembly.contains("    set [j + -1], a"), "{assembly}");
+        assert!(assembly.contains("    set a, [j + -1]"), "{assembly}");
+    }
+
+    #[test]
+    fn spills_values_live_across_inline_asm() {
+        let assembly = emit(
+            "volatile mmio INPUT: u16 = 0x8000 volatile mmio OUTPUT: u16 = 0x8001 fn main() { let live: u16 = INPUT; asm volatile(clobber memory) { \"set c, 0\" \"set x, 0\" \"set y, 0\" \"set z, 0\" } OUTPUT = live }",
+        );
+
+        assert!(
+            assembly.contains("_main:\n    set push, j\n    set j, sp\n    sub sp, 1"),
+            "{assembly}"
+        );
+        assert!(assembly.contains("    set [j + -1], a"), "{assembly}");
+        assert!(assembly.contains("    set a, [j + -1]"), "{assembly}");
+    }
+
+    #[test]
+    fn address_taken_and_aggregate_locals_use_frame_slots() {
+        let assembly = emit(
+            "fn main() -> u16 { let scalar: u16 = 5; let pointer: ptr<u16> = &scalar; let values: [u16; 2] = [2, 3]; return *pointer + values[1] }",
+        );
+
+        assert!(
+            assembly.contains("_main:\n    set push, j\n    set j, sp\n    sub sp, 3"),
+            "{assembly}"
+        );
+        assert!(assembly.contains("    set [j + -1], a"), "{assembly}");
+        assert!(assembly.contains("    set [j + -3 + 0], a"), "{assembly}");
+        assert!(assembly.contains("    set [j + -3 + 1], a"), "{assembly}");
+    }
+
+    #[test]
+    fn reuses_non_overlapping_aggregate_spill_slots() {
+        let assembly = emit(
+            "global sink: u16 = 0 fn main() { let first: [u16; 2] = [1, 2]; sink = first[0]; let second: [u16; 2] = [3, 4]; sink = second[1] }",
+        );
+
+        assert!(
+            assembly.contains("_main:\n    set push, j\n    set j, sp\n    sub sp, 2"),
+            "{assembly}"
+        );
+        assert!(!assembly.contains("    sub sp, 4"), "{assembly}");
+        assert_eq!(
+            assembly.matches("    set [j + -2 + 0], a").count(),
+            2,
+            "{assembly}"
+        );
+    }
+
+    #[test]
+    fn allocated_arithmetic_and_control_flow_execute_on_dcpu() {
+        let assembly = emit(
+            r#"
+            fn bump(value: u16) -> u16 { return value + 1 }
+            fn main() -> u16 {
+                let total: u16 = 2
+                let index: u16 = 0
+                while index < 4 {
+                    total += bump(index)
+                    index += 1
+                }
+                if total == 12 { return total }
+                return 1
+            }
+            "#,
+        );
+        let assembly = assembly.replace(
+            "__ezra_exit:\n    set pc, __ezra_exit\n",
+            "__ezra_exit:\n    set [0xfff2], a\n    set [0xfff3], 1\n",
+        );
+        let bytes = assemble_subset_at(CpuFamily::Dcpu, &assembly, 0)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        let run = TestRunner::default()
+            .run(
+                &TestImage {
+                    cpu_family: CpuFamily::Dcpu,
+                    base_addr: 0,
+                    bytes,
+                },
+                &TestRunOptions {
+                    instruction_budget: 2_000,
+                    initial_ports: Vec::new(),
+                    initial_memory: Vec::new(),
+                    stack_top: 0x1_fffe,
+                },
+            )
+            .unwrap();
+
+        assert!(run.halted, "{run:?}\n{assembly}");
+        assert_eq!(run.result_code, 12, "{assembly}");
+        assert_eq!(run.failure, None, "{assembly}");
     }
 
     #[test]

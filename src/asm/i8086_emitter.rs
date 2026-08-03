@@ -19,6 +19,11 @@ use crate::{
     compat::prelude::*,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::CpuFamily,
     tbir::{
         TbirProgram,
@@ -53,14 +58,36 @@ pub fn emit_i8086_assembly_with_options(
         .map(|asm| {
             let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::I8086);
             let asm = relax_i8086_branches(&asm);
-            with_readability_comments(asm, program, &options, "i8086")
+            with_readability_comments(asm, program, &options, "i8086", &tbir.source_comments)
         })
+}
+
+#[derive(Clone, Copy)]
+enum BindingLocation {
+    Static(Storage),
+    Bp,
 }
 
 #[derive(Clone)]
 struct Binding {
-    storage: Storage,
+    location: BindingLocation,
     ty: Type,
+}
+
+#[derive(Clone, Copy)]
+enum PlannedLocation {
+    Bp,
+    Spill(usize),
+}
+
+struct PlannedLocal {
+    location: PlannedLocation,
+    ty: Type,
+}
+
+struct FunctionLocals {
+    bindings: HashMap<String, PlannedLocal>,
+    spill_sizes: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -78,6 +105,7 @@ enum Address {
 enum MaterializedPlace {
     Direct(u32),
     Indirect(Storage),
+    Bp,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -584,6 +612,7 @@ impl Emitter {
                 function.name
             )));
         }
+        let local_plan = plan_function_locals(function, &self.model)?;
         let return_label = self.next_label(&format!("{}_return", function.name));
         self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(HashMap::new());
@@ -618,8 +647,28 @@ impl Emitter {
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
         for (param, slot) in function.params.iter().zip(signature.argument_slots) {
             let storage = self.model.allocate_type(&param.ty)?;
-            self.bind(param.name.clone(), storage, param.ty.clone())?;
+            self.bind(
+                param.name.clone(),
+                BindingLocation::Static(storage),
+                param.ty.clone(),
+            )?;
             self.copy(slot, storage, storage.size);
+        }
+        let spill_storage = local_plan
+            .spill_sizes
+            .iter()
+            .map(|size| self.model.allocate(*size))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (name, planned) in local_plan.bindings {
+            let location = match planned.location {
+                PlannedLocation::Bp => BindingLocation::Bp,
+                PlannedLocation::Spill(slot) => BindingLocation::Static(
+                    *spill_storage
+                        .get(slot)
+                        .ok_or_else(|| Diagnostic::new("invalid i8086 static spill slot"))?,
+                ),
+            };
+            self.bind(name, location, planned.ty)?;
         }
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
@@ -697,9 +746,8 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match stmt {
             Stmt::Let { name, ty, value } => {
-                let storage = self.model.allocate_type(ty)?;
-                self.bind(name.clone(), storage, ty.clone())?;
-                self.emit_initializer(storage, ty, value)?;
+                let binding = self.binding(name)?;
+                self.emit_binding_initializer(&binding, ty, value)?;
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
@@ -731,7 +779,7 @@ impl Emitter {
                                 && self.model.resolved_type(&binding.ty).ok()
                                     == self.model.resolved_type(&ty).ok() =>
                         {
-                            self.copy(binding.storage, destination, u32::from(width));
+                            self.copy_binding_to_storage(&binding, destination, u32::from(width));
                             return Ok(());
                         }
                         _ => {}
@@ -898,6 +946,41 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_binding_initializer(
+        &mut self,
+        binding: &Binding,
+        ty: &Type,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let BindingLocation::Bp = binding.location else {
+            return self.emit_initializer(self.static_storage(binding)?, ty, value);
+        };
+        debug_assert_eq!(self.scalar_width(ty)?, 2);
+        match value {
+            Expr::Int(value) | Expr::TypedInt(value, _) => {
+                self.line(&format!("    mov bp,{}", format_immediate(*value, 2)));
+            }
+            Expr::Bool(value) => self.line(&format!("    mov bp,{}", imm(u32::from(*value)))),
+            Expr::Char(value) => self.line(&format!("    mov bp,{}", imm(u32::from(*value)))),
+            Expr::Ident(source) => {
+                let source = self.binding(source)?;
+                match source.location {
+                    BindingLocation::Bp => {}
+                    BindingLocation::Static(storage) => {
+                        self.load_ax(storage.address);
+                        self.line("    mov bp,ax");
+                    }
+                }
+            }
+            _ => {
+                self.emit_expr(value, ty)?;
+                self.load_ax(self.r0.address);
+                self.line("    mov bp,ax");
+            }
+        }
+        Ok(())
+    }
+
     fn emit_initializer(
         &mut self,
         storage: Storage,
@@ -907,7 +990,7 @@ impl Emitter {
         match (self.model.resolved_type(ty)?, value) {
             (Type::Array { .. }, Expr::Ident(name)) => {
                 let source = self.binding(name)?;
-                self.copy(source.storage, storage, storage.size);
+                self.copy(self.static_storage(&source)?, storage, storage.size);
             }
             (Type::Array { element, len }, Expr::Array(values)) => {
                 let element_size = self.model.type_size(&element)?;
@@ -946,7 +1029,8 @@ impl Emitter {
                 }
             }
             (Type::Named(name), Expr::Ident(source)) if self.model.structs.contains_key(&name) => {
-                self.copy(self.binding(source)?.storage, storage, storage.size);
+                let source = self.binding(source)?;
+                self.copy(self.static_storage(&source)?, storage, storage.size);
             }
             (resolved @ Type::Array { .. }, Expr::Deref(pointer)) => {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(resolved)))?;
@@ -976,7 +1060,7 @@ impl Emitter {
                     let width = self.scalar_width(&resolved)?;
                     let source_width = self.scalar_width(&binding.ty)?;
                     if source_width == width && self.model.resolved_type(&binding.ty)? == resolved {
-                        self.copy(binding.storage, storage, u32::from(width));
+                        self.copy_binding_to_storage(&binding, storage, u32::from(width));
                         return Ok(());
                     }
                 }
@@ -1102,7 +1186,11 @@ impl Emitter {
                 } else {
                     let binding = self.binding(name)?;
                     let source_width = self.scalar_width(&binding.ty)?;
-                    self.copy(binding.storage, self.r0, u32::from(source_width.min(width)));
+                    self.copy_binding_to_storage(
+                        &binding,
+                        self.r0,
+                        u32::from(source_width.min(width)),
+                    );
                     self.extend_result(source_width, width, self.type_is_signed(&binding.ty)?);
                 }
             }
@@ -1126,7 +1214,8 @@ impl Emitter {
                     self.line(&format!("    mov ax,{}", function_pointer_label(name)));
                     self.line(&format!("    mov {},ax", mem(self.r0.address)));
                 } else {
-                    self.load_constant(i64::from(self.binding(name)?.storage.address), width)
+                    let binding = self.binding(name)?;
+                    self.load_constant(i64::from(self.static_storage(&binding)?.address), width)
                 }
             }
             Expr::AddressOfIndex { name, index } => {
@@ -1323,7 +1412,7 @@ impl Emitter {
                         argument_slots,
                     },
                     None,
-                    Some(binding.storage),
+                    Some(self.static_storage(&binding)?),
                 )
             };
         if self
@@ -2173,6 +2262,11 @@ impl Emitter {
     }
 
     fn materialize_place(&mut self, place: &Place) -> Result<MaterializedPlace, Diagnostic> {
+        if let Place::Ident(name) = place
+            && matches!(self.binding(name)?.location, BindingLocation::Bp)
+        {
+            return Ok(MaterializedPlace::Bp);
+        }
         match self.place_address(place)? {
             Address::Direct(address) => Ok(MaterializedPlace::Direct(address)),
             Address::Indirect => {
@@ -2197,6 +2291,10 @@ impl Emitter {
                 self.load_bx(address.address);
                 self.load_indirect(width);
             }
+            MaterializedPlace::Bp => {
+                self.line("    mov ax,bp");
+                self.line(&format!("    mov {},ax", mem(self.r0.address)));
+            }
         }
     }
 
@@ -2209,12 +2307,20 @@ impl Emitter {
                 self.load_bx(address.address);
                 self.copy_storage_to_indirect(source, size);
             }
+            MaterializedPlace::Bp => {
+                debug_assert_eq!(size, 2);
+                self.load_ax(source.address);
+                self.line("    mov bp,ax");
+            }
         }
     }
 
     fn place_address(&mut self, place: &Place) -> Result<Address, Diagnostic> {
         match place {
-            Place::Ident(name) => Ok(Address::Direct(self.binding(name)?.storage.address)),
+            Place::Ident(name) => {
+                let binding = self.binding(name)?;
+                Ok(Address::Direct(self.static_storage(&binding)?.address))
+            }
             Place::Index { name, index } => {
                 self.named_index_address(name, index)?;
                 Ok(Address::Indirect)
@@ -2280,7 +2386,7 @@ impl Emitter {
                 let resolved = self.model.resolved_type(&binding.ty)?;
                 if let Type::Ptr(inner) = resolved {
                     let field = self.model.field(&inner, field_name)?.clone();
-                    self.load_bx(binding.storage.address);
+                    self.load_binding_into_bx(&binding);
                     if field.offset != 0 {
                         self.line(&format!("    add bx,{}", imm(field.offset)));
                     }
@@ -2288,7 +2394,7 @@ impl Emitter {
                 } else {
                     let field = self.model.field(&resolved, field_name)?.clone();
                     Ok((
-                        Address::Direct(binding.storage.address + field.offset),
+                        Address::Direct(self.static_storage(&binding)?.address + field.offset),
                         field,
                     ))
                 }
@@ -2321,9 +2427,12 @@ impl Emitter {
         match (root, &resolved) {
             (AccessRoot::Storage(binding), Type::Array { len, .. }) => {
                 self.validate_const_array_index(index, len, name)?;
-                self.line(&format!("    mov bx,{}", imm(binding.storage.address)));
+                self.line(&format!(
+                    "    mov bx,{}",
+                    imm(self.static_storage(&binding)?.address)
+                ));
             }
-            (AccessRoot::Storage(binding), Type::Ptr(_)) => self.load_bx(binding.storage.address),
+            (AccessRoot::Storage(binding), Type::Ptr(_)) => self.load_binding_into_bx(&binding),
             (AccessRoot::Constant { address, .. }, Type::Ptr(_)) => {
                 self.line(&format!("    mov bx,{}", imm(address)));
             }
@@ -2339,10 +2448,13 @@ impl Emitter {
             AccessRoot::Storage(binding) => {
                 let resolved = self.model.resolved_type(&binding.ty)?;
                 if let Type::Ptr(inner) = resolved {
-                    self.load_bx(binding.storage.address);
+                    self.load_binding_into_bx(&binding);
                     *inner
                 } else {
-                    self.line(&format!("    mov bx,{}", imm(binding.storage.address)));
+                    self.line(&format!(
+                        "    mov bx,{}",
+                        imm(self.static_storage(&binding)?.address)
+                    ));
                     resolved
                 }
             }
@@ -2910,7 +3022,10 @@ impl Emitter {
         match input.class.as_str() {
             "reg8" => Ok("al".to_owned()),
             "reg16" => Ok("ax".to_owned()),
-            "mem" => Ok(mem(self.binding(&input.name)?.storage.address)),
+            "mem" => {
+                let binding = self.binding(&input.name)?;
+                Ok(mem(self.static_storage(&binding)?.address))
+            }
             "imm" => {
                 let width = self.model.type_width(&input.ty)?;
                 let value = self.model.constants[&input.name];
@@ -2930,7 +3045,10 @@ impl Emitter {
         match output.class.as_str() {
             "reg8" => Ok("al".to_owned()),
             "reg16" => Ok("ax".to_owned()),
-            "mem" => Ok(mem(self.binding(&output.name)?.storage.address)),
+            "mem" => {
+                let binding = self.binding(&output.name)?;
+                Ok(mem(self.static_storage(&binding)?.address))
+            }
             _ => Err(Diagnostic::new(format!(
                 "unsupported inline asm output class `{}`",
                 output.class
@@ -2942,7 +3060,8 @@ impl Emitter {
         match input.class.as_str() {
             "reg8" => {
                 if let Ok(binding) = self.binding(&input.name) {
-                    self.load_al(binding.storage.address);
+                    let storage = self.static_storage(&binding)?;
+                    self.load_al(storage.address);
                 } else {
                     self.line(&format!(
                         "    mov al,{}",
@@ -2952,7 +3071,10 @@ impl Emitter {
             }
             "reg16" => {
                 if let Ok(binding) = self.binding(&input.name) {
-                    self.load_ax(binding.storage.address);
+                    match binding.location {
+                        BindingLocation::Static(storage) => self.load_ax(storage.address),
+                        BindingLocation::Bp => self.line("    mov ax,bp"),
+                    }
                 } else {
                     self.line(&format!(
                         "    mov ax,{}",
@@ -2972,8 +3094,16 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         let binding = self.binding(&output.name)?;
         match output.class.as_str() {
-            "reg8" => self.store_al(binding.storage.address),
-            "reg16" => self.line(&format!("    mov {},ax", mem(binding.storage.address))),
+            "reg8" => {
+                let storage = self.static_storage(&binding)?;
+                self.store_al(storage.address);
+            }
+            "reg16" => match binding.location {
+                BindingLocation::Static(storage) => {
+                    self.line(&format!("    mov {},ax", mem(storage.address)))
+                }
+                BindingLocation::Bp => self.line("    mov bp,ax"),
+            },
             "mem" => {}
             _ => unreachable!("validated inline asm output class"),
         }
@@ -3038,7 +3168,12 @@ impl Emitter {
         }
     }
 
-    fn bind(&mut self, name: String, storage: Storage, ty: Type) -> Result<(), Diagnostic> {
+    fn bind(
+        &mut self,
+        name: String,
+        location: BindingLocation,
+        ty: Type,
+    ) -> Result<(), Diagnostic> {
         if self
             .scopes
             .iter()
@@ -3052,7 +3187,7 @@ impl Emitter {
         self.scopes
             .last_mut()
             .expect("function scope")
-            .insert(name, Binding { storage, ty });
+            .insert(name, Binding { location, ty });
         Ok(())
     }
 
@@ -3102,7 +3237,7 @@ impl Emitter {
         }
         if let Some(storage) = self.model.globals.get(name) {
             return Ok(Binding {
-                storage: *storage,
+                location: BindingLocation::Static(*storage),
                 ty: self.model.global_types[name].clone(),
             });
         }
@@ -3114,6 +3249,33 @@ impl Emitter {
             .get(name)
             .copied()
             .ok_or_else(|| Diagnostic::new(format!("unknown port `{name}`")))
+    }
+
+    fn static_storage(&self, binding: &Binding) -> Result<Storage, Diagnostic> {
+        match binding.location {
+            BindingLocation::Static(storage) => Ok(storage),
+            BindingLocation::Bp => Err(Diagnostic::new(
+                "BP local unexpectedly requires addressable storage",
+            )),
+        }
+    }
+
+    fn copy_binding_to_storage(&mut self, binding: &Binding, target: Storage, size: u32) {
+        match binding.location {
+            BindingLocation::Static(source) => self.copy(source, target, size),
+            BindingLocation::Bp => {
+                debug_assert_eq!(size, 2);
+                self.line("    mov ax,bp");
+                self.line(&format!("    mov {},ax", mem(target.address)));
+            }
+        }
+    }
+
+    fn load_binding_into_bx(&mut self, binding: &Binding) {
+        match binding.location {
+            BindingLocation::Static(storage) => self.load_bx(storage.address),
+            BindingLocation::Bp => self.line("    mov bx,bp"),
+        }
     }
 
     fn copy(&mut self, source: Storage, target: Storage, size: u32) {
@@ -3365,11 +3527,13 @@ impl Emitter {
                 .flat_map(|scope| scope.iter())
                 .filter(|(name, _)| live_after.contains(*name))
                 .filter_map(|(_, binding)| {
-                    let start = binding.storage.address.max(live.address);
-                    let end = binding
-                        .storage
+                    let BindingLocation::Static(storage) = binding.location else {
+                        return None;
+                    };
+                    let start = storage.address.max(live.address);
+                    let end = storage
                         .address
-                        .saturating_add(binding.storage.size)
+                        .saturating_add(storage.size)
                         .min(live.address.saturating_add(live.size));
                     (start < end).then_some((start, end))
                 })
@@ -3386,7 +3550,12 @@ impl Emitter {
             .filter_map(|arg| match arg {
                 // The callee can mutate this storage through its pointer parameter.
                 // Restoring a pre-call snapshot would discard that mutation.
-                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
+                Expr::AddressOf(name) => self.binding(name).ok().and_then(|binding| match binding
+                    .location
+                {
+                    BindingLocation::Static(storage) => Some(storage),
+                    BindingLocation::Bp => None,
+                }),
                 _ => None,
             })
             .filter_map(|storage| {
@@ -3503,6 +3672,184 @@ impl Emitter {
         self.out.push_str(line);
         self.out.push('\n');
     }
+}
+
+const I8086_WORD_CLASS: RegClass = RegClass(0);
+const I8086_BYTE_CLASS: RegClass = RegClass(1);
+const I8086_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+const I8086_BP_REGISTER: PhysReg = PhysReg(14);
+
+fn i8086_local_target() -> Target {
+    Target {
+        units: [
+            "al", "ah", "bl", "bh", "cl", "ch", "dl", "dh", "si", "di", "bp",
+        ]
+        .into_iter()
+        .map(RegisterUnit::new)
+        .collect(),
+        registers: vec![
+            PhysicalRegister::new("ax", vec![RegUnit(0), RegUnit(1)]),
+            PhysicalRegister::new("al", vec![RegUnit(0)]),
+            PhysicalRegister::new("ah", vec![RegUnit(1)]),
+            PhysicalRegister::new("bx", vec![RegUnit(2), RegUnit(3)]),
+            PhysicalRegister::new("bl", vec![RegUnit(2)]),
+            PhysicalRegister::new("bh", vec![RegUnit(3)]),
+            PhysicalRegister::new("cx", vec![RegUnit(4), RegUnit(5)]),
+            PhysicalRegister::new("cl", vec![RegUnit(4)]),
+            PhysicalRegister::new("ch", vec![RegUnit(5)]),
+            PhysicalRegister::new("dx", vec![RegUnit(6), RegUnit(7)]),
+            PhysicalRegister::new("dl", vec![RegUnit(6)]),
+            PhysicalRegister::new("dh", vec![RegUnit(7)]),
+            PhysicalRegister::new("si", vec![RegUnit(8)]),
+            PhysicalRegister::new("di", vec![RegUnit(9)]),
+            PhysicalRegister::new("bp", vec![RegUnit(10)]),
+        ],
+        register_classes: vec![
+            RegisterClass::new("local-word", vec![I8086_BP_REGISTER]),
+            RegisterClass::new("byte", vec![]),
+        ],
+        spill_classes: vec![SpillClass::new("static", None, 1).with_base_alignment(1)],
+    }
+}
+
+fn plan_function_locals(
+    function: &Function,
+    model: &SemanticModel,
+) -> Result<FunctionLocals, Diagnostic> {
+    let mut source_locals = Vec::new();
+    let mut local_types = HashMap::new();
+    collect_i8086_locals(&function.body, model, &mut source_locals, &mut local_types)?;
+    let allocation = allocate_source_locals(
+        &i8086_local_target(),
+        &source_locals,
+        &function.body,
+        &[I8086_BP_REGISTER],
+    )
+    .map_err(|diagnostics| {
+        Diagnostic::new(
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.message)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })?;
+
+    let spill_sizes = allocation
+        .allocation
+        .spill_slots
+        .iter()
+        .map(|slot| {
+            debug_assert_eq!(slot.class, I8086_STATIC_SPILL_CLASS);
+            slot.size
+        })
+        .collect();
+    let mut bindings = HashMap::new();
+    for (name, ty) in local_types {
+        let vreg = allocation
+            .locals
+            .vreg(&name)
+            .ok_or_else(|| Diagnostic::new(format!("missing allocation for local `{name}`")))?;
+        let location = match allocation.allocation.location(vreg) {
+            Some(Location::Register(register)) if register == I8086_BP_REGISTER => {
+                PlannedLocation::Bp
+            }
+            Some(Location::Spill(slot)) => PlannedLocation::Spill(slot),
+            Some(Location::Register(_)) => {
+                return Err(Diagnostic::new(format!(
+                    "invalid i8086 local register for `{name}`"
+                )));
+            }
+            Some(Location::Unused) | None => {
+                return Err(Diagnostic::new(format!(
+                    "source allocator did not place local `{name}`"
+                )));
+            }
+        };
+        bindings.insert(name, PlannedLocal { location, ty });
+    }
+    Ok(FunctionLocals {
+        bindings,
+        spill_sizes,
+    })
+}
+
+fn collect_i8086_locals(
+    body: &[Stmt],
+    model: &SemanticModel,
+    locals: &mut Vec<SourceLocal>,
+    local_types: &mut HashMap<String, Type>,
+) -> Result<(), Diagnostic> {
+    for stmt in body {
+        match stmt {
+            Stmt::Let { name, ty, .. } => {
+                let resolved = model.resolved_type(ty)?;
+                let aggregate = matches!(&resolved, Type::Array { .. })
+                    || matches!(&resolved, Type::Named(name) if model.structs.contains_key(name));
+                let function_pointer = matches!(&resolved, Type::Function { .. })
+                    || matches!(&resolved, Type::Ptr(inner) if matches!(inner.as_ref(), Type::Function { .. }));
+                let size = model.type_size(&resolved)?;
+                let word = !aggregate && model.type_width(&resolved).ok() == Some(2);
+                if local_types.insert(name.clone(), ty.clone()).is_some() {
+                    return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                }
+                locals.push(
+                    SourceLocal::new(
+                        name.clone(),
+                        size,
+                        1,
+                        if word {
+                            I8086_WORD_CLASS
+                        } else {
+                            I8086_BYTE_CLASS
+                        },
+                    )
+                    .with_spill_classes(vec![I8086_STATIC_SPILL_CLASS])
+                    .with_force_memory(
+                        aggregate || function_pointer || local_is_inline_asm_memory(body, name),
+                    ),
+                );
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_i8086_locals(then_body, model, locals, local_types)?;
+                collect_i8086_locals(else_body, model, locals, local_types)?;
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_i8086_locals(body, model, locals, local_types)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn local_is_inline_asm_memory(body: &[Stmt], name: &str) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Asm {
+            inputs, outputs, ..
+        } => {
+            inputs
+                .iter()
+                .any(|input| input.name == name && input.class == "mem")
+                || outputs
+                    .iter()
+                    .any(|output| output.name == name && output.class == "mem")
+        }
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            local_is_inline_asm_memory(then_body, name)
+                || local_is_inline_asm_memory(else_body, name)
+        }
+        Stmt::While { body, .. } | Stmt::Loop { body } => local_is_inline_asm_memory(body, name),
+        _ => false,
+    })
 }
 
 fn bool_ty() -> Type {
@@ -4521,6 +4868,128 @@ mod tests {
             .unwrap()
     }
 
+    fn local_plan(source: &str, function_name: &str) -> FunctionLocals {
+        let program = parse_program(Path::new("i8086-regalloc-test.ezra"), source).unwrap();
+        let options = AssemblyOptions {
+            cpu: CpuFamily::I8086,
+            ram_base: Address24::new(0x4000),
+            rodata_base: Address24::new(0x6000),
+            asset_base: Address24::new(0x7000),
+            stack_top: Address24::new(0xfffe),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        };
+        let hir = HirProgram::from_ast(&program).unwrap();
+        let tbir = TbirProgram::lower(&hir, &program, &options).unwrap();
+        let model = SemanticModel::from_program(
+            &tbir.lowered_program,
+            16,
+            options.ram_base.get(),
+            options.rodata_base.get(),
+            options.asset_base.get(),
+        )
+        .unwrap();
+        let function = tbir
+            .lowered_program
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Function(function) if function.name == function_name => Some(function),
+                _ => None,
+            })
+            .unwrap();
+        plan_function_locals(function, &model).unwrap()
+    }
+
+    #[test]
+    fn i8086_register_model_tracks_ax_aliases_and_reserves_bp_for_words() {
+        let target = i8086_local_target();
+        assert!(target.registers_alias(PhysReg(0), PhysReg(1)));
+        assert!(target.registers_alias(PhysReg(0), PhysReg(2)));
+        assert!(!target.registers_alias(PhysReg(1), PhysReg(2)));
+        assert!(target.registers_alias(PhysReg(3), PhysReg(4)));
+        assert!(target.registers_alias(PhysReg(6), PhysReg(8)));
+        assert!(target.registers_alias(PhysReg(9), PhysReg(11)));
+        assert_eq!(
+            target.register_classes[I8086_WORD_CLASS.0].registers,
+            vec![I8086_BP_REGISTER]
+        );
+        assert!(
+            target.register_classes[I8086_BYTE_CLASS.0]
+                .registers
+                .is_empty()
+        );
+        assert_eq!(
+            target.spill_classes[I8086_STATIC_SPILL_CLASS.0].name,
+            "static"
+        );
+    }
+
+    #[test]
+    fn bp_word_local_avoids_local_memory_traffic_and_strictly_assembles() {
+        let source = "fn value() -> u16 { let local: u16 = 42 local += 1 return local } fn main() { let result: u16 = value() }";
+        let plan = local_plan(source, "value");
+        assert!(matches!(
+            plan.bindings["local"].location,
+            PlannedLocation::Bp
+        ));
+
+        let assembly = emit_and_assemble(source);
+        let value = function_assembly(&assembly, "value");
+        assert!(value.contains("    mov bp,02Ah\n"), "{value}");
+        assert!(value.contains("    mov ax,bp\n"), "{value}");
+    }
+
+    #[test]
+    fn calls_and_address_taking_force_word_locals_to_static_spills() {
+        let call_plan = local_plan(
+            "global sink: u16 = 0 fn helper() {} fn test(input: u16) { let live: u16 = input live += 1 helper() sink = live } fn main() { test(7) }",
+            "test",
+        );
+        assert!(matches!(
+            call_plan.bindings["live"].location,
+            PlannedLocation::Spill(_)
+        ));
+
+        let address_plan = local_plan(
+            "global sink: u16 = 0 fn main() { let addressed: u16 = 7 addressed += 1 let pointer: ptr<u16> = &addressed; *pointer = 9 sink = *pointer }",
+            "main",
+        );
+        assert!(matches!(
+            address_plan.bindings["addressed"].location,
+            PlannedLocation::Spill(_)
+        ));
+
+        let asm_plan = local_plan(
+            "global sink: u16 = 1 fn main() { let live: u16 = sink live += 1 asm volatile { \"nop\" } sink = live }",
+            "main",
+        );
+        assert!(matches!(
+            asm_plan.bindings["live"].location,
+            PlannedLocation::Spill(_)
+        ));
+
+        emit_and_assemble(
+            "global sink: u16 = 0 fn helper() {} fn test(input: u16) { let live: u16 = input live += 1 helper() sink = live } fn main() { let addressed: u16 = 9 addressed += 1 let pointer: ptr<u16> = &addressed; *pointer = 11 sink = *pointer test(sink) }",
+        );
+    }
+
+    #[test]
+    fn nonoverlapping_static_locals_reuse_one_colored_spill_slot() {
+        let source = "global sink: u8 = 0 fn test(input: u8) { let first: u8 = input first += 1 sink = first let second: u8 = input second += 2 sink = second } fn main() { test(1) }";
+        let plan = local_plan(source, "test");
+        let PlannedLocation::Spill(first) = plan.bindings["first"].location else {
+            panic!("byte local must spill");
+        };
+        let PlannedLocation::Spill(second) = plan.bindings["second"].location else {
+            panic!("byte local must spill");
+        };
+        assert_eq!(first, second);
+        assert_eq!(plan.spill_sizes, vec![1]);
+
+        emit_and_assemble(source);
+    }
+
     #[test]
     fn rejects_array_initializer_for_scalar_global_with_a_specific_message() {
         let error = emit_error(
@@ -5047,9 +5516,8 @@ mod tests {
             fn main() { let value: u16 = gcd(48, 18) }
         "#,
         );
-        assert!(assembly.contains("push ax"));
-        assert!(assembly.contains("pop ax"));
         assert!(assembly.contains("call near _gcd"));
+        assert!(assembly.contains("mov bp,ax"), "{assembly}");
     }
 
     #[test]

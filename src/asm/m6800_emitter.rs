@@ -9,6 +9,11 @@ use crate::{
     ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, Type, UnaryOp},
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::CpuFamily,
     tbir::{
         TbirProgram,
@@ -40,10 +45,12 @@ pub fn emit_m6800_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    Emitter::new(model, CpuFamily::M6800)?.emit(&tbir.lowered_program).map(|asm| {
-        let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
-        with_readability_comments(asm, program, &options, "m6800")
-    })
+    Emitter::new(model, CpuFamily::M6800)?
+        .emit(&tbir.lowered_program)
+        .map(|asm| {
+            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
+            with_readability_comments(asm, program, &options, "m6800", &tbir.source_comments)
+        })
 }
 
 #[cfg(feature = "m6809")]
@@ -70,14 +77,16 @@ pub fn emit_m6809_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    Emitter::new(model, CpuFamily::M6809)?.emit(&tbir.lowered_program).map(|asm| {
-        let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
-        let asm = asm.replace(
-            "; target: Motorola M6800 scalar RAM ABI",
-            "; target: Motorola M6809 scalar RAM ABI",
-        );
-        with_readability_comments(asm, program, &options, "m6809")
-    })
+    Emitter::new(model, CpuFamily::M6809)?
+        .emit(&tbir.lowered_program)
+        .map(|asm| {
+            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
+            let asm = asm.replace(
+                "; target: Motorola M6800 scalar RAM ABI",
+                "; target: Motorola M6809 scalar RAM ABI",
+            );
+            with_readability_comments(asm, program, &options, "m6809", &tbir.source_comments)
+        })
 }
 
 #[derive(Clone)]
@@ -101,6 +110,7 @@ struct Emitter {
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
+    local_plans: Vec<HashMap<String, Binding>>,
     r1: Storage,
 }
 
@@ -116,6 +126,7 @@ impl Emitter {
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
+            local_plans: Vec::new(),
             r1,
         })
     }
@@ -186,11 +197,13 @@ impl Emitter {
         if let Some(ty) = &function.return_type {
             self.require_scalar(ty, "function return")?;
         }
+        let local_plan = plan_function_locals(function, &mut self.model, self.cpu)?;
         let return_label = self.next_label(&format!("{}_return", function.name));
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
         self.return_types.push(function.return_type.clone());
+        self.local_plans.push(local_plan);
         let signature = self.model.functions[&function.name].clone();
         for (param, slot) in function.params.iter().zip(signature.argument_slots) {
             self.bind(param.name.clone(), slot, param.ty.clone())?;
@@ -200,6 +213,7 @@ impl Emitter {
         self.line("    rts");
         self.return_types.pop();
         self.return_labels.pop();
+        self.local_plans.pop();
         self.scopes.pop();
         Ok(())
     }
@@ -215,7 +229,14 @@ impl Emitter {
         match stmt {
             Stmt::Let { name, ty, value } => {
                 self.require_scalar(ty, "local")?;
-                let storage = self.model.allocate(1)?;
+                let storage = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(name))
+                    .map(|binding| binding.storage)
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing allocation for local `{name}`"))
+                    })?;
                 self.bind(name.clone(), storage, ty.clone())?;
                 self.emit_expr(value, ty)?;
                 self.staa(storage.address);
@@ -799,6 +820,135 @@ impl Emitter {
     }
 }
 
+#[cfg(test)]
+const M6800_BYTE_CLASS: RegClass = RegClass(0);
+const M6800_LOCAL_CLASS: RegClass = RegClass(1);
+const M6800_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+
+fn m6800_local_target(cpu: CpuFamily) -> Target {
+    let mut registers = vec![
+        PhysicalRegister::new("a", vec![RegUnit(0)]),
+        PhysicalRegister::new("b", vec![RegUnit(1)]),
+    ];
+    if cpu == CpuFamily::M6809 {
+        registers.push(PhysicalRegister::new("d", vec![RegUnit(0), RegUnit(1)]));
+    }
+    Target {
+        units: vec![RegisterUnit::new("a"), RegisterUnit::new("b")],
+        registers,
+        register_classes: vec![
+            RegisterClass::new("accumulator-byte", vec![PhysReg(0), PhysReg(1)]),
+            RegisterClass::new("memory-local", Vec::new()),
+        ],
+        spill_classes: vec![
+            SpillClass::new("static", None, 0).for_register_classes(vec![M6800_LOCAL_CLASS]),
+        ],
+    }
+}
+
+fn plan_function_locals(
+    function: &Function,
+    model: &mut SemanticModel,
+    cpu: CpuFamily,
+) -> Result<HashMap<String, Binding>, Diagnostic> {
+    let mut source_locals = Vec::new();
+    let mut local_types = HashMap::new();
+    collect_source_locals(&function.body, &mut source_locals, &mut local_types)?;
+    let clobbers = (0..m6800_local_target(cpu).registers.len())
+        .map(PhysReg)
+        .collect::<Vec<_>>();
+    let planned = allocate_source_locals(
+        &m6800_local_target(cpu),
+        &source_locals,
+        &function.body,
+        &clobbers,
+    )
+    .map_err(regalloc_diagnostic)?;
+    let spill_bytes = planned
+        .allocation
+        .spill_slots
+        .iter()
+        .map(|slot| slot.offset.saturating_add(slot.size))
+        .max()
+        .unwrap_or(0);
+    let spill_region = model.allocate(spill_bytes)?;
+    let mut bindings = HashMap::new();
+    for (name, ty) in local_types {
+        let vreg = planned
+            .locals
+            .vreg(&name)
+            .ok_or_else(|| Diagnostic::new(format!("missing allocation for local `{name}`")))?;
+        let Location::Spill(slot_index) = planned.allocation.location(vreg).ok_or_else(|| {
+            Diagnostic::new(format!("source allocator did not place local `{name}`"))
+        })?
+        else {
+            return Err(Diagnostic::new(format!(
+                "M6800 local `{name}` was not allocated to static memory"
+            )));
+        };
+        let slot = planned
+            .allocation
+            .spill_slots
+            .get(slot_index)
+            .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for local `{name}`")))?;
+        debug_assert_eq!(slot.class, M6800_STATIC_SPILL_CLASS);
+        bindings.insert(
+            name,
+            Binding {
+                storage: Storage {
+                    address: spill_region.address + slot.offset,
+                    size: slot.size,
+                },
+                ty,
+            },
+        );
+    }
+    Ok(bindings)
+}
+
+fn collect_source_locals(
+    body: &[Stmt],
+    locals: &mut Vec<SourceLocal>,
+    local_types: &mut HashMap<String, Type>,
+) -> Result<(), Diagnostic> {
+    for stmt in body {
+        match stmt {
+            Stmt::Let { name, ty, .. } => {
+                if local_types.insert(name.clone(), ty.clone()).is_some() {
+                    return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                }
+                locals.push(
+                    SourceLocal::new(name.clone(), 1, 1, M6800_LOCAL_CLASS)
+                        .with_spill_classes(vec![M6800_STATIC_SPILL_CLASS]),
+                );
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_source_locals(then_body, locals, local_types)?;
+                collect_source_locals(else_body, locals, local_types)?;
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_source_locals(body, locals, local_types)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn regalloc_diagnostic(diagnostics: Vec<crate::regalloc::Diagnostic>) -> Diagnostic {
+    Diagnostic::new(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
 fn collect_calls(body: &[Stmt], calls: &mut Vec<String>) {
     for stmt in body {
         match stmt {
@@ -891,6 +1041,7 @@ mod tests {
     use crate::{
         asm::AssemblyOptions,
         parser::parse_program,
+        regalloc::PhysReg,
         target::{Address24, AssemblerCpu, CpuFamily},
         vm::{
             TestImage, TestRunOptions, TestRunner, assemble_subset_at,
@@ -917,6 +1068,86 @@ mod tests {
             asset_base: Address24::new(0xC000),
             ..AssemblyOptions::default()
         }
+    }
+
+    #[test]
+    fn local_target_models_accumulators_and_uses_memory_only_locals() {
+        let m6800 = super::m6800_local_target(CpuFamily::M6800);
+        assert_eq!(
+            m6800.register_classes[super::M6800_BYTE_CLASS.0]
+                .registers
+                .len(),
+            2
+        );
+        assert!(
+            m6800.register_classes[super::M6800_LOCAL_CLASS.0]
+                .registers
+                .is_empty()
+        );
+        assert!(!m6800.registers_alias(PhysReg(0), PhysReg(1)));
+
+        let m6809 = super::m6800_local_target(CpuFamily::M6809);
+        assert_eq!(m6809.registers[2].name, "d");
+        assert!(m6809.registers_alias(PhysReg(0), PhysReg(2)));
+        assert!(m6809.registers_alias(PhysReg(1), PhysReg(2)));
+    }
+
+    fn local_initializer_address(assembly: &str, value: u8) -> String {
+        let marker = format!("    ldaa #{value:02X}h\n    staa >");
+        let rest = assembly
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing local initializer {value:02X}\n{assembly}"))
+            .1;
+        rest[..4].to_owned()
+    }
+
+    fn assert_reuses_memory_local(assembly: &str, cpu: AssemblerCpu) {
+        assert_eq!(
+            local_initializer_address(assembly, 0x11),
+            local_initializer_address(assembly, 0x22),
+            "{assembly}"
+        );
+        assemble_subset_with_symbols_at(cpu, assembly, 0)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    }
+
+    #[test]
+    fn colors_nonoverlapping_m6800_locals_into_one_static_byte() {
+        let program = parse_program(
+            Path::new("m6800_spill_reuse.ezra"),
+            r#"
+                global sink: u8 = 0
+                fn main() {
+                    let first: u8 = 0x11
+                    sink = first
+                    let second: u8 = 0x22
+                    sink = second
+                }
+            "#,
+        )
+        .unwrap();
+        let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+        assert_reuses_memory_local(&assembly, AssemblerCpu::M6800);
+    }
+
+    #[cfg(feature = "m6809")]
+    #[test]
+    fn colors_nonoverlapping_m6809_locals_into_one_static_byte() {
+        let program = parse_program(
+            Path::new("m6809_spill_reuse.ezra"),
+            r#"
+                global sink: u8 = 0
+                fn main() {
+                    let first: u8 = 0x11
+                    sink = first
+                    let second: u8 = 0x22
+                    sink = second
+                }
+            "#,
+        )
+        .unwrap();
+        let assembly = emit_m6809_assembly_with_options(&program, m6809_options()).unwrap();
+        assert_reuses_memory_local(&assembly, AssemblerCpu::M6809);
     }
 
     #[test]
@@ -1115,7 +1346,7 @@ mod tests {
     fn rejects_wide_scalar_storage() {
         let program = parse_program(
             Path::new("m6800_test.ezra"),
-            "fn main() { let wide: u16 = 1 }",
+            "fn main() -> u16 { let wide: u16 = 1 return wide }",
         )
         .unwrap();
         let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();

@@ -30,6 +30,7 @@ pub mod package;
 pub mod parser;
 #[cfg(feature = "std")]
 pub mod project;
+pub mod regalloc;
 pub mod target;
 pub mod tbir;
 pub mod vm;

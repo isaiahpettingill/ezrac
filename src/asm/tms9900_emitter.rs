@@ -13,6 +13,11 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::CpuFamily,
     tbir::{
         TbirProgram,
@@ -22,10 +27,11 @@ use crate::{
 
 /// Emit the initial TMS9900 source backend.
 ///
-/// Scalar values are evaluated in `R0`; `R1` through `R8` are volatile scratch
-/// registers. `R9` addresses word-aligned function frames and `R10` is the
-/// descending stack pointer, so locals, nested arguments, and recursive calls
-/// have independent storage.
+/// Scalar values are evaluated in `R0`; `R1` through `R5` are arithmetic
+/// scratch registers. `R6` through `R8` hold allocated scalar locals but remain
+/// volatile across calls and inline assembly. `R9` addresses word-aligned
+/// function frames and `R10` is the descending stack pointer, so spills, nested
+/// arguments, and recursive calls have independent storage.
 pub fn emit_tms9900_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
@@ -46,13 +52,19 @@ pub fn emit_tms9900_assembly_with_options(
         .emit(&tbir.lowered_program)
         .map(|asm| {
             let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Tms9900);
-            with_readability_comments(asm, program, &options, "tms9900")
+            with_readability_comments(asm, program, &options, "tms9900", &tbir.source_comments)
         })
+}
+
+#[derive(Clone, Copy)]
+enum BindingLocation {
+    Frame(i16),
+    Register(u8),
 }
 
 #[derive(Clone)]
 struct Binding {
-    offset: i16,
+    location: BindingLocation,
     ty: Type,
 }
 
@@ -319,7 +331,13 @@ impl Emitter {
                     Diagnostic::new("TMS9900 function parameter frame is too large")
                 })?)
                 .ok_or_else(|| Diagnostic::new("TMS9900 function parameter frame is too large"))?;
-            self.bind(param.name.clone(), offset, ty)?;
+            self.bind(
+                param.name.clone(),
+                Binding {
+                    location: BindingLocation::Frame(offset),
+                    ty,
+                },
+            )?;
         }
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
@@ -351,9 +369,9 @@ impl Emitter {
                     .and_then(|locals| locals.get(name))
                     .cloned()
                     .ok_or_else(|| Diagnostic::new(format!("missing frame slot for `{name}`")))?;
-                self.bind(name.clone(), binding.offset, ty.clone())?;
+                self.bind(name.clone(), binding.clone())?;
                 self.emit_expr(value, &ty)?;
-                self.store_frame_r0(binding.offset, &ty)?;
+                self.store_binding_r0(&binding)?;
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
@@ -478,7 +496,15 @@ impl Emitter {
             }
             Expr::Ident(name) => self.load_ident(name, ty)?,
             Expr::AddressOf(name) => {
-                if self.is_ti_cartridge() && self.model.embeds.contains_key(name) {
+                if let Some(binding) = self.binding(name) {
+                    let BindingLocation::Frame(offset) = binding.location else {
+                        return Err(Diagnostic::new(format!(
+                            "address-taken local `{name}` was allocated to a register"
+                        )));
+                    };
+                    self.line("    mov r9, r0");
+                    self.line(&format!("    ai r0, >{:04X}", offset as u16));
+                } else if self.is_ti_cartridge() && self.model.embeds.contains_key(name) {
                     self.line(&format!("    li r0, {}", embed_label(name)));
                 } else {
                     let storage = self
@@ -935,7 +961,7 @@ impl Emitter {
 
     fn load_ident(&mut self, name: &str, expected: &Type) -> Result<(), Diagnostic> {
         if let Some(binding) = self.binding(name) {
-            return self.load_frame_r0(binding.offset, &binding.ty);
+            return self.load_binding_r0(&binding);
         }
         if self.is_ti_cartridge() {
             if let Some(embed_name) = name.strip_suffix(".ptr")
@@ -986,7 +1012,7 @@ impl Emitter {
         match place {
             Place::Ident(name) => {
                 if let Some(binding) = self.binding(name) {
-                    return self.store_frame_r0(binding.offset, &binding.ty);
+                    return self.store_binding_r0(&binding);
                 }
                 if let Some(storage) = self.model.globals.get(name) {
                     let ty = self.model.global_types.get(name).unwrap_or(ty).clone();
@@ -1064,10 +1090,9 @@ impl Emitter {
                 .or_else(|| self.model.global_types.get(name).cloned())
                 .ok_or_else(|| Diagnostic::new(format!("unknown value `{name}`"))),
             Expr::AddressOf(name) => self
-                .model
-                .global_types
-                .get(name)
-                .cloned()
+                .binding(name)
+                .map(|binding| binding.ty)
+                .or_else(|| self.model.global_types.get(name).cloned())
                 .map(|ty| Type::Ptr(Box::new(ty)))
                 .ok_or_else(|| Diagnostic::new(format!("unknown value `{name}`"))),
             Expr::Field { base, field } => self
@@ -1106,6 +1131,32 @@ impl Emitter {
             _ => unreachable!("scalar_width accepts only one or two bytes"),
         }
         Ok(())
+    }
+
+    fn load_binding_r0(&mut self, binding: &Binding) -> Result<(), Diagnostic> {
+        match binding.location {
+            BindingLocation::Frame(offset) => self.load_frame_r0(offset, &binding.ty),
+            BindingLocation::Register(register) => {
+                self.line(&format!("    mov r{register}, r0"));
+                if scalar_width(&self.model, &binding.ty)? == 1 {
+                    self.line("    andi r0, >00FF");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn store_binding_r0(&mut self, binding: &Binding) -> Result<(), Diagnostic> {
+        match binding.location {
+            BindingLocation::Frame(offset) => self.store_frame_r0(offset, &binding.ty),
+            BindingLocation::Register(register) => {
+                if scalar_width(&self.model, &binding.ty)? == 1 {
+                    self.line("    andi r0, >00FF");
+                }
+                self.line(&format!("    mov r0, r{register}"));
+                Ok(())
+            }
+        }
     }
 
     fn load_frame_r0(&mut self, offset: i16, ty: &Type) -> Result<(), Diagnostic> {
@@ -1193,12 +1244,12 @@ impl Emitter {
         Ok(())
     }
 
-    fn bind(&mut self, name: String, offset: i16, ty: Type) -> Result<(), Diagnostic> {
+    fn bind(&mut self, name: String, binding: Binding) -> Result<(), Diagnostic> {
         let scope = self
             .scopes
             .last_mut()
             .ok_or_else(|| Diagnostic::new("local binding outside function"))?;
-        if scope.insert(name.clone(), Binding { offset, ty }).is_some() {
+        if scope.insert(name.clone(), binding).is_some() {
             return Err(Diagnostic::new(format!("duplicate local `{name}`")));
         }
         Ok(())
@@ -1246,15 +1297,110 @@ impl Emitter {
     }
 }
 
+const TMS_LOCAL_REGISTERS: [u8; 3] = [6, 7, 8];
+const TMS_SCALAR_WORD_CLASS: RegClass = RegClass(0);
+const TMS_STACK_SPILL_CLASS: SpillClassId = SpillClassId(0);
+
+fn tms_local_target() -> Target {
+    Target {
+        units: TMS_LOCAL_REGISTERS
+            .iter()
+            .map(|register| RegisterUnit::new(format!("r{register}")))
+            .collect(),
+        registers: TMS_LOCAL_REGISTERS
+            .iter()
+            .enumerate()
+            .map(|(unit, register)| {
+                PhysicalRegister::new(format!("r{register}"), vec![RegUnit(unit)])
+            })
+            .collect(),
+        register_classes: vec![RegisterClass::new(
+            "scalar-word",
+            (0..TMS_LOCAL_REGISTERS.len()).map(PhysReg).collect(),
+        )],
+        spill_classes: vec![
+            SpillClass::new("stack", None, 1)
+                .with_base_alignment(2)
+                .for_register_classes(vec![TMS_SCALAR_WORD_CLASS]),
+        ],
+    }
+}
+
 fn plan_function_frame(
     function: &Function,
     model: &SemanticModel,
 ) -> Result<FunctionFrame, Diagnostic> {
-    let mut locals = HashMap::new();
-    let mut next_offset = -2i16;
-    collect_frame_locals(&function.body, model, &mut locals, &mut next_offset)?;
-    let local_bytes = u16::try_from(-2i32 - i32::from(next_offset))
+    let mut source_locals = Vec::new();
+    let mut local_types = HashMap::new();
+    collect_frame_locals(&function.body, model, &mut source_locals, &mut local_types)?;
+
+    let clobbers = (0..TMS_LOCAL_REGISTERS.len())
+        .map(PhysReg)
+        .collect::<Vec<_>>();
+    let planned = allocate_source_locals(
+        &tms_local_target(),
+        &source_locals,
+        &function.body,
+        &clobbers,
+    )
+    .map_err(|diagnostics| {
+        Diagnostic::new(
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.message)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })?;
+
+    let spill_bytes = planned
+        .allocation
+        .spill_slots
+        .iter()
+        .map(|slot| slot.offset.saturating_add(slot.size))
+        .max()
+        .unwrap_or(0);
+    let local_bytes = u16::try_from(spill_bytes)
         .map_err(|_| Diagnostic::new("TMS9900 function frame is too large"))?;
+    let mut locals = HashMap::new();
+    for (name, ty) in local_types {
+        let vreg = planned
+            .locals
+            .vreg(&name)
+            .ok_or_else(|| Diagnostic::new(format!("missing allocation for local `{name}`")))?;
+        let location = match planned.allocation.location(vreg) {
+            Some(Location::Register(register)) => {
+                let register = *TMS_LOCAL_REGISTERS.get(register.0).ok_or_else(|| {
+                    Diagnostic::new(format!("invalid TMS9900 local register for `{name}`"))
+                })?;
+                BindingLocation::Register(register)
+            }
+            Some(Location::Spill(slot_index)) => {
+                let slot = planned
+                    .allocation
+                    .spill_slots
+                    .get(slot_index)
+                    .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for `{name}`")))?;
+                debug_assert_eq!(slot.class, TMS_STACK_SPILL_CLASS);
+                let end = slot
+                    .offset
+                    .checked_add(slot.size)
+                    .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
+                let offset = i16::try_from(end)
+                    .ok()
+                    .and_then(|end| end.checked_neg())
+                    .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
+                BindingLocation::Frame(offset)
+            }
+            Some(Location::Unused) | None => {
+                return Err(Diagnostic::new(format!(
+                    "source allocator did not place local `{name}`"
+                )));
+            }
+        };
+        locals.insert(name, Binding { location, ty });
+    }
+
     Ok(FunctionFrame {
         locals,
         local_bytes,
@@ -1264,33 +1410,45 @@ fn plan_function_frame(
 fn collect_frame_locals(
     body: &[Stmt],
     model: &SemanticModel,
-    locals: &mut HashMap<String, Binding>,
-    next_offset: &mut i16,
+    locals: &mut Vec<SourceLocal>,
+    local_types: &mut HashMap<String, Type>,
 ) -> Result<(), Diagnostic> {
     for stmt in body {
         match stmt {
             Stmt::Let { name, ty, .. } => {
-                let binding = Binding {
-                    offset: *next_offset,
-                    ty: model.resolved_type(ty)?,
+                let ty = model.resolved_type(ty)?;
+                let aggregate = matches!(&ty, Type::Array { .. })
+                    || matches!(&ty, Type::Named(name) if model.structs.contains_key(name));
+                let size = if aggregate {
+                    model
+                        .type_size(&ty)?
+                        .checked_add(1)
+                        .map(|size| size & !1)
+                        .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?
+                        .max(2)
+                } else {
+                    scalar_width(model, &ty)?;
+                    2
                 };
-                if locals.insert(name.clone(), binding).is_some() {
+                if local_types.insert(name.clone(), ty).is_some() {
                     return Err(Diagnostic::new(format!("duplicate local `{name}`")));
                 }
-                *next_offset = next_offset
-                    .checked_sub(2)
-                    .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
+                locals.push(
+                    SourceLocal::new(name.clone(), size, 2, TMS_SCALAR_WORD_CLASS)
+                        .with_spill_classes(vec![TMS_STACK_SPILL_CLASS])
+                        .with_force_memory(aggregate),
+                );
             }
             Stmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                collect_frame_locals(then_body, model, locals, next_offset)?;
-                collect_frame_locals(else_body, model, locals, next_offset)?;
+                collect_frame_locals(then_body, model, locals, local_types)?;
+                collect_frame_locals(else_body, model, locals, local_types)?;
             }
             Stmt::While { body, .. } | Stmt::Loop { body } => {
-                collect_frame_locals(body, model, locals, next_offset)?;
+                collect_frame_locals(body, model, locals, local_types)?;
             }
             _ => {}
         }
@@ -1691,6 +1849,212 @@ mod tests {
     fn emit(source: &str, options: AssemblyOptions) -> String {
         let program = parse_program(Path::new("test.ezra"), source).unwrap();
         emit_tms9900_assembly_with_options(&program, options).unwrap()
+    }
+
+    fn test_options() -> AssemblyOptions {
+        AssemblyOptions {
+            cpu: CpuFamily::Tms9900,
+            load_addr: crate::target::Address24::new(0x0100),
+            entry_addr: crate::target::Address24::new(0x0100),
+            code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
+            ram_base: crate::target::Address24::new(0xA000),
+            ..AssemblyOptions::default()
+        }
+    }
+
+    fn execute(assembly: &str, steps: usize) -> FlatRam {
+        let image =
+            crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, assembly, 0x0100)
+                .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+        let mut ram = FlatRam::new();
+        ram.load(0x0100, &image.bytes);
+        let mut cpu = Cpu::new();
+        cpu.set_pc(0x0100);
+        for _ in 0..steps {
+            cpu.step(&mut ram);
+        }
+        ram
+    }
+
+    fn planned_main_frame(source: &str) -> FunctionFrame {
+        let options = test_options();
+        let program = parse_program(Path::new("test.ezra"), source).unwrap();
+        let model = SemanticModel::from_program(
+            &program,
+            16,
+            options.ram_base.get(),
+            options.rodata_base.get(),
+            options.asset_base.get(),
+        )
+        .unwrap();
+        let function = program
+            .declarations
+            .iter()
+            .find_map(|declaration| match unwrapped_declaration(declaration) {
+                Declaration::Function(function) if function.name == "main" => Some(function),
+                _ => None,
+            })
+            .unwrap();
+        plan_function_frame(function, &model).unwrap()
+    }
+
+    #[test]
+    fn allocates_straight_scalar_locals_to_r6_through_r8() {
+        let assembly = emit(
+            r#"
+                global input: u8 = 1
+                global result: u8 = 0
+                fn main() {
+                    let first: u8 = input
+                    let second: u8 = input
+                    let third: u8 = input
+                    first += second
+                    result = first + third
+                }
+            "#,
+            test_options(),
+        );
+
+        for register in 6..=8 {
+            assert!(
+                assembly.contains(&format!("    mov r0, r{register}")),
+                "{assembly}"
+            );
+        }
+        assert!(
+            assembly.contains("    mov r10, r9\n    clr r0"),
+            "local register allocation should not adjust the frame\n{assembly}"
+        );
+        assert_eq!(execute(&assembly, 200).read_byte(0xA001), 3);
+    }
+
+    #[test]
+    fn spills_overlapping_excess_locals_to_one_word_of_frame_storage() {
+        let assembly = emit(
+            r#"
+                global input: u16 = 1
+                global result: u16 = 0
+                fn main() {
+                    let first: u16 = input
+                    let second: u16 = input
+                    let third: u16 = input
+                    let fourth: u16 = input
+                    first += second
+                    third += fourth
+                    result = first + third
+                }
+            "#,
+            test_options(),
+        );
+
+        assert!(
+            assembly.contains("    mov r10, r9\n    ai r10, >FFFE"),
+            "{assembly}"
+        );
+        assert!(assembly.contains("@>FFFE(r9)"), "{assembly}");
+        assert_eq!(execute(&assembly, 250).read_word(0xA002), 4);
+    }
+
+    #[test]
+    fn spills_values_live_across_calls_and_inline_assembly() {
+        let assembly = emit(
+            r#"
+                global result: u16 = 0
+                fn identity(value: u16) -> u16 { return value }
+                fn main() {
+                    let across_call: u16 = 40
+                    let called: u16 = identity(2)
+                    let across_asm: u16 = called
+                    asm volatile { "nop" }
+                    result = across_call + across_asm
+                }
+            "#,
+            test_options(),
+        );
+
+        let frame = planned_main_frame(
+            r#"
+                global result: u16 = 0
+                fn identity(value: u16) -> u16 { return value }
+                fn main() {
+                    let across_call: u16 = 40
+                    let called: u16 = identity(2)
+                    let across_asm: u16 = called
+                    asm volatile { "nop" }
+                    result = across_call + across_asm
+                }
+            "#,
+        );
+        assert!(matches!(
+            frame.locals["across_call"].location,
+            BindingLocation::Frame(_)
+        ));
+        assert!(matches!(
+            frame.locals["across_asm"].location,
+            BindingLocation::Frame(_)
+        ));
+        assert_eq!(execute(&assembly, 300).read_word(0xA000), 42);
+    }
+
+    #[test]
+    fn keeps_address_taken_and_aggregate_locals_in_aligned_frame_slots() {
+        let frame = planned_main_frame(
+            r#"
+                fn main() {
+                    let scalar: u16 = 7
+                    let pointer: ptr<u16> = &scalar
+                    let values: [u16; 2] = [1, 2]
+                }
+            "#,
+        );
+
+        assert!(matches!(
+            frame.locals["scalar"].location,
+            BindingLocation::Frame(offset) if offset % 2 == 0
+        ));
+        assert!(matches!(
+            frame.locals["values"].location,
+            BindingLocation::Frame(offset) if offset % 2 == 0
+        ));
+        assert_eq!(frame.local_bytes % 2, 0);
+
+        let assembly = emit(
+            "global result: u16 = 0; fn main() { let value: u16 = 42; let pointer: ptr<u16> = &value; result = *pointer }",
+            test_options(),
+        );
+        assert!(assembly.contains("    ai r0, >FFFE"), "{assembly}");
+        assert_eq!(execute(&assembly, 150).read_word(0xA000), 42);
+    }
+
+    #[test]
+    fn reuses_spill_slots_for_nonoverlapping_scalar_locals() {
+        let frame = planned_main_frame(
+            r#"
+                global sink: u16 = 0
+                fn main() {
+                    let first: u16 = 1
+                    let second: u16 = 2
+                    let third: u16 = 3
+                    let first_spill: u16 = 4
+                    sink = first + second + third + first_spill
+                    let fifth: u16 = 5
+                    let sixth: u16 = 6
+                    let seventh: u16 = 7
+                    let second_spill: u16 = 8
+                    sink = fifth + sixth + seventh + second_spill
+                }
+            "#,
+        );
+
+        assert_eq!(frame.local_bytes, 2);
+        let BindingLocation::Frame(first_offset) = frame.locals["first_spill"].location else {
+            panic!("first excess local should spill");
+        };
+        let BindingLocation::Frame(second_offset) = frame.locals["second_spill"].location else {
+            panic!("second excess local should spill");
+        };
+        assert_eq!(first_offset, second_offset);
     }
 
     #[test]

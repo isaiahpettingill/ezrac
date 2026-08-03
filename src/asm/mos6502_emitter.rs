@@ -12,6 +12,11 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::CpuFamily,
     tbir::{
         TbirProgram,
@@ -41,7 +46,9 @@ pub fn emit_mos6502_assembly_with_options(
         .emit(&tbir.lowered_program)
         .map(|asm| strip_unreachable_generated_routines(&asm, RoutineProfile::Mos6502))
         .and_then(|asm| cleanup_assembly(&asm, options.cpu))
-        .map(|asm| with_readability_comments(asm, program, &options, "mos6502"))
+        .map(|asm| {
+            with_readability_comments(asm, program, &options, "mos6502", &tbir.source_comments)
+        })
 }
 
 #[derive(Clone)]
@@ -87,6 +94,7 @@ struct Emitter {
     out: String,
     labels: usize,
     scopes: Vec<HashMap<String, Binding>>,
+    planned_locals: Vec<HashMap<String, Binding>>,
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
@@ -113,6 +121,7 @@ impl Emitter {
             out: String::new(),
             labels: 0,
             scopes: Vec::new(),
+            planned_locals: Vec::new(),
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
@@ -259,6 +268,8 @@ impl Emitter {
                 self.model.type_size(&param.ty)?,
             );
         }
+        let planned_locals = plan_static_locals(function, &mut self.model)?;
+        self.planned_locals.push(planned_locals);
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
         if interrupt {
@@ -278,6 +289,7 @@ impl Emitter {
         self.return_labels.pop();
         self.function_ram_bases.pop();
         self.current_functions.pop();
+        self.planned_locals.pop();
         self.scopes.pop();
         Ok(())
     }
@@ -292,9 +304,16 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match stmt {
             Stmt::Let { name, ty, value } => {
-                let storage = self.model.allocate_type(ty)?;
-                self.bind(name.clone(), storage, ty.clone())?;
-                self.emit_initializer(storage, ty, value)?;
+                let binding = self
+                    .planned_locals
+                    .last()
+                    .and_then(|locals| locals.get(name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing planned storage for local `{name}`"))
+                    })?;
+                self.bind(name.clone(), binding.storage, binding.ty)?;
+                self.emit_initializer(binding.storage, ty, value)?;
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
@@ -3249,6 +3268,143 @@ fn is_comparison(op: BinaryOp) -> bool {
     )
 }
 
+const MOS6502_MEMORY_LOCAL_CLASS: RegClass = RegClass(0);
+const MOS6502_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+
+fn mos6502_local_target() -> Target {
+    Target {
+        units: ["A", "X", "Y"].into_iter().map(RegisterUnit::new).collect(),
+        registers: vec![
+            PhysicalRegister::new("A", vec![RegUnit(0)]),
+            PhysicalRegister::new("X", vec![RegUnit(1)]),
+            PhysicalRegister::new("Y", vec![RegUnit(2)]),
+        ],
+        register_classes: vec![
+            RegisterClass::new("memory-only", vec![]),
+            RegisterClass::new("accumulator", vec![PhysReg(0)]),
+            RegisterClass::new("index", vec![PhysReg(1), PhysReg(2)]),
+        ],
+        spill_classes: vec![
+            SpillClass::new("static-bytes", None, 1)
+                .with_base_alignment(1)
+                .for_register_classes(vec![MOS6502_MEMORY_LOCAL_CLASS]),
+        ],
+    }
+}
+
+fn plan_static_locals(
+    function: &Function,
+    model: &mut SemanticModel,
+) -> Result<HashMap<String, Binding>, Diagnostic> {
+    let mut locals = Vec::new();
+    let mut local_types = HashMap::new();
+    collect_static_locals(&function.body, model, &mut locals, &mut local_types)?;
+    let planned = allocate_source_locals(&mos6502_local_target(), &locals, &function.body, &[])
+        .map_err(|diagnostics| {
+            Diagnostic::new(format!(
+                "MOS 6502 local allocation failed: {}",
+                diagnostics
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))
+        })?;
+    let backing_size = planned
+        .allocation
+        .spill_slots
+        .iter()
+        .map(|slot| slot.offset.saturating_add(slot.size))
+        .max()
+        .unwrap_or(0);
+    let backing = (backing_size != 0)
+        .then(|| model.allocate(backing_size))
+        .transpose()?;
+    let mut bindings = HashMap::new();
+    for (name, ty) in local_types {
+        let vreg = planned.locals.vreg(&name).ok_or_else(|| {
+            Diagnostic::new(format!("missing MOS 6502 local allocation for `{name}`"))
+        })?;
+        let slot_index = match planned.allocation.location(vreg) {
+            Some(Location::Spill(slot_index)) => slot_index,
+            Some(Location::Register(_)) => {
+                return Err(Diagnostic::new(format!(
+                    "MOS 6502 local `{name}` was assigned a register"
+                )));
+            }
+            Some(Location::Unused) | None => {
+                return Err(Diagnostic::new(format!(
+                    "MOS 6502 local `{name}` has no storage allocation"
+                )));
+            }
+        };
+        let slot = planned
+            .allocation
+            .spill_slots
+            .get(slot_index)
+            .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for local `{name}`")))?;
+        if slot.class != MOS6502_STATIC_SPILL_CLASS {
+            return Err(Diagnostic::new(format!(
+                "invalid spill class for MOS 6502 local `{name}`"
+            )));
+        }
+        let backing = backing.ok_or_else(|| {
+            Diagnostic::new(format!("missing static backing storage for local `{name}`"))
+        })?;
+        bindings.insert(
+            name,
+            Binding {
+                storage: Storage {
+                    address: backing.address + slot.offset,
+                    size: model.type_size(&ty)?,
+                },
+                ty,
+            },
+        );
+    }
+    Ok(bindings)
+}
+
+fn collect_static_locals(
+    body: &[Stmt],
+    model: &SemanticModel,
+    locals: &mut Vec<SourceLocal>,
+    local_types: &mut HashMap<String, Type>,
+) -> Result<(), Diagnostic> {
+    for stmt in body {
+        match stmt {
+            Stmt::Let { name, ty, .. } => {
+                if local_types.insert(name.clone(), ty.clone()).is_some() {
+                    return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                }
+                locals.push(
+                    SourceLocal::new(
+                        name.clone(),
+                        model.type_size(ty)?,
+                        1,
+                        MOS6502_MEMORY_LOCAL_CLASS,
+                    )
+                    .with_spill_classes(vec![MOS6502_STATIC_SPILL_CLASS])
+                    .with_force_memory(true),
+                );
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_static_locals(then_body, model, locals, local_types)?;
+                collect_static_locals(else_body, model, locals, local_types)?;
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_static_locals(body, model, locals, local_types)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn assign_binary(op: AssignOp) -> BinaryOp {
     match op {
         AssignOp::Add => BinaryOp::Add,
@@ -3537,6 +3693,70 @@ mod structural_tests {
 
     fn emit(source: &str) -> String {
         emit_for_cpu(source, CpuFamily::Mos6502)
+    }
+
+    fn planned_main_locals(source: &str) -> (HashMap<String, Binding>, u32) {
+        let program = parse_program(Path::new("mos6502-locals.ezra"), source).unwrap();
+        let options = AssemblyOptions {
+            cpu: CpuFamily::Mos6502,
+            ram_base: crate::target::Address24::new(0xA000),
+            rodata_base: crate::target::Address24::new(0x8000),
+            asset_base: crate::target::Address24::new(0xC000),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        };
+        let mut model = SemanticModel::from_program(
+            &program,
+            16,
+            options.ram_base.get(),
+            options.rodata_base.get(),
+            options.asset_base.get(),
+        )
+        .unwrap();
+        let start = model.next_ram_address();
+        let bindings = plan_static_locals(program.main_function().unwrap(), &mut model).unwrap();
+        (bindings, model.next_ram_address() - start)
+    }
+
+    #[test]
+    fn local_target_models_distinct_registers_and_memory_only_source_class() {
+        let target = mos6502_local_target();
+        assert!(
+            target.register_classes[MOS6502_MEMORY_LOCAL_CLASS.0]
+                .registers
+                .is_empty()
+        );
+        assert!(!target.registers_alias(PhysReg(0), PhysReg(1)));
+        assert!(!target.registers_alias(PhysReg(0), PhysReg(2)));
+        assert!(!target.registers_alias(PhysReg(1), PhysReg(2)));
+        assert_eq!(
+            target.spill_classes[MOS6502_STATIC_SPILL_CLASS.0].base_alignment,
+            1
+        );
+    }
+
+    #[test]
+    fn static_local_plan_reuses_only_nonoverlapping_storage() {
+        let (reused, reused_bytes) = planned_main_locals(
+            "global result: u8 = 0; fn main() { let first: u8 = 1; result = first; let second: u8 = 2; result = second }",
+        );
+        assert_eq!(
+            reused["first"].storage.address,
+            reused["second"].storage.address
+        );
+        assert_eq!(reused_bytes, 1);
+
+        let (overlapping, overlapping_bytes) = planned_main_locals(
+            "global result: u8 = 0; fn main() { let first: u8 = 1; let second: u8 = 2; result = first + second }",
+        );
+        assert_ne!(
+            overlapping["first"].storage.address,
+            overlapping["second"].storage.address
+        );
+        assert_eq!(overlapping_bytes, 2);
+        emit(
+            "global result: u8 = 0; fn main() { let first: u8 = 1; let second: u8 = 2; result = first + second }",
+        );
     }
 
     #[test]
@@ -4213,6 +4433,15 @@ mod tests {
 
     fn run(source: &str, instruction_budget: usize) -> TestBus {
         run_with_setup(source, instruction_budget, |_| {}).0
+    }
+
+    #[test]
+    fn overlapping_static_locals_keep_distinct_runtime_values() {
+        let bus = run(
+            "global result: u8 = 0; fn main() { let first: u8 = 1; let second: u8 = 2; result = first + second }",
+            1_000,
+        );
+        assert_eq!(bus.byte(0xA000), 3);
     }
 
     #[test]

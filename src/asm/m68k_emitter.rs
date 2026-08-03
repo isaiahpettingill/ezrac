@@ -13,6 +13,11 @@ use crate::{
     },
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::CpuFamily,
     tbir::{
         TbirProgram,
@@ -45,15 +50,32 @@ pub fn emit_m68k_assembly_with_options(
         .emit(&tbir.lowered_program)
         .map(|asm| {
             let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M68k);
-            with_readability_comments(asm, program, &options, "m68k")
+            with_readability_comments(asm, program, &options, "m68k", &tbir.source_comments)
         })
+}
+
+#[derive(Clone, Copy)]
+enum BindingLocation {
+    Memory(Storage),
+    AddressRegister(u8),
 }
 
 #[derive(Clone)]
 struct Binding {
-    storage: Storage,
+    location: BindingLocation,
     ty: Type,
     volatile: bool,
+}
+
+impl Binding {
+    fn memory(&self) -> Result<Storage, Diagnostic> {
+        match self.location {
+            BindingLocation::Memory(storage) => Ok(storage),
+            BindingLocation::AddressRegister(register) => Err(Diagnostic::new(format!(
+                "address-register local in a{register} does not have memory storage"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -72,6 +94,7 @@ struct Emitter {
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
     function_ram_bases: Vec<u32>,
+    local_plans: Vec<HashMap<String, Binding>>,
 }
 
 impl Emitter {
@@ -86,6 +109,7 @@ impl Emitter {
             return_labels: Vec::new(),
             return_types: Vec::new(),
             function_ram_bases: Vec::new(),
+            local_plans: Vec::new(),
         }
     }
 
@@ -162,11 +186,14 @@ impl Emitter {
                 function.name
             )));
         }
+        let function_ram_base = self.model.next_ram_address();
+        let local_plan = plan_function_locals(function, &mut self.model)?;
         let return_label = self.next_label(&format!("{}_return", function.name));
         self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
-        self.function_ram_bases.push(self.model.next_ram_address());
+        self.function_ram_bases.push(function_ram_base);
+        self.local_plans.push(local_plan);
         self.return_types.push(
             function
                 .return_type
@@ -186,7 +213,7 @@ impl Emitter {
         for (param, slot) in function.params.iter().zip(signature.argument_slots) {
             let ty = self.model.resolved_type(&param.ty)?;
             let storage = self.model.allocate_type(&ty)?;
-            self.bind(param.name.clone(), storage, ty.clone())?;
+            self.bind_memory(param.name.clone(), storage, ty.clone())?;
             if self.model.type_width(&ty).is_ok() {
                 self.load_d0(slot, &ty)?;
                 self.store_d0(storage, &ty)?;
@@ -213,6 +240,7 @@ impl Emitter {
         self.return_types.pop();
         self.return_labels.pop();
         self.function_ram_bases.pop();
+        self.local_plans.pop();
         self.scopes.pop();
         Ok(())
     }
@@ -228,9 +256,25 @@ impl Emitter {
         match stmt {
             Stmt::Let { name, ty, value } => {
                 let ty = self.model.resolved_type(ty)?;
-                let storage = self.model.allocate_type(&ty)?;
-                self.bind(name.clone(), storage, ty.clone())?;
-                self.emit_initializer(storage, &ty, value)?;
+                let binding = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing allocation for local `{name}`"))
+                    })?;
+                self.bind(name.clone(), binding.clone())?;
+                match binding.location {
+                    BindingLocation::Memory(storage) => {
+                        self.emit_initializer(storage, &ty, value)?
+                    }
+                    BindingLocation::AddressRegister(register) => {
+                        debug_assert!(matches!(ty, Type::Ptr(_)));
+                        self.emit_expr(value, &ty)?;
+                        self.line(&format!("    move.l d0,a{register}"));
+                    }
+                }
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
@@ -370,7 +414,7 @@ impl Emitter {
         match (resolved, value) {
             (Type::Array { .. }, Expr::Ident(name)) => {
                 let source = self.binding(name)?;
-                self.copy(source.storage, storage, storage.size);
+                self.copy(source.memory()?, storage, storage.size);
             }
             (Type::Array { element, len }, Expr::Array(values)) => {
                 let element_size = self.model.type_size(&element)?;
@@ -410,7 +454,7 @@ impl Emitter {
             }
             (Type::Named(name), Expr::Ident(source)) if self.model.structs.contains_key(&name) => {
                 let source = self.binding(source)?;
-                self.copy(source.storage, storage, storage.size);
+                self.copy(source.memory()?, storage, storage.size);
             }
             (resolved @ (Type::Array { .. } | Type::Named(_)), Expr::Deref(pointer)) => {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(resolved)))?;
@@ -470,7 +514,7 @@ impl Emitter {
         };
         self.line(&format!(
             "    {instruction} ${:06X}",
-            binding.storage.address
+            binding.memory()?.address
         ));
         Ok(true)
     }
@@ -521,7 +565,7 @@ impl Emitter {
         self.line(&format!(
             "    {instruction} #{},${:06X}",
             bit % 8,
-            binding.storage.address + byte_offset
+            binding.memory()?.address + byte_offset
         ));
         Ok(true)
     }
@@ -610,7 +654,7 @@ impl Emitter {
                 } else {
                     let binding = self.binding(name)?;
                     let source_ty = binding.ty.clone();
-                    self.load_d0(binding.storage, &source_ty)?;
+                    self.load_binding_d0(&binding)?;
                     self.convert_d0(&source_ty, expected)?;
                 }
             }
@@ -623,7 +667,7 @@ impl Emitter {
                     let field = self.model.field(&binding.ty, field)?.clone();
                     self.load_d0(
                         Storage {
-                            address: binding.storage.address + field.offset,
+                            address: binding.memory()?.address + field.offset,
                             size: field.size,
                         },
                         &field.ty,
@@ -643,7 +687,7 @@ impl Emitter {
             }
             Expr::AddressOf(name) => {
                 let binding = self.binding(name)?;
-                self.load_constant(i64::from(binding.storage.address), expected)?;
+                self.load_constant(i64::from(binding.memory()?.address), expected)?;
             }
             Expr::AddressOfIndex { name, index } => {
                 self.emit_named_index_address(name, index)?;
@@ -652,7 +696,10 @@ impl Emitter {
             Expr::AddressOfField { base, field } => {
                 let binding = self.binding(base)?;
                 let field = self.model.field(&binding.ty, field)?;
-                self.load_constant(i64::from(binding.storage.address + field.offset), expected)?;
+                self.load_constant(
+                    i64::from(binding.memory()?.address + field.offset),
+                    expected,
+                )?;
             }
             Expr::AddressOfAccess(path) => {
                 self.emit_access_address(path)?;
@@ -1349,7 +1396,7 @@ impl Emitter {
 
     fn load_place(&mut self, place: &Place, ty: &Type) -> Result<(), Diagnostic> {
         match place {
-            Place::Ident(name) => self.load_d0(self.binding(name)?.storage, ty),
+            Place::Ident(name) => self.load_binding_d0(&self.binding(name)?),
             Place::Index { name, index } => {
                 self.emit_named_index_address(name, index)?;
                 self.load_from_a0(ty)
@@ -1359,7 +1406,7 @@ impl Emitter {
                 let field = self.model.field(&binding.ty, field)?.clone();
                 self.load_d0(
                     Storage {
-                        address: binding.storage.address + field.offset,
+                        address: binding.memory()?.address + field.offset,
                         size: field.size,
                     },
                     ty,
@@ -1381,7 +1428,7 @@ impl Emitter {
 
     fn store_place(&mut self, place: &Place, ty: &Type) -> Result<(), Diagnostic> {
         match place {
-            Place::Ident(name) => self.store_d0(self.binding(name)?.storage, ty),
+            Place::Ident(name) => self.store_binding_d0(&self.binding(name)?),
             Place::Index { name, index } => {
                 self.line(&format!("    move.{} d0,d3", size_suffix(ty)?));
                 self.emit_named_index_address(name, index)?;
@@ -1393,7 +1440,7 @@ impl Emitter {
                 let field = self.model.field(&binding.ty, field)?.clone();
                 self.store_d0(
                     Storage {
-                        address: binding.storage.address + field.offset,
+                        address: binding.memory()?.address + field.offset,
                         size: field.size,
                     },
                     ty,
@@ -1425,7 +1472,7 @@ impl Emitter {
         match place {
             Place::Ident(name) => {
                 let destination = self.binding(name)?;
-                self.copy(source, destination.storage, size);
+                self.copy(source, destination.memory()?, size);
             }
             Place::Index { name, index } => {
                 self.emit_named_index_address(name, index)?;
@@ -1437,7 +1484,7 @@ impl Emitter {
                 self.copy(
                     source,
                     Storage {
-                        address: binding.storage.address + field.offset,
+                        address: binding.memory()?.address + field.offset,
                         size,
                     },
                     size,
@@ -1481,12 +1528,20 @@ impl Emitter {
         let element_size = self.model.type_size(&element)?;
         match resolved {
             Type::Array { .. } => {
-                self.line(&format!("    move.l #${:06X},a0", binding.storage.address));
+                self.line(&format!(
+                    "    move.l #${:06X},a0",
+                    binding.memory()?.address
+                ));
             }
-            Type::Ptr(_) => {
-                self.load_d0(binding.storage, &binding.ty)?;
-                self.line("    move.l d0,a0");
-            }
+            Type::Ptr(_) => match binding.location {
+                BindingLocation::Memory(storage) => {
+                    self.load_d0(storage, &binding.ty)?;
+                    self.line("    move.l d0,a0");
+                }
+                BindingLocation::AddressRegister(register) => {
+                    self.line(&format!("    move.l a{register},a0"));
+                }
+            },
             _ => return Err(Diagnostic::new("indexing requires array or pointer")),
         }
         self.add_index_to_a0(index, element_size)?;
@@ -1497,11 +1552,21 @@ impl Emitter {
         let binding = self.binding(&path.root)?;
         let mut ty = self.model.resolved_type(&binding.ty)?;
         if let Type::Ptr(inner) = ty {
-            self.load_d0(binding.storage, &binding.ty)?;
-            self.line("    move.l d0,a0");
+            match binding.location {
+                BindingLocation::Memory(storage) => {
+                    self.load_d0(storage, &binding.ty)?;
+                    self.line("    move.l d0,a0");
+                }
+                BindingLocation::AddressRegister(register) => {
+                    self.line(&format!("    move.l a{register},a0"));
+                }
+            }
             ty = *inner;
         } else {
-            self.line(&format!("    move.l #${:06X},a0", binding.storage.address));
+            self.line(&format!(
+                "    move.l #${:06X},a0",
+                binding.memory()?.address
+            ));
         }
         for segment in &path.segments {
             match segment {
@@ -1578,7 +1643,10 @@ impl Emitter {
             .filter_map(|arg| match arg {
                 // The callee can mutate this storage through its pointer parameter.
                 // Restoring a pre-call snapshot would discard that mutation.
-                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
+                Expr::AddressOf(name) => self
+                    .binding(name)
+                    .ok()
+                    .and_then(|binding| binding.memory().ok()),
                 _ => None,
             })
             .filter_map(|storage| {
@@ -1738,7 +1806,7 @@ impl Emitter {
         {
             operands.insert(
                 operand.clone(),
-                format!("${:06X}", self.binding(operand)?.storage.address),
+                format!("${:06X}", self.binding(operand)?.memory()?.address),
             );
         }
         for line in lines {
@@ -1805,6 +1873,36 @@ impl Emitter {
         Ok(())
     }
 
+    fn load_binding_d0(&mut self, binding: &Binding) -> Result<(), Diagnostic> {
+        match binding.location {
+            BindingLocation::Memory(storage) => self.load_d0(storage, &binding.ty),
+            BindingLocation::AddressRegister(register) => {
+                if !matches!(binding.ty, Type::Ptr(_)) {
+                    return Err(Diagnostic::new(format!(
+                        "non-pointer local was allocated to address register a{register}"
+                    )));
+                }
+                self.line(&format!("    move.l a{register},d0"));
+                self.normalize_d0(&binding.ty)
+            }
+        }
+    }
+
+    fn store_binding_d0(&mut self, binding: &Binding) -> Result<(), Diagnostic> {
+        match binding.location {
+            BindingLocation::Memory(storage) => self.store_d0(storage, &binding.ty),
+            BindingLocation::AddressRegister(register) => {
+                if !matches!(binding.ty, Type::Ptr(_)) {
+                    return Err(Diagnostic::new(format!(
+                        "non-pointer local was allocated to address register a{register}"
+                    )));
+                }
+                self.line(&format!("    move.l d0,a{register}"));
+                Ok(())
+            }
+        }
+    }
+
     fn store_d0(&mut self, storage: Storage, ty: &Type) -> Result<(), Diagnostic> {
         if scalar_width(ty)? == 3 {
             self.line("    move.l d0,d1");
@@ -1847,7 +1945,19 @@ impl Emitter {
         Ok(())
     }
 
-    fn bind(&mut self, name: String, storage: Storage, ty: Type) -> Result<(), Diagnostic> {
+    fn bind_memory(&mut self, name: String, storage: Storage, ty: Type) -> Result<(), Diagnostic> {
+        let ty = self.model.resolved_type(&ty)?;
+        self.bind(
+            name,
+            Binding {
+                location: BindingLocation::Memory(storage),
+                ty,
+                volatile: false,
+            },
+        )
+    }
+
+    fn bind(&mut self, name: String, binding: Binding) -> Result<(), Diagnostic> {
         if self
             .scopes
             .iter()
@@ -1858,15 +1968,10 @@ impl Emitter {
                 "local `{name}` shadows an existing name"
             )));
         }
-        let ty = self.model.resolved_type(&ty)?;
-        self.scopes.last_mut().expect("function scope").insert(
-            name,
-            Binding {
-                storage,
-                ty,
-                volatile: false,
-            },
-        );
+        self.scopes
+            .last_mut()
+            .expect("function scope")
+            .insert(name, binding);
         Ok(())
     }
 
@@ -1876,17 +1981,17 @@ impl Emitter {
         }
         if let Some(storage) = self.model.globals.get(name) {
             return Ok(Binding {
-                storage: *storage,
+                location: BindingLocation::Memory(*storage),
                 ty: self.model.resolved_type(&self.model.global_types[name])?,
                 volatile: false,
             });
         }
         if let Some((address, ty, volatile)) = self.model.mmio.get(name) {
             return Ok(Binding {
-                storage: Storage {
+                location: BindingLocation::Memory(Storage {
                     address: *address,
                     size: self.model.type_size(ty)?,
-                },
+                }),
                 ty: ty.clone(),
                 volatile: *volatile,
             });
@@ -1914,6 +2019,163 @@ impl Emitter {
     fn emit_text_data(&mut self, value: &str) {
         self.line(&terminated_text_data_line("db", value, "0"));
     }
+}
+
+const M68K_ADDRESS_REGISTERS: [u8; 5] = [2, 3, 4, 5, 6];
+const M68K_POINTER_CLASS: RegClass = RegClass(0);
+const M68K_MEMORY_CLASS: RegClass = RegClass(1);
+const M68K_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+
+fn m68k_local_target() -> Target {
+    Target {
+        units: M68K_ADDRESS_REGISTERS
+            .iter()
+            .map(|register| RegisterUnit::new(format!("a{register}")))
+            .collect(),
+        registers: M68K_ADDRESS_REGISTERS
+            .iter()
+            .enumerate()
+            .map(|(unit, register)| {
+                PhysicalRegister::new(format!("a{register}"), vec![RegUnit(unit)])
+            })
+            .collect(),
+        register_classes: vec![
+            RegisterClass::new(
+                "pointer-address",
+                (0..M68K_ADDRESS_REGISTERS.len()).map(PhysReg).collect(),
+            ),
+            RegisterClass::new("memory-local", Vec::new()),
+        ],
+        spill_classes: vec![
+            SpillClass::new("static", None, 0)
+                .for_register_classes(vec![M68K_POINTER_CLASS, M68K_MEMORY_CLASS]),
+        ],
+    }
+}
+
+fn plan_function_locals(
+    function: &Function,
+    model: &mut SemanticModel,
+) -> Result<HashMap<String, Binding>, Diagnostic> {
+    let mut source_locals = Vec::new();
+    let mut local_types = HashMap::new();
+    collect_source_locals(&function.body, model, &mut source_locals, &mut local_types)?;
+    let clobbers = (0..M68K_ADDRESS_REGISTERS.len())
+        .map(PhysReg)
+        .collect::<Vec<_>>();
+    let planned = allocate_source_locals(
+        &m68k_local_target(),
+        &source_locals,
+        &function.body,
+        &clobbers,
+    )
+    .map_err(regalloc_diagnostic)?;
+    let spill_bytes = planned
+        .allocation
+        .spill_slots
+        .iter()
+        .map(|slot| slot.offset.saturating_add(slot.size))
+        .max()
+        .unwrap_or(0);
+    let spill_region = model.allocate(spill_bytes)?;
+    let mut bindings = HashMap::new();
+    for (name, ty) in local_types {
+        let vreg = planned
+            .locals
+            .vreg(&name)
+            .ok_or_else(|| Diagnostic::new(format!("missing allocation for local `{name}`")))?;
+        let location = match planned.allocation.location(vreg) {
+            Some(Location::Register(register)) => {
+                if !matches!(ty, Type::Ptr(_)) {
+                    return Err(Diagnostic::new(format!(
+                        "non-pointer local `{name}` was allocated to an address register"
+                    )));
+                }
+                let register = *M68K_ADDRESS_REGISTERS.get(register.0).ok_or_else(|| {
+                    Diagnostic::new(format!("invalid M68k local register for `{name}`"))
+                })?;
+                BindingLocation::AddressRegister(register)
+            }
+            Some(Location::Spill(slot_index)) => {
+                let slot = planned
+                    .allocation
+                    .spill_slots
+                    .get(slot_index)
+                    .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for `{name}`")))?;
+                debug_assert_eq!(slot.class, M68K_STATIC_SPILL_CLASS);
+                BindingLocation::Memory(Storage {
+                    address: spill_region.address + slot.offset,
+                    size: slot.size,
+                })
+            }
+            Some(Location::Unused) | None => {
+                return Err(Diagnostic::new(format!(
+                    "source allocator did not place local `{name}`"
+                )));
+            }
+        };
+        bindings.insert(
+            name,
+            Binding {
+                location,
+                ty,
+                volatile: false,
+            },
+        );
+    }
+    Ok(bindings)
+}
+
+fn collect_source_locals(
+    body: &[Stmt],
+    model: &SemanticModel,
+    locals: &mut Vec<SourceLocal>,
+    local_types: &mut HashMap<String, Type>,
+) -> Result<(), Diagnostic> {
+    for stmt in body {
+        match stmt {
+            Stmt::Let { name, ty, .. } => {
+                let ty = model.resolved_type(ty)?;
+                let pointer = matches!(ty, Type::Ptr(_));
+                let class = if pointer {
+                    M68K_POINTER_CLASS
+                } else {
+                    M68K_MEMORY_CLASS
+                };
+                if local_types.insert(name.clone(), ty.clone()).is_some() {
+                    return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                }
+                locals.push(
+                    SourceLocal::new(name.clone(), model.type_size(&ty)?, 1, class)
+                        .with_spill_classes(vec![M68K_STATIC_SPILL_CLASS])
+                        .with_force_memory(!pointer),
+                );
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_source_locals(then_body, model, locals, local_types)?;
+                collect_source_locals(else_body, model, locals, local_types)?;
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_source_locals(body, model, locals, local_types)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn regalloc_diagnostic(diagnostics: Vec<crate::regalloc::Diagnostic>) -> Diagnostic {
+    Diagnostic::new(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 fn expr_call_args(expr: &Expr) -> Result<&[Expr], Diagnostic> {
@@ -2391,6 +2653,7 @@ mod tests {
                 let shifted: u8 = value << 1
                 let text: ptr<u8> = "ok"
                 let first: u8 = *text
+                bytes[1] = shifted ^ first
             }
         "#,
         )
@@ -2920,6 +3183,207 @@ mod tests {
 
         assert!(assembly.contains("jsr _write"), "{assembly}");
         assert!(!assembly.contains("-(sp)"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn local_target_reserves_only_a2_through_a6_for_pointers() {
+        let target = m68k_local_target();
+        assert_eq!(
+            target
+                .registers
+                .iter()
+                .map(|register| register.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a2", "a3", "a4", "a5", "a6"]
+        );
+        assert_eq!(
+            target.register_classes[M68K_POINTER_CLASS.0].registers,
+            (0..5).map(PhysReg).collect::<Vec<_>>()
+        );
+        assert!(
+            target.register_classes[M68K_MEMORY_CLASS.0]
+                .registers
+                .is_empty()
+        );
+        for left in 0..5 {
+            for right in 0..5 {
+                assert_eq!(
+                    target.registers_alias(PhysReg(left), PhysReg(right)),
+                    left == right
+                );
+            }
+        }
+    }
+
+    fn emit_test_program(source: &str) -> String {
+        let program = parse_program(Path::new("m68k_regalloc_test.ezra"), source).unwrap();
+        emit_m68k_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu: CpuFamily::M68k,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn main_assembly(assembly: &str) -> &str {
+        assembly
+            .split_once("_main:\n")
+            .map(|(_, main)| main)
+            .expect("missing main function")
+    }
+
+    #[test]
+    fn keeps_pointer_locals_in_address_registers() {
+        let assembly = emit_test_program(
+            r#"
+                global byte: u8 = 0
+                fn main() {
+                    let pointer: ptr<u8> = &byte
+                    *pointer = 7
+                }
+            "#,
+        );
+        let main = main_assembly(&assembly);
+        assert!(main.contains("    move.l d0,a2\n"), "{assembly}");
+        assert!(main.contains("    move.l a2,d0\n"), "{assembly}");
+        assert!(!main.contains("move.b d0,a2"), "{assembly}");
+        assert!(!main.contains("move.w d0,a2"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[cfg(feature = "test-runner")]
+    #[test]
+    fn pointer_register_locals_execute_correctly() {
+        let (assembly, run) = emit_and_run(
+            r#"
+                volatile mmio DEBUG: u8 = 0xFFFFF0
+                volatile mmio HALT: u8 = 0xFFFFF2
+                global byte: u8 = 0
+                fn main() {
+                    let pointer: ptr<u8> = &byte
+                    *pointer = 7
+                    DEBUG = byte
+                    HALT = 1
+                }
+            "#,
+            200,
+        );
+        assert!(run.halted, "{run:?}\n{assembly}");
+        assert_eq!(run.debug_output, [7], "{assembly}");
+    }
+
+    fn local_byte_initializer_address(assembly: &str, value: u8) -> String {
+        let marker = format!("    move.b #${value:X},d0\n    move.b d0,$");
+        let rest = assembly
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing local initializer {value:X}\n{assembly}"))
+            .1;
+        rest[..6].to_owned()
+    }
+
+    #[test]
+    fn colors_nonoverlapping_memory_locals_into_one_static_byte() {
+        let assembly = emit_test_program(
+            r#"
+                global sink: u8 = 0
+                fn main() {
+                    let first: u8 = 0x11
+                    sink = first
+                    let second: u8 = 0x22
+                    sink = second
+                }
+            "#,
+        );
+        assert_eq!(
+            local_byte_initializer_address(&assembly, 0x11),
+            local_byte_initializer_address(&assembly, 0x22),
+            "{assembly}"
+        );
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn spills_pointer_locals_across_calls() {
+        let assembly = emit_test_program(
+            r#"
+                global byte: u8 = 0
+                fn touch() {}
+                fn main() {
+                    let pointer: ptr<u8> = &byte
+                    touch()
+                    *pointer = 7
+                }
+            "#,
+        );
+        let main = main_assembly(&assembly);
+        assert!(main.contains("    jsr _touch\n"), "{assembly}");
+        for register in M68K_ADDRESS_REGISTERS {
+            assert!(!main.contains(&format!("a{register}")), "{assembly}");
+        }
+        assert!(main.matches("move.b").count() >= 6, "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn interrupt_pointer_locals_keep_full_register_preservation() {
+        let assembly = emit_test_program(
+            r#"
+                global byte: u8 = 0
+                interrupt fn irq() {
+                    let pointer: ptr<u8> = &byte
+                    *pointer = 7
+                }
+                fn main() {}
+            "#,
+        );
+        assert!(assembly.contains("    move.l a2,-(sp)\n"), "{assembly}");
+        assert!(assembly.contains("    move.l (sp)+,a2\n"), "{assembly}");
+        assert!(assembly.contains("    move.l d0,a2\n"), "{assembly}");
+        assert!(assembly.contains("    rte\n"), "{assembly}");
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn spills_pointer_locals_across_inline_asm() {
+        let assembly = emit_test_program(
+            r#"
+                global byte: u8 = 0
+                fn main() {
+                    let pointer: ptr<u8> = &byte
+                    asm volatile(in pointer: ptr<u8> as mem, clobber memory) { "nop" }
+                    *pointer = 7
+                }
+            "#,
+        );
+        let main = main_assembly(&assembly);
+        assert!(main.contains("    nop\n"), "{assembly}");
+        for register in M68K_ADDRESS_REGISTERS {
+            assert!(!main.contains(&format!("a{register}")), "{assembly}");
+        }
+        assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+    }
+
+    #[test]
+    fn spills_address_taken_pointer_locals() {
+        let assembly = emit_test_program(
+            r#"
+                global byte: u8 = 0
+                global saved: u24 = 0
+                fn main() {
+                    let pointer: ptr<u8> = &byte
+                    let address: u24 = cast<u24>(&pointer)
+                    saved = address
+                }
+            "#,
+        );
+        let main = main_assembly(&assembly);
+        for register in M68K_ADDRESS_REGISTERS {
+            assert!(!main.contains(&format!("a{register}")), "{assembly}");
+        }
+        assert!(main.matches("move.b d0,$").count() >= 3, "{assembly}");
         assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
     }
 

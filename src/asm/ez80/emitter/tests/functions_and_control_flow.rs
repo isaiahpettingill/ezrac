@@ -16,6 +16,24 @@ fn lowered_function_calls(checked: &CheckedEz80Program, function_name: &str) -> 
     calls
 }
 
+fn debug_let_store_address(assembly: &str, name: &str) -> u32 {
+    let marker = format!("; source: let {name}:");
+    let body = assembly
+        .split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing debug marker for local `{name}`\n{assembly}"));
+    let line = body
+        .lines()
+        .find(|line| line.trim_start().starts_with("ld (") && line.trim_end().ends_with("), a"))
+        .unwrap_or_else(|| panic!("missing direct store for local `{name}`\n{body}"));
+    let address = line
+        .trim()
+        .strip_prefix("ld (")
+        .and_then(|line| line.strip_suffix("h), a"))
+        .unwrap_or_else(|| panic!("unexpected local store syntax `{line}`"));
+    u32::from_str_radix(address, 16).unwrap()
+}
+
 #[test]
 fn rejects_missing_return_value_in_non_void_function() {
     let cases = [
@@ -85,6 +103,217 @@ fn rejects_value_return_in_void_function() {
     let error = emit_ez80_assembly(&program).unwrap_err();
 
     assert_eq!(error.message, "void function `main` cannot return a value");
+}
+
+#[test]
+fn local_target_models_pair_aliases_and_cpu_index_registers() {
+    let z80 = ez80_local_target(CpuFamily::Z80);
+    let register = |target: &Target, name: &str| {
+        PhysReg(
+            target
+                .registers
+                .iter()
+                .position(|register| register.name == name)
+                .unwrap_or_else(|| panic!("missing register `{name}`")),
+        )
+    };
+
+    assert!(z80.registers_alias(register(&z80, "b"), register(&z80, "bc")));
+    assert!(z80.registers_alias(register(&z80, "c"), register(&z80, "bc")));
+    assert!(!z80.registers_alias(register(&z80, "b"), register(&z80, "de")));
+    assert!(z80.registers.iter().any(|register| register.name == "ix"));
+    assert!(z80.registers.iter().any(|register| register.name == "iy"));
+    assert!(
+        z80.register_classes[EZ80_MEMORY_LOCAL_CLASS.0]
+            .registers
+            .is_empty()
+    );
+
+    for cpu in [CpuFamily::I8080, CpuFamily::I8085] {
+        let target = ez80_local_target(cpu);
+        assert!(
+            !target
+                .registers
+                .iter()
+                .any(|register| register.name == "ix")
+        );
+        assert!(
+            !target
+                .registers
+                .iter()
+                .any(|register| register.name == "iy")
+        );
+    }
+}
+
+#[test]
+fn nonoverlapping_storage_locals_share_static_memory() {
+    let source = r#"
+            global sink: u8 = 0
+
+            fn main() {
+                let first: u8 = 1
+                first += 1
+                sink = first
+                let second: u8 = 3
+                second += 1
+                sink += second
+                test.assert_eq_u8(sink, 6, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let assembly = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+
+    assert_eq!(
+        debug_let_store_address(&assembly, "first"),
+        debug_let_store_address(&assembly, "second"),
+        "{assembly}"
+    );
+    let run = run_assembly_test(&assembly, 2_000).unwrap();
+    assert!(run.halted, "{assembly}");
+    assert_eq!(run.result_code, 0, "{assembly}");
+}
+
+#[test]
+fn overlapping_storage_locals_use_distinct_static_memory() {
+    let source = r#"
+            global sink: u8 = 0
+
+            fn main() {
+                let first: u8 = 1
+                first += 1
+                let second: u8 = 3
+                second += 1
+                sink = first + second
+                test.assert_eq_u8(sink, 6, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let assembly = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+
+    assert_ne!(
+        debug_let_store_address(&assembly, "first"),
+        debug_let_store_address(&assembly, "second"),
+        "{assembly}"
+    );
+    let run = run_assembly_test(&assembly, 2_000).unwrap();
+    assert!(run.halted, "{assembly}");
+    assert_eq!(run.result_code, 0, "{assembly}");
+}
+
+#[test]
+fn allocated_locals_assemble_and_run_on_ez80_z80_and_i8080() {
+    let source = r#"
+            fn main() {
+                let first: u8 = 1
+                first += 1
+                let second: u8 = 3
+                second += 1
+                test.assert_eq_u8(first + second, 6, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+
+    for cpu in [CpuFamily::Ez80, CpuFamily::Z80, CpuFamily::I8080] {
+        let classic = cpu != CpuFamily::Ez80;
+        let stack_top = if classic {
+            0xF000
+        } else {
+            EZRA_STACK_TOP.get()
+        };
+        let assembly = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu,
+                ram_base: Address24::new(if classic { 0x2000 } else { EZRA_RAM_BASE.get() }),
+                rodata_base: Address24::new(if classic {
+                    0x3000
+                } else {
+                    EZRA_RODATA_BASE.get()
+                }),
+                stack_top: Address24::new(stack_top),
+                section_bases: vec![(
+                    ".rodata".to_owned(),
+                    Address24::new(if classic {
+                        0x3000
+                    } else {
+                        EZRA_RODATA_BASE.get()
+                    }),
+                )],
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        let run = crate::vm::run_assembly_test_with_cpu_options_at(
+            cpu,
+            &assembly,
+            &TestRunOptions {
+                instruction_budget: 3_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top,
+            },
+            if classic {
+                0x0100
+            } else {
+                EZRA_LOAD_ADDR.get()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{} failed: {error}\n{assembly}", cpu.as_str()));
+
+        assert!(run.halted, "{}\n{assembly}", cpu.as_str());
+        assert_eq!(run.result_code, 0, "{}\n{assembly}", cpu.as_str());
+    }
+}
+
+#[test]
+fn plans_storage_for_constants_used_after_inline_asm_memory_clobber() {
+    let source = r#"
+            fn main() {
+                let value: u8 = 7
+                asm volatile(clobber memory) {
+                    "nop"
+                }
+                let copied: u8 = value
+                test.assert_eq_u8(copied, 7, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let assembly = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&assembly, 2_000).unwrap();
+
+    assert!(assembly.contains("    ; clobber memory"), "{assembly}");
+    assert!(run.halted, "{assembly}");
+    assert_eq!(run.result_code, 0, "{assembly}");
+}
+
+#[test]
+fn plans_storage_for_inline_asm_output_and_later_dependent_local() {
+    let source = r#"
+            fn main() {
+                let result: u8 = 0
+                asm volatile(out result: u8 as reg8, clobber a) {
+                    "ld a, 07h"
+                }
+                let copied: u8 = result
+                test.assert_eq_u8(copied, 7, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let assembly = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&assembly, 2_000).unwrap();
+
+    assert!(
+        assembly.contains("    ; out result: u8 as reg8"),
+        "{assembly}"
+    );
+    assert!(run.halted, "{assembly}");
+    assert_eq!(run.result_code, 0, "{assembly}");
 }
 
 #[test]

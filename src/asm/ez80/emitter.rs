@@ -15,6 +15,11 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    regalloc::{
+        Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
+        SpillClass, SpillClassId, Target,
+        source::{SourceLocal, allocate_source_locals},
+    },
     target::{
         Address24, AssemblerCpu, CpuFamily, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE,
         EZRA_ENTRY_ADDR, EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP,
@@ -159,15 +164,6 @@ pub fn collect_ez80_semantic_diagnostics(
         emitter.disable_dead_code_elimination();
         if let Err(error) = emitter.emit_function(function) {
             let error = locate_program_diagnostic(program, error);
-            let error = if error.span.is_none() {
-                function
-                    .body_spans
-                    .first()
-                    .map(|span| error.clone().with_span_if_missing(span.span.clone()))
-                    .unwrap_or(error)
-            } else {
-                error
-            };
             if !diagnostics.iter().any(|diagnostic| {
                 diagnostic.message == error.message && diagnostic.span == error.span
             }) {
@@ -300,7 +296,13 @@ pub fn emit_ez80_assembly_from_checked(
             RoutineProfile::Ez80
         };
         let asm = strip_unreachable_generated_routines(&asm, profile);
-        with_readability_comments(asm, original_program, &options, "ez80")
+        with_readability_comments(
+            asm,
+            original_program,
+            &options,
+            "ez80",
+            &checked.tbir.source_comments,
+        )
     })
 }
 
@@ -316,6 +318,50 @@ fn supports_z80_bit_instructions(cpu: CpuFamily) -> bool {
         cpu,
         CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::Ez80
     )
+}
+
+const EZ80_MEMORY_LOCAL_CLASS: RegClass = RegClass(0);
+const EZ80_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+
+fn ez80_local_target(cpu: CpuFamily) -> Target {
+    let mut units = ["a", "f", "b", "c", "d", "e", "h", "l", "sp"]
+        .into_iter()
+        .map(RegisterUnit::new)
+        .collect::<Vec<_>>();
+    let mut registers = vec![
+        PhysicalRegister::new("a", vec![RegUnit(0)]),
+        PhysicalRegister::new("f", vec![RegUnit(1)]),
+        PhysicalRegister::new("af", vec![RegUnit(0), RegUnit(1)]),
+        PhysicalRegister::new("b", vec![RegUnit(2)]),
+        PhysicalRegister::new("c", vec![RegUnit(3)]),
+        PhysicalRegister::new("bc", vec![RegUnit(2), RegUnit(3)]),
+        PhysicalRegister::new("d", vec![RegUnit(4)]),
+        PhysicalRegister::new("e", vec![RegUnit(5)]),
+        PhysicalRegister::new("de", vec![RegUnit(4), RegUnit(5)]),
+        PhysicalRegister::new("h", vec![RegUnit(6)]),
+        PhysicalRegister::new("l", vec![RegUnit(7)]),
+        PhysicalRegister::new("hl", vec![RegUnit(6), RegUnit(7)]),
+        PhysicalRegister::new("sp", vec![RegUnit(8)]),
+    ];
+    if !is_intel_8080_family(cpu) {
+        let ix = units.len();
+        units.push(RegisterUnit::new("ix"));
+        registers.push(PhysicalRegister::new("ix", vec![RegUnit(ix)]));
+        let iy = units.len();
+        units.push(RegisterUnit::new("iy"));
+        registers.push(PhysicalRegister::new("iy", vec![RegUnit(iy)]));
+    }
+
+    Target {
+        units,
+        registers,
+        register_classes: vec![RegisterClass::new("memory-local", Vec::new())],
+        spill_classes: vec![
+            SpillClass::new("static", None, 1)
+                .with_base_alignment(1)
+                .for_register_classes(vec![EZ80_MEMORY_LOCAL_CLASS]),
+        ],
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -809,6 +855,7 @@ struct Emitter {
     function_interrupt_stack: Vec<bool>,
     function_naked_stack: Vec<bool>,
     function_storage_stack: Vec<Vec<Variable>>,
+    function_local_plans: Vec<HashMap<String, Variable>>,
     cacheable_ranges: Vec<(u32, u32)>,
     assigned_names_stack: Vec<HashSet<String>>,
     storage_required_names_stack: Vec<HashSet<String>>,
@@ -855,6 +902,7 @@ impl Emitter {
             function_interrupt_stack: Vec::new(),
             function_naked_stack: Vec::new(),
             function_storage_stack: Vec::new(),
+            function_local_plans: Vec::new(),
             cacheable_ranges,
             assigned_names_stack: Vec::new(),
             storage_required_names_stack: Vec::new(),
@@ -1448,7 +1496,10 @@ impl Emitter {
             }
             self.bind_params(function)?;
         }
+        let local_plan = self.plan_function_locals(function)?;
+        self.function_local_plans.push(local_plan);
         self.emit_block(&function.body)?;
+        self.function_local_plans.pop();
         self.function_naked_stack.pop();
         self.function_interrupt_stack.pop();
         self.function_frame_stack.pop();
@@ -1476,6 +1527,184 @@ impl Emitter {
                 self.emit_frame_epilogue();
             }
             self.line("    ret");
+        }
+        Ok(())
+    }
+
+    fn plan_function_locals(
+        &mut self,
+        function: &Function,
+    ) -> Result<HashMap<String, Variable>, Diagnostic> {
+        let saved_scope = self.current_scope_mut().clone();
+        let saved_types = self.current_scope_types_mut().clone();
+        let saved_constants = self.current_local_constants_mut().clone();
+        let saved_aliases = self.current_readonly_pointer_aliases_mut().clone();
+
+        let result = (|| {
+            let mut locals = Vec::new();
+            let mut local_types = HashMap::new();
+            let mut asm_output_names = HashSet::new();
+            let mut asm_clobbers_memory = false;
+            collect_inline_asm_storage_requirements(
+                &function.body,
+                &mut asm_output_names,
+                &mut asm_clobbers_memory,
+            );
+            self.collect_function_locals(
+                &function.body,
+                &mut locals,
+                &mut local_types,
+                &asm_output_names,
+                asm_clobbers_memory,
+            )?;
+
+            let target = ez80_local_target(self.cpu);
+            let clobbers = (0..target.registers.len()).map(PhysReg).collect::<Vec<_>>();
+            let planned = allocate_source_locals(&target, &locals, &function.body, &clobbers)
+                .map_err(|diagnostics| {
+                    Diagnostic::new(format!(
+                        "eZ80 local allocation failed in function `{}`: {}",
+                        function.name,
+                        diagnostics
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ))
+                })?;
+            let storage_size = planned
+                .allocation
+                .spill_slots
+                .iter()
+                .map(|slot| slot.offset.saturating_add(slot.size))
+                .max()
+                .unwrap_or(0);
+            let storage = (storage_size != 0).then(|| self.alloc_var(storage_size));
+            let mut variables = HashMap::new();
+
+            for local in &locals {
+                let vreg = planned.locals.vreg(&local.name).ok_or_else(|| {
+                    Diagnostic::new(format!("missing allocation for local `{}`", local.name))
+                })?;
+                let slot_index = match planned.allocation.location(vreg) {
+                    Some(Location::Spill(slot)) => slot,
+                    Some(Location::Register(_)) => {
+                        return Err(Diagnostic::new(format!(
+                            "memory-only local `{}` was allocated to a register",
+                            local.name
+                        )));
+                    }
+                    Some(Location::Unused) | None => {
+                        return Err(Diagnostic::new(format!(
+                            "source allocator did not place local `{}`",
+                            local.name
+                        )));
+                    }
+                };
+                let slot = planned
+                    .allocation
+                    .spill_slots
+                    .get(slot_index)
+                    .ok_or_else(|| Diagnostic::new("invalid eZ80 static spill slot"))?;
+                debug_assert_eq!(slot.class, EZ80_STATIC_SPILL_CLASS);
+                let base = storage.ok_or_else(|| {
+                    Diagnostic::new("eZ80 local allocation omitted its static storage region")
+                })?;
+                let ty = local_types.get(&local.name).ok_or_else(|| {
+                    Diagnostic::new(format!("missing type for local `{}`", local.name))
+                })?;
+                variables.insert(
+                    local.name.clone(),
+                    self.symbols.storage_at(base.addr + slot.offset, ty)?,
+                );
+            }
+            Ok(variables)
+        })();
+
+        *self.current_scope_mut() = saved_scope;
+        *self.current_scope_types_mut() = saved_types;
+        *self.current_local_constants_mut() = saved_constants;
+        *self.current_readonly_pointer_aliases_mut() = saved_aliases;
+        result
+    }
+
+    fn collect_function_locals(
+        &mut self,
+        body: &[Stmt],
+        locals: &mut Vec<SourceLocal>,
+        local_types: &mut HashMap<String, Type>,
+        asm_output_names: &HashSet<String>,
+        asm_clobbers_memory: bool,
+    ) -> Result<(), Diagnostic> {
+        for stmt in body {
+            match stmt {
+                Stmt::Let { name, ty, value } => {
+                    if self.name_in_current_function(name) {
+                        return Err(Diagnostic::new(format!(
+                            "local `{name}` shadows an existing name"
+                        )));
+                    }
+                    self.current_scope_types_mut()
+                        .insert(name.clone(), ty.clone());
+                    if asm_clobbers_memory
+                        || asm_output_names.contains(name)
+                        || !self.can_elide_constant_local_storage(name, ty, value)?
+                    {
+                        let size = self.symbols.type_size(ty)?;
+                        locals.push(
+                            SourceLocal::new(name.clone(), size, 1, EZ80_MEMORY_LOCAL_CLASS)
+                                .with_spill_classes(vec![EZ80_STATIC_SPILL_CLASS])
+                                .with_force_memory(true),
+                        );
+                        local_types.insert(name.clone(), ty.clone());
+                        let placeholder = self.symbols.storage_at(0, ty)?;
+                        self.current_scope_mut().insert(name.clone(), placeholder);
+                    }
+                    self.record_local_constant(name, ty, value);
+                    self.record_readonly_pointer_alias(name, value);
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.collect_function_locals(
+                        then_body,
+                        locals,
+                        local_types,
+                        asm_output_names,
+                        asm_clobbers_memory,
+                    )?;
+                    self.collect_function_locals(
+                        else_body,
+                        locals,
+                        local_types,
+                        asm_output_names,
+                        asm_clobbers_memory,
+                    )?;
+                }
+                Stmt::While { body, .. } | Stmt::Loop { body } => {
+                    self.collect_function_locals(
+                        body,
+                        locals,
+                        local_types,
+                        asm_output_names,
+                        asm_clobbers_memory,
+                    )?;
+                }
+                Stmt::Asm {
+                    outputs, clobbers, ..
+                } => {
+                    for output in outputs {
+                        self.invalidate_local_constant(&output.name);
+                        self.invalidate_readonly_pointer_alias(&output.name);
+                    }
+                    if asm_clobbers_include(clobbers, "memory") {
+                        self.invalidate_all_local_constants();
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -1631,7 +1860,14 @@ impl Emitter {
                     self.record_readonly_pointer_alias(name, value);
                     return Ok(());
                 }
-                let variable = self.alloc_storage(ty)?;
+                let variable = self
+                    .function_local_plans
+                    .last()
+                    .and_then(|locals| locals.get(name))
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing storage allocation for local `{name}`"))
+                    })?;
                 self.current_scope_mut().insert(name.clone(), variable);
                 self.emit_storage_initializer(variable, ty, value)?;
                 self.record_local_constant(name, ty, value);
@@ -3129,13 +3365,28 @@ impl Emitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut variables = storage
+        let mut addresses = storage
             .iter()
-            .copied()
-            .filter(|variable| !excluded.contains(variable))
+            .flat_map(|variable| variable.addr..variable.addr.saturating_add(variable.size))
+            .filter(|addr| {
+                !excluded.iter().any(|variable| {
+                    (variable.addr..variable.addr.saturating_add(variable.size)).contains(addr)
+                })
+            })
             .collect::<Vec<_>>();
-        variables.sort_by_key(|variable| variable.addr);
-        variables.dedup_by_key(|variable| variable.addr);
+        addresses.sort_unstable();
+        addresses.dedup();
+
+        let mut variables: Vec<Variable> = Vec::new();
+        for addr in addresses {
+            if let Some(variable) = variables.last_mut()
+                && variable.addr + variable.size == addr
+            {
+                variable.size += 1;
+            } else {
+                variables.push(scalar_var(addr, 1));
+            }
+        }
         variables
     }
 
@@ -7374,6 +7625,13 @@ impl Emitter {
         ty: &Type,
         value: &Expr,
     ) -> Result<bool, Diagnostic> {
+        if self
+            .function_local_plans
+            .last()
+            .is_some_and(|locals| locals.contains_key(name))
+        {
+            return Ok(false);
+        }
         if self.current_function_assigns(name)
             || self.current_function_requires_storage(name)
             || !self.local_constant_supported_type(ty)
@@ -8391,6 +8649,35 @@ fn stmt_terminates_current_block(stmt: &Stmt) -> bool {
             body,
         } => !block_can_break_current_loop(body) && block_terminates_current_block(body),
         _ => false,
+    }
+}
+
+fn collect_inline_asm_storage_requirements(
+    stmts: &[Stmt],
+    output_names: &mut HashSet<String>,
+    clobbers_memory: &mut bool,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Asm {
+                outputs, clobbers, ..
+            } => {
+                output_names.extend(outputs.iter().map(|output| output.name.clone()));
+                *clobbers_memory |= asm_clobbers_include(clobbers, "memory");
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_inline_asm_storage_requirements(then_body, output_names, clobbers_memory);
+                collect_inline_asm_storage_requirements(else_body, output_names, clobbers_memory);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                collect_inline_asm_storage_requirements(body, output_names, clobbers_memory);
+            }
+            _ => {}
+        }
     }
 }
 
