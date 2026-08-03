@@ -250,7 +250,7 @@ fn mos6502_differential_arithmetic_corpus_assembles() {
         super::emit_mos6502_assembly_with_options(&program(), options(CpuFamily::Mos6502)).unwrap();
     validate(AssemblerCpu::Mos6502, &assembly);
 
-    #[cfg(feature = "test-runner")]
+    #[cfg(all(feature = "test-runner", feature = "mos6502-emulator"))]
     {
         let writes = debug_writes(|address| format!("    lda ${address:04X}\n    sta $FF0C"));
         let instrumented = assembly.replace(

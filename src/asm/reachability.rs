@@ -66,13 +66,25 @@ pub(crate) fn strip_unreachable_generated_routines(
     assembly: &str,
     profile: RoutineProfile,
 ) -> String {
+    strip_unreachable_generated_routines_with_roots(assembly, profile, &[])
+}
+
+pub(crate) fn strip_unreachable_generated_routines_with_roots(
+    assembly: &str,
+    profile: RoutineProfile,
+    extra_roots: &[&str],
+) -> String {
     let profile = transfer_profile(profile);
     let routine_labels = discover_generated_routine_labels(assembly, profile);
     let banked_payload_roots = labels_referenced_from_banked_payload(assembly, &routine_labels);
     let root_labels = routine_labels
         .iter()
         .copied()
-        .filter(|label| is_routine_root(label) || banked_payload_roots.contains(label))
+        .filter(|label| {
+            is_routine_root(label)
+                || banked_payload_roots.contains(label)
+                || extra_roots.contains(label)
+        })
         .collect::<Vec<_>>();
 
     strip_unreachable_routines(assembly, &routine_labels, &root_labels, profile)

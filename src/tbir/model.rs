@@ -7,7 +7,10 @@ use std::{
 };
 
 use crate::{
-    ast::{BinaryOp, ConstDecl, Declaration, EmbedSource, Expr, Program, Type, UnaryOp},
+    ast::{
+        AccessPath, AccessSegment, BinaryOp, ConstDecl, Declaration, EmbedSource, Expr, Program,
+        Type, UnaryOp,
+    },
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
 };
@@ -201,6 +204,13 @@ impl SemanticModel {
                 .get(name)
                 .copied()
                 .ok_or_else(|| Diagnostic::new(format!("`{name}` is not a constant"))),
+            Expr::Field { base, field } => {
+                self.const_value(&Expr::Ident(format!("{base}.{field}")))
+            }
+            Expr::Access(path) => {
+                let name = const_access_name(path)?;
+                self.const_value(&Expr::Ident(name))
+            }
             Expr::Unary { op, expr } => {
                 let value = self.const_value(expr)?;
                 Ok(match op {
@@ -215,13 +225,113 @@ impl SemanticModel {
                 Ok(eval_binary(left, *op, right))
             }
             Expr::Cast { expr, .. } => self.const_value(expr),
+            Expr::AddressOf(_)
+            | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_) => self.const_address_value(expr),
+            Expr::String(value) => self
+                .strings
+                .get(value)
+                .map(|storage| i64::from(storage.address))
+                .ok_or_else(|| Diagnostic::new("unknown string literal")),
+            _ => Err(Diagnostic::new("expression is not constant")),
+        }
+    }
+
+    fn const_address_value(&self, expr: &Expr) -> Result<i64, Diagnostic> {
+        let storage = match expr {
             Expr::AddressOf(name) => self
                 .globals
                 .get(name)
-                .map(|storage| i64::from(storage.address))
-                .ok_or_else(|| Diagnostic::new(format!("unknown global `{name}`"))),
-            _ => Err(Diagnostic::new("expression is not constant")),
+                .copied()
+                .ok_or_else(|| Diagnostic::new(format!("unknown global `{name}"))),
+            Expr::AddressOfIndex { name, index } => {
+                let base = self
+                    .globals
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| Diagnostic::new(format!("unknown global `{name}")))?;
+                let Type::Array { element, len } = self
+                    .global_types
+                    .get(name)
+                    .ok_or_else(|| Diagnostic::new(format!("unknown global `{name}")))
+                    .and_then(|ty| self.resolved_type(ty))?
+                else {
+                    return Err(Diagnostic::new(format!("`{name}` is not an array")));
+                };
+                let index = self.const_value(index)?;
+                let len = self.const_value(&len)?;
+                if index < 0 || index >= len {
+                    return Err(Diagnostic::new(format!(
+                        "array index {index} is out of bounds for `{name}` length {len}"
+                    )));
+                }
+                let element_size = self.type_size(&element)?;
+                Ok(Storage {
+                    address: base.address + index as u32 * element_size,
+                    size: element_size,
+                })
+            }
+            Expr::AddressOfField { base, field } => {
+                let base_storage = self
+                    .globals
+                    .get(base)
+                    .copied()
+                    .ok_or_else(|| Diagnostic::new(format!("unknown global `{base}")))?;
+                let base_type = self
+                    .global_types
+                    .get(base)
+                    .ok_or_else(|| Diagnostic::new(format!("unknown global `{base}")))?;
+                let field = self.field(base_type, field)?.clone();
+                Ok(Storage {
+                    address: base_storage.address + field.offset,
+                    size: field.size,
+                })
+            }
+            Expr::AddressOfAccess(path) => self.const_access_storage(path),
+            _ => unreachable!("not an address expression"),
+        }?;
+        Ok(i64::from(storage.address))
+    }
+
+    fn const_access_storage(&self, path: &AccessPath) -> Result<Storage, Diagnostic> {
+        let mut storage = self
+            .globals
+            .get(&path.root)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown global `{}`", path.root)))?;
+        let mut ty = self
+            .global_types
+            .get(&path.root)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown global `{}`", path.root)))?;
+        for segment in &path.segments {
+            match segment {
+                AccessSegment::Field(name) => {
+                    let field = self.field(&ty, name)?.clone();
+                    storage.address += field.offset;
+                    storage.size = field.size;
+                    ty = field.ty;
+                }
+                AccessSegment::Index(index) => {
+                    let Type::Array { element, len } = self.resolved_type(&ty)? else {
+                        return Err(Diagnostic::new("indexing requires an array"));
+                    };
+                    let index = self.const_value(index)?;
+                    let len = self.const_value(&len)?;
+                    if index < 0 || index >= len {
+                        return Err(Diagnostic::new(format!(
+                            "array index {index} is out of bounds"
+                        )));
+                    }
+                    let element_size = self.type_size(&element)?;
+                    storage.address += index as u32 * element_size;
+                    storage.size = element_size;
+                    ty = *element;
+                }
+            }
         }
+        Ok(storage)
     }
 
     pub fn field(&self, ty: &Type, name: &str) -> Result<&FieldLayout, Diagnostic> {
@@ -246,6 +356,9 @@ impl SemanticModel {
     }
 
     fn collect(&mut self, program: &Program) -> Result<(), Diagnostic> {
+        // String addresses are needed while resolving pointer constants and
+        // globals, not only when the final model is complete.
+        collect_strings(program, self)?;
         let mut names = HashSet::new();
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
@@ -285,9 +398,6 @@ impl SemanticModel {
                 break;
             }
         }
-        if !pending.is_empty() {
-            ensure_no_circular_constants(&pending)?;
-        }
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
             if let Declaration::Struct(declaration) = declaration {
@@ -325,20 +435,9 @@ impl SemanticModel {
                 );
             }
         }
-        for declaration in &program.declarations {
-            let declaration = unwrapped_declaration(declaration);
-            if let Declaration::Const(declaration) = declaration {
-                if self.constants.contains_key(&declaration.name)
-                    || matches!(declaration.ty, Type::Array { .. })
-                {
-                    continue;
-                }
-                let value = self.const_value(&declaration.value)?;
-                self.constants.insert(declaration.name.clone(), value);
-                self.constant_types
-                    .insert(declaration.name.clone(), declaration.ty.clone());
-            }
-        }
+
+        // Allocate addressable objects before resolving pointer constants. Global
+        // array sizes and struct layouts only depend on the plain constants above.
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
             match declaration {
@@ -351,94 +450,123 @@ impl SemanticModel {
                     self.constant_types
                         .insert(declaration.name.clone(), declaration.ty.clone());
                 }
-                Declaration::Mmio(declaration) => {
-                    let address = u32::try_from(self.const_value(&declaration.value)?)
-                        .ok()
-                        .filter(|address| *address <= self.max_address)
-                        .ok_or_else(|| {
-                            Diagnostic::new(format!(
-                                "mmio `{}` is outside target address space",
-                                declaration.name
-                            ))
-                        })?;
-                    self.mmio.insert(
-                        declaration.name.clone(),
-                        (address, declaration.ty.clone(), declaration.volatile),
-                    );
-                    self.constants
-                        .insert(declaration.name.clone(), i64::from(address));
-                    self.constant_types
-                        .insert(declaration.name.clone(), declaration.ty.clone());
-                }
                 Declaration::Global(declaration) => {
                     let storage = self.allocate_type(&declaration.ty)?;
                     self.globals.insert(declaration.name.clone(), storage);
                     self.global_types
                         .insert(declaration.name.clone(), declaration.ty.clone());
                 }
-                Declaration::Embed(declaration) => {
-                    let bytes = embed_bytes(&declaration.source, &program.source_path, self)?;
-                    let len = match &declaration.ty {
-                        Some(Type::Array { len, .. }) => usize::try_from(self.const_value(len)?)
-                            .map_err(|_| Diagnostic::new("embed length must be non-negative"))?,
-                        Some(_) => {
-                            return Err(Diagnostic::new(format!(
-                                "embed `{}` must have an array type",
-                                declaration.name
-                            )));
-                        }
-                        None => bytes.len(),
-                    };
-                    if len != bytes.len() {
-                        return Err(Diagnostic::new(format!(
-                            "embed `{}` declares {len} bytes but contains {}",
-                            declaration.name,
-                            bytes.len()
-                        )));
-                    }
-                    // Embeds are always raw byte storage. Their declared array length
-                    // documents and validates the number of bytes; it does not change
-                    // their in-memory representation.
-                    let ty = Type::Array {
-                        element: Box::new(Type::Named("u8".to_owned())),
-                        len: Box::new(Expr::Int(i64::try_from(len).unwrap_or(i64::MAX))),
-                    };
-                    let align = declaration
-                        .align
-                        .as_ref()
-                        .map(|value| self.const_value(value))
-                        .transpose()?
-                        .unwrap_or(1);
-                    let align = u32::try_from(align)
-                        .ok()
-                        .filter(|value| value.is_power_of_two())
-                        .ok_or_else(|| Diagnostic::new("embed alignment must be a power of two"))?;
-                    let size = u32::try_from(bytes.len())
-                        .map_err(|_| Diagnostic::new("embedded asset is too large"))?;
-                    let storage =
-                        allocate_from(&mut self.next_asset, size, align, self.max_address)?;
-                    self.embeds
-                        .insert(declaration.name.clone(), EmbedObject { storage, ty, bytes });
-                    for (suffix, value, ty) in [
-                        (
-                            "ptr",
-                            storage.address,
-                            Type::Ptr(Box::new(Type::Named("u8".to_owned()))),
-                        ),
-                        ("len", storage.size, Type::Named("u24".to_owned())),
-                        (
-                            "end",
-                            storage.address + storage.size,
-                            Type::Ptr(Box::new(Type::Named("u8".to_owned()))),
-                        ),
-                    ] {
-                        let name = format!("{}.{suffix}", declaration.name);
-                        self.constants.insert(name.clone(), i64::from(value));
-                        self.constant_types.insert(name, ty);
-                    }
-                }
                 _ => {}
             }
+        }
+
+        // Embeds can be address constants too, so allocate them before the final
+        // constant-resolution pass. Their alignment and byte expressions use the
+        // already resolved plain constants.
+        for declaration in &program.declarations {
+            let Declaration::Embed(declaration) = unwrapped_declaration(declaration) else {
+                continue;
+            };
+            let bytes = embed_bytes(&declaration.source, &program.source_path, self)?;
+            let len = match &declaration.ty {
+                Some(Type::Array { len, .. }) => usize::try_from(self.const_value(len)?)
+                    .map_err(|_| Diagnostic::new("embed length must be non-negative"))?,
+                Some(_) => {
+                    return Err(Diagnostic::new(format!(
+                        "embed `{}` must have an array type",
+                        declaration.name
+                    )));
+                }
+                None => bytes.len(),
+            };
+            if len != bytes.len() {
+                return Err(Diagnostic::new(format!(
+                    "embed `{}` declares {len} bytes but contains {}",
+                    declaration.name,
+                    bytes.len()
+                )));
+            }
+            // Embeds are always raw byte storage. Their declared array length
+            // documents and validates the number of bytes; it does not change
+            // their in-memory representation.
+            let ty = Type::Array {
+                element: Box::new(Type::Named("u8".to_owned())),
+                len: Box::new(Expr::Int(i64::try_from(len).unwrap_or(i64::MAX))),
+            };
+            let align = declaration
+                .align
+                .as_ref()
+                .map(|value| self.const_value(value))
+                .transpose()?
+                .unwrap_or(1);
+            let align = u32::try_from(align)
+                .ok()
+                .filter(|value| value.is_power_of_two())
+                .ok_or_else(|| Diagnostic::new("embed alignment must be a power of two"))?;
+            let size = u32::try_from(bytes.len())
+                .map_err(|_| Diagnostic::new("embedded asset is too large"))?;
+            let storage = allocate_from(&mut self.next_asset, size, align, self.max_address)?;
+            self.embeds
+                .insert(declaration.name.clone(), EmbedObject { storage, ty, bytes });
+            for (suffix, value, ty) in [
+                (
+                    "ptr",
+                    storage.address,
+                    Type::Ptr(Box::new(Type::Named("u8".to_owned()))),
+                ),
+                ("len", storage.size, Type::Named("u24".to_owned())),
+                (
+                    "end",
+                    storage.address + storage.size,
+                    Type::Ptr(Box::new(Type::Named("u8".to_owned()))),
+                ),
+            ] {
+                let name = format!("{}.{suffix}", declaration.name);
+                self.constants.insert(name.clone(), i64::from(value));
+                self.constant_types.insert(name, ty);
+            }
+        }
+
+        while !pending.is_empty() {
+            let before = pending.len();
+            pending.retain(|declaration| {
+                let Ok(value) = self.const_value(&declaration.value) else {
+                    return true;
+                };
+                self.constants.insert(declaration.name.clone(), value);
+                self.constant_types
+                    .insert(declaration.name.clone(), declaration.ty.clone());
+                false
+            });
+            if pending.len() == before {
+                break;
+            }
+        }
+        if !pending.is_empty() {
+            ensure_no_circular_constants(&pending)?;
+        }
+
+        for declaration in &program.declarations {
+            let Declaration::Mmio(declaration) = unwrapped_declaration(declaration) else {
+                continue;
+            };
+            let address = u32::try_from(self.const_value(&declaration.value)?)
+                .ok()
+                .filter(|address| *address <= self.max_address)
+                .ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "mmio `{}` is outside target address space",
+                        declaration.name
+                    ))
+                })?;
+            self.mmio.insert(
+                declaration.name.clone(),
+                (address, declaration.ty.clone(), declaration.volatile),
+            );
+            self.constants
+                .insert(declaration.name.clone(), i64::from(address));
+            self.constant_types
+                .insert(declaration.name.clone(), declaration.ty.clone());
         }
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
@@ -464,7 +592,6 @@ impl SemanticModel {
                 },
             );
         }
-        collect_strings(program, self)?;
         Ok(())
     }
 }
@@ -485,6 +612,22 @@ fn allocate_from(
         .ok_or_else(|| Diagnostic::new("storage exceeds target address space"))?;
     *cursor = next;
     Ok(Storage { address, size })
+}
+
+fn const_access_name(path: &AccessPath) -> Result<String, Diagnostic> {
+    let mut name = path.root.clone();
+    for segment in &path.segments {
+        match segment {
+            AccessSegment::Field(field) => {
+                name.push('.');
+                name.push_str(field);
+            }
+            AccessSegment::Index(_) => {
+                return Err(Diagnostic::new("expression is not constant"));
+            }
+        }
+    }
+    Ok(name)
 }
 
 fn declaration_name(declaration: &Declaration) -> Option<&str> {
@@ -556,21 +699,40 @@ fn embed_bytes(
 
 #[cfg(feature = "std")]
 fn read_embed_file(file: &str, source_path: &SourcePath) -> Result<Vec<u8>, Diagnostic> {
-    let relative = source_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(file);
-    let mut candidates = vec![relative];
+    let path = Path::new(file);
+    if path.is_absolute() {
+        return fs::read(path).map_err(|error| {
+            Diagnostic::new(format!(
+                "failed to read embedded file `{}`: {error}",
+                path.display()
+            ))
+        });
+    }
+
+    let mut candidates = vec![
+        source_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path),
+    ];
     if let Some(root) = source_path
         .ancestors()
-        .find(|path| path.join("Ezra.toml").is_file())
+        .find(|candidate| candidate.join("Ezra.toml").is_file())
     {
-        candidates.push(root.join(file));
+        candidates.push(root.join(path));
+    }
+    if let Ok(project_root) = std::env::current_dir() {
+        let project_relative = project_root.join(path);
+        if !candidates
+            .iter()
+            .any(|candidate| candidate == &project_relative)
+        {
+            candidates.push(project_relative);
+        }
     }
     candidates
         .into_iter()
-        .find_map(|path| fs::read(&path).ok().map(|bytes| (path, bytes)))
-        .map(|(_, bytes)| bytes)
+        .find_map(|candidate| fs::read(candidate).ok())
         .ok_or_else(|| {
             Diagnostic::new(format!(
                 "failed to read embedded file `{}`",

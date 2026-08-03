@@ -393,7 +393,7 @@ fn range_facts_fold_pure_overshifts_and_extend_known_bits_to_u32() {
     let signed = function_named(&program, "signed");
     assert!(matches!(
         signed.body.last(),
-        Some(Stmt::Return(Some(Expr::TypedInt(0xff, Type::Named(ty))))) if ty == "i8"
+        Some(Stmt::Return(Some(Expr::TypedInt(-1, Type::Named(ty))))) if ty == "i8"
     ));
 
     let wide = function_named(&program, "wide");

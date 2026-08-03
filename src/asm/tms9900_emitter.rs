@@ -690,6 +690,12 @@ impl Emitter {
         op: BinaryOp,
         right: &Expr,
     ) -> Result<(), Diagnostic> {
+        if matches!((left, op), (Expr::Bool(false), BinaryOp::And))
+            || matches!((left, op), (Expr::Bool(true), BinaryOp::Or))
+        {
+            self.load_immediate(i64::from(op == BinaryOp::Or))?;
+            return Ok(());
+        }
         let short = self.next_label("logical_short");
         let done = self.next_label("logical_done");
         self.emit_expr(left, &Type::Named("bool".to_owned()))?;
@@ -1615,9 +1621,14 @@ fn collect_expr_calls(expr: &Expr, calls: &mut Vec<Vec<String>>) {
                 collect_expr_calls(arg, calls);
             }
         }
-        Expr::Binary { left, right, .. } => {
+        Expr::Binary { left, op, right } => {
             collect_expr_calls(left, calls);
-            collect_expr_calls(right, calls);
+            if !matches!(
+                (left.as_ref(), *op),
+                (Expr::Bool(false), BinaryOp::And) | (Expr::Bool(true), BinaryOp::Or)
+            ) {
+                collect_expr_calls(right, calls);
+            }
         }
         Expr::Int(_)
         | Expr::TypedInt(_, _)

@@ -163,12 +163,16 @@
     fn constant_shifts_use_fixed_lr35902_instructions() {
         let assembly = emit(
             r#"
+                global value: u24 = 0x123456
+                global left: u24 = 0
+                global right: u24 = 0
+                global signed: i16 = -2
+                global sign_fill: i16 = 0
+
                 fn main() {
-                    let value: u24 = 0x123456
-                    let left: u24 = value << 12
-                    let right: u24 = value >> 16
-                    let signed: i16 = -2
-                    let sign_fill: i16 = signed >> 16
+                    left = value << 12
+                    right = value >> 16
+                    sign_fill = signed >> 16
                 }
             "#,
         );
@@ -231,17 +235,26 @@
     fn small_constant_multiplication_uses_shift_add_sequences() {
         let assembly = emit(
             r#"
+                global value: u16 = 0x1234
+                global times_three: u16 = 0
+                global times_five: u16 = 0
+                global times_six: u16 = 0
+                global times_seven: u16 = 0
+                global times_nine: u16 = 0
+                global times_ten: u16 = 0
+                global power_of_two: u16 = 0
+                global signed: i16 = -1234
+                global negative: i16 = 0
+
                 fn main() {
-                    let value: u16 = 0x1234
-                    let times_three: u16 = value * 3
-                    let times_five: u16 = value * 5
-                    let times_six: u16 = value * 6
-                    let times_seven: u16 = value * 7
-                    let times_nine: u16 = value * 9
-                    let times_ten: u16 = value * 10
-                    let power_of_two: u16 = value * 8
-                    let signed: i16 = -1234
-                    let negative: i16 = signed * -7
+                    times_three = value * 3
+                    times_five = value * 5
+                    times_six = value * 6
+                    times_seven = value * 7
+                    times_nine = value * 9
+                    times_ten = value * 10
+                    power_of_two = value * 8
+                    negative = signed * -7
                 }
             "#,
         );

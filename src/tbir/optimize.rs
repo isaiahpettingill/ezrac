@@ -31,10 +31,10 @@ pub fn optimize_program_with_context(
     // Keep the stage order visible: later passes rely on the safety facts and
     // normalized expressions produced by earlier stages.
     scalar_simplify_program(&mut program, &mut report, true);
+    hoist_pure_loop_invariants_program(&mut program, &mut report);
     local_propagation_and_cse_program(&mut program, context, &mut report);
     scalar_simplify_program(&mut program, &mut report, false);
     known_bits_program(&mut program);
-    hoist_pure_loop_invariants_program(&mut program, &mut report);
     hoist_named_memory_reads_program(&mut program, context, &mut report);
     expand_inline_functions(&mut program, context, &mut report);
     demand::apply_program(&mut program);
@@ -58,6 +58,14 @@ fn functions(program: &Program) -> Vec<&Function> {
     let mut output = Vec::new();
     collect(&program.declarations, &mut output);
     output
+}
+
+fn inline_function_names(program: &Program) -> HashSet<String> {
+    functions(program)
+        .into_iter()
+        .filter(|function| has_attr(function, "inline"))
+        .map(|function| function.name.clone())
+        .collect()
 }
 
 fn expand_inline_functions(
@@ -1467,6 +1475,8 @@ fn propagate_block(
                     || use_counts.get(&name).copied().unwrap_or(0) <= 1;
                 if may_propagate
                     && !assigned.contains(&name)
+                    && !contains_licm_temporary(&name)
+                    && !contains_licm_temporary_expr(&value)
                     && is_pure_scalar(&value)
                     && !references_memory
                 {
@@ -1758,6 +1768,14 @@ fn is_cheap_to_duplicate(expr: &Expr) -> bool {
     )
 }
 
+fn contains_licm_temporary(name: &str) -> bool {
+    name.starts_with("__tbir_licm_")
+}
+
+fn contains_licm_temporary_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Ident(name) if contains_licm_temporary(name))
+}
+
 fn is_pure_scalar(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_) => {
@@ -1766,6 +1784,48 @@ fn is_pure_scalar(expr: &Expr) -> bool {
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => is_pure_scalar(expr),
         Expr::Binary { left, right, .. } => is_pure_scalar(left) && is_pure_scalar(right),
         _ => false,
+    }
+}
+
+fn contains_inline_call(expr: &Expr, inline_functions: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Call { path, args } => {
+            path.last()
+                .is_some_and(|name| inline_functions.contains(name))
+                || args
+                    .iter()
+                    .any(|arg| contains_inline_call(arg, inline_functions))
+        }
+        Expr::Array(values) => values
+            .iter()
+            .any(|value| contains_inline_call(value, inline_functions)),
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+            contains_inline_call(index, inline_functions)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => path.segments.iter().any(|segment| {
+            matches!(segment, AccessSegment::Index(index) if contains_inline_call(index, inline_functions))
+        }),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| contains_inline_call(value, inline_functions)),
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => contains_inline_call(value, inline_functions),
+        Expr::Binary { left, right, .. } => {
+            contains_inline_call(left, inline_functions)
+                || contains_inline_call(right, inline_functions)
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. }
+        | Expr::AddressOf(_) => false,
     }
 }
 
@@ -2809,14 +2869,25 @@ fn known_bits_value_fits(value: i64, ty: &Type, mask: i64) -> bool {
     }
 }
 
-fn known_bits_constant(value: i64, ty: &Type, mask: i64) -> (Expr, Option<KnownBits>) {
+fn signed_or_unsigned_literal(value: i64, ty: &Type, mask: i64) -> i64 {
     let value = value & mask;
+    if matches!(ty, Type::Named(name) if name.starts_with('i')) {
+        let sign = 1_i64 << (mask.count_ones() - 1);
+        if value & sign != 0 {
+            return value - (mask + 1);
+        }
+    }
+    value
+}
+
+fn known_bits_constant(value: i64, ty: &Type, mask: i64) -> (Expr, Option<KnownBits>) {
+    let raw = value & mask;
     (
-        Expr::TypedInt(value, ty.clone()),
+        Expr::TypedInt(signed_or_unsigned_literal(raw, ty, mask), ty.clone()),
         Some(KnownBits {
             ty: ty.clone(),
-            zero: (!value) & mask,
-            one: value,
+            zero: (!raw) & mask,
+            one: raw,
         }),
     )
 }
@@ -2826,7 +2897,10 @@ fn known_bits_fold(expr: Expr, fact: Option<KnownBits>, mask: i64) -> (Expr, Opt
         && fact.zero | fact.one == mask
     {
         return (
-            Expr::TypedInt(fact.one, fact.ty.clone()),
+            Expr::TypedInt(
+                signed_or_unsigned_literal(fact.one, &fact.ty, mask),
+                fact.ty.clone(),
+            ),
             Some(fact.clone()),
         );
     }
@@ -2848,8 +2922,14 @@ fn scalar_simplify_program(
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
 ) {
+    let inline_functions = inline_function_names(program);
     for declaration in &mut program.declarations {
-        optimize_declaration(declaration, report, count_dead_statements);
+        optimize_declaration(
+            declaration,
+            report,
+            count_dead_statements,
+            &inline_functions,
+        );
     }
 }
 
@@ -2857,19 +2937,21 @@ fn optimize_declaration(
     declaration: &mut Declaration,
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
+    inline_functions: &HashSet<String>,
 ) {
     match declaration {
         Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
-            optimize_declaration(declaration, report, count_dead_statements)
+            optimize_declaration(declaration, report, count_dead_statements, inline_functions)
         }
         Declaration::Function(function) => {
-            optimize_function(function, report, count_dead_statements)
+            optimize_function(function, report, count_dead_statements, inline_functions)
         }
         Declaration::Const(decl) => {
             decl.value = optimize_expr(
                 core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
+                inline_functions,
             )
         }
         Declaration::Port(decl) => {
@@ -2877,6 +2959,7 @@ fn optimize_declaration(
                 core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
+                inline_functions,
             )
         }
         Declaration::Mmio(decl) => {
@@ -2884,6 +2967,7 @@ fn optimize_declaration(
                 core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
+                inline_functions,
             )
         }
         Declaration::Global(decl) => {
@@ -2891,6 +2975,7 @@ fn optimize_declaration(
                 core::mem::replace(&mut decl.value, Expr::Int(0)),
                 &HashMap::new(),
                 report,
+                inline_functions,
             )
         }
         Declaration::Embed(_)
@@ -2905,6 +2990,7 @@ fn optimize_function(
     function: &mut Function,
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
+    inline_functions: &HashSet<String>,
 ) {
     let mut constants = HashMap::new();
     function.body = optimize_stmts(
@@ -2912,6 +2998,7 @@ fn optimize_function(
         &mut constants,
         report,
         count_dead_statements,
+        inline_functions,
     );
 }
 
@@ -2920,6 +3007,7 @@ fn optimize_stmts(
     constants: &mut HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
+    inline_functions: &HashSet<String>,
 ) -> Vec<Stmt> {
     let mut output = Vec::with_capacity(stmts.len());
     let mut terminated = false;
@@ -2930,7 +3018,13 @@ fn optimize_stmts(
             }
             continue;
         }
-        let stmt = optimize_stmt(stmt, constants, report, count_dead_statements);
+        let stmt = optimize_stmt(
+            stmt,
+            constants,
+            report,
+            count_dead_statements,
+            inline_functions,
+        );
         terminated = terminates(&stmt);
         output.push(stmt);
     }
@@ -2942,16 +3036,17 @@ fn optimize_stmt(
     constants: &mut HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
+    inline_functions: &HashSet<String>,
 ) -> Stmt {
     match stmt {
         Stmt::Let { name, ty, value } => {
             let value = type_unsigned_power_of_two_divisor(value, &ty);
-            let value = optimize_expr(value, constants, report);
+            let value = optimize_expr(value, constants, report, inline_functions);
             Stmt::Let { name, ty, value }
         }
         Stmt::Assign { target, op, value } => {
-            let target = optimize_place(target, constants, report);
-            let value = optimize_expr(value, constants, report);
+            let target = optimize_place(target, constants, report, inline_functions);
+            let value = optimize_expr(value, constants, report, inline_functions);
             Stmt::Assign { target, op, value }
         }
         Stmt::If {
@@ -2959,7 +3054,7 @@ fn optimize_stmt(
             then_body,
             else_body,
         } => {
-            let condition = optimize_expr(condition, constants, report);
+            let condition = optimize_expr(condition, constants, report, inline_functions);
             let mut then_constants = constants.clone();
             let mut else_constants = constants.clone();
             let then_body = optimize_stmts(
@@ -2967,12 +3062,14 @@ fn optimize_stmt(
                 &mut then_constants,
                 report,
                 count_dead_statements,
+                inline_functions,
             );
             let else_body = optimize_stmts(
                 else_body,
                 &mut else_constants,
                 report,
                 count_dead_statements,
+                inline_functions,
             );
             Stmt::If {
                 condition,
@@ -2981,25 +3078,37 @@ fn optimize_stmt(
             }
         }
         Stmt::While { condition, body } => {
-            let condition = optimize_expr(condition, constants, report);
+            let condition = optimize_expr(condition, constants, report, inline_functions);
             let mut body_constants = constants.clone();
-            let body = optimize_stmts(body, &mut body_constants, report, count_dead_statements);
+            let body = optimize_stmts(
+                body,
+                &mut body_constants,
+                report,
+                count_dead_statements,
+                inline_functions,
+            );
             Stmt::While { condition, body }
         }
         Stmt::Loop { body } => {
             let mut body_constants = constants.clone();
-            let body = optimize_stmts(body, &mut body_constants, report, count_dead_statements);
+            let body = optimize_stmts(
+                body,
+                &mut body_constants,
+                report,
+                count_dead_statements,
+                inline_functions,
+            );
             Stmt::Loop { body }
         }
-        Stmt::Return(value) => {
-            Stmt::Return(value.map(|value| optimize_expr(value, constants, report)))
-        }
+        Stmt::Return(value) => Stmt::Return(
+            value.map(|value| optimize_expr(value, constants, report, inline_functions)),
+        ),
         Stmt::Out { port, value } => Stmt::Out {
             port,
-            value: optimize_expr(value, constants, report),
+            value: optimize_expr(value, constants, report, inline_functions),
         },
         Stmt::Expr(value) => {
-            let value = optimize_expr(value, constants, report);
+            let value = optimize_expr(value, constants, report, inline_functions);
             Stmt::Expr(value)
         }
         Stmt::Asm { .. } => stmt,
@@ -3011,14 +3120,22 @@ fn optimize_place(
     place: Place,
     constants: &HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
+    inline_functions: &HashSet<String>,
 ) -> Place {
     match place {
         Place::Index { name, index } => Place::Index {
             name,
-            index: Box::new(optimize_expr(*index, constants, report)),
+            index: Box::new(optimize_expr(*index, constants, report, inline_functions)),
         },
-        Place::Access(path) => Place::Access(optimize_access(path, constants, report)),
-        Place::Deref(expr) => Place::Deref(Box::new(optimize_expr(*expr, constants, report))),
+        Place::Access(path) => {
+            Place::Access(optimize_access(path, constants, report, inline_functions))
+        }
+        Place::Deref(expr) => Place::Deref(Box::new(optimize_expr(
+            *expr,
+            constants,
+            report,
+            inline_functions,
+        ))),
         Place::Ident(_) | Place::Field { .. } => place,
     }
 }
@@ -3051,48 +3168,61 @@ fn optimize_expr(
     mut expr: Expr,
     constants: &HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
+    inline_functions: &HashSet<String>,
 ) -> Expr {
     expr = match expr {
         Expr::Ident(name) => Expr::Ident(name),
         Expr::Array(values) => Expr::Array(
             values
                 .into_iter()
-                .map(|value| optimize_expr(value, constants, report))
+                .map(|value| optimize_expr(value, constants, report, inline_functions))
                 .collect(),
         ),
         Expr::Index { name, index } => Expr::Index {
             name,
-            index: Box::new(optimize_expr(*index, constants, report)),
+            index: Box::new(optimize_expr(*index, constants, report, inline_functions)),
         },
         Expr::AddressOfIndex { name, index } => Expr::AddressOfIndex {
             name,
-            index: Box::new(optimize_expr(*index, constants, report)),
+            index: Box::new(optimize_expr(*index, constants, report, inline_functions)),
         },
-        Expr::Access(path) => Expr::Access(optimize_access(path, constants, report)),
+        Expr::Access(path) => {
+            Expr::Access(optimize_access(path, constants, report, inline_functions))
+        }
         Expr::AddressOfAccess(path) => {
-            Expr::AddressOfAccess(optimize_access(path, constants, report))
+            Expr::AddressOfAccess(optimize_access(path, constants, report, inline_functions))
         }
         Expr::StructInit { ty, fields } => Expr::StructInit {
             ty,
             fields: fields
                 .into_iter()
-                .map(|(name, value)| (name, optimize_expr(value, constants, report)))
+                .map(|(name, value)| {
+                    (
+                        name,
+                        optimize_expr(value, constants, report, inline_functions),
+                    )
+                })
                 .collect(),
         },
-        Expr::Deref(value) => Expr::Deref(Box::new(optimize_expr(*value, constants, report))),
+        Expr::Deref(value) => Expr::Deref(Box::new(optimize_expr(
+            *value,
+            constants,
+            report,
+            inline_functions,
+        ))),
         Expr::BankedPointer { pointer, bank } => Expr::BankedPointer {
-            pointer: Box::new(optimize_expr(*pointer, constants, report)),
+            pointer: Box::new(optimize_expr(*pointer, constants, report, inline_functions)),
             bank,
         },
         Expr::Call { path, args } => Expr::Call {
             path,
             args: args
                 .into_iter()
-                .map(|arg| optimize_expr(arg, constants, report))
+                .map(|arg| optimize_expr(arg, constants, report, inline_functions))
                 .collect(),
         },
         Expr::Unary { op, expr } => {
-            let expr = optimize_expr(*expr, constants, report);
+            let expr = optimize_expr(*expr, constants, report, inline_functions);
             if op == UnaryOp::BitNot
                 && let Expr::Unary {
                     op: UnaryOp::BitNot,
@@ -3112,12 +3242,14 @@ fn optimize_expr(
             }
         }
         Expr::Binary { left, op, right } => {
-            let left = optimize_expr(*left, constants, report);
-            let right = optimize_expr(*right, constants, report);
+            let left = optimize_expr(*left, constants, report, inline_functions);
+            let right = optimize_expr(*right, constants, report, inline_functions);
             if let Some(value) = fold_binary(&left, op, &right) {
                 report.constant_folds += 1;
                 value
-            } else if let Some((value, strength_reduction)) = simplify_binary(&left, op, &right) {
+            } else if let Some((value, strength_reduction)) =
+                simplify_binary(&left, op, &right, inline_functions)
+            {
                 if strength_reduction {
                     report.strength_reductions += 1;
                     decision(
@@ -3140,7 +3272,7 @@ fn optimize_expr(
             }
         }
         Expr::Cast { ty, expr } => {
-            let expr = optimize_expr(*expr, constants, report);
+            let expr = optimize_expr(*expr, constants, report, inline_functions);
             let expr = remove_unsigned_narrowing_mask(&ty, expr).unwrap_or_else(|expr| expr);
             Expr::Cast {
                 ty,
@@ -3203,21 +3335,30 @@ fn optimize_access(
     mut path: AccessPath,
     constants: &HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
+    inline_functions: &HashSet<String>,
 ) -> AccessPath {
     path.segments = path
         .segments
         .into_iter()
         .map(|segment| match segment {
-            AccessSegment::Index(index) => {
-                AccessSegment::Index(Box::new(optimize_expr(*index, constants, report)))
-            }
+            AccessSegment::Index(index) => AccessSegment::Index(Box::new(optimize_expr(
+                *index,
+                constants,
+                report,
+                inline_functions,
+            ))),
             AccessSegment::Field(field) => AccessSegment::Field(field),
         })
         .collect();
     path
 }
 
-fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<(Expr, bool)> {
+fn simplify_binary(
+    left: &Expr,
+    op: BinaryOp,
+    right: &Expr,
+    inline_functions: &HashSet<String>,
+) -> Option<(Expr, bool)> {
     let algebraic = |expr| Some((expr, false));
     let strength = |expr| Some((expr, true));
     match (left, op, right) {
@@ -3297,8 +3438,15 @@ fn simplify_binary(left: &Expr, op: BinaryOp, right: &Expr) -> Option<(Expr, boo
         | (Expr::Bool(false), BinaryOp::Or, value)
         | (value, BinaryOp::And, Expr::Bool(true))
         | (value, BinaryOp::Or, Expr::Bool(false)) => algebraic(value.clone()),
-        (Expr::Bool(false), BinaryOp::And, _) | (Expr::Bool(true), BinaryOp::Or, _) => {
-            algebraic(Expr::Bool(matches!(op, BinaryOp::Or)))
+        (Expr::Bool(false), BinaryOp::And, value)
+            if is_pure_scalar(value) || !contains_inline_call(value, inline_functions) =>
+        {
+            algebraic(Expr::Bool(false))
+        }
+        (Expr::Bool(true), BinaryOp::Or, value)
+            if is_pure_scalar(value) || !contains_inline_call(value, inline_functions) =>
+        {
+            algebraic(Expr::Bool(true))
         }
         (value, BinaryOp::And, Expr::Bool(false)) if is_pure_scalar(value) => {
             algebraic(Expr::Bool(false))

@@ -37,7 +37,7 @@ mod symbols;
 use crate::asm::{
     comments::with_readability_comments,
     data::terminated_text_data_line,
-    reachability::{RoutineProfile, strip_unreachable_generated_routines},
+    reachability::{RoutineProfile, strip_unreachable_generated_routines_with_roots},
 };
 use intel8080::{is_intel_8080_family, translate_assembly_for_cpu};
 use symbols::{FunctionSig, StructLayout, Symbols, ValueWidth, Variable};
@@ -135,6 +135,26 @@ pub fn emit_ez80_assembly_with_options(
     result.map_err(|error| locate_program_diagnostic(program, error))
 }
 
+fn validate_source_program_before_optimization(
+    program: &Program,
+    options: &AssemblyOptions,
+) -> Result<(), Diagnostic> {
+    let symbols = Symbols::from_program(program, options.clone())?;
+    let main = program
+        .main_function()
+        .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
+    validate_main_signature(main)?;
+    validate_all_function_calls(program, &symbols.functions)?;
+    let recursive_call_edges = recursive_call_edges(program, &symbols.functions);
+    validate_all_function_bodies(
+        program,
+        symbols,
+        options.clone(),
+        recursive_call_edges,
+        HashSet::new(),
+    )
+}
+
 pub fn collect_ez80_semantic_diagnostics(
     program: &Program,
     options: AssemblyOptions,
@@ -164,6 +184,15 @@ pub fn collect_ez80_semantic_diagnostics(
         emitter.disable_dead_code_elimination();
         if let Err(error) = emitter.emit_function(function) {
             let error = locate_program_diagnostic(program, error);
+            let error = if error.span.is_none() {
+                function
+                    .body_spans
+                    .first()
+                    .map(|span| error.clone().with_span_if_missing(span.span.clone()))
+                    .unwrap_or(error)
+            } else {
+                error
+            };
             if !diagnostics.iter().any(|diagnostic| {
                 diagnostic.message == error.message && diagnostic.span == error.span
             }) {
@@ -236,6 +265,7 @@ pub struct CheckedEz80Program {
 
 impl CheckedEz80Program {
     pub fn from_program(program: &Program, options: &AssemblyOptions) -> Result<Self, Diagnostic> {
+        validate_source_program_before_optimization(program, options)?;
         let hir = HirProgram::from_ast(program)?;
         let tbir = TbirProgram::lower(&hir, program, options)?;
         Ok(Self { hir, tbir })
@@ -257,13 +287,6 @@ pub fn emit_ez80_assembly_from_checked(
     validate_main_signature(main)?;
     validate_all_function_calls(program, &symbols.functions)?;
     let recursive_call_edges = recursive_call_edges(program, &symbols.functions);
-    validate_all_function_bodies(
-        program,
-        symbols.clone(),
-        options.clone(),
-        recursive_call_edges.clone(),
-        tail_call_edges.clone(),
-    )?;
     let emitted_functions = reachable_function_names(program, &symbols);
     let cpu = options.cpu;
 
@@ -295,7 +318,18 @@ pub fn emit_ez80_assembly_from_checked(
         } else {
             RoutineProfile::Ez80
         };
-        let asm = strip_unreachable_generated_routines(&asm, profile);
+        let naked_roots = program
+            .declarations
+            .iter()
+            .filter_map(|declaration| match unwrapped_declaration(declaration) {
+                Declaration::Function(function) if has_attr(function, "naked") => {
+                    Some(function_label(&function.name))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let naked_root_refs = naked_roots.iter().map(String::as_str).collect::<Vec<_>>();
+        let asm = strip_unreachable_generated_routines_with_roots(&asm, profile, &naked_root_refs);
         with_readability_comments(
             asm,
             original_program,
@@ -573,6 +607,11 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
                 invalidate_register_value_aliases(&mut register_values, register);
             }
         }
+        if is_indirect_memory_access(trimmed) {
+            // A memory access may be volatile. Do not reuse an immediate
+            // address load across it, even when the instruction only changes A.
+            register_values.clear();
+        }
 
         if is_peephole_block_terminator(trimmed) {
             register_values.clear();
@@ -638,6 +677,14 @@ fn registers_overlap(left: &str, right: &str) -> bool {
             | ("d" | "e", "de")
             | ("b" | "c", "bc")
     )
+}
+
+fn is_indirect_memory_access(line: &str) -> bool {
+    line.contains("(hl)")
+        || line.contains("(ix")
+        || line.contains("(iy")
+        || line.contains("(bc)")
+        || line.contains("(de)")
 }
 
 fn parse_absolute_memory_transfer(line: &str) -> Option<AbsoluteMemoryTransfer> {
@@ -802,11 +849,15 @@ fn strip_unreachable_runtime_helpers(assembly: &str) -> String {
     output
 }
 
-fn is_immediate_u8(expr: &Expr) -> bool {
+fn is_integer_literal(expr: &Expr) -> bool {
     matches!(
         expr,
         Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) | Expr::Bool(_)
     )
+}
+
+fn is_immediate_u8(expr: &Expr) -> bool {
+    is_integer_literal(expr)
 }
 
 fn is_unit_integer_literal(expr: &Expr) -> bool {
@@ -847,6 +898,7 @@ struct Emitter {
     local_constants: Vec<HashMap<String, LocalConstant>>,
     readonly_pointer_aliases: Vec<HashMap<String, u32>>,
     string_literals: HashMap<String, Variable>,
+    emitted_string_literals: HashSet<String>,
     loop_stack: Vec<LoopLabels>,
     return_type_stack: Vec<Option<Type>>,
     return_value_stack: Vec<bool>,
@@ -894,6 +946,7 @@ impl Emitter {
             local_constants: Vec::new(),
             readonly_pointer_aliases: Vec::new(),
             string_literals,
+            emitted_string_literals: HashSet::new(),
             loop_stack: Vec::new(),
             return_type_stack: Vec::new(),
             return_value_stack: Vec::new(),
@@ -970,6 +1023,14 @@ impl Emitter {
     }
 
     fn emit_required_sections(&mut self) {
+        let literals = self
+            .string_literals
+            .iter()
+            .map(|(value, variable)| (value.clone(), *variable))
+            .collect::<Vec<_>>();
+        for (value, variable) in literals {
+            self.emit_string_literal_initializer(&value, variable);
+        }
         self.line("section .header");
         self.line("section .rodata");
         if !self.rodata.is_empty() {
@@ -1403,8 +1464,11 @@ impl Emitter {
         let mut literals = self
             .string_literals
             .iter()
+            .chain(self.symbols.string_literals.iter())
             .map(|(value, variable)| (variable.addr, value.clone(), *variable))
             .collect::<Vec<_>>();
+        literals.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        literals.dedup_by(|left, right| left.1 == right.1);
         literals.sort_by_key(|(addr, _, _)| *addr);
         for (_, value, variable) in literals {
             self.emit_string_literal_initializer(&value, variable);
@@ -1412,9 +1476,11 @@ impl Emitter {
     }
 
     fn emit_string_literal_initializer(&mut self, value: &str, _variable: Variable) {
-        self.rodata
-            .push_str(&terminated_text_data_line(".dm", value, "00h"));
-        self.rodata.push('\n');
+        if self.emitted_string_literals.insert(value.to_owned()) {
+            self.rodata
+                .push_str(&terminated_text_data_line(".dm", value, "00h"));
+            self.rodata.push('\n');
+        }
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
@@ -1562,15 +1628,30 @@ impl Emitter {
             let clobbers = (0..target.registers.len()).map(PhysReg).collect::<Vec<_>>();
             let planned = allocate_source_locals(&target, &locals, &function.body, &clobbers)
                 .map_err(|diagnostics| {
-                    Diagnostic::new(format!(
-                        "eZ80 local allocation failed in function `{}`: {}",
-                        function.name,
-                        diagnostics
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ))
+                    let details = diagnostics
+                        .iter()
+                        .map(|diagnostic| match diagnostic.message.as_str() {
+                            "break appears outside a loop" => "`break` outside loop".to_owned(),
+                            "continue appears outside a loop" => {
+                                "`continue` outside loop".to_owned()
+                            }
+                            _ => diagnostic.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    if diagnostics.len() == 1
+                        && matches!(
+                            diagnostics[0].message.as_str(),
+                            "break appears outside a loop" | "continue appears outside a loop"
+                        )
+                    {
+                        Diagnostic::new(details)
+                    } else {
+                        Diagnostic::new(format!(
+                            "eZ80 local allocation failed in function `{}`: {details}",
+                            function.name,
+                        ))
+                    }
                 })?;
             let storage_size = planned
                 .allocation
@@ -1646,6 +1727,11 @@ impl Emitter {
                     }
                     self.current_scope_types_mut()
                         .insert(name.clone(), ty.clone());
+                    // Validate before deciding that a constant local needs no
+                    // storage. The optimized program may remove this let, but
+                    // invalid source must still be rejected.
+                    self.validate_expr_arithmetic_compatibility(value)?;
+                    self.validate_expr_assignable_to_type(value, ty)?;
                     if asm_clobbers_memory
                         || asm_output_names.contains(name)
                         || !self.can_elide_constant_local_storage(name, ty, value)?
@@ -2218,7 +2304,8 @@ impl Emitter {
                 if let Some(variable) = self.variable_opt(&input.name) {
                     self.emit_load_a(variable);
                 } else {
-                    let value = self.u8(&Expr::Ident(input.name.clone()))?;
+                    let value =
+                        self.eval_i64_with_local_constants(&Expr::Ident(input.name.clone()))?;
                     self.line(&format!("    ld a, {value:02X}h"));
                 }
             }
@@ -2227,7 +2314,8 @@ impl Emitter {
                 if let Some(variable) = self.variable_opt(&input.name) {
                     self.emit_load_width(variable);
                 } else {
-                    let value = self.symbols.eval_i64(&Expr::Ident(input.name.clone()))?;
+                    let value =
+                        self.eval_i64_with_local_constants(&Expr::Ident(input.name.clone()))?;
                     self.line(&format!("    ld hl, {}", format_immediate(value, width)));
                 }
             }
@@ -4033,7 +4121,7 @@ impl Emitter {
             }
             Expr::BankedPointer { pointer, .. } => self.emit_expr_to_a(pointer)?,
             Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) | Expr::Bool(_) => {
-                let value = self.u8(expr)?;
+                let value = self.value_for_width(expr, ValueWidth::U8)?;
                 self.line(&format!("    ld a, {:02X}h", value));
             }
             Expr::Cast { expr, ty } => self.emit_cast_to_type(expr, ty)?,
@@ -6630,11 +6718,17 @@ impl Emitter {
     }
 
     fn value_for_width(&self, expr: &Expr, width: ValueWidth) -> Result<u32, Diagnostic> {
-        let value = match width {
-            ValueWidth::U8 => self.u8(expr).map(u32::from),
-            ValueWidth::U16 => self.u16(expr).map(u32::from),
-            ValueWidth::U24 => self.u24(expr),
-        }?;
+        let value = if is_integer_literal(expr) {
+            let bits = u32::from(width.bytes()) * 8;
+            let mask = (1_i128 << bits) - 1;
+            (self.symbols.eval_i64(expr)? as i128 & mask) as u32
+        } else {
+            match width {
+                ValueWidth::U8 => self.u8(expr).map(u32::from),
+                ValueWidth::U16 => self.u16(expr).map(u32::from),
+                ValueWidth::U24 => self.u24(expr),
+            }?
+        };
         self.validate_value_width_for_target(value, width)?;
         Ok(value)
     }
@@ -6704,10 +6798,13 @@ impl Emitter {
         let Some(constant) = self.local_constant(name) else {
             return Ok(None);
         };
-        if self.symbols.type_width(&constant.ty)? != width {
-            return Ok(None);
-        }
-        let value = self.value_for_type(constant.value, &constant.ty, width)?;
+        let source_width = self.symbols.type_width(&constant.ty)?;
+        let value_width = if width.bytes() >= source_width.bytes() {
+            source_width
+        } else {
+            width
+        };
+        let value = self.value_for_type(constant.value, &constant.ty, value_width)?;
         Ok(Some(value))
     }
 
@@ -7270,9 +7367,11 @@ impl Emitter {
                     }
                 }
             }
-            Expr::Cast { expr, .. }
-            | Expr::Deref(expr)
-            | Expr::BankedPointer { pointer: expr, .. } => {
+            Expr::Cast { expr, ty } => {
+                self.validate_expr_arithmetic_compatibility(expr)?;
+                self.validate_cast(expr, ty)?;
+            }
+            Expr::Deref(expr) | Expr::BankedPointer { pointer: expr, .. } => {
                 self.validate_expr_arithmetic_compatibility(expr)?;
             }
             Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
