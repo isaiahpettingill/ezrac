@@ -9,8 +9,8 @@ use crate::{
 
 use super::{
     TbirAccess, TbirDeclaration, TbirEffect, TbirMemoryModel, TbirMemoryRegion, TbirObjectKind,
-    TbirParam, TbirProgram, TbirStmt, TbirTarget, diagnostics, model::SemanticModel, optimize,
-    provenance,
+    TbirParam, TbirProgram, TbirSourceComment, TbirStmt, TbirTarget, diagnostics,
+    model::SemanticModel, optimize, provenance,
 };
 
 pub fn lower(
@@ -32,6 +32,7 @@ pub fn lower(
     validate_constant_array_indices(&semantic, lowered_program)?;
     let objects = provenance::memory_objects(lowered_program, &semantic, &memory);
     let context = provenance::OptimizationContext::from_objects(&objects);
+    let source_comments = collect_source_comments(lowered_program);
     let (lowered_program, optimizations) =
         optimize::optimize_program_with_context(lowered_program, options.cpu, &context);
     let declarations = hir
@@ -54,6 +55,7 @@ pub fn lower(
         objects,
         declarations,
         optimizations,
+        source_comments,
         lowered_program,
     })
 }
@@ -455,6 +457,105 @@ fn lower_declaration(declaration: &HirDeclaration, program: &Program) -> TbirDec
             object_decl(&sig.name, TbirObjectKind::ExternFunction)
         }
     }
+}
+
+fn collect_source_comments(program: &Program) -> Vec<TbirSourceComment> {
+    fn collect_spans<'a>(
+        spans: &'a [crate::ast::StmtSpan],
+        output: &mut Vec<&'a crate::ast::StmtSpan>,
+    ) {
+        for span in spans {
+            output.push(span);
+            collect_spans(&span.children, output);
+        }
+    }
+
+    fn collect_declaration_spans<'a>(
+        declarations: &'a [Declaration],
+        output: &mut Vec<&'a crate::ast::StmtSpan>,
+    ) {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Function(function) => collect_spans(&function.body_spans, output),
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    collect_declaration_spans(core::slice::from_ref(declaration), output);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut spans = Vec::new();
+    collect_declaration_spans(&program.declarations, &mut spans);
+
+    let mut comments = Vec::new();
+    for unit in &program.source_units {
+        for (line_index, line) in unit.text.lines().enumerate() {
+            let Some(comment_byte) = inline_comment_start(line) else {
+                continue;
+            };
+            let text = line[comment_byte + 2..].trim();
+            if text.is_empty() {
+                continue;
+            }
+            let line_number = line_index + 1;
+            let comment_column = line[..comment_byte].chars().count() + 1;
+            let Some(statement) = spans
+                .iter()
+                .copied()
+                .filter(|statement| {
+                    statement.span.file == unit.path
+                        && statement.span.start.line == line_number
+                        && statement.span.start.column < comment_column
+                })
+                .max_by_key(|statement| statement.span.start.column)
+            else {
+                continue;
+            };
+            let statement_start = line
+                .char_indices()
+                .nth(statement.span.start.column.saturating_sub(1))
+                .map_or(line.len(), |(byte, _)| byte);
+            comments.push(TbirSourceComment {
+                text: text.to_owned(),
+                statement_text: line[statement_start..comment_byte]
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .to_owned(),
+                statement_span: statement.span.clone(),
+            });
+        }
+    }
+    comments
+}
+
+fn inline_comment_start(line: &str) -> Option<usize> {
+    let mut chars = line.char_indices().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    while let Some((index, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote.is_some() && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_none() && ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn lower_stmts(stmts: &[Stmt]) -> Vec<TbirStmt> {

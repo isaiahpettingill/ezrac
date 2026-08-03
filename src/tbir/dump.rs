@@ -33,6 +33,15 @@ pub fn text(program: &TbirProgram) -> String {
             decision.kind, decision.outcome, decision.caller, decision.callee, decision.reason
         ));
     }
+    for comment in &program.source_comments {
+        out.push_str(&format!(
+            "comment line={} column={} statement={:?} text={}\n",
+            comment.statement_span.start.line,
+            comment.statement_span.start.column,
+            comment.statement_text,
+            comment.text
+        ));
+    }
     for region in &program.memory.regions {
         out.push_str(&format!(
             "region {} start=0x{:06X} size=0x{:X} access={:?} volatile={} executable={}\n",

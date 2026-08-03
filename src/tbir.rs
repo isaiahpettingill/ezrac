@@ -2,7 +2,7 @@ use crate::{
     asm::AssemblyOptions,
     ast::{AsmInput, AsmOutput, AssignOp, Expr, Place, Program, Type},
     compat::{SourcePathBuf, prelude::*},
-    diagnostic::Diagnostic,
+    diagnostic::{Diagnostic, SourceSpan},
     hir::HirProgram,
 };
 
@@ -25,7 +25,16 @@ pub struct TbirProgram {
     pub objects: Vec<TbirMemoryObject>,
     pub declarations: Vec<TbirDeclaration>,
     pub optimizations: TbirOptimizationReport,
+    /// Inline source comments attached to the statements they describe.
+    pub source_comments: Vec<TbirSourceComment>,
     pub lowered_program: Program,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TbirSourceComment {
+    pub text: String,
+    pub statement_text: String,
+    pub statement_span: SourceSpan,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

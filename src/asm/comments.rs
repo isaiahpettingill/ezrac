@@ -1,10 +1,11 @@
-use crate::{asm::AssemblyOptions, ast::Program, compat::prelude::*};
+use crate::{asm::AssemblyOptions, ast::Program, compat::prelude::*, tbir::TbirSourceComment};
 
 pub fn with_readability_comments(
     assembly: String,
     program: &Program,
     options: &AssemblyOptions,
     backend: &str,
+    inline_comments: &[TbirSourceComment],
 ) -> String {
     let mut out = String::new();
     let marker = comment_marker(backend);
@@ -14,7 +15,16 @@ pub fn with_readability_comments(
         "{marker} Runtime/compiler glue, inlined functions, SDK functions, and preserved source comments are annotated where the backend can identify them.\n"
     ));
 
-    let comments = source_comments(program);
+    let placeable_comments = placeable_comments(&assembly, inline_comments);
+    let comments = source_comments(program)
+        .into_iter()
+        .filter(|comment| {
+            !inline_comments
+                .iter()
+                .enumerate()
+                .any(|(index, inline)| placeable_comments[index] && inline.text == *comment)
+        })
+        .collect::<Vec<_>>();
     if !comments.is_empty() {
         out.push_str(&format!("{marker} EZRA source comments:\n"));
         for comment in comments {
@@ -22,7 +32,7 @@ pub fn with_readability_comments(
         }
     }
     out.push('\n');
-    let annotated = annotate_assembly(&assembly, marker);
+    let annotated = annotate_assembly(&assembly, marker, inline_comments);
     if let Some((first, rest)) = annotated.split_once('\n')
         && first.trim_start().starts_with(marker)
     {
@@ -70,8 +80,13 @@ fn source_comments(program: &Program) -> Vec<String> {
     comments
 }
 
-fn annotate_assembly(assembly: &str, marker: &str) -> String {
+fn annotate_assembly(
+    assembly: &str,
+    marker: &str,
+    inline_comments: &[TbirSourceComment],
+) -> String {
     let mut out = String::with_capacity(assembly.len() + assembly.lines().count() * 12);
+    let mut emitted_comments = vec![false; inline_comments.len()];
     for line in assembly.lines() {
         let trimmed = line.trim();
         if trimmed.ends_with(':') && !trimmed.starts_with('.') {
@@ -91,8 +106,47 @@ fn annotate_assembly(assembly: &str, marker: &str) -> String {
         }
         out.push_str(line);
         out.push('\n');
+        if let Some(source) = trimmed.strip_prefix("; source:") {
+            let source = normalize_statement(source);
+            for (index, comment) in inline_comments.iter().enumerate() {
+                if !emitted_comments[index] && statements_match(&comment.statement_text, &source) {
+                    out.push_str(&format!("{marker} {}\n", comment.text));
+                    emitted_comments[index] = true;
+                }
+            }
+        }
     }
     out
+}
+
+fn placeable_comments(assembly: &str, comments: &[TbirSourceComment]) -> Vec<bool> {
+    let sources = assembly
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("; source:"))
+        .map(normalize_statement)
+        .collect::<Vec<_>>();
+    comments
+        .iter()
+        .map(|comment| {
+            sources
+                .iter()
+                .any(|source| statements_match(&comment.statement_text, source))
+        })
+        .collect()
+}
+
+fn statements_match(statement: &str, normalized_source: &str) -> bool {
+    let statement = normalize_statement(statement);
+    statement == normalized_source
+        || statement.starts_with(normalized_source)
+        || normalized_source.starts_with(&statement)
+}
+
+fn normalize_statement(statement: &str) -> String {
+    statement
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != ';')
+        .collect()
 }
 
 fn is_call(trimmed: &str) -> bool {

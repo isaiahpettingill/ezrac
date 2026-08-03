@@ -278,6 +278,33 @@ fn emits_source_comments_in_debug_mode() {
 }
 
 #[test]
+fn emits_inline_comments_next_to_their_operations() {
+    let source = r#"
+        fn main() {
+            let x: u8 = 4 // initialize x
+            x += 1 // increment x
+            test.pass()
+        }
+    "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
+
+    let init_source = asm.find("; source: let x: u8 = 4").unwrap();
+    let init_comment = asm
+        .find("; initialize x")
+        .unwrap_or_else(|| panic!("{asm}"));
+    let increment_source = asm.find("; source: x += 1").unwrap();
+    let increment_comment = asm.find("; increment x").unwrap();
+    assert!(
+        init_source < init_comment && init_comment < increment_source,
+        "{asm}"
+    );
+    assert!(increment_source < increment_comment, "{asm}");
+    assert!(!asm.contains(";   initialize x"), "{asm}");
+    assert!(!asm.contains(";   increment x"), "{asm}");
+}
+
+#[test]
 fn peephole_removes_adjacent_duplicate_register_loads() {
     let asm = peephole_cleanup(
         r#"

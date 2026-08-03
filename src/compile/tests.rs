@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn unresolved_diagnostic_locations_are_not_forced_to_source_start() {
+    let diagnostic = locate_source_diagnostic(
+        Diagnostic::new("target configuration failed"),
+        "\n\nfn main() {}\n",
+        Path::new("main.ezra"),
+    );
+
+    assert!(diagnostic.span.is_none());
+}
+
+#[test]
 fn warns_for_costly_wide_integer_targets() {
     let program = parse_program(
         Path::new("wide.ezra"),

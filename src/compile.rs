@@ -610,7 +610,7 @@ fn locate_source_diagnostic(error: Diagnostic, source: &str, path: &Path) -> Dia
     }
     diagnostic_span(path, source, &error.message)
         .map(|span| error.clone().with_span_if_missing(span))
-        .unwrap_or_else(|| error.with_location_if_missing(source_start_location(path)))
+        .unwrap_or(error)
 }
 
 struct ReferenceDiagnostics {

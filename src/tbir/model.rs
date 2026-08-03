@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    ast::{BinaryOp, Declaration, EmbedSource, Expr, Program, Type, UnaryOp},
+    ast::{BinaryOp, ConstDecl, Declaration, EmbedSource, Expr, Program, Type, UnaryOp},
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
 };
@@ -284,6 +284,9 @@ impl SemanticModel {
             if pending.len() == before {
                 break;
             }
+        }
+        if !pending.is_empty() {
+            ensure_no_circular_constants(&pending)?;
         }
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
@@ -642,5 +645,60 @@ fn collect_strings(program: &Program, model: &mut SemanticModel) -> Result<(), D
     for value in values {
         model.intern_string(&value)?;
     }
+    Ok(())
+}
+
+fn collect_const_ident_names(expr: &Expr, output: &mut Vec<String>) {
+    match expr {
+        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) => {}
+        Expr::Ident(name) => output.push(name.clone()),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            collect_const_ident_names(expr, output)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_const_ident_names(left, output);
+            collect_const_ident_names(right, output);
+        }
+        _ => {}
+    }
+}
+
+fn ensure_no_circular_constants(pending: &[&ConstDecl]) -> Result<(), Diagnostic> {
+    let names = pending
+        .iter()
+        .map(|declaration| declaration.name.clone())
+        .collect::<HashSet<_>>();
+    let values = pending
+        .iter()
+        .map(|declaration| (declaration.name.clone(), &declaration.value))
+        .collect::<HashMap<_, _>>();
+    let mut visiting = HashSet::new();
+    for declaration in pending {
+        visit_const(&declaration.name, &names, &values, &mut visiting)?;
+    }
+    Ok(())
+}
+
+fn visit_const(
+    name: &str,
+    names: &HashSet<String>,
+    values: &HashMap<String, &Expr>,
+    visiting: &mut HashSet<String>,
+) -> Result<(), Diagnostic> {
+    if !visiting.insert(name.to_owned()) {
+        return Err(Diagnostic::new(format!(
+            "circular constant reference `{name}`"
+        )));
+    }
+    if let Some(expr) = values.get(name) {
+        let mut references = Vec::new();
+        collect_const_ident_names(expr, &mut references);
+        for reference in references {
+            if names.contains(&reference) {
+                visit_const(&reference, names, values, visiting)?;
+            }
+        }
+    }
+    visiting.remove(name);
     Ok(())
 }

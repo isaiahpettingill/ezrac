@@ -2,8 +2,8 @@ use std::path::Path;
 
 use crate::{asm::AssemblyOptions, ast::BinaryOp, hir::HirProgram, parser::parse_program};
 
-use super::model::SemanticModel;
-use super::*;
+use crate::tbir::model::SemanticModel;
+use crate::tbir::*;
 
 #[test]
 fn semantic_model_uses_four_byte_u32_and_i32_widths() {
@@ -102,6 +102,29 @@ fn tbir_lowers_declaration_kinds() {
     assert_eq!(
         object_kind(&tbir, "read_status"),
         Some(TbirObjectKind::ExternFunction)
+    );
+}
+
+#[test]
+fn tbir_keeps_inline_comments_attached_to_source_statements() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn main() {\n    let value: u8 = 1 // initialize value\n    value += 1 // increment value\n}\n",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+
+    assert_eq!(tbir.source_comments.len(), 2);
+    assert_eq!(tbir.source_comments[0].text, "initialize value");
+    assert_eq!(tbir.source_comments[0].statement_text, "let value: u8 = 1");
+    assert_eq!(tbir.source_comments[0].statement_span.start.line, 2);
+    assert_eq!(tbir.source_comments[1].text, "increment value");
+    assert_eq!(tbir.source_comments[1].statement_span.start.line, 3);
+    assert!(
+        tbir.dump_text().contains("text=initialize value"),
+        "{}",
+        tbir.dump_text()
     );
 }
 
