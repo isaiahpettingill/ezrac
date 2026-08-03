@@ -59,8 +59,11 @@ fn needs_implicit_deref_assignment_separators(source: &str) -> bool {
 fn insert_implicit_deref_assignment_separators(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     for (index, line) in source.lines().enumerate() {
-        if index > 0 && line_starts_deref_assignment(line) && previous_line_can_end_stmt(&out) {
-            out.push(';');
+        if index > 0
+            && line_starts_deref_assignment(line)
+            && let Some(insert_at) = previous_statement_end(&out)
+        {
+            out.insert(insert_at, ';');
         }
         if index > 0 {
             out.push('\n');
@@ -73,30 +76,45 @@ fn insert_implicit_deref_assignment_separators(source: &str) -> String {
     out
 }
 
-fn previous_line_can_end_stmt(source_so_far: &str) -> bool {
-    let Some(ch) = source_so_far.chars().rev().find(|ch| !ch.is_whitespace()) else {
-        return false;
-    };
-    !matches!(
-        ch,
-        ';' | '{'
-            | '}'
-            | '('
-            | '['
-            | ','
-            | '='
-            | '+'
-            | '-'
-            | '/'
-            | '%'
-            | '&'
-            | '|'
-            | '^'
-            | '<'
-            | '>'
-            | '!'
-            | '~'
-    )
+fn previous_statement_end(source_so_far: &str) -> Option<usize> {
+    let mut line_end = source_so_far.len();
+    loop {
+        let line_start = source_so_far[..line_end]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let line = &source_so_far[line_start..line_end];
+        let code = line.split_once("//").map_or(line, |(code, _)| code);
+        let code = code.trim_end();
+        if let Some(ch) = code.chars().last() {
+            if matches!(
+                ch,
+                ';' | '{'
+                    | '}'
+                    | '('
+                    | '['
+                    | ','
+                    | '='
+                    | '+'
+                    | '-'
+                    | '/'
+                    | '%'
+                    | '&'
+                    | '|'
+                    | '^'
+                    | '<'
+                    | '>'
+                    | '!'
+                    | '~'
+            ) {
+                return None;
+            }
+            return Some(line_start + code.len());
+        }
+        if line_start == 0 {
+            return None;
+        }
+        line_end = line_start - 1;
+    }
 }
 
 fn line_starts_deref_assignment(line: &str) -> bool {

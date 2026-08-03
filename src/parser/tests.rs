@@ -275,6 +275,31 @@ fn parses_newline_separated_deref_assignment_without_semicolon() {
 }
 
 #[test]
+fn parses_newline_separated_deref_assignments_around_a_comment() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            volatile mmio input: ptr<i32> = 0x90
+            volatile mmio first: ptr<i32> = 0xB0
+            volatile mmio second: ptr<i32> = 0xC0
+
+            fn clamp(value: i32, min: i32, max: i32) -> i32 {
+                return value
+            }
+
+            fn main() {
+                *first = clamp(*input, 0, 6502)
+                // The separator must be inserted before this comment.
+                *second = clamp(*first, 0, 6502)
+            }
+        "#,
+    )
+    .unwrap();
+
+    assert!(program.main_function().is_some());
+}
+
+#[test]
 fn parses_deref_assignment_after_a_block_without_an_inserted_separator() {
     let program = parse_program(
         Path::new("game.ezra"),
