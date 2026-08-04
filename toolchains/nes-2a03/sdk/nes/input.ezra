@@ -1,0 +1,17 @@
+pub const A: u8 = 0x01
+pub const B: u8 = 0x02
+pub const SELECT: u8 = 0x04
+pub const START: u8 = 0x08
+pub const UP: u8 = 0x10
+pub const DOWN: u8 = 0x20
+pub const LEFT: u8 = 0x40
+pub const RIGHT: u8 = 0x80
+
+pub fn read_controller1() -> u8 {
+    let result: u8 = 0
+    asm volatile(out result: u8 as mem, clobber a, clobber flags, clobber memory) {
+        "lda #$01" "sta $4016" "lda #$00" "sta $4016" "ldx #$08" "lda #$00"
+        ".nes_input_read:" "pha" "lda $4016" "and #$01" "lsr a" "pla" "ror a" "dex" "bne .nes_input_read" "sta {result}"
+    }
+    return result
+}

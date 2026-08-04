@@ -1,50 +1,18 @@
+import nes.ppu
+import nes.palette
+import nes.sprites
+import nes.audio
+import nes.timing
+
 fn main() {
-    asm volatile {
-        "sei"
-        "lda #$00"
-        "sta $2000"
-        "sta $2001"
-        "sta $4015"
-        "lda #$40"
-        "sta $4017"
-        ".L_wait_vblank_1:"
-        "bit $2002"
-        "bpl .L_wait_vblank_1"
-        ".L_wait_vblank_2:"
-        "bit $2002"
-        "bpl .L_wait_vblank_2"
+    ppu.disable_rendering()
+    audio.disable()
+    timing.wait_two_vblanks()
 
-        // Set the universal background to dark blue and sprite color 1 to white.
-        "lda $2002"
-        "lda #$3F"
-        "sta $2006"
-        "lda #$00"
-        "sta $2006"
-        "lda #$01"
-        "sta $2007"
-        "lda $2002"
-        "lda #$3F"
-        "sta $2006"
-        "lda #$11"
-        "sta $2006"
-        "lda #$30"
-        "sta $2007"
+    palette.set_background(palette.DARK_BLUE)
+    palette.set_sprite_color(0, 1, palette.WHITE)
+    sprites.set(0, 0x78, 0x70, 0, 0)
 
-        // Draw built-in solid tile 0 as an 8x8 sprite near the screen center.
-        "lda #$00"
-        "sta $2003"
-        "lda #$70"
-        "sta $2004"
-        "lda #$00"
-        "sta $2004"
-        "sta $2004"
-        "lda #$78"
-        "sta $2004"
-
-        // Enable sprites and keep running while the PPU displays the square.
-        "lda #$10"
-        "sta $2001"
-        ".L_forever:"
-        "jmp .L_forever"
-    }
+    ppu.set_mask(ppu.MASK_SPRITES)
+    loop {}
 }

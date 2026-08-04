@@ -1,0 +1,16 @@
+pub const BLACK: u8 = 0x0F
+pub const DARK_BLUE: u8 = 0x01
+pub const WHITE: u8 = 0x30
+
+pub fn set_background(color: u8) {
+    asm volatile(in color: u8 as mem, clobber a, clobber memory) {
+        "lda $2002" "lda #$3F" "sta $2006" "lda #$00" "sta $2006" "lda {color}" "sta $2007"
+    }
+}
+
+pub fn set_sprite_color(palette: u8, color: u8, value: u8) {
+    let address: u8 = 0x10 + (palette & 3) * 4 + (color & 3)
+    asm volatile(in address: u8 as mem, in value: u8 as mem, clobber a, clobber memory) {
+        "lda $2002" "lda #$3F" "sta $2006" "lda {address}" "sta $2006" "lda {value}" "sta $2007"
+    }
+}

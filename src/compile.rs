@@ -1733,6 +1733,17 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(|target| target.starts_with("nes-")) {
+        match import {
+            "nes.ppu" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/ppu.ezra"), "nes.ppu")),
+            "nes.palette" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/palette.ezra"), "nes.palette")),
+            "nes.sprites" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/sprites.ezra"), "nes.sprites")),
+            "nes.input" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/input.ezra"), "nes.input")),
+            "nes.audio" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/audio.ezra"), "nes.audio")),
+            "nes.timing" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/timing.ezra"), "nes.timing")),
+            "nes.memory" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/memory.ezra"), "nes.memory")),
+            _ => None,
+        }
     } else if target.is_some_and(|target| target.starts_with("commodore64-6502")) {
         match import {
             "c64.vic" => Some(builtin_sdk_utf8(
@@ -1876,6 +1887,13 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "gb.audio",
         "gb.color",
         "gb.text",
+        "nes.ppu",
+        "nes.palette",
+        "nes.sprites",
+        "nes.input",
+        "nes.audio",
+        "nes.timing",
+        "nes.memory",
         "agon.buffers",
         "agon.console",
         "agon.mos",

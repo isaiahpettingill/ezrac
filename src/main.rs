@@ -2865,7 +2865,7 @@ fn print_targets() {
             cpu: "2a03",
             address_width_bits: 16,
             output: "nes",
-            sdk: "none",
+            sdk: "nes.*",
             status: "EZRA source and raw assembly NROM-128 target",
         },
         #[cfg(feature = "tms9900")]

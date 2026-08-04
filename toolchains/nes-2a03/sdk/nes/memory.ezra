@@ -1,0 +1,9 @@
+pub const RAM_START: u16 = 0x0000
+pub const RAM_SIZE: u16 = 0x0800
+pub const OAM_PAGE: u8 = 0x02
+
+pub fn clear_internal_ram() {
+    asm volatile(clobber a, clobber flags, clobber memory) {
+        "lda #$00" "ldx #$00" ".nes_memory_clear:" "sta $0000,x" "sta $0100,x" "sta $0200,x" "sta $0300,x" "sta $0400,x" "sta $0500,x" "sta $0600,x" "sta $0700,x" "inx" "bne .nes_memory_clear"
+    }
+}

@@ -1,0 +1,26 @@
+pub const CTRL_NMI: u8 = 0x80
+pub const MASK_BACKGROUND: u8 = 0x08
+pub const MASK_SPRITES: u8 = 0x10
+pub const MASK_SHOW_LEFT_BACKGROUND: u8 = 0x02
+pub const MASK_SHOW_LEFT_SPRITES: u8 = 0x04
+
+pub fn disable_rendering() {
+    asm volatile(clobber a, clobber memory) { "lda #$00" "sta $2000" "sta $2001" }
+}
+
+pub fn set_control(value: u8) { *(cast<ptr<u8>>(cast<u24>(0x2000))) = value }
+pub fn set_mask(value: u8) { *(cast<ptr<u8>>(cast<u24>(0x2001))) = value }
+pub fn status() -> u8 { return *(cast<ptr<u8>>(cast<u24>(0x2002))) }
+
+pub fn wait_vblank() {
+    asm volatile(clobber a, clobber flags, clobber memory) { ".nes_ppu_wait_vblank:" "bit $2002" "bpl .nes_ppu_wait_vblank" }
+}
+
+pub fn set_address(address: u16) {
+    asm volatile(in address: u16 as mem, clobber a, clobber flags, clobber memory) {
+        "lda $2002" "lda {address}+1" "sta $2006" "lda {address}" "sta $2006"
+    }
+}
+
+pub fn write(value: u8) { *(cast<ptr<u8>>(cast<u24>(0x2007))) = value }
+pub fn scroll(x: u8, y: u8) { *(cast<ptr<u8>>(cast<u24>(0x2005))) = x; *(cast<ptr<u8>>(cast<u24>(0x2005))) = y }

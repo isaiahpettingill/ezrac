@@ -54,7 +54,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
-| `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | none | Optional `mos6502` feature; EZRA source and raw assembly NROM-128 target |
+| `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | `nes.*` | Optional `mos6502` feature; EZRA source, bundled SDK, and raw assembly NROM-128 target |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
@@ -394,6 +394,8 @@ Default layout reserves zero page and stack, loads code at `$080D`, uses `$4000.
 The `nes-2a03` target compiles EZRA source with the Ricoh 2A03 backend. Source builds are packaged as mapper 0 NROM-128 images with a 16-byte iNES header, one 16 KiB PRG-ROM bank, reset/NMI/IRQ vectors pointing to the generated startup code, and one 8 KiB CHR-ROM bank containing a solid tile 0 for basic source-only graphics. See [`examples/nes-2a03/source-hello`](../examples/nes-2a03/source-hello).
 
 Raw assembly builds can still provide a complete iNES NROM-128 image, including their own header, PRG-ROM, vectors, and CHR-ROM. The packager validates the mapper and page layout. See [`examples/nes-2a03/hello-world`](../examples/nes-2a03/hello-world).
+
+The bundled `nes.*` SDK covers PPU control and data writes, palettes, direct OAM and DMA sprites, controller reads, basic pulse audio, vblank timing, and internal RAM clearing. See [`targets/nes.md`](targets/nes.md).
 
 The source uses `$BFF0` as the file-coordinate load address for the iNES header and starts PRG code at `$C000`. Build it with:
 

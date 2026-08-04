@@ -1,0 +1,13 @@
+pub const FLIP_HORIZONTAL: u8 = 0x40
+pub const FLIP_VERTICAL: u8 = 0x80
+pub const BEHIND_BACKGROUND: u8 = 0x20
+
+pub fn set(index: u8, x: u8, y: u8, tile: u8, attributes: u8) {
+    let address: u8 = index << 2
+    asm volatile(in address: u8 as mem, in x: u8 as mem, in y: u8 as mem, in tile: u8 as mem, in attributes: u8 as mem, clobber a, clobber memory) {
+        "lda {address}" "sta $2003" "lda {y}" "sta $2004" "lda {tile}" "sta $2004" "lda {attributes}" "sta $2004" "lda {x}" "sta $2004"
+    }
+}
+
+pub fn hide(index: u8) { set(index, 0, 0xFF, 0, 0) }
+pub fn dma(page: u8) { *(cast<ptr<u8>>(cast<u24>(0x4014))) = page }

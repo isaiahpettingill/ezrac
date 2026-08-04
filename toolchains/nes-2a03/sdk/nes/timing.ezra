@@ -1,0 +1,2 @@
+pub fn wait_frame() { asm volatile(clobber a, clobber flags, clobber memory) { ".nes_timing_wait_frame:" "bit $2002" "bpl .nes_timing_wait_frame" } }
+pub fn wait_two_vblanks() { wait_frame(); wait_frame() }

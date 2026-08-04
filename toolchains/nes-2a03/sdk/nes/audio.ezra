@@ -1,0 +1,6 @@
+pub fn disable() {
+    asm volatile(clobber a, clobber memory) { "lda #$00" "sta $4015" "lda #$40" "sta $4017" }
+}
+
+pub fn enable_channels(mask: u8) { *(cast<ptr<u8>>(cast<u24>(0x4015))) = mask & 0x1F }
+pub fn pulse1(control: u8, timer_low: u8, timer_high: u8) { *(cast<ptr<u8>>(cast<u24>(0x4000))) = control; *(cast<ptr<u8>>(cast<u24>(0x4002))) = timer_low; *(cast<ptr<u8>>(cast<u24>(0x4003))) = timer_high }
