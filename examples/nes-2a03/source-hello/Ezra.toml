@@ -1,0 +1,7 @@
+[project]
+name = "nes-source-hello"
+
+[build]
+input = "src/main.ezra"
+target = "nes-2a03"
+executable = "source-hello"

@@ -110,6 +110,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/platforms.md` documents supported target profiles and platform-specific coding guidance.
 - `docs/agon-apps.md` explains how to write Agon console apps, games/visualizations, and graphical apps.
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
+- `examples/nes-2a03/source-hello` compiles EZRA source into an NROM-128 NES image.
 - `examples/nes-2a03/hello-world` contains the raw 2A03 NES hello-world assembly example.
 - `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
 - `docs/disk-images.md` documents the disk-image command, emulator profiles, and `no_std + alloc` API.

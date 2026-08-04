@@ -17,6 +17,24 @@ fn packages_nes_nrom_image_without_adding_a_second_header() {
 }
 
 #[test]
+fn packages_nes_entry_code_as_nrom_with_vectors_and_blank_chr() {
+    let code = [0x78, 0xD8, 0x4C, 0x00, 0xC0];
+    let packaged = package_executable(
+        &PackageRequest::new("nes-2a03", OutputFormat::NesRom, 0xBFF0, 0xC000),
+        &code,
+    )
+    .unwrap();
+
+    assert_eq!(packaged.len(), 0x6010);
+    assert_eq!(&packaged[..8], b"NES\x1A\x01\x01\0\0");
+    assert_eq!(&packaged[0x10..0x10 + code.len()], &code);
+    assert!(packaged[0x4010..].iter().all(|byte| *byte == 0));
+    for offset in [0x400A, 0x400C, 0x400E] {
+        assert_eq!(&packaged[offset..offset + 2], &0xC000u16.to_le_bytes());
+    }
+}
+
+#[test]
 fn rejects_nes_images_with_the_wrong_mapper_or_size() {
     let mut image = vec![0; 0x6010];
     image[..8].copy_from_slice(b"NES\x1A\x01\x01\0\0");

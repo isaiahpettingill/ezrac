@@ -7,6 +7,34 @@ fn repository_root() -> PathBuf {
 }
 
 #[test]
+fn nes_source_builds_a_valid_nrom_image() {
+    let root = repository_root();
+    let source = "examples/nes-2a03/source-hello/src/main.ezra";
+    let output = Command::new(env!("CARGO_BIN_EXE_ezrac"))
+        .current_dir(&root)
+        .args(["build", source])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to launch ezrac for `{source}`: {error}"));
+    assert!(
+        output.status.success(),
+        "failed to build `{source}`\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let image = fs::read(root.join(
+        "examples/nes-2a03/source-hello/target/nes-2a03/src/source-hello.nes",
+    ))
+    .unwrap();
+    assert_eq!(image.len(), 0x6010);
+    assert_eq!(&image[..8], b"NES\x1A\x01\x01\0\0");
+    assert!(image[0x4010..].iter().all(|byte| *byte == 0));
+    for offset in [0x400A, 0x400C, 0x400E] {
+        assert_eq!(&image[offset..offset + 2], &0xC000u16.to_le_bytes());
+    }
+}
+
+#[test]
 fn nes_hello_world_assembly_builds_a_valid_nrom_image() {
     let root = repository_root();
     let source = "examples/nes-2a03/hello-world/helloWorld.asm";

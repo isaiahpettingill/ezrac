@@ -209,7 +209,7 @@ pub fn package_executable_with_context(
         OutputFormat::GameBoyGb => game_boy_rom_bytes(request, context, code),
         OutputFormat::Commodore64Prg => commodore64_prg_bytes(request, code),
         OutputFormat::Commodore64Crt => commodore64_crt_bytes(request, code),
-        OutputFormat::NesRom => nes_rom_bytes(request, code),
+        OutputFormat::NesRom => nes_rom_bytes(request, context, code),
         OutputFormat::Ti8ek | OutputFormat::Ti8xk => Err(PackageError::new(format!(
             "TI flash application output `.{}` is not implemented; use `.8xp` protected-program output",
             request.output_format.extension()
@@ -217,7 +217,11 @@ pub fn package_executable_with_context(
     }
 }
 
-fn nes_rom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
+fn nes_rom_bytes(
+    request: &PackageRequest,
+    context: &PackageContext,
+    code: &[u8],
+) -> Result<Vec<u8>, PackageError> {
     if !request.target.starts_with("nes-") {
         return Err(PackageError::new(format!(
             "target `{}` does not support NES `.nes` output",
@@ -231,8 +235,29 @@ fn nes_rom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, Packa
     }
     const HEADER_SIZE: usize = 16;
     const PRG_SIZE: usize = 0x4000;
+    const VECTOR_SIZE: usize = 6;
     const CHR_SIZE: usize = 0x2000;
     const IMAGE_SIZE: usize = HEADER_SIZE + PRG_SIZE + CHR_SIZE;
+    if context.image_kind == PackageImageKind::EntryCode && !code.starts_with(b"NES\x1A") {
+        if code.len() > PRG_SIZE - VECTOR_SIZE {
+            return Err(PackageError::new(format!(
+                "NES program code must fit in {} bytes before the interrupt vectors, got {}",
+                PRG_SIZE - VECTOR_SIZE,
+                code.len()
+            )));
+        }
+        let mut image = vec![0; IMAGE_SIZE];
+        image[..8].copy_from_slice(b"NES\x1A\x01\x01\0\0");
+        image[HEADER_SIZE..HEADER_SIZE + code.len()].copy_from_slice(code);
+        let entry = u16::try_from(request.entry_addr)
+            .map_err(|_| PackageError::new("NES entry address exceeds 16 bits"))?
+            .to_le_bytes();
+        let vectors = HEADER_SIZE + PRG_SIZE - VECTOR_SIZE;
+        for offset in [0, 2, 4] {
+            image[vectors + offset..vectors + offset + 2].copy_from_slice(&entry);
+        }
+        return Ok(image);
+    }
     if code.len() != IMAGE_SIZE {
         return Err(PackageError::new(format!(
             "NES NROM image must be exactly {IMAGE_SIZE} bytes (16 KiB PRG + 8 KiB CHR), got {}",

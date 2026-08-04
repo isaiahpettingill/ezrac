@@ -73,15 +73,15 @@ fn compiles_in_memory_source_to_avr_assembly() {
 
 #[cfg(feature = "mos6502")]
 #[test]
-fn rejects_nes_source_before_source_codegen() {
-    let error = compile_source_to_assembly(
-        "this is not valid EZRA source",
+fn compiles_nes_source_with_the_ricoh_2a03_backend() {
+    let compilation = compile_source_to_assembly(
+        "fn main() {}",
         &CompileRequest::new("memory.ezra", "nes-2a03"),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.message.contains("assembly-only"), "{error}");
-    assert!(error.message.contains("nes-2a03"), "{error}");
+    assert!(compilation.assembly.contains("target: MOS 6502"));
+    assert!(compilation.assembly.contains("__ezra_start:"));
 }
 
 #[cfg(feature = "i8086")]

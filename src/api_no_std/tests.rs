@@ -78,14 +78,14 @@
 
     #[cfg(feature = "mos6502")]
     #[test]
-    fn alloc_only_api_rejects_nes_source_before_parsing() {
-        let error = compile_source_to_assembly(
-            "this is not valid EZRA source",
+    fn alloc_only_api_compiles_nes_source() {
+        let compilation = compile_source_to_assembly(
+            "fn main() {}",
             &CompileRequest::new("main.ezra", "nes-2a03"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.message.contains("assembly-only"), "{error}");
+        assert!(compilation.assembly.contains("target: MOS 6502"));
     }
 
     #[test]

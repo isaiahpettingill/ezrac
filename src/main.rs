@@ -1105,6 +1105,9 @@ fn resolve_build_settings(
 }
 
 fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), String> {
+    if settings.target.triple.value.starts_with("nes-") {
+        return Ok(());
+    }
     if matches!(
         settings.target.triple.cpu,
         CpuFamily::Ez80
@@ -1117,6 +1120,7 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::Lr35902
             | CpuFamily::Avr
             | CpuFamily::Mos6502
+            | CpuFamily::Ricoh2A03
             | CpuFamily::Tms9900
     ) {
         return Ok(());
@@ -2862,7 +2866,7 @@ fn print_targets() {
             address_width_bits: 16,
             output: "nes",
             sdk: "none",
-            status: "raw assembly NROM-128 target",
+            status: "EZRA source and raw assembly NROM-128 target",
         },
         #[cfg(feature = "tms9900")]
         TargetRow {

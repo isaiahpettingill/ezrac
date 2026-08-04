@@ -1,0 +1,3 @@
+fn main() {
+    // NES startup enters here after ezrac initializes the CPU stack.
+}

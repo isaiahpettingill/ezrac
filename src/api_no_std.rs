@@ -197,7 +197,7 @@ fn compile_workspace_to_assembly_with_resolved_request(
     target: &TargetProfile,
     layout: &Layout,
 ) -> Result<AssemblyCompilation, Diagnostic> {
-    reject_assembly_only_source_target(target)?;
+
     if !matches!(
         target.triple.cpu,
         CpuFamily::Ez80
@@ -961,15 +961,7 @@ fn flat_assembly_map_at(
     Ok(out)
 }
 
-fn reject_assembly_only_source_target(target: &TargetProfile) -> Result<(), Diagnostic> {
-    if target.triple.value.starts_with("nes-") {
-        return Err(Diagnostic::new(format!(
-            "target `{}` is assembly-only; use NES assembly input instead of EZRA source",
-            target.triple.value
-        )));
-    }
-    Ok(())
-}
+
 
 #[cfg(all(test, feature = "i8086"))]
 mod tests;

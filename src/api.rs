@@ -236,7 +236,7 @@ pub fn compile_workspace_to_assembly_with_request(
     request: &CompileRequest,
     build: &BuildRequest,
 ) -> Result<AssemblyCompilation, Diagnostic> {
-    reject_assembly_only_source_target(&build.target)?;
+
     if request.target != build.target.triple.value {
         return Err(Diagnostic::new(format!(
             "compile target `{}` does not match build target `{}`",
@@ -1023,7 +1023,7 @@ fn compile_source_to_assembly_with_overrides(
     source_overrides: &HashMap<PathBuf, String>,
 ) -> Result<AssemblyCompilation, Diagnostic> {
     let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
-    reject_assembly_only_source_target(&target)?;
+
     let layout = layout_for_target(&request.target, target.triple.cpu);
     validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
     let sdk = request.sdk_resolver();
@@ -1371,15 +1371,7 @@ fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<S
     }
 }
 
-fn reject_assembly_only_source_target(target: &TargetProfile) -> Result<(), Diagnostic> {
-    if target.triple.value.starts_with("nes-") {
-        return Err(Diagnostic::new(format!(
-            "target `{}` is assembly-only; use NES assembly input instead of EZRA source",
-            target.triple.value
-        )));
-    }
-    Ok(())
-}
+
 
 /// Resolve the source path used by a compilation request relative to a host
 /// application without requiring it to exist on disk.
