@@ -35,6 +35,7 @@ pub struct TbirSourceComment {
     pub text: String,
     pub statement_text: String,
     pub statement_span: SourceSpan,
+    pub function_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

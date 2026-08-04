@@ -460,23 +460,26 @@ fn lower_declaration(declaration: &HirDeclaration, program: &Program) -> TbirDec
 }
 
 fn collect_source_comments(program: &Program) -> Vec<TbirSourceComment> {
-    fn collect_spans<'a>(
-        spans: &'a [crate::ast::StmtSpan],
-        output: &mut Vec<&'a crate::ast::StmtSpan>,
-    ) {
-        for span in spans {
-            output.push(span);
-            collect_spans(&span.children, output);
-        }
-    }
-
     fn collect_declaration_spans<'a>(
         declarations: &'a [Declaration],
-        output: &mut Vec<&'a crate::ast::StmtSpan>,
+        output: &mut Vec<(&'a str, &'a crate::ast::StmtSpan)>,
     ) {
+        fn collect_function_spans<'a>(
+            function_name: &'a str,
+            spans: &'a [crate::ast::StmtSpan],
+            output: &mut Vec<(&'a str, &'a crate::ast::StmtSpan)>,
+        ) {
+            for span in spans {
+                output.push((function_name, span));
+                collect_function_spans(function_name, &span.children, output);
+            }
+        }
+
         for declaration in declarations {
             match declaration {
-                Declaration::Function(function) => collect_spans(&function.body_spans, output),
+                Declaration::Function(function) => {
+                    collect_function_spans(&function.name, &function.body_spans, output)
+                }
                 Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
                     collect_declaration_spans(core::slice::from_ref(declaration), output);
                 }
@@ -549,13 +552,13 @@ fn collect_source_comments(program: &Program) -> Vec<TbirSourceComment> {
                 spans
                     .iter()
                     .copied()
-                    .filter(|statement| {
+                    .filter(|(_, statement)| {
                         statement.span.file == unit.path && statement.span.start.line > line_number
                     })
-                    .min_by_key(|statement| {
+                    .min_by_key(|(_, statement)| {
                         (statement.span.start.line, statement.span.start.column)
                     })
-                    .filter(|statement| {
+                    .filter(|(_, statement)| {
                         let Some(statement_line) =
                             source_line(&unit.text, statement.span.start.line)
                         else {
@@ -575,14 +578,14 @@ fn collect_source_comments(program: &Program) -> Vec<TbirSourceComment> {
                 spans
                     .iter()
                     .copied()
-                    .filter(|statement| {
+                    .filter(|(_, statement)| {
                         statement.span.file == unit.path
                             && statement.span.start.line == line_number
                             && statement.span.start.column < comment_column
                     })
-                    .max_by_key(|statement| statement.span.start.column)
+                    .max_by_key(|(_, statement)| statement.span.start.column)
             };
-            let Some(statement) = statement else {
+            let Some((function_name, statement)) = statement else {
                 continue;
             };
             let statement_text = if standalone {
@@ -602,6 +605,7 @@ fn collect_source_comments(program: &Program) -> Vec<TbirSourceComment> {
                 text: text.to_owned(),
                 statement_text,
                 statement_span: statement.span.clone(),
+                function_name: function_name.to_owned(),
             });
         }
     }

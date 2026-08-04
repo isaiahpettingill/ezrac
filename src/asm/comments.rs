@@ -23,13 +23,20 @@ pub fn with_readability_comments(
     ));
 
     let placeable_comments = placeable_comments(&assembly, inline_comments);
+    let function_comments = inline_comments
+        .iter()
+        .map(|comment| Some(comment.function_name.clone()))
+        .collect::<Vec<_>>();
     let comments = source_comments(program)
         .into_iter()
         .filter(|comment| {
-            !inline_comments
-                .iter()
-                .enumerate()
-                .any(|(index, inline)| placeable_comments[index] && inline.text == *comment)
+            !inline_comments.iter().enumerate().any(|(index, inline)| {
+                (placeable_comments[index]
+                    || function_comments[index]
+                        .as_deref()
+                        .is_some_and(|function| assembly_has_function_label(&assembly, function)))
+                    && inline.text == *comment
+            })
         })
         .collect::<Vec<_>>();
     if !comments.is_empty() {
@@ -39,7 +46,13 @@ pub fn with_readability_comments(
         }
     }
     out.push('\n');
-    let annotated = annotate_assembly(&assembly, marker, inline_comments, options.debug_comments);
+    let annotated = annotate_assembly(
+        &assembly,
+        marker,
+        inline_comments,
+        &function_comments,
+        options.debug_comments,
+    );
     let starts_with_source_anchor = assembly
         .lines()
         .next()
@@ -279,6 +292,7 @@ fn annotate_assembly(
     assembly: &str,
     marker: &str,
     inline_comments: &[TbirSourceComment],
+    function_comments: &[Option<String>],
     debug_comments: bool,
 ) -> String {
     let mut out = String::with_capacity(assembly.len() + assembly.lines().count() * 12);
@@ -304,6 +318,20 @@ fn annotate_assembly(
             }
             out.push_str(line);
             out.push('\n');
+            if trimmed.ends_with(':') {
+                let label = trimmed.trim_end_matches(':');
+                for (index, comment) in inline_comments.iter().enumerate() {
+                    if !emitted_comments[index]
+                        && !placeable_comment(assembly, comment)
+                        && function_comments[index]
+                            .as_deref()
+                            .is_some_and(|function| function_label_matches(label, function))
+                    {
+                        out.push_str(&format!("{marker} {}\n", comment.text));
+                        emitted_comments[index] = true;
+                    }
+                }
+            }
         }
         if let Some(source) = source {
             let source = normalize_statement(source);
@@ -316,6 +344,14 @@ fn annotate_assembly(
         }
     }
     out
+}
+
+fn placeable_comment(assembly: &str, comment: &TbirSourceComment) -> bool {
+    assembly
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("; source:"))
+        .map(normalize_statement)
+        .any(|source| statements_match(&comment.statement_text, &source))
 }
 
 fn placeable_comments(assembly: &str, comments: &[TbirSourceComment]) -> Vec<bool> {
@@ -332,6 +368,18 @@ fn placeable_comments(assembly: &str, comments: &[TbirSourceComment]) -> Vec<boo
                 .any(|source| statements_match(&comment.statement_text, source))
         })
         .collect()
+}
+
+fn function_label_matches(label: &str, function: &str) -> bool {
+    label == function || label.strip_prefix('_') == Some(function)
+}
+
+fn assembly_has_function_label(assembly: &str, function: &str) -> bool {
+    assembly.lines().any(|line| {
+        line.trim()
+            .strip_suffix(':')
+            .is_some_and(|label| function_label_matches(label, function))
+    })
 }
 
 fn statements_match(statement: &str, normalized_source: &str) -> bool {
@@ -380,6 +428,7 @@ mod tests {
                 start: SourcePosition { line: 1, column: 1 },
                 end: SourcePosition { line: 1, column: 1 },
             },
+            function_name: "main".to_owned(),
         }];
         let assembly = "    ; source: value += 1\n    add a, b\n".to_owned();
 
@@ -408,5 +457,35 @@ mod tests {
         );
         assert!(debug.contains("; source: value += 1"), "{debug}");
         assert!(debug.contains("; increment the value"), "{debug}");
+    }
+
+    #[test]
+    fn keeps_comments_for_rewritten_statements_inside_their_function() {
+        let program = parse_program(
+            Path::new("comments.ezra"),
+            "fn main() {\n    // calculate value\n    let value: u8 = 1\n}\n",
+        )
+        .unwrap();
+        let function = program.main_function().unwrap();
+        let inline_comments = [TbirSourceComment {
+            text: "calculate value".to_owned(),
+            statement_text: "let value: u8 = 1".to_owned(),
+            statement_span: function.body_spans[0].span.clone(),
+            function_name: "main".to_owned(),
+        }];
+
+        let output = with_readability_comments(
+            "_main:\n    ret\n".to_owned(),
+            &program,
+            &AssemblyOptions::default(),
+            "test",
+            &inline_comments,
+        );
+
+        assert!(
+            output.contains("_main:\n; calculate value\n    ret"),
+            "{output}"
+        );
+        assert!(!output.contains("; EZRA source comments:"), "{output}");
     }
 }
