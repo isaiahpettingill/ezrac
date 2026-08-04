@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.33
+
+- Enabled every compiler backend by default and added `no_std + alloc` compilation for every CPU family, with a CI feature matrix covering each backend independently.
+- Expanded the alloc-only embedding API with explicit build requests, layouts, linking, maps, standalone assembly, and filesystem-free packaging context.
+- Fixed generic i8086 linking, AVR API dispatch, 65C816 pointer width, inactive conditional embeds, versioned MS-DOS targets, Intel HEX addressing, and unsupported target/output diagnostics.
+- Fixed M6800 multiplication, i8086 and M68k regressions, MOS banked-declaration handling, Arduboy EEPROM interrupt restoration, and newline-separated dereference assignments around comments.
+- Hardened project and CLI handling for artifact paths, same-stem outputs, layout-checked tests, symlink cycles, project discovery, scaffold preflight, case-insensitive extensions, non-UTF-8 paths, and nested outputs.
+- Fixed LSP handling for layout documents, closed-file workspace symbols, and unsaved imported modules.
 - Added `dcpu.*` Standard Machine constants and a vendorable DCPU assembly macro SDK for LEM1802, keyboard, clock, speaker, and generic `HWI` commands.
 - Switched DCPU-16 emulator-backed compiler tests to the published `dcpu16-core` crate.
 - Added handwritten LEM1802 and scalar-source DCPU-16 examples under `examples/dcpu-16`, build-tested as raw little-endian images for `dcpu-16-libretro`.
