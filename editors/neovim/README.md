@@ -13,7 +13,7 @@ For package-style installation, copy or symlink `../vim/ftdetect`, `../vim/ftplu
 Install `ezrac` with LSP support enabled and make sure `ezrac lsp` is on `PATH`:
 
 ```sh
-cargo install --path /path/to/ezrac --features lsp
+cargo install --path /path/to/ezrac/crates/ezrac-cli --features lsp
 ```
 
 With Neovim's built-in LSP client, add this to `init.lua`:

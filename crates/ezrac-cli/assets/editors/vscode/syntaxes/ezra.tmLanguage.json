@@ -1,0 +1,101 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Ezra",
+  "scopeName": "source.ezra",
+  "fileTypes": [
+    "ezra",
+    "ezralayout"
+  ],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#characters" },
+    { "include": "#numbers" },
+    { "include": "#attributes" },
+    { "include": "#declarations" },
+    { "include": "#storage" },
+    { "include": "#control" },
+    { "include": "#operators" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#functions" }
+  ],
+  "repository": {
+    "attributes": {
+      "patterns": [
+        { "name": "storage.modifier.ezra", "match": "\\b(pub|inline|naked|interrupt|volatile)\\b" }
+      ]
+    },
+    "characters": {
+      "patterns": [
+        {
+          "name": "constant.character.ezra",
+          "match": "'(?:\\\\[n0t\\\\'\\\"]|[^'\\\\])'"
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.ezra", "match": "//.*$" }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.boolean.ezra", "match": "\\b(true|false)\\b" }
+      ]
+    },
+    "control": {
+      "patterns": [
+        { "name": "keyword.control.ezra", "match": "\\b(if|else|while|loop|break|continue|return)\\b" }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        { "name": "keyword.other.import.ezra", "match": "\\bimport\\b" },
+        { "name": "keyword.other.declaration.ezra", "match": "\\b(const|alias|port|mmio|embed|global|struct|extern|asm|fn|layout|load|entry|stack|region|section|symbol)\\b" },
+        { "name": "keyword.other.embed.ezra", "match": "\\b(file|bytes|text|cstr|repeat|align|read|write|execute|reserved|clobber|in|out|as)\\b" }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        { "name": "entity.name.function.ezra", "match": "(?<=\\bfn\\s+)[A-Za-z_][A-Za-z0-9_]*" },
+        { "name": "entity.name.function.call.ezra", "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.ezra", "match": "\\b0x[0-9A-Fa-f]+(?:u8|i8|u16|i16|u24|i24)?\\b" },
+        { "name": "constant.numeric.binary.ezra", "match": "\\b0b[01]+(?:u8|i8|u16|i16|u24|i24)?\\b" },
+        { "name": "constant.numeric.decimal.ezra", "match": "\\b[0-9]+(?:u8|i8|u16|i16|u24|i24)?\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.ezra", "match": "->|\\.\\.|<<=|>>=|==|!=|<=|>=|&&|\\|\\||<<|>>|[-+*/%&|^~!=<>]=?" }
+      ]
+    },
+    "storage": {
+      "patterns": [
+        { "name": "storage.type.ezra", "match": "\\b(fn|struct|ptr|bytes)\\b" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.ezra",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.ezra", "match": "\\\\[n0t\\\\'\\\"]" }
+          ]
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "support.type.integer.ezra", "match": "\\b(u8|i8|u16|i16|u24|i24)\\b" },
+        { "name": "entity.name.type.ezra", "match": "(?<=\\b(struct|alias)\\s+)[A-Za-z_][A-Za-z0-9_]*" }
+      ]
+    }
+  }
+}

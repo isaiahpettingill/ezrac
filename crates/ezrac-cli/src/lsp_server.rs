@@ -731,8 +731,9 @@ struct BundledSdkContext {
 }
 
 fn bundled_sdk_context(path: &Path) -> Option<BundledSdkContext> {
-    let toolchains =
-        normalize_document_path(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("toolchains"));
+    let toolchains = normalize_document_path(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../toolchains"),
+    );
     let path = normalize_document_path(path);
     let relative = path.strip_prefix(&toolchains).ok()?;
     if relative

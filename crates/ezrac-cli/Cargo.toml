@@ -1,0 +1,57 @@
+[package]
+name = "ezrac-cli"
+version = "0.1.33"
+edition = "2024"
+description = "Command-line compiler and language server for the EZRA language"
+license = "BSD-3-Clause"
+repository = "https://github.com/isaiahpettingill/ezrac"
+
+[[bin]]
+name = "ezrac"
+path = "src/main.rs"
+required-features = ["std", "test-runner"]
+
+[dependencies]
+ezra = { package = "ezra-core", version = "0.1.33", path = "../..", default-features = false }
+lsp = { version = "0.1.1", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.150", optional = true }
+
+[features]
+default = [
+    "std",
+    "test-runner",
+    "intel",
+    "i8086",
+    "z80",
+    "lr35902",
+    "avr",
+    "m6800",
+    "m6809",
+    "m68k",
+    "mos6502",
+    "tms9900",
+    "dcpu",
+]
+std = ["ezra/std"]
+no-std = ["ezra/no-std"]
+test-runner = ["std", "ezra/test-runner"]
+intel = ["ezra/intel"]
+i8086 = ["ezra/i8086"]
+z80 = ["ezra/z80"]
+lr35902 = ["ezra/lr35902"]
+avr = ["ezra/avr"]
+m6800 = ["ezra/m6800"]
+m6809 = ["ezra/m6809"]
+m68k = ["ezra/m68k"]
+mos6502 = ["ezra/mos6502"]
+mos6502-emulator = ["mos6502", "test-runner", "ezra/mos6502-emulator"]
+tms9900 = ["ezra/tms9900"]
+dcpu = ["ezra/dcpu"]
+lsp = ["std", "ezra/lsp", "dep:lsp", "dep:serde", "dep:serde_json"]
+
+[dev-dependencies]
+ez80 = "0.5.0"
+play96 = "0.3.2"
+libre99-core = { git = "https://github.com/joelodom/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
+libre99-asm = { git = "https://github.com/joelodom/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }

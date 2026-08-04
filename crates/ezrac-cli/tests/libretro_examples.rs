@@ -21,7 +21,7 @@ fn lock_real_core_tests() -> MutexGuard<'static, ()> {
 }
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn core_from_env(variable: &str) -> PathBuf {

@@ -2,6 +2,10 @@ use super::*;
 
 pub(super) static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub(super) fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 pub(super) struct CurrentDirGuard {
     previous: PathBuf,
 }
@@ -57,7 +61,7 @@ pub(super) fn assert_ti8xp(bytes: &[u8], name: &[u8; 8], program_prefix: &[u8]) 
 }
 
 pub(super) fn copy_fixture(root: &Path, name: &str) -> PathBuf {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let source = repository_root()
         .join("tests")
         .join("fixtures")
         .join("harness")

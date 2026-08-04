@@ -131,7 +131,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 
 ## Embedding the Compiler
 
-The crate exposes filesystem-free compile and build APIs for Rust applications. A virtual workspace can be compiled, assembled, and packaged without invoking the CLI or writing artifacts:
+The `ezra-core` package exposes the `ezra` library crate with filesystem-free compile and build APIs. The `ezrac-cli` workspace package contains the `ezrac` binary and LSP server. A virtual workspace can be compiled, assembled, and packaged without invoking the CLI or writing artifacts:
 
 ```rust
 use ezra::api::{BuildCompilation, CompileRequest, Workspace, WorkspaceFile, build_workspace};
@@ -159,15 +159,26 @@ assert_eq!(build.executable_extension, "com");
 Both std and alloc-only builds validate the selected layout, strictly validate generated target assembly, and ensure the assembled `.text` bytes fit the region assigned by the layout before packaging. Source parsing, import resolution, code generation, assembly, linking, maps, explicit layouts, and packaging work under `no_std + alloc` for every compiler backend. Select only the backends an embedded consumer needs:
 
 ```sh
-cargo check --lib --no-default-features --features no-std,z80
-cargo check --lib --no-default-features --features no-std,mos6502
-cargo check --lib --no-default-features --features no-std,i8086
-cargo check --lib --no-default-features --features no-std,avr,m6800,m6809,m68k,tms9900,dcpu,lr35902
+cargo check -p ezra-core --lib --no-default-features --features no-std,z80
+cargo check -p ezra-core --lib --no-default-features --features no-std,mos6502
+cargo check -p ezra-core --lib --no-default-features --features no-std,i8086
+cargo check -p ezra-core --lib --no-default-features --features no-std,avr,m6800,m6809,m68k,tms9900,dcpu,lr35902
 ```
 
 No-std builds never access host paths: all imported SDK source and binary assets must be included in `Workspace`. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
 
 ## Development
+
+The root is a Cargo workspace with two packages:
+
+- `ezra-core` at the repository root contains the compiler library and supports `no_std + alloc`.
+- `ezrac-cli` under `crates/ezrac-cli` contains the host CLI, LSP server, and editor installer.
+
+Root `cargo run -- <args>` commands still run the `ezrac` binary. Install it from a checkout with:
+
+```sh
+cargo install --path crates/ezrac-cli --features lsp
+```
 
 ```sh
 cargo fmt

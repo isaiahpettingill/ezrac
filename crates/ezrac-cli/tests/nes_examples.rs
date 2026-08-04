@@ -3,7 +3,7 @@
 use std::{fs, path::PathBuf, process::Command};
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 #[test]
@@ -22,10 +22,9 @@ fn nes_source_builds_a_valid_nrom_image() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let image = fs::read(root.join(
-        "examples/nes-2a03/source-hello/target/nes-2a03/src/source-hello.nes",
-    ))
-    .unwrap();
+    let image =
+        fs::read(root.join("examples/nes-2a03/source-hello/target/nes-2a03/src/source-hello.nes"))
+            .unwrap();
     assert_eq!(image.len(), 0x6010);
     assert_eq!(&image[..8], b"NES\x1A\x01\x01\0\0");
     assert!(image[0x4010..0x4018].iter().all(|byte| *byte == 0xFF));

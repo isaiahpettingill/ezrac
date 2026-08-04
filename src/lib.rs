@@ -12,7 +12,7 @@ mod compat;
 #[cfg(feature = "std")]
 pub mod api;
 #[cfg(all(feature = "no-std", not(feature = "std")))]
-#[path = "api_no_std.rs"]
+#[path = "api_no_std/mod.rs"]
 pub mod api;
 pub mod asm;
 pub mod ast;

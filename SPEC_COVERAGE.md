@@ -6,7 +6,7 @@ Status meanings: **Implemented** is exercised end to end by tests; **Partial** h
 
 | Spec | Status | Evidence | Remaining gap |
 | --- | --- | --- | --- |
-| 1. Purpose | Implemented | CLI, compiler, assembler, layouts, SDKs, and emulator tests are integrated in `src/main.rs`. | None for the stated purpose. |
+| 1. Purpose | Implemented | The compiler library is integrated in `src/lib.rs`; the CLI and host tooling are integrated in `crates/ezrac-cli/src/main.rs`. | None for the stated purpose. |
 | 2. Target and CPU model | Partial | `src/target.rs` models eZ80, Z80, Z80N, Z180, 8080, 8085, MOS 6502, AVR, and other CPU families with target memory models; MOS 6502 lowers through HIR/TBIR and AVR has a complete HIR/TBIR-backed register-ABI source backend. | Other CPU families retain their listed target-specific gaps. |
 | 3. Cartridge kinds | Implemented | `src/cart.rs` and target output selection cover EZRA cartridges and target-owned formats. | Future targets may add formats. |
 | 4. Address space | Implemented | `Address24`, layout validation, section-fit, stack, and VM bounds tests enforce current address spaces. | None for current targets. |

@@ -3,7 +3,7 @@
 use std::{fs, path::PathBuf, process::Command};
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn build_example(name: &str, source: &str) -> Vec<u8> {

@@ -197,7 +197,6 @@ fn compile_workspace_to_assembly_with_resolved_request(
     target: &TargetProfile,
     layout: &Layout,
 ) -> Result<AssemblyCompilation, Diagnostic> {
-
     if !matches!(
         target.triple.cpu,
         CpuFamily::Ez80
@@ -960,8 +959,6 @@ fn flat_assembly_map_at(
     }
     Ok(out)
 }
-
-
 
 #[cfg(all(test, feature = "i8086"))]
 mod tests;

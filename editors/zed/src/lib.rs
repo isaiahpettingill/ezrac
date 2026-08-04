@@ -13,7 +13,7 @@ impl zed::Extension for EzraExtension {
         worktree: &Worktree,
     ) -> Result<zed::Command> {
         let command = worktree.which("ezrac").ok_or_else(|| {
-            "Could not find `ezrac` in PATH. Install it with `cargo install --path /path/to/ezrac --features lsp`."
+            "Could not find `ezrac` in PATH. Install it with `cargo install --path /path/to/ezrac/crates/ezrac-cli --features lsp`."
                 .to_owned()
         })?;
 

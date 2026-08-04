@@ -448,8 +448,7 @@ fn test_discovery_does_not_follow_symlink_cycles() {
 
 #[test]
 fn examples_ignore_generated_artifacts_but_not_handwritten_assembly() {
-    let gitignore =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".gitignore")).unwrap();
+    let gitignore = std::fs::read_to_string(repository_root().join(".gitignore")).unwrap();
 
     assert!(gitignore.contains("/examples/**/target"), "{gitignore}");
     assert!(!gitignore.contains("/examples/**/*.asm"), "{gitignore}");

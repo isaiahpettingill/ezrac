@@ -133,7 +133,7 @@ fn assemble_file_writes_cpm_com_for_cpm_z80_target() {
 fn cpm_z80_examples_assemble_as_com_programs() {
     let root = temp_root("assemble_cpm_examples");
     std::fs::create_dir_all(&root).unwrap();
-    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80");
+    let examples = repository_root().join("examples/cpm-z80");
 
     for name in ["console-output", "exit", "file-read", "line-input"] {
         let output = root.join(format!("{name}.com"));
@@ -156,7 +156,7 @@ fn cpm_z80_examples_assemble_as_com_programs() {
 
 #[test]
 fn game_boy_vendored_sdk_macros_preprocess_and_assemble() {
-    let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/gameboy-lr35902/sdk/asm/gb");
+    let sdk = repository_root().join("toolchains/gameboy-lr35902/sdk/asm/gb");
     let source_path = sdk.join("fixture.asm");
     let source = r#"
             include "color.inc"

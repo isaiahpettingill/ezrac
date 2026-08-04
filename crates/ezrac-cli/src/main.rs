@@ -2374,7 +2374,7 @@ fn install_syntax_for_editor(editor: SyntaxEditor, dry_run: bool) -> Result<Vec<
         SyntaxEditor::Nano => install_nano_syntax(dry_run),
         SyntaxEditor::Micro => install_single_syntax_file(
             micro_config_home()?.join("syntax/ezra.yaml"),
-            include_str!("../editors/micro/ezra.yaml"),
+            include_str!("../assets/editors/micro/ezra.yaml"),
             dry_run,
         ),
         SyntaxEditor::Helix => install_helix_syntax(dry_run),
@@ -2434,15 +2434,15 @@ fn install_vim_syntax(root: PathBuf, dry_run: bool) -> Result<Vec<PathBuf>, Stri
     let files = [
         (
             "ftdetect/ezra.vim",
-            include_str!("../editors/vim/ftdetect/ezra.vim"),
+            include_str!("../assets/editors/vim/ftdetect/ezra.vim"),
         ),
         (
             "ftplugin/ezra.vim",
-            include_str!("../editors/vim/ftplugin/ezra.vim"),
+            include_str!("../assets/editors/vim/ftplugin/ezra.vim"),
         ),
         (
             "syntax/ezra.vim",
-            include_str!("../editors/vim/syntax/ezra.vim"),
+            include_str!("../assets/editors/vim/syntax/ezra.vim"),
         ),
     ];
     write_syntax_files(root, &files, dry_run)
@@ -2454,7 +2454,7 @@ fn install_nano_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
     let syntax_path = nanorc_dir.join("ezra.nanorc");
     let mut paths = install_single_syntax_file(
         syntax_path.clone(),
-        include_str!("../editors/nano/ezra.nanorc"),
+        include_str!("../assets/editors/nano/ezra.nanorc"),
         dry_run,
     )?;
     let include_line = format!("include {}", syntax_path.display());
@@ -2487,11 +2487,11 @@ fn install_helix_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
     let files = [
         (
             "languages.toml",
-            include_str!("../editors/helix/languages.toml"),
+            include_str!("../assets/editors/helix/languages.toml"),
         ),
         (
             "runtime/queries/ezra/highlights.scm",
-            include_str!("../editors/helix/queries/highlights.scm"),
+            include_str!("../assets/editors/helix/queries/highlights.scm"),
         ),
     ];
     write_syntax_files(root, &files, dry_run)
@@ -2502,15 +2502,15 @@ fn install_vscode_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
     let files = [
         (
             "package.json",
-            include_str!("../editors/vscode/package.json"),
+            include_str!("../assets/editors/vscode/package.json"),
         ),
         (
             "language-configuration.json",
-            include_str!("../editors/vscode/language-configuration.json"),
+            include_str!("../assets/editors/vscode/language-configuration.json"),
         ),
         (
             "syntaxes/ezra.tmLanguage.json",
-            include_str!("../editors/vscode/syntaxes/ezra.tmLanguage.json"),
+            include_str!("../assets/editors/vscode/syntaxes/ezra.tmLanguage.json"),
         ),
     ];
     write_syntax_files(root, &files, dry_run)
@@ -2562,7 +2562,7 @@ fn install_zed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
 fn install_notepadpp_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
     install_single_syntax_file(
         appdata_home()?.join("Notepad++/userDefineLangs/ezra.xml"),
-        include_str!("../editors/notepad++/ezra.xml"),
+        include_str!("../assets/editors/notepad++/ezra.xml"),
         dry_run,
     )
 }

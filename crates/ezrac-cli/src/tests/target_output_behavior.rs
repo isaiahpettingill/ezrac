@@ -203,7 +203,7 @@ fn game_boy_explicit_banking_packages_banked_embed_and_emits_bank_zero_runtime()
 
 #[test]
 fn game_boy_source_examples_build_as_roms() {
-    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gameboy");
+    let examples = repository_root().join("examples/gameboy");
     for name in [
         "serial-hello",
         "background",
@@ -253,8 +253,7 @@ fn game_boy_source_examples_build_as_roms() {
 #[cfg(feature = "mos6502")]
 #[test]
 fn commodore64_source_example_builds_as_prg() {
-    let source =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/commodore64/hello/src/main.ezra");
+    let source = repository_root().join("examples/commodore64/hello/src/main.ezra");
     let outputs = build_source_with_build_options(&BuildCommandOptions {
         path: Some(source.clone()),
         debug_comments: false,
@@ -794,7 +793,7 @@ fn cpm_z80_source_build_writes_com_binary() {
 fn cpm_z80_source_examples_use_sdk_and_write_com_binaries() {
     let root = temp_root("cpm_source_example");
     std::fs::create_dir_all(&root).unwrap();
-    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cpm-z80");
+    let examples = repository_root().join("examples/cpm-z80");
     for name in ["console-output", "line-input", "file-read"] {
         let source_path = root.join(format!("{name}.ezra"));
         std::fs::copy(examples.join(format!("{name}.ezra")), &source_path).unwrap();

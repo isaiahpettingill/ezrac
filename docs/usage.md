@@ -11,6 +11,12 @@ cargo build
 cargo test --quiet
 ```
 
+The workspace contains the `ezra-core` library package and the `ezrac-cli` binary package. Install the binary from a checkout with:
+
+```sh
+cargo install --path crates/ezrac-cli --features lsp
+```
+
 Run commands from the repository without installing:
 
 ```sh

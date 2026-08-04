@@ -48,25 +48,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a31c7fd56bc3b5cc0cc372be064c43d698ff31baec6e2e8dfbb0de2e4d970b2"
 
 [[package]]
-name = "ezrac"
+name = "ezra-core"
 version = "0.1.33"
 dependencies = [
  "dcpu16-core",
  "ez80",
  "hashbrown 0.15.5",
- "libre99-asm",
- "libre99-core",
- "lsp",
  "m6800",
  "m68000",
  "mc6809-core",
  "mos6502",
  "pest",
  "pest_derive",
+ "toml",
+]
+
+[[package]]
+name = "ezrac-cli"
+version = "0.1.33"
+dependencies = [
+ "ez80",
+ "ezra-core",
+ "libre99-asm",
+ "libre99-core",
+ "lsp",
  "play96",
  "serde",
  "serde_json",
- "toml",
 ]
 
 [[package]]
