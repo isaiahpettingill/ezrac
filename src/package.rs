@@ -256,6 +256,10 @@ fn nes_rom_bytes(
         for offset in [0, 2, 4] {
             image[vectors + offset..vectors + offset + 2].copy_from_slice(&entry);
         }
+        // Give source-only programs one immediately usable 8x8 solid tile.
+        // The first bit plane selects palette color 1; the second remains zero.
+        let chr_start = HEADER_SIZE + PRG_SIZE;
+        image[chr_start..chr_start + 8].fill(0xFF);
         return Ok(image);
     }
     if code.len() != IMAGE_SIZE {

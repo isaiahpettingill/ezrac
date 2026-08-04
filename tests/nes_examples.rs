@@ -28,7 +28,14 @@ fn nes_source_builds_a_valid_nrom_image() {
     .unwrap();
     assert_eq!(image.len(), 0x6010);
     assert_eq!(&image[..8], b"NES\x1A\x01\x01\0\0");
-    assert!(image[0x4010..].iter().all(|byte| *byte == 0));
+    assert!(image[0x4010..0x4018].iter().all(|byte| *byte == 0xFF));
+    assert!(image[0x4018..].iter().all(|byte| *byte == 0));
+    assert!(
+        image[0x10..0x400A]
+            .windows(3)
+            .any(|instruction| instruction == [0x8D, 0x04, 0x20]),
+        "generated program never writes sprite data to OAMDATA"
+    );
     for offset in [0x400A, 0x400C, 0x400E] {
         assert_eq!(&image[offset..offset + 2], &0xC000u16.to_le_bytes());
     }

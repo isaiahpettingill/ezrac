@@ -17,7 +17,7 @@ fn packages_nes_nrom_image_without_adding_a_second_header() {
 }
 
 #[test]
-fn packages_nes_entry_code_as_nrom_with_vectors_and_blank_chr() {
+fn packages_nes_entry_code_as_nrom_with_vectors_and_a_solid_tile() {
     let code = [0x78, 0xD8, 0x4C, 0x00, 0xC0];
     let packaged = package_executable(
         &PackageRequest::new("nes-2a03", OutputFormat::NesRom, 0xBFF0, 0xC000),
@@ -28,7 +28,8 @@ fn packages_nes_entry_code_as_nrom_with_vectors_and_blank_chr() {
     assert_eq!(packaged.len(), 0x6010);
     assert_eq!(&packaged[..8], b"NES\x1A\x01\x01\0\0");
     assert_eq!(&packaged[0x10..0x10 + code.len()], &code);
-    assert!(packaged[0x4010..].iter().all(|byte| *byte == 0));
+    assert!(packaged[0x4010..0x4018].iter().all(|byte| *byte == 0xFF));
+    assert!(packaged[0x4018..].iter().all(|byte| *byte == 0));
     for offset in [0x400A, 0x400C, 0x400E] {
         assert_eq!(&packaged[offset..offset + 2], &0xC000u16.to_le_bytes());
     }
