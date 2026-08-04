@@ -15,12 +15,26 @@ pub const DRIVE_A: u8 = 1
 pub const DRIVE_B: u8 = 2
 pub const DRIVE_C: u8 = 3
 pub const DRIVE_D: u8 = 4
+pub const DRIVE_P: u8 = 16
+pub const MAX_DRIVE: u8 = 16
 pub const WILDCARD: u8 = '?'
 pub const PAD: u8 = ' '
 
 pub const RESULT_OK: u8 = 0
 pub const RESULT_ERROR: u8 = 0xFF
+pub const NAME_NO_SPACE: u8 = 0xFE
 pub const DIRECTORY_ENTRY_SIZE: u8 = 32
+pub const DIRECTORY_RECORD_SIZE: u8 = 128
+pub const DIRECTORY_ENTRIES_PER_RECORD: u8 = 4
+pub const DIRECTORY_UNUSED: u8 = 0xE5
+pub const SEARCH_NO_MATCH: u8 = 0xFF
+pub const USER_DEFAULT: u8 = 0
+pub const USER_MAX: u8 = 15
+pub const BYTE_STREAM_SEEK_UNSUPPORTED: u8 = 1
+
+pub const NAME_LENGTH: u8 = 8
+pub const EXTENSION_LENGTH: u8 = 3
+pub const NAME_TEXT_MAX: u8 = 13
 
 pub fn clear(fcb: ptr<u8>) {
     let index: u8 = 0
@@ -39,6 +53,51 @@ pub fn init(fcb: ptr<u8>, drive: u8) {
 
 pub fn set_drive(fcb: ptr<u8>, drive: u8) {
     *(fcb + DRIVE) = drive
+}
+
+pub fn get_drive(fcb: ptr<u8>) -> u8 {
+    return *(fcb + DRIVE)
+}
+
+pub fn is_valid_drive(value: u8) -> bool {
+    return value <= MAX_DRIVE
+}
+
+pub fn set_drive_checked(fcb: ptr<u8>, value: u8) -> u8 {
+    if !is_valid_drive(value) {
+        return RESULT_ERROR
+    }
+    set_drive(fcb, value)
+    return RESULT_OK
+}
+
+pub fn drive_from_letter(letter: u8) -> u8 {
+    if letter >= 'a' && letter <= 'p' {
+        return letter - 'a' + DRIVE_A
+    }
+    if letter >= 'A' && letter <= 'P' {
+        return letter - 'A' + DRIVE_A
+    }
+    return RESULT_ERROR
+}
+
+pub fn drive_letter(value: u8) -> u8 {
+    if value == DRIVE_DEFAULT {
+        return ' '
+    }
+    if !is_valid_drive(value) {
+        return 0
+    }
+    return 'A' + value - DRIVE_A
+}
+
+pub fn set_drive_letter(fcb: ptr<u8>, letter: u8) -> u8 {
+    let value: u8 = drive_from_letter(letter)
+    if value == RESULT_ERROR {
+        return RESULT_ERROR
+    }
+    set_drive(fcb, value)
+    return RESULT_OK
 }
 
 pub fn pad_name(fcb: ptr<u8>) {
@@ -85,8 +144,37 @@ pub fn set_extension_char(fcb: ptr<u8>, index: u8, ch: u8) {
     }
 }
 
+pub fn name_char(fcb: ptr<u8>, index: u8) -> u8 {
+    if index >= NAME_LENGTH {
+        return 0
+    }
+    return *(fcb + NAME + index)
+}
+
+pub fn extension_char(fcb: ptr<u8>, index: u8) -> u8 {
+    if index >= EXTENSION_LENGTH {
+        return 0
+    }
+    return *(fcb + EXTENSION + index)
+}
+
+pub fn set_wildcard(fcb: ptr<u8>) {
+    wildcard_name(fcb)
+    wildcard_extension(fcb)
+}
+
 pub fn set_extent(fcb: ptr<u8>, extent: u8) {
     *(fcb + EXTENT_LOW) = extent
+}
+
+// BDOS 23 reads the old name from bytes 0..11 and the new name from bytes
+// 16..27 of one FCB. This copies only the 12-byte name portions.
+pub fn prepare_rename(source: ptr<u8>, destination: ptr<u8>) {
+    let index: u8 = 0
+    while index < 12 {
+        *(source + SYSTEM_RESERVED_2 + 2 + index) = *(destination + index)
+        index += 1
+    }
 }
 
 pub fn set_current_record(fcb: ptr<u8>, record: u8) {
@@ -97,4 +185,304 @@ pub fn set_random_record(fcb: ptr<u8>, record: u24) {
     *(fcb + RANDOM_RECORD) = cast<u8>(record)
     *(fcb + RANDOM_RECORD + 1) = cast<u8>(record >> 8)
     *(fcb + RANDOM_RECORD + 2) = cast<u8>(record >> 16)
+}
+
+pub fn get_extent(fcb: ptr<u8>) -> u8 {
+    return *(fcb + EXTENT_LOW)
+}
+
+pub fn record_count(fcb: ptr<u8>) -> u8 {
+    return *(fcb + RECORD_COUNT)
+}
+
+pub fn set_record_count(fcb: ptr<u8>, count: u8) {
+    *(fcb + RECORD_COUNT) = count
+}
+
+pub fn current_record(fcb: ptr<u8>) -> u8 {
+    return *(fcb + CURRENT_RECORD)
+}
+
+pub fn random_record(fcb: ptr<u8>) -> u24 {
+    return cast<u24>(*(fcb + RANDOM_RECORD))
+        | (cast<u24>(*(fcb + RANDOM_RECORD + 1)) << 8)
+        | (cast<u24>(*(fcb + RANDOM_RECORD + 2)) << 16)
+}
+
+pub fn record_position(fcb: ptr<u8>) -> u24 {
+    return random_record(fcb)
+}
+
+pub fn set_record_position(fcb: ptr<u8>, record: u24) {
+    set_random_record(fcb, record)
+}
+
+pub fn record_for_byte_offset(offset: u24) -> u24 {
+    return offset / 128u24
+}
+
+pub fn byte_offset_in_record(offset: u24) -> u8 {
+    return cast<u8>(offset & 127u24)
+}
+
+pub fn byte_offset_for_record(record: u24) -> u24 {
+    return record * 128u24
+}
+
+pub fn is_valid_user_area(value: u8) -> bool {
+    return value <= USER_MAX
+}
+
+fn uppercase(ch: u8) -> u8 {
+    if ch >= 'a' && ch <= 'z' {
+        return ch - 'a' + 'A'
+    }
+    return ch
+}
+
+fn valid_name_char(ch: u8) -> bool {
+    if ch >= 'A' && ch <= 'Z' {
+        return true
+    }
+    if ch >= 'a' && ch <= 'z' {
+        return true
+    }
+    if ch >= '0' && ch <= '9' {
+        return true
+    }
+    return ch == '$' || ch == '%' || ch == '-' || ch == '_' || ch == '@'
+        || ch == '~' || ch == '!' || ch == '#' || ch == '&' || ch == '('
+        || ch == ')' || ch == '{' || ch == '}' || ch == '^' || ch == WILDCARD
+}
+
+// Parse a bounded 8.3 name. A leading A: through P: selects a drive; the
+// default drive is retained when no prefix is present. Lowercase is folded to
+// uppercase. This intentionally rejects separators and unchecked high bytes.
+pub fn parse_name_bounded(fcb: ptr<u8>, source: ptr<u8>, length: u8) -> u8 {
+    if length == 0 {
+        return RESULT_ERROR
+    }
+    let index: u8 = 0
+    let selected_drive: u8 = get_drive(fcb)
+    if length >= 2 && *(source + 1) == ':' {
+        let parsed_drive: u8 = drive_from_letter(*source)
+        if parsed_drive == RESULT_ERROR {
+            return RESULT_ERROR
+        }
+        selected_drive = parsed_drive
+        index = 2
+    }
+    let name_count: u8 = 0
+    let extension_count: u8 = 0
+    let in_extension: bool = false
+    while index < length {
+        let ch: u8 = *(source + index)
+        if ch == '.' {
+            if in_extension || name_count == 0 {
+                return RESULT_ERROR
+            }
+            in_extension = true
+        } else {
+            if !valid_name_char(ch) {
+                return RESULT_ERROR
+            }
+            if in_extension {
+                if extension_count >= EXTENSION_LENGTH {
+                    return RESULT_ERROR
+                }
+                set_extension_char(fcb, extension_count, uppercase(ch))
+                extension_count += 1
+            } else {
+                if name_count >= NAME_LENGTH {
+                    return RESULT_ERROR
+                }
+                set_name_char(fcb, name_count, uppercase(ch))
+                name_count += 1
+            }
+        }
+        index += 1
+    }
+    if name_count == 0 {
+        return RESULT_ERROR
+    }
+    set_drive(fcb, selected_drive)
+    while name_count < NAME_LENGTH {
+        set_name_char(fcb, name_count, PAD)
+        name_count += 1
+    }
+    while extension_count < EXTENSION_LENGTH {
+        set_extension_char(fcb, extension_count, PAD)
+        extension_count += 1
+    }
+    return RESULT_OK
+}
+
+pub fn parse_name(fcb: ptr<u8>, source: ptr<u8>) -> u8 {
+    let length: u8 = 0
+    while length < NAME_TEXT_MAX && *(source + length) != 0 {
+        length += 1
+    }
+    if length == 0 || length >= NAME_TEXT_MAX {
+        return RESULT_ERROR
+    }
+    return parse_name_bounded(fcb, source, length)
+}
+
+pub fn validate(fcb: ptr<u8>) -> bool {
+    if !is_valid_drive(get_drive(fcb)) {
+        return false
+    }
+    let index: u8 = 0
+    while index < NAME_LENGTH {
+        let ch: u8 = name_char(fcb, index)
+        if ch != PAD && ch != WILDCARD && !valid_name_char(ch) {
+            return false
+        }
+        index += 1
+    }
+    let extension_index: u8 = 0
+    while extension_index < EXTENSION_LENGTH {
+        let ch: u8 = extension_char(fcb, extension_index)
+        if ch != PAD && ch != WILDCARD && !valid_name_char(ch) {
+            return false
+        }
+        extension_index += 1
+    }
+    return true
+}
+
+pub fn format_name(fcb: ptr<u8>, destination: ptr<u8>, capacity: u8) -> u8 {
+    if capacity == 0 {
+        return NAME_NO_SPACE
+    }
+    if !validate(fcb) {
+        return RESULT_ERROR
+    }
+    let name_count: u8 = NAME_LENGTH
+    while name_count > 0 && name_char(fcb, name_count - 1) == PAD {
+        name_count -= 1
+    }
+    if name_count == 0 {
+        return RESULT_ERROR
+    }
+    let extension_count: u8 = EXTENSION_LENGTH
+    while extension_count > 0 && extension_char(fcb, extension_count - 1) == PAD {
+        extension_count -= 1
+    }
+    let required: u8 = name_count + extension_count + 1
+    if extension_count != 0 {
+        required += 1
+    }
+    if capacity < required {
+        return NAME_NO_SPACE
+    }
+    let output: u8 = 0
+    let index: u8 = 0
+    while index < name_count {
+        *(destination + output) = name_char(fcb, index)
+        output += 1
+        index += 1
+    }
+    if extension_count != 0 {
+        *(destination + output) = '.'
+        output += 1
+        index = 0
+        while index < extension_count {
+            *(destination + output) = extension_char(fcb, index)
+            output += 1
+            index += 1
+        }
+    }
+    *(destination + output) = 0
+    return output
+}
+
+pub fn format_name_with_drive(fcb: ptr<u8>, destination: ptr<u8>, capacity: u8) -> u8 {
+    let prefix: u8 = 0
+    if get_drive(fcb) != DRIVE_DEFAULT {
+        if !is_valid_drive(get_drive(fcb)) {
+            return RESULT_ERROR
+        }
+        if capacity < 3 {
+            return NAME_NO_SPACE
+        }
+        *(destination) = drive_letter(get_drive(fcb))
+        *(destination + 1) = ':'
+        prefix = 2
+    }
+    let count: u8 = format_name(fcb, destination + prefix, capacity - prefix)
+    if count == RESULT_ERROR || count == NAME_NO_SPACE {
+        return count
+    }
+    return count + prefix
+}
+
+pub fn directory_search_complete(result: u8) -> bool {
+    return result == SEARCH_NO_MATCH
+}
+
+pub fn directory_search_entry(result: u8) -> bool {
+    return result < DIRECTORY_ENTRIES_PER_RECORD
+}
+
+pub fn directory_entry(buffer: ptr<u8>, result: u8) -> ptr<u8> {
+    if !directory_search_entry(result) {
+        return cast<ptr<u8>>(cast<u24>(0))
+    }
+    return buffer + cast<u16>(result) * cast<u16>(DIRECTORY_ENTRY_SIZE)
+}
+
+pub fn directory_entry_user(buffer: ptr<u8>, result: u8) -> u8 {
+    let entry: ptr<u8> = directory_entry(buffer, result)
+    if entry == cast<ptr<u8>>(cast<u24>(0)) {
+        return DIRECTORY_UNUSED
+    }
+    return *entry
+}
+
+pub fn directory_entry_drive(search_fcb: ptr<u8>) -> u8 {
+    return get_drive(search_fcb)
+}
+
+pub fn directory_entry_name_char(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
+    if index >= NAME_LENGTH {
+        return 0
+    }
+    let entry: ptr<u8> = directory_entry(buffer, result)
+    if entry == cast<ptr<u8>>(cast<u24>(0)) {
+        return 0
+    }
+    return *(entry + NAME + index)
+}
+
+pub fn directory_entry_extension_char(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
+    if index >= EXTENSION_LENGTH {
+        return 0
+    }
+    let entry: ptr<u8> = directory_entry(buffer, result)
+    if entry == cast<ptr<u8>>(cast<u24>(0)) {
+        return 0
+    }
+    return *(entry + EXTENSION + index)
+}
+
+// Decode a search result into a normal FCB. The returned byte is the user
+// area from the directory entry; the drive comes from the search FCB.
+pub fn decode_directory_entry(buffer: ptr<u8>, result: u8, destination: ptr<u8>, search_fcb: ptr<u8>) -> u8 {
+    let entry: ptr<u8> = directory_entry(buffer, result)
+    if entry == cast<ptr<u8>>(cast<u24>(0)) {
+        return DIRECTORY_UNUSED
+    }
+    init(destination, get_drive(search_fcb))
+    let index: u8 = 0
+    while index < NAME_LENGTH {
+        set_name_char(destination, index, *(entry + NAME + index))
+        index += 1
+    }
+    let extension_index: u8 = 0
+    while extension_index < EXTENSION_LENGTH {
+        set_extension_char(destination, extension_index, *(entry + EXTENSION + extension_index))
+        extension_index += 1
+    }
+    return *entry
 }

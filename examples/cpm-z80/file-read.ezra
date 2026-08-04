@@ -22,8 +22,8 @@ fn prepare_readme_fcb() {
 fn main() {
     prepare_readme_fcb()
     dma.set_buffer(&dma_record[0])
-    if bdos.open_file_at(&file_control_block[0]) == fcb.RESULT_OK {
-        if bdos.read_sequential_at(&file_control_block[0]) == fcb.RESULT_OK {
+    if bdos.open_file_at(&file_control_block[0]) == bdos.BDOS_RESULT_OK {
+        if bdos.read_sequential_at(&file_control_block[0]) == bdos.BDOS_RESULT_OK {
             console.write(dma_record[0])
         }
         bdos.close_file_at(&file_control_block[0])

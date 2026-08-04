@@ -16,17 +16,18 @@ The current output format is `.com`, loaded at `0x0100` in the transient program
 - CP/M source builds exist for Z80, 8080, and 8085 target profiles.
 - Built-in SDK modules exist for `cpm.bdos`, `cpm.console`, `cpm.fcb`, and `cpm.dma`.
 - Assembly examples exist under `examples/cpm-z80`.
-- Source examples for console output, line input, and FCB file reads exist under `examples/cpm-z80`.
-- The VM test harness emulates BDOS 0, 2, and 9 for basic console-output tests.
+- Source examples for console output, line input, command tails, record files, directory scans, and temporary-file cleanup exist under `examples/cpm-z80`.
+- The compiler-host layer is record-based and has no hidden allocation or byte-stream adapter.
+- VM file/BDOS coverage is still pending; the SDK must not be treated as VM-verified until those tests exist.
 
 ## SDK Modules
 
 Planned module set:
 
-- `cpm.bdos`: raw BDOS constants and register-shaped wrappers.
-- `cpm.console`: console-oriented helpers for character, line, status, and `$`-terminated string output.
-- `cpm.fcb`: File Control Block offsets, constructors, filename helpers, extent/random-record helpers, and file result constants.
-- `cpm.dma`: default DMA address constants and helpers for setting DMA buffers.
+- `cpm.bdos`: raw BDOS constants, register-shaped wrappers, operation-specific result constants/helpers, user-area helpers, and pointer-safe record-file aliases.
+- `cpm.console`: console-oriented helpers for character, line, status, `$`-terminated string output, bounded command-tail copying, and token access.
+- `cpm.fcb`: File Control Block offsets, constructors, bounded 8.3 parsing/formatting, drive/user validation, wildcard helpers, rename preparation, directory-entry decoding, and record-position helpers.
+- `cpm.dma`: default DMA constants, explicit 128-byte record/directory buffer setup, and buffer clearing/copy helpers.
 - `cpm.disk`: selected-disk, login-vector, read-only-vector, allocation-vector, reset/access/free-drive helpers.
 - `cpm.user`: user-code get/set helpers.
 - `cpm.serial`: reader, punch, list-device wrappers if they remain useful beyond `cpm.bdos` names.
@@ -90,34 +91,51 @@ Planned module set:
 - `$`-terminated string output: `console.print_dollar`.
 - `$`-terminated line output: `console.print_line_dollar`.
 - Buffered line input wrapper around BDOS 10: `console.read_line`.
+- Command-tail length, bounded copy, and byte access: `console.command_tail_length`, `console.copy_command_tail`, and `console.command_tail_byte`.
+- Bounded command-tail token count, length, byte, and copy access: `console.command_tail_token_*`.
 - Decimal/hex formatting helpers: pending.
 - Backspace/editing helpers for simple text UIs: pending.
 
 ## File And Disk SDK Checklist
 
 - Define FCB offsets for drive, name, extension, extent, records, random record, and current record: `cpm.fcb` done.
-- Provide result constants for success, not-found/error, and directory-full cases: partial in `cpm.fcb`.
+- Provide raw-result and operation-specific success, not-found, EOF, disk-full, and directory-full constants/helpers: `cpm.bdos` done.
 - Provide helpers to clear and initialize 36-byte FCB buffers: `cpm.fcb` done.
-- Provide helpers to set 8.3 filenames in FCBs: per-character helpers done; whole-name helpers pending.
-- Wrap open, close, make, delete, rename, search-first, search-next.
-- Wrap sequential read/write using the current DMA address.
-- Wrap random read/write, compute-file-size, and set-random-record.
-- Provide DMA buffer setup helpers and examples: `cpm.dma` and `examples/cpm-z80/file-read.ezra` done.
-- Document CP/M wildcard semantics and drive numbering.
+- Provide bounded whole-name 8.3 parsing, validation, formatting, drive prefixes, and wildcard setup: `cpm.fcb` done. The parser accepts a conservative ASCII CP/M character subset and folds lowercase to uppercase.
+- Wrap open, close, create, delete, rename, search-first, and search-next with pointer forms: `cpm.bdos` done.
+- Wrap sequential read/write using the current DMA address: `cpm.bdos` done.
+- Wrap random read/write, compute-file-size, and set-random-record: `cpm.bdos` done.
+- Expose only 128-byte record seek and byte-offset conversion. A byte-stream seek adapter, partial-record buffering, and hidden allocation are intentionally unsupported.
+- Decode directory search results into names, drive, user area, and completion status: `cpm.fcb` done. Search results point into one 128-byte DMA record with four 32-byte entries.
+- Provide explicit record and directory DMA setup helpers: `cpm.dma` done.
+- Document CP/M wildcard semantics, drive numbering, user areas, temporary files, DMA lifetime, and compiler-host memory limits: this tracker documents them below.
 
 ## Runtime And Tooling Checklist
 
 - Keep `.COM` base and entry at `0x0100`.
 - Keep source codegen restricted to instructions valid for the chosen CPU profile.
 - Ensure Z80, 8080, and 8085 CP/M targets build source and assembly inputs.
-- Expand VM BDOS emulation enough for SDK tests: console input/status, direct console I/O, buffered input, and basic file calls with in-memory fake files.
-- Add source examples for console, file read, file write, and directory scan.
+- Expand VM BDOS emulation enough for SDK tests: console input/status, direct console I/O, buffered input, command tails, and basic file calls with in-memory fake files.
+- Add source examples for console, arguments, record copy/seek, directory scan, and temporary-file cleanup.
 - Add docs for running `.COM` output in common CP/M emulators.
 - Add package tests ensuring CP/M SDK files are embedded in published crates.
 
-## Usage Notes
+## Compiler-host limits and conventions
 
 Normal EZRA string literals are zero-terminated. CP/M BDOS function 9 requires `$` termination. The SDK exposes raw `u16` address wrappers for function 9 and pointer-based wrappers for buffered input, FCB, and DMA operations.
+
+- The low 256 bytes are owned by CP/M. BDOS is entered through `0x0005`; the `.COM` program loads and starts at `0x0100`.
+- The initial command tail is at `0x0080`: byte `0` is its length and bytes `1..length` are the tail. It is not NUL-terminated. `0x0080` is also the initial/default DMA address, so copy the tail before any operation that changes DMA or uses it for a record/search result.
+- Every sequential or random file operation transfers one 128-byte record through the current DMA address. Directory search also writes one 128-byte record, containing four 32-byte directory entries. DMA contents are owned by the next BDOS operation and must be copied if they need to survive it.
+- Keep FCBs in program-owned memory. A normal FCB is 36 bytes. BDOS rename uses bytes `0..11` for the old name and `16..27` for the new name; `fcb.prepare_rename` fills the latter range.
+- There is no byte-stream file API in this layer. Use `fcb.set_record_position` followed by `bdos.apply_record_position_at` with 128-byte record numbers. `fcb.record_for_byte_offset` and `fcb.byte_offset_in_record` are arithmetic helpers only; partial-record buffering remains the caller's responsibility.
+- CP/M drive numbers are `0` for the current/default drive and `1..16` for `A:` through `P:`. User areas are global BDOS state, `0..15`, and are not stored in an FCB. Use `bdos.get_user` and `bdos.set_user`.
+- In a search FCB, `?` matches one name or extension position. The usual `*` shorthand means the remaining positions are wildcards; build that form with `fcb.wildcard_name`, `fcb.wildcard_extension`, or `fcb.set_wildcard`. The bounded parser accepts `?` but rejects `*` so a literal parse cannot silently broaden a search.
+- A safe temporary-file convention is an application-owned 8.3 name with a `.$$$` extension, such as `STAGE001.$$$`. Treat `create` returning `0xFF` as a collision or create failure; never overwrite a collision. Close and delete the temporary file on failure. After a complete close, optionally prepare the rename FCB and call BDOS rename to commit it to the final name. Cleanup after a successful rename is not a delete of the final file.
+- The current EZRA CP/M layout reserves `0x0100..0x7FFF` for code, `0x8000..0x9FFF` for read-only data, `0xA000..0xBFFF` for RAM, `0xC000..0xDFFF` for assets, `0xE000..0xEFFF` for scratch, and `0xF000..0xFFFF` for the stack. These are packaging assumptions, not a portable CP/M memory query. A system with a smaller TPA cannot run an image that reaches beyond its resident BDOS/BIOS area; leave room for the stack and all live FCB/DMA/scratch buffers.
+- Stock CP/M 2.2 has no general child-process, `exec`, or wait API. The SDK reports child execution/chaining as unsupported by omission. CCP `SUBMIT` or system-specific chaining commands are non-portable and are not wrapped here; a compiler host must return to the CCP and let it perform any command sequencing.
+
+The command-tail, directory, and temporary-file examples under `examples/cpm-z80` show the intended order of operations.
 
 ```ezra
 import cpm.console

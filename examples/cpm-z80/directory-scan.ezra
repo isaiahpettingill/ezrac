@@ -1,0 +1,50 @@
+import cpm.bdos
+import cpm.console
+import cpm.dma
+import cpm.fcb
+
+global search_fcb: [u8; 36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+global found_fcb: [u8; 36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+global directory_record: [u8; 128] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+]
+global name_buffer: [u8; 13] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+fn main() {
+    fcb.init(&search_fcb[0], fcb.DRIVE_DEFAULT)
+    fcb.set_wildcard(&search_fcb[0])
+    dma.set_directory_buffer(&directory_record[0])
+
+    let result: u8 = bdos.search_for_first_at(&search_fcb[0])
+    while bdos.search_found(result) {
+        if fcb.directory_search_entry(result) {
+            let user: u8 = fcb.decode_directory_entry(&directory_record[0], result, &found_fcb[0], &search_fcb[0])
+            let name_length: u8 = fcb.format_name(&found_fcb[0], &name_buffer[0], 13)
+            if user != fcb.DIRECTORY_UNUSED && name_length != fcb.RESULT_ERROR {
+                console.write(fcb.drive_letter(fcb.directory_entry_drive(&search_fcb[0])))
+                console.write(':')
+                let index: u8 = 0
+                while index < name_length {
+                    console.write(name_buffer[index])
+                    index += 1
+                }
+                console.write(' ')
+                if user < 10 {
+                    console.write('0' + user)
+                } else {
+                    console.write('A' + user - 10)
+                }
+                console.newline()
+            }
+        }
+        result = bdos.search_for_next()
+    }
+    console.exit()
+}

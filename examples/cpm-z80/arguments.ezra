@@ -1,0 +1,41 @@
+import cpm.console
+
+// Copy the command tail before selecting another DMA buffer. The destination
+// is caller-owned and includes room for the terminating NUL.
+global command_tail_copy: [u8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+]
+
+fn main() {
+    let length: u8 = console.copy_command_tail(&command_tail_copy[0], 64)
+    console.write('T')
+    console.write('A')
+    console.write('I')
+    console.write('L')
+    console.write(':')
+    console.write(' ')
+    let index: u8 = 0
+    while index < length {
+        console.write(command_tail_copy[index])
+        index += 1
+    }
+    console.newline()
+
+    let token_count: u8 = console.command_tail_token_count(&command_tail_copy[0], length)
+    let token: u8 = 0
+    while token < token_count {
+        let token_length: u8 = console.command_tail_token_length(&command_tail_copy[0], length, token)
+        let token_index: u8 = 0
+        while token_index < token_length {
+            console.write(console.command_tail_token_byte(&command_tail_copy[0], length, token, token_index))
+            token_index += 1
+        }
+        console.write(' ')
+        token += 1
+    }
+    console.newline()
+    console.exit()
+}

@@ -43,6 +43,85 @@ pub const WRITE_RANDOM_WITH_ZERO_FILL: u8 = 40
 pub const BDOS_ENTRY: u16 = 0x0005
 pub const DEFAULT_DMA_ADDRESS: u16 = 0x0080
 
+// BDOS returns the raw A value. Keep it visible to callers: zero is success,
+// FFh is the usual file/directory error, and record I/O uses operation-specific
+// values such as EOF, disk full, and directory full.
+pub const BDOS_RESULT_OK: u8 = 0
+pub const BDOS_RESULT_EOF: u8 = 1
+pub const BDOS_RESULT_DISK_FULL: u8 = 1
+pub const BDOS_RESULT_DIRECTORY_FULL: u8 = 2
+pub const BDOS_RESULT_ERROR: u8 = 0xFF
+pub const BDOS_SEARCH_NO_MATCH: u8 = 0xFF
+
+pub const OPEN_NOT_FOUND: u8 = 0xFF
+pub const CLOSE_ERROR: u8 = 0xFF
+pub const DELETE_NOT_FOUND: u8 = 0xFF
+pub const CREATE_ERROR: u8 = 0xFF
+pub const RENAME_ERROR: u8 = 0xFF
+pub const READ_END_OF_FILE: u8 = 1
+pub const READ_DISK_ERROR: u8 = 2
+pub const WRITE_DISK_FULL: u8 = 1
+pub const WRITE_DIRECTORY_FULL: u8 = 2
+pub const RANDOM_READ_END_OF_FILE: u8 = 1
+pub const RANDOM_READ_DISK_ERROR: u8 = 2
+pub const RANDOM_WRITE_DISK_FULL: u8 = 1
+pub const RANDOM_WRITE_DIRECTORY_FULL: u8 = 2
+
+pub const BDOS_USER_DEFAULT: u8 = 0
+pub const BDOS_USER_MAX: u8 = 15
+
+pub fn is_success(result: u8) -> bool {
+    return result == BDOS_RESULT_OK
+}
+
+pub fn is_error(result: u8) -> bool {
+    return result == BDOS_RESULT_ERROR
+}
+
+pub fn search_found(result: u8) -> bool {
+    return result != BDOS_SEARCH_NO_MATCH
+}
+
+pub fn read_record_complete(result: u8) -> bool {
+    return result == BDOS_RESULT_OK
+}
+
+pub fn read_record_end(result: u8) -> bool {
+    return result == READ_END_OF_FILE
+}
+
+pub fn read_record_failed(result: u8) -> bool {
+    return result == READ_DISK_ERROR || result == BDOS_RESULT_ERROR
+}
+
+pub fn write_record_complete(result: u8) -> bool {
+    return result == BDOS_RESULT_OK
+}
+
+pub fn write_record_disk_full(result: u8) -> bool {
+    return result == WRITE_DISK_FULL
+}
+
+pub fn write_record_directory_full(result: u8) -> bool {
+    return result == WRITE_DIRECTORY_FULL
+}
+
+pub fn random_read_end(result: u8) -> bool {
+    return result == RANDOM_READ_END_OF_FILE
+}
+
+pub fn random_write_disk_full(result: u8) -> bool {
+    return result == RANDOM_WRITE_DISK_FULL
+}
+
+pub fn random_write_directory_full(result: u8) -> bool {
+    return result == RANDOM_WRITE_DIRECTORY_FULL
+}
+
+pub fn user_valid(code: u8) -> bool {
+    return code <= BDOS_USER_MAX
+}
+
 pub fn call(function: u8) {
     asm volatile(in function: u8 as reg8, clobber af, clobber bc, clobber de, clobber hl, clobber flags, clobber memory) {
         "ld c, {function}"
@@ -257,12 +336,20 @@ pub fn write_random(fcb: u16) -> u8 {
     return call_de_a(WRITE_RANDOM, fcb)
 }
 
-pub fn compute_file_size(fcb: u16) {
-    call_de(COMPUTE_FILE_SIZE, fcb)
+pub fn compute_file_size(fcb: u16) -> u8 {
+    return call_de_a(COMPUTE_FILE_SIZE, fcb)
+}
+
+pub fn compute_file_size_at(fcb: ptr<u8>) -> u8 {
+    return compute_file_size(cast<u16>(fcb))
 }
 
 pub fn populate_random_record(fcb: u16) {
     call_de(SET_RANDOM_RECORD, fcb)
+}
+
+pub fn populate_random_record_at(fcb: ptr<u8>) {
+    populate_random_record(cast<u16>(fcb))
 }
 
 pub fn reset_drive(mask: u16) -> u8 {
@@ -315,5 +402,148 @@ pub fn get_read_only_vector() -> u16 {
 
 pub fn get_set_user_code(value: u8) -> u8 {
     return call_de_a(GET_SET_USER_CODE, cast<u16>(value))
+}
+
+// User areas are global BDOS state, not an FCB byte. Keep these helpers next to
+// the BDOS function 32 wrapper so an FCB cannot accidentally claim ownership.
+pub fn user_code() -> u8 {
+    return get_user_code()
+}
+
+pub fn set_user(code: u8) {
+    if user_valid(code) {
+        set_user_code(code)
+    }
+}
+
+pub fn get_user() -> u8 {
+    return get_user_code()
+}
+
+// Pointer forms keep callers from hand-casting the common FCB address.
+pub fn delete_file_at(fcb: ptr<u8>) -> u8 {
+    return delete_file(cast<u16>(fcb))
+}
+
+pub fn search_for_first_at(fcb: ptr<u8>) -> u8 {
+    return search_for_first(cast<u16>(fcb))
+}
+
+pub fn write_sequential_at(fcb: ptr<u8>) -> u8 {
+    return write_sequential(cast<u16>(fcb))
+}
+
+pub fn make_file_at(fcb: ptr<u8>) -> u8 {
+    return make_file(cast<u16>(fcb))
+}
+
+pub fn rename_file_at(fcb: ptr<u8>) -> u8 {
+    return rename_file(cast<u16>(fcb))
+}
+
+pub fn set_file_attributes_at(fcb: ptr<u8>) -> u8 {
+    return set_file_attributes(cast<u16>(fcb))
+}
+
+pub fn read_random_at(fcb: ptr<u8>) -> u8 {
+    return read_random(cast<u16>(fcb))
+}
+
+pub fn write_random_at(fcb: ptr<u8>) -> u8 {
+    return write_random(cast<u16>(fcb))
+}
+
+pub fn write_random_with_zero_fill_at(fcb: ptr<u8>) -> u8 {
+    return write_random_with_zero_fill(cast<u16>(fcb))
+}
+
+// Names that describe the CP/M record model directly. Every operation returns
+// the raw BDOS A value except apply_record_position, which updates the FCB.
+pub fn open(fcb: u16) -> u8 {
+    return open_file(fcb)
+}
+
+pub fn open_at(fcb: ptr<u8>) -> u8 {
+    return open_file_at(fcb)
+}
+
+pub fn close(fcb: u16) -> u8 {
+    return close_file(fcb)
+}
+
+pub fn close_at(fcb: ptr<u8>) -> u8 {
+    return close_file_at(fcb)
+}
+
+pub fn create(fcb: u16) -> u8 {
+    return make_file(fcb)
+}
+
+pub fn create_at(fcb: ptr<u8>) -> u8 {
+    return make_file_at(fcb)
+}
+
+pub fn delete(fcb: u16) -> u8 {
+    return delete_file(fcb)
+}
+
+pub fn delete_at(fcb: ptr<u8>) -> u8 {
+    return delete_file_at(fcb)
+}
+
+pub fn rename(fcb: u16) -> u8 {
+    return rename_file(fcb)
+}
+
+pub fn rename_at(fcb: ptr<u8>) -> u8 {
+    return rename_file_at(fcb)
+}
+
+pub fn read_record(fcb: u16) -> u8 {
+    return read_sequential(fcb)
+}
+
+pub fn read_record_at(fcb: ptr<u8>) -> u8 {
+    return read_sequential_at(fcb)
+}
+
+pub fn write_record(fcb: u16) -> u8 {
+    return write_sequential(fcb)
+}
+
+pub fn write_record_at(fcb: ptr<u8>) -> u8 {
+    return write_sequential_at(fcb)
+}
+
+pub fn read_random_record(fcb: u16) -> u8 {
+    return read_random(fcb)
+}
+
+pub fn read_random_record_at(fcb: ptr<u8>) -> u8 {
+    return read_random_at(fcb)
+}
+
+pub fn write_random_record(fcb: u16) -> u8 {
+    return write_random(fcb)
+}
+
+pub fn write_random_record_at(fcb: ptr<u8>) -> u8 {
+    return write_random_at(fcb)
+}
+
+pub fn apply_record_position(fcb: u16) {
+    populate_random_record(fcb)
+}
+
+pub fn apply_record_position_at(fcb: ptr<u8>) {
+    populate_random_record_at(fcb)
+}
+
+pub fn compute_size(fcb: u16) -> u8 {
+    return compute_file_size(fcb)
+}
+
+pub fn compute_size_at(fcb: ptr<u8>) -> u8 {
+    return compute_file_size_at(fcb)
 }
 

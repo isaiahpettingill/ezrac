@@ -1,5 +1,15 @@
 pub const DEFAULT_ADDRESS: u16 = 0x0080
 pub const RECORD_SIZE: u16 = 128
+pub const DMA_COMMAND_TAIL_ADDRESS: u16 = 0x0080
+pub const DMA_COMMAND_TAIL_DATA: u16 = 0x0081
+pub const DMA_COMMAND_TAIL_MAX_LENGTH: u8 = 127
+pub const DMA_DIRECTORY_RECORD_SIZE: u16 = 128
+pub const DMA_DIRECTORY_ENTRY_SIZE: u16 = 32
+pub const DMA_DIRECTORY_ENTRIES_PER_RECORD: u8 = 4
+
+// The command tail and the initial DMA buffer overlap. A compiler-host
+// program must copy the tail before selecting a record or directory buffer.
+pub const COMMAND_TAIL_OVERLAPS_DEFAULT_DMA: u8 = 1
 
 const DMA_SET_DMA_ADDRESS: u8 = 26
 
@@ -20,6 +30,16 @@ pub fn set_buffer(buffer: ptr<u8>) {
     set_address(cast<u16>(buffer))
 }
 
+// These names document the 128-byte contract at each call site. They do not
+// allocate or inspect memory; the caller owns the storage and its lifetime.
+pub fn set_record_buffer(buffer: ptr<u8>) {
+    set_buffer(buffer)
+}
+
+pub fn set_directory_buffer(buffer: ptr<u8>) {
+    set_buffer(buffer)
+}
+
 pub fn reset_default() {
     set_address(DEFAULT_ADDRESS)
 }
@@ -34,4 +54,23 @@ pub fn fill(buffer: ptr<u8>, value: u8, len: u16) {
 
 pub fn clear_record(buffer: ptr<u8>) {
     fill(buffer, 0, RECORD_SIZE)
+}
+
+pub fn clear_directory_record(buffer: ptr<u8>) {
+    fill(buffer, 0, DMA_DIRECTORY_RECORD_SIZE)
+}
+
+pub fn record_byte(buffer: ptr<u8>, offset: u16) -> u8 {
+    if offset >= RECORD_SIZE {
+        return 0
+    }
+    return *(buffer + offset)
+}
+
+pub fn copy_record(source: ptr<u8>, destination: ptr<u8>) {
+    let index: u16 = 0
+    while index < RECORD_SIZE {
+        *(destination + index) = *(source + index)
+        index += 1
+    }
 }

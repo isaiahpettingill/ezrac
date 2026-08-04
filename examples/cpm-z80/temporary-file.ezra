@@ -1,0 +1,38 @@
+import cpm.bdos
+import cpm.console
+import cpm.fcb
+
+const COMMIT_TEMPORARY_FILE: u8 = 1
+
+global temporary_fcb: [u8; 36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+global final_fcb: [u8; 36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+global temporary_name: [u8; 14] = [83, 84, 65, 71, 69, 48, 48, 49, 46, 36, 36, 36, 0, 0]
+global final_name: [u8; 12] = [79, 85, 84, 80, 85, 84, 46, 66, 73, 78, 0, 0]
+
+fn main() {
+    if fcb.parse_name(&temporary_fcb[0], &temporary_name[0]) != fcb.RESULT_OK {
+        console.exit()
+        return
+    }
+    if fcb.parse_name(&final_fcb[0], &final_name[0]) != fcb.RESULT_OK {
+        console.exit()
+        return
+    }
+
+    // A failed create is a collision or another BDOS error; do not overwrite it.
+    if bdos.create_at(&temporary_fcb[0]) != bdos.BDOS_RESULT_OK {
+        console.exit()
+        return
+    }
+    bdos.close_at(&temporary_fcb[0])
+
+    if COMMIT_TEMPORARY_FILE != 0 {
+        fcb.prepare_rename(&temporary_fcb[0], &final_fcb[0])
+        if bdos.rename_file_at(&temporary_fcb[0]) != bdos.BDOS_RESULT_OK {
+            bdos.delete_at(&temporary_fcb[0])
+        }
+    } else {
+        bdos.delete_at(&temporary_fcb[0])
+    }
+    console.exit()
+}

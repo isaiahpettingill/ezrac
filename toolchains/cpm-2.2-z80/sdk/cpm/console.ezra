@@ -3,6 +3,13 @@ pub const CR: u8 = 13
 pub const CTRL_Z: u8 = 26
 pub const DIRECT_IO_POLL: u8 = 0xFF
 
+// CP/M supplies the command tail in the initial DMA buffer. It is not
+// NUL-terminated, and the same 0080h address is also the default DMA area.
+pub const COMMAND_TAIL_ADDRESS: u16 = 0x0080
+pub const COMMAND_TAIL_DATA: u16 = 0x0081
+pub const COMMAND_TAIL_MAX_LENGTH: u8 = 127
+pub const TOKEN_NOT_FOUND: u8 = 0xFF
+
 const CONSOLE_SYSTEM_RESET: u8 = 0
 const CONSOLE_INPUT_FUNCTION: u8 = 1
 const CONSOLE_OUTPUT_FUNCTION: u8 = 2
@@ -81,6 +88,144 @@ pub fn print_dollar(address: u16) {
 
 pub fn read_line(buffer: ptr<u8>) {
     console_call_de(CONSOLE_READ_BUFFER, cast<u16>(buffer))
+}
+
+fn command_tail_start() -> ptr<u8> {
+    return cast<ptr<u8>>(cast<u24>(COMMAND_TAIL_ADDRESS))
+}
+
+pub fn command_tail() -> ptr<u8> {
+    return cast<ptr<u8>>(cast<u24>(COMMAND_TAIL_DATA))
+}
+
+pub fn command_tail_length() -> u8 {
+    let length: u8 = *command_tail_start()
+    if length > COMMAND_TAIL_MAX_LENGTH {
+        return COMMAND_TAIL_MAX_LENGTH
+    }
+    return length
+}
+
+pub fn command_tail_byte(index: u8) -> u8 {
+    if index >= command_tail_length() {
+        return 0
+    }
+    return *(command_tail() + index)
+}
+
+// Copy this before changing DMA. The copy has no dependency on the current
+// BDOS DMA address because CP/M initially places the tail at 0080h.
+pub fn copy_command_tail(destination: ptr<u8>, capacity: u8) -> u8 {
+    if capacity == 0 {
+        return 0
+    }
+    let count: u8 = command_tail_length()
+    if count >= capacity {
+        count = capacity - 1
+    }
+    let index: u8 = 0
+    while index < count {
+        *(destination + index) = command_tail_byte(index)
+        index += 1
+    }
+    *(destination + count) = 0
+    return count
+}
+
+fn token_separator(ch: u8) -> bool {
+    return ch == ' ' || ch == 9
+}
+
+pub fn command_tail_token_count(text: ptr<u8>, length: u8) -> u8 {
+    let bounded_length: u8 = length
+    if bounded_length > COMMAND_TAIL_MAX_LENGTH {
+        bounded_length = COMMAND_TAIL_MAX_LENGTH
+    }
+    let index: u8 = 0
+    let count: u8 = 0
+    let in_token: bool = false
+    while index < bounded_length {
+        let separator: bool = token_separator(*(text + index))
+        if separator {
+            in_token = false
+        } else if !in_token {
+            count += 1
+            in_token = true
+        }
+        index += 1
+    }
+    return count
+}
+
+pub fn command_tail_token_start(text: ptr<u8>, length: u8, token: u8) -> u8 {
+    let bounded_length: u8 = length
+    if bounded_length > COMMAND_TAIL_MAX_LENGTH {
+        bounded_length = COMMAND_TAIL_MAX_LENGTH
+    }
+    let index: u8 = 0
+    let token_index: u8 = 0
+    let in_token: bool = false
+    while index < bounded_length {
+        let separator: bool = token_separator(*(text + index))
+        if separator {
+            in_token = false
+        } else if !in_token {
+            if token_index == token {
+                return index
+            }
+            token_index += 1
+            in_token = true
+        }
+        index += 1
+    }
+    return TOKEN_NOT_FOUND
+}
+
+pub fn command_tail_token_length(text: ptr<u8>, length: u8, token: u8) -> u8 {
+    let start: u8 = command_tail_token_start(text, length, token)
+    if start == TOKEN_NOT_FOUND {
+        return 0
+    }
+    let bounded_length: u8 = length
+    if bounded_length > COMMAND_TAIL_MAX_LENGTH {
+        bounded_length = COMMAND_TAIL_MAX_LENGTH
+    }
+    let count: u8 = 0
+    while start + count < bounded_length && !token_separator(*(text + start + count)) {
+        count += 1
+    }
+    return count
+}
+
+pub fn command_tail_token_byte(text: ptr<u8>, length: u8, token: u8, index: u8) -> u8 {
+    let start: u8 = command_tail_token_start(text, length, token)
+    if start == TOKEN_NOT_FOUND {
+        return 0
+    }
+    let token_length: u8 = command_tail_token_length(text, length, token)
+    if index >= token_length {
+        return 0
+    }
+    return *(text + start + index)
+}
+
+// Copies one token and returns its copied length. The destination is always
+// NUL-terminated when capacity is nonzero.
+pub fn copy_command_tail_token(text: ptr<u8>, length: u8, token: u8, destination: ptr<u8>, capacity: u8) -> u8 {
+    if capacity == 0 {
+        return 0
+    }
+    let count: u8 = command_tail_token_length(text, length, token)
+    if count >= capacity {
+        count = capacity - 1
+    }
+    let index: u8 = 0
+    while index < count {
+        *(destination + index) = command_tail_token_byte(text, length, token, index)
+        index += 1
+    }
+    *(destination + count) = 0
+    return count
 }
 
 pub fn newline() {
