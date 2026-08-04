@@ -298,3 +298,45 @@ manifest = "cart.toml"
         error.message
     );
 }
+
+#[test]
+fn executable_configuration_accepts_only_a_basename() {
+    for executable in ["../escape", "nested/program", ".."] {
+        let error = parse_project_config(
+            Path::new("/project/Ezra.toml"),
+            &format!("[build]\nexecutable = \"{executable}\"\n"),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("must be a file basename"), "{error}");
+    }
+
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[build]\nexecutable = \"game.v1\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.executable.as_deref(), Some("game.v1"));
+}
+
+#[test]
+fn assets_configuration_must_be_a_table() {
+    for source in ["assets = \"assets\"\n", "assets = []\n"] {
+        let error = parse_project_config(Path::new("/project/Ezra.toml"), source).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("project field `assets` must be a table"),
+            "{error}"
+        );
+    }
+
+    let error = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[assets]\nsection = \".assets\"\n\n[assets.targets]\n\"bare-z80\" = \"bad\"\n",
+    )
+    .unwrap_err();
+    assert!(
+        error.message.contains("`assets.targets` must be a table"),
+        "{error}"
+    );
+}

@@ -195,7 +195,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
     let executable = value
         .get("build")
         .and_then(|build| build.get("executable"))
-        .map(required_string("build.executable"))
+        .map(required_basename("build.executable"))
         .transpose()?;
 
     let lsp_mode = value
@@ -529,6 +529,9 @@ fn parse_asset_config(value: &toml::Value) -> Result<AssetConfig, Diagnostic> {
     let Some(assets) = value.get("assets") else {
         return Ok(AssetConfig::default());
     };
+    if !assets.is_table() {
+        return Err(Diagnostic::new("project field `assets` must be a table"));
+    }
     let default = parse_asset_placement(assets, "assets")?;
     let mut targets = Vec::new();
     if let Some(target_table) = assets.get("targets") {
@@ -549,11 +552,14 @@ fn parse_asset_placement(
     value: &toml::Value,
     field: &'static str,
 ) -> Result<AssetPlacement, Diagnostic> {
-    let section = value
+    let table = value
+        .as_table()
+        .ok_or_else(|| Diagnostic::new(format!("project field `{field}` must be a table")))?;
+    let section = table
         .get("section")
         .map(required_string(field))
         .transpose()?;
-    let align = value
+    let align = table
         .get("align")
         .map(|value| {
             value
@@ -605,6 +611,23 @@ fn required_string(field: &'static str) -> impl Fn(&toml::Value) -> Result<Strin
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| Diagnostic::new(format!("project field `{field}` must be a string")))
+    }
+}
+
+fn required_basename(field: &'static str) -> impl Fn(&toml::Value) -> Result<String, Diagnostic> {
+    move |value| {
+        let name = required_string(field)(value)?;
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\')
+        {
+            return Err(Diagnostic::new(format!(
+                "project field `{field}` must be a file basename, not a path"
+            )));
+        }
+        Ok(name)
     }
 }
 

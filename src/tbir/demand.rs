@@ -56,13 +56,6 @@ struct DemandReport {
     effects: Effects,
 }
 
-impl DemandReport {
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn demanded(&self) -> Demand {
-        Demand::from_bits(self.demanded_bits)
-    }
-}
-
 fn bytes_for_bits(bits: u32) -> u8 {
     let mut bytes = 0;
     let mut byte = 0;

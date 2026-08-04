@@ -1,7 +1,7 @@
 use crate::target::{
     Address24, AssemblerCpu, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
     EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
-    MSDOS_COM_I8086_TARGET,
+    is_msdos_i8086_target,
 };
 use crate::{compat::prelude::*, diagnostic::Diagnostic};
 use pest::{Parser, iterators::Pair};
@@ -92,7 +92,7 @@ pub fn default_layout_for_target(target: &str) -> Layout {
             AssemblerCpu::M68k => Layout::bare_m68k(),
             _ => Layout::bare_16(cpu.as_str()),
         }
-    } else if target == MSDOS_COM_I8086_TARGET {
+    } else if is_msdos_i8086_target(target) {
         Layout::msdos_i8086_com()
     } else if target == "zxspectrum-z80-128k" {
         Layout::zx_spectrum_z80_128k()

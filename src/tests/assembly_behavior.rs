@@ -18,8 +18,8 @@ fn assemble_file_writes_raw_binary() {
     .unwrap();
 
     assemble_file(&AssembleOptions {
-        path: source_path.to_string_lossy().into_owned(),
-        output: Some(output_path.to_string_lossy().into_owned()),
+        path: source_path.clone(),
+        output: Some(output_path.clone()),
         base_addr: Some(0x04_0000),
         assembler_cpu: None,
         layout_path: None,
@@ -37,6 +37,31 @@ fn assemble_file_writes_raw_binary() {
 }
 
 #[test]
+fn assemble_file_creates_output_and_map_parent_directories() {
+    let root = temp_root("assemble_nested_output");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.asm");
+    let output_path = root.join("nested/deeper/main.bin");
+    let map_path = root.join("nested/deeper/main.map");
+    std::fs::write(&source_path, "nop\n").unwrap();
+
+    assemble_file(&AssembleOptions {
+        path: source_path.clone(),
+        output: Some(output_path.clone()),
+        base_addr: None,
+        assembler_cpu: None,
+        layout_path: None,
+        map_path: Some(map_path.clone()),
+        target: Some("bare-z80".to_owned()),
+    })
+    .unwrap();
+
+    assert!(output_path.is_file());
+    assert!(map_path.is_file());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn classic_z80_assembly_rejects_a_24_bit_base_address() {
     let root = temp_root("assemble_z80_24_bit_base");
     std::fs::create_dir_all(&root).unwrap();
@@ -44,7 +69,7 @@ fn classic_z80_assembly_rejects_a_24_bit_base_address() {
     std::fs::write(&source_path, "nop\n").unwrap();
 
     let error = assemble_file(&AssembleOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         output: None,
         base_addr: Some(0x01_0000),
         assembler_cpu: None,
@@ -84,7 +109,7 @@ fn assemble_file_writes_cpm_com_for_cpm_z80_target() {
     .unwrap();
 
     assemble_file(&AssembleOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         output: None,
         base_addr: None,
         assembler_cpu: None,
@@ -113,11 +138,8 @@ fn cpm_z80_examples_assemble_as_com_programs() {
     for name in ["console-output", "exit", "file-read", "line-input"] {
         let output = root.join(format!("{name}.com"));
         assemble_file(&AssembleOptions {
-            path: examples
-                .join(format!("{name}.asm"))
-                .to_string_lossy()
-                .into_owned(),
-            output: Some(output.to_string_lossy().into_owned()),
+            path: examples.join(format!("{name}.asm")),
+            output: Some(output.clone()),
             base_addr: None,
             assembler_cpu: None,
             layout_path: None,
@@ -160,7 +182,7 @@ fn game_boy_vendored_sdk_macros_preprocess_and_assemble() {
             halt
         "#;
     let expanded = ezra::asm::preprocess_assembly_with_resolver(
-        &source_path.to_string_lossy(),
+        source_path.to_str().unwrap(),
         source,
         &ezra::asm::FilesystemAssemblyResolver,
         ezra::asm::AssemblyPreprocessOptions::for_compiled_features(
@@ -195,12 +217,12 @@ fn assemble_file_can_write_layout_map() {
     .unwrap();
 
     assemble_file(&AssembleOptions {
-        path: source_path.to_string_lossy().into_owned(),
-        output: Some(output_path.to_string_lossy().into_owned()),
+        path: source_path.clone(),
+        output: Some(output_path.clone()),
         base_addr: None,
         assembler_cpu: None,
         layout_path: None,
-        map_path: Some(map_path.to_string_lossy().into_owned()),
+        map_path: Some(map_path.clone()),
         target: Some("cpm-2.2-z80".to_owned()),
     })
     .unwrap();
@@ -232,7 +254,7 @@ fn assembly_build_can_reference_layout_symbols() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Assembly),
@@ -265,7 +287,7 @@ fn assembly_build_reports_source_location_for_assembler_errors() {
     .unwrap();
 
     let error = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Assembly),
@@ -304,7 +326,7 @@ fn assembly_build_maps_layout_sections_and_includes() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Assembly),
@@ -431,8 +453,8 @@ fn assembly_preprocessor_expands_vendored_macros_and_target_conditionals() {
     )
     .unwrap();
     assemble_file(&AssembleOptions {
-        path: base_source.to_string_lossy().into_owned(),
-        output: Some(base_output.to_string_lossy().into_owned()),
+        path: base_source.clone(),
+        output: Some(base_output.clone()),
         base_addr: Some(0x0100),
         assembler_cpu: None,
         layout_path: None,
@@ -459,7 +481,7 @@ fn assembly_errors_in_nested_includes_report_included_file() {
     std::fs::write(lib.join("bad.inc"), "; first line\nnot_an_instruction\n").unwrap();
 
     let error = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Assembly),
@@ -510,12 +532,12 @@ fn assembly_build_respects_custom_layout_entry() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Assembly),
         assembler_cpu: None,
-        layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(layout_path.clone()),
         target: Some("zxspectrum-z80".to_owned()),
     })
     .unwrap();
@@ -554,8 +576,8 @@ fn bare_assembly_targets_cover_each_cpu_mode() {
         std::fs::write(&source_path, source).unwrap();
 
         assemble_file(&AssembleOptions {
-            path: source_path.to_string_lossy().into_owned(),
-            output: Some(output_path.to_string_lossy().into_owned()),
+            path: source_path.clone(),
+            output: Some(output_path.clone()),
             base_addr: None,
             assembler_cpu: None,
             layout_path: None,
@@ -577,8 +599,8 @@ fn cpm_z80_harness_runs_complex_assembly_fixture_and_com_format() {
     let output_path = root.join("z80_cpm_complex.com");
 
     assemble_file(&AssembleOptions {
-        path: source_path.to_string_lossy().into_owned(),
-        output: Some(output_path.to_string_lossy().into_owned()),
+        path: source_path.clone(),
+        output: Some(output_path.clone()),
         base_addr: Some(0x0100),
         assembler_cpu: None,
         layout_path: None,
@@ -623,8 +645,8 @@ fn arduboy_avr_assembly_smoke_test_writes_hex() {
     let output = root.join("blink.hex");
 
     assemble_file(&AssembleOptions {
-        path: asm.display().to_string(),
-        output: Some(output.display().to_string()),
+        path: asm.clone(),
+        output: Some(output.clone()),
         map_path: None,
         base_addr: Some(0),
         target: Some("arduboy-avr".to_owned()),
@@ -679,8 +701,8 @@ fn assemble_file_writes_m6800_raw_binary() {
     .unwrap();
 
     assemble_file(&AssembleOptions {
-        path: source_path.to_string_lossy().into_owned(),
-        output: Some(output_path.to_string_lossy().into_owned()),
+        path: source_path.clone(),
+        output: Some(output_path.clone()),
         base_addr: Some(0x8000),
         assembler_cpu: Some(AssemblerCpu::M6800),
         layout_path: None,
@@ -718,8 +740,8 @@ fn assemble_file_writes_tms9900_raw_binary() {
     .unwrap();
 
     assemble_file(&AssembleOptions {
-        path: source_path.to_string_lossy().into_owned(),
-        output: Some(output_path.to_string_lossy().into_owned()),
+        path: source_path.clone(),
+        output: Some(output_path.clone()),
         base_addr: Some(0xa000),
         assembler_cpu: None,
         layout_path: None,
@@ -755,7 +777,7 @@ fn m6800_target_builds_ezra_source() {
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: false,
         input_kind: Some(InputKind::Ezra),

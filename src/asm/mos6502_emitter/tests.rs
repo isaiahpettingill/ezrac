@@ -1,122 +1,123 @@
-    use std::path::Path;
 
-    use crate::{asm::AssemblyOptions, parser::parse_program, target::CpuFamily};
-    use mos6502::{cpu::CPU, instruction::Nmos6502, memory::Bus, registers::StackPointer};
+use std::path::Path;
 
-    use super::*;
+use crate::{asm::AssemblyOptions, parser::parse_program, target::CpuFamily};
+use mos6502::{cpu::CPU, instruction::Nmos6502, memory::Bus, registers::StackPointer};
 
-    fn emit(source: &str) -> String {
-        let program = parse_program(Path::new("test.ezra"), source).unwrap();
-        emit_mos6502_assembly_with_options(
-            &program,
-            AssemblyOptions {
-                cpu: CpuFamily::Mos6502,
-                load_addr: crate::target::Address24::new(0x0200),
-                entry_addr: crate::target::Address24::new(0x0200),
-                code_base: crate::target::Address24::new(0x0200),
-                stack_top: crate::target::Address24::new(0x01FF),
-                ram_base: crate::target::Address24::new(0xA000),
-                rodata_base: crate::target::Address24::new(0x8000),
-                asset_base: crate::target::Address24::new(0xC000),
-                default_sdk_symbols: false,
-                ..AssemblyOptions::default()
-            },
-        )
-        .unwrap()
-    }
+use super::*;
 
-    struct TestBus {
-        bytes: Box<[u8; 0x1_0000]>,
-    }
+fn emit(source: &str) -> String {
+    let program = parse_program(Path::new("test.ezra"), source).unwrap();
+    emit_mos6502_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Mos6502,
+            load_addr: crate::target::Address24::new(0x0200),
+            entry_addr: crate::target::Address24::new(0x0200),
+            code_base: crate::target::Address24::new(0x0200),
+            stack_top: crate::target::Address24::new(0x01FF),
+            ram_base: crate::target::Address24::new(0xA000),
+            rodata_base: crate::target::Address24::new(0x8000),
+            asset_base: crate::target::Address24::new(0xC000),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap()
+}
 
-    impl TestBus {
-        fn new() -> Self {
-            Self {
-                bytes: Box::new([0; 0x1_0000]),
-            }
-        }
+struct TestBus {
+    bytes: Box<[u8; 0x1_0000]>,
+}
 
-        fn byte(&self, address: u16) -> u8 {
-            self.bytes[usize::from(address)]
-        }
-
-        fn set_byte(&mut self, address: u16, value: u8) {
-            self.bytes[usize::from(address)] = value;
+impl TestBus {
+    fn new() -> Self {
+        Self {
+            bytes: Box::new([0; 0x1_0000]),
         }
     }
 
-    impl Bus for TestBus {
-        fn get_byte(&mut self, address: u16) -> u8 {
-            self.bytes[usize::from(address)]
-        }
-
-        fn set_byte(&mut self, address: u16, value: u8) {
-            TestBus::set_byte(self, address, value);
-        }
+    fn byte(&self, address: u16) -> u8 {
+        self.bytes[usize::from(address)]
     }
 
-    fn run_with_setup(
-        source: &str,
-        instruction_budget: usize,
-        setup: impl FnOnce(&mut TestBus),
-    ) -> (TestBus, String, usize) {
-        let assembly = emit(source);
-        let assembled = crate::vm::assemble_subset_with_symbols_at(
-            crate::target::AssemblerCpu::Mos6502,
-            &assembly,
-            0x0200,
-        )
-        .unwrap();
-        let exit = u16::try_from(
-            assembled
-                .symbols
-                .iter()
-                .find(|symbol| symbol.name == "__ezra_exit")
-                .expect("emitter exit symbol")
-                .addr,
-        )
-        .unwrap();
-        let image_size = assembled.bytes.len();
-        let mut bus = TestBus::new();
-        for (offset, byte) in assembled.bytes.iter().copied().enumerate() {
-            bus.set_byte(0x0200 + offset as u16, byte);
+    fn set_byte(&mut self, address: u16, value: u8) {
+        self.bytes[usize::from(address)] = value;
+    }
+}
+
+impl Bus for TestBus {
+    fn get_byte(&mut self, address: u16) -> u8 {
+        self.bytes[usize::from(address)]
+    }
+
+    fn set_byte(&mut self, address: u16, value: u8) {
+        TestBus::set_byte(self, address, value);
+    }
+}
+
+fn run_with_setup(
+    source: &str,
+    instruction_budget: usize,
+    setup: impl FnOnce(&mut TestBus),
+) -> (TestBus, String, usize) {
+    let assembly = emit(source);
+    let assembled = crate::vm::assemble_subset_with_symbols_at(
+        crate::target::AssemblerCpu::Mos6502,
+        &assembly,
+        0x0200,
+    )
+    .unwrap();
+    let exit = u16::try_from(
+        assembled
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "__ezra_exit")
+            .expect("emitter exit symbol")
+            .addr,
+    )
+    .unwrap();
+    let image_size = assembled.bytes.len();
+    let mut bus = TestBus::new();
+    for (offset, byte) in assembled.bytes.iter().copied().enumerate() {
+        bus.set_byte(0x0200 + offset as u16, byte);
+    }
+    setup(&mut bus);
+    let mut cpu = CPU::new(bus, Nmos6502);
+    cpu.registers.program_counter = 0x0200;
+    cpu.registers.stack_pointer = StackPointer(0xFF);
+    for _ in 0..instruction_budget {
+        if cpu.registers.program_counter == exit {
+            return (cpu.memory, assembly, image_size);
         }
-        setup(&mut bus);
-        let mut cpu = CPU::new(bus, Nmos6502);
-        cpu.registers.program_counter = 0x0200;
-        cpu.registers.stack_pointer = StackPointer(0xFF);
-        for _ in 0..instruction_budget {
-            if cpu.registers.program_counter == exit {
-                return (cpu.memory, assembly, image_size);
-            }
-            assert!(
-                cpu.single_step(),
-                "6502 stopped at ${:04X}\n{assembly}",
-                cpu.registers.program_counter
-            );
-        }
-        panic!(
-            "6502 execution exceeded {instruction_budget} instructions at ${:04X}\n{assembly}",
+        assert!(
+            cpu.single_step(),
+            "6502 stopped at ${:04X}\n{assembly}",
             cpu.registers.program_counter
         );
     }
+    panic!(
+        "6502 execution exceeded {instruction_budget} instructions at ${:04X}\n{assembly}",
+        cpu.registers.program_counter
+    );
+}
 
-    fn run(source: &str, instruction_budget: usize) -> TestBus {
-        run_with_setup(source, instruction_budget, |_| {}).0
-    }
+fn run(source: &str, instruction_budget: usize) -> TestBus {
+    run_with_setup(source, instruction_budget, |_| {}).0
+}
 
-    #[test]
-    fn overlapping_static_locals_keep_distinct_runtime_values() {
-        let bus = run(
-            "global result: u8 = 0; fn main() { let first: u8 = 1; let second: u8 = 2; result = first + second }",
-            1_000,
-        );
-        assert_eq!(bus.byte(0xA000), 3);
-    }
+#[test]
+fn overlapping_static_locals_keep_distinct_runtime_values() {
+    let bus = run(
+        "global result: u8 = 0; fn main() { let first: u8 = 1; let second: u8 = 2; result = first + second }",
+        1_000,
+    );
+    assert_eq!(bus.byte(0xA000), 3);
+}
 
-    #[test]
-    fn binary_search_uses_the_optimized_6502_slice_and_executes_edge_cases() {
-        let source = r#"
+#[test]
+fn binary_search_uses_the_optimized_6502_slice_and_executes_edge_cases() {
+    let source = r#"
             volatile mmio output: ptr<u8> = 0x2401
             volatile mmio search: ptr<u8> = 0x23FF
             volatile mmio input: ptr<u8> = 0x2301
@@ -148,44 +149,44 @@
             }
         "#;
 
-        fn search(source: &str, target: u8, values: &[u8]) -> (u8, String, usize) {
-            let (bus, assembly, size) = run_with_setup(source, 10_000, |bus| {
-                bus.set_byte(0x23FF, target);
-                bus.set_byte(0x2300, values.len() as u8);
-                for (index, value) in values.iter().copied().enumerate() {
-                    bus.set_byte(0x2301 + index as u16, value);
-                }
-            });
-            (bus.byte(0x2401), assembly, size)
-        }
-
-        let (found, assembly, size) = search(source, 7, &[1, 3, 5, 7, 9]);
-        assert_eq!(found, 1);
-        assert_eq!(search(source, 4, &[1, 3, 5, 7, 9]).0, 0);
-        assert_eq!(search(source, 9, &[9]).0, 1);
-        assert_eq!(search(source, 9, &[]).0, 0);
-        for instruction in ["lda $23FF", "lda $2300", "lda $2301,x", "sta $2401", "lsr "] {
-            assert!(
-                assembly.contains(instruction),
-                "missing {instruction}\n{assembly}"
-            );
-        }
-        for forbidden in ["div_loop", "compare_true", "($F0),y"] {
-            assert!(
-                !assembly.contains(forbidden),
-                "found {forbidden}\n{assembly}"
-            );
-        }
-        assert!(
-            size <= 128,
-            "binary search image is {size} bytes\n{assembly}"
-        );
+    fn search(source: &str, target: u8, values: &[u8]) -> (u8, String, usize) {
+        let (bus, assembly, size) = run_with_setup(source, 10_000, |bus| {
+            bus.set_byte(0x23FF, target);
+            bus.set_byte(0x2300, values.len() as u8);
+            for (index, value) in values.iter().copied().enumerate() {
+                bus.set_byte(0x2301 + index as u16, value);
+            }
+        });
+        (bus.byte(0x2401), assembly, size)
     }
 
-    #[test]
-    fn explicit_inline_arguments_execute_once_left_to_right_with_typed_temps_and_nested_helpers() {
-        let bus = run(
-            r#"
+    let (found, assembly, size) = search(source, 7, &[1, 3, 5, 7, 9]);
+    assert_eq!(found, 1);
+    assert_eq!(search(source, 4, &[1, 3, 5, 7, 9]).0, 0);
+    assert_eq!(search(source, 9, &[9]).0, 1);
+    assert_eq!(search(source, 9, &[]).0, 0);
+    for instruction in ["lda $23FF", "lda $2300", "lda $2301,x", "sta $2401", "lsr "] {
+        assert!(
+            assembly.contains(instruction),
+            "missing {instruction}\n{assembly}"
+        );
+    }
+    for forbidden in ["div_loop", "compare_true", "($F0),y"] {
+        assert!(
+            !assembly.contains(forbidden),
+            "found {forbidden}\n{assembly}"
+        );
+    }
+    assert!(
+        size <= 128,
+        "binary search image is {size} bytes\n{assembly}"
+    );
+}
+
+#[test]
+fn explicit_inline_arguments_execute_once_left_to_right_with_typed_temps_and_nested_helpers() {
+    let bus = run(
+        r#"
                 global trace: u8 = 0
                 global result: u8 = 0
                 global guarded_calls: u8 = 0
@@ -206,32 +207,32 @@
                     let skipped: bool = flag && guarded(true)
                 }
             "#,
-            2_000,
-        );
+        2_000,
+    );
 
-        assert_eq!(bus.byte(0xA000), 12);
-        assert_eq!(bus.byte(0xA001), 44);
-        assert_eq!(bus.byte(0xA002), 0);
-    }
+    assert_eq!(bus.byte(0xA000), 12);
+    assert_eq!(bus.byte(0xA001), 44);
+    assert_eq!(bus.byte(0xA002), 0);
+}
 
-    #[test]
-    fn omits_unused_public_functions() {
-        let assembly = emit(
-            r#"
+#[test]
+fn omits_unused_public_functions() {
+    let assembly = emit(
+        r#"
                 pub fn unused_sdk_helper() { }
                 fn used_helper() -> u8 { return 1 }
                 fn main() { let value: u8 = used_helper() }
             "#,
-        );
+    );
 
-        assert!(assembly.contains("_used_helper:"), "{assembly}");
-        assert!(!assembly.contains("_unused_sdk_helper:"), "{assembly}");
-    }
+    assert!(assembly.contains("_used_helper:"), "{assembly}");
+    assert!(!assembly.contains("_unused_sdk_helper:"), "{assembly}");
+}
 
-    #[test]
-    fn emits_core_6502_source_constructs() {
-        let assembly = emit(
-            r#"
+#[test]
+fn emits_core_6502_source_constructs() {
+    let assembly = emit(
+        r#"
                 volatile mmio SCREEN: ptr<u8> = 0xD020
                 global counter: u16 = 1
                 fn add(value: u16) -> u16 { return value + 2 }
@@ -244,34 +245,34 @@
                     }
                 }
             "#,
-        );
-        assert!(assembly.contains("; target: MOS 6502"), "{assembly}");
-        assert!(assembly.contains("jsr _add"), "{assembly}");
-        assert!(assembly.contains("sta $D020"), "{assembly}");
-        assert!(!assembly.contains("ld hl"), "{assembly}");
-        crate::vm::assemble_subset_with_symbols_at(
-            crate::target::AssemblerCpu::Mos6502,
-            &assembly,
-            0x0200,
-        )
-        .unwrap();
-    }
+    );
+    assert!(assembly.contains("; target: MOS 6502"), "{assembly}");
+    assert!(assembly.contains("jsr _add"), "{assembly}");
+    assert!(assembly.contains("sta $D020"), "{assembly}");
+    assert!(!assembly.contains("ld hl"), "{assembly}");
+    crate::vm::assemble_subset_with_symbols_at(
+        crate::target::AssemblerCpu::Mos6502,
+        &assembly,
+        0x0200,
+    )
+    .unwrap();
+}
 
-    #[test]
-    fn emitted_core_program_assembles() {
-        let assembly = emit("global value: u8 = 1\nfn main() { value += 2 }");
-        crate::vm::assemble_subset_with_symbols_at(
-            crate::target::AssemblerCpu::Mos6502,
-            &assembly,
-            0x0200,
-        )
-        .unwrap();
-    }
+#[test]
+fn emitted_core_program_assembles() {
+    let assembly = emit("global value: u8 = 1\nfn main() { value += 2 }");
+    crate::vm::assemble_subset_with_symbols_at(
+        crate::target::AssemblerCpu::Mos6502,
+        &assembly,
+        0x0200,
+    )
+    .unwrap();
+}
 
-    #[test]
-    fn complete_language_surface_emits_and_assembles() {
-        let assembly = emit(
-            r#"
+#[test]
+fn complete_language_surface_emits_and_assembles() {
+    let assembly = emit(
+        r#"
                 const COUNT: u8 = 3
                 alias Word = u16
                 struct Point { x: u8 y: Word }
@@ -319,19 +320,19 @@
                     asm volatile(clobber a, clobber flags) { "nop" }
                 }
             "#,
-        );
-        crate::vm::assemble_subset_with_symbols_at(
-            crate::target::AssemblerCpu::Mos6502,
-            &assembly,
-            0x0200,
-        )
-        .unwrap();
-    }
+    );
+    crate::vm::assemble_subset_with_symbols_at(
+        crate::target::AssemblerCpu::Mos6502,
+        &assembly,
+        0x0200,
+    )
+    .unwrap();
+}
 
-    #[test]
-    fn executes_integer_arithmetic_and_signed_comparisons() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_integer_arithmetic_and_signed_comparisons() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
                 volatile mmio RESULT2: ptr<u8> = 0xFF02
@@ -345,18 +346,18 @@
                     *(RESULT3) = cast<u8>(negative < -3)
                 }
             "#,
-            50_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 36);
-        assert_eq!(memory.byte(0xFF01), 7);
-        assert_eq!(memory.byte(0xFF02), 1);
-        assert_eq!(memory.byte(0xFF03), 1);
-    }
+        50_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 36);
+    assert_eq!(memory.byte(0xFF01), 7);
+    assert_eq!(memory.byte(0xFF02), 1);
+    assert_eq!(memory.byte(0xFF03), 1);
+}
 
-    #[test]
-    fn executes_bounded_u16_helpers_and_zero_divisors() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_bounded_u16_helpers_and_zero_divisors() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
                 volatile mmio RESULT2: ptr<u8> = 0xFF02
@@ -377,20 +378,20 @@
                     *(RESULT5) = cast<u8>(maximum % zero)
                 }
             "#,
-            30_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 1);
-        assert_eq!(memory.byte(0xFF01), 0xFF);
-        assert_eq!(memory.byte(0xFF02), 0xFF);
-        assert_eq!(memory.byte(0xFF03), 24);
-        assert_eq!(memory.byte(0xFF04), 0);
-        assert_eq!(memory.byte(0xFF05), 0);
-    }
+        30_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 1);
+    assert_eq!(memory.byte(0xFF01), 0xFF);
+    assert_eq!(memory.byte(0xFF02), 0xFF);
+    assert_eq!(memory.byte(0xFF03), 24);
+    assert_eq!(memory.byte(0xFF04), 0);
+    assert_eq!(memory.byte(0xFF05), 0);
+}
 
-    #[test]
-    fn executes_small_constant_multiplication_with_wrapping() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_small_constant_multiplication_with_wrapping() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
                 volatile mmio RESULT2: ptr<u8> = 0xFF02
@@ -408,18 +409,18 @@
                     *(RESULT4) = compound
                 }
             "#,
-            2_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 238);
-        assert_eq!(memory.byte(0xFF01), 0xF5);
-        assert_eq!(memory.byte(0xFF02), 0x6B);
-        assert_eq!(memory.byte(0xFF03), 0x18);
-        assert_eq!(memory.byte(0xFF04), 255);
-    }
+        2_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 238);
+    assert_eq!(memory.byte(0xFF01), 0xF5);
+    assert_eq!(memory.byte(0xFF02), 0x6B);
+    assert_eq!(memory.byte(0xFF03), 0x18);
+    assert_eq!(memory.byte(0xFF04), 255);
+}
 
-    #[test]
-    fn executes_immediate_bitwise_after_one_volatile_u16_read() {
-        let source = r#"
+#[test]
+fn executes_immediate_bitwise_after_one_volatile_u16_read() {
+    let source = r#"
             volatile mmio INPUT: ptr<u16> = 0xD000
             volatile mmio RESULT0: ptr<u8> = 0xFF00
             volatile mmio RESULT1: ptr<u8> = 0xFF01
@@ -439,31 +440,31 @@
                 *(RESULT2) = calls
             }
         "#;
-        let assembly = emit(source);
-        let read_input = assembly
-            .split("_read_input:")
-            .nth(1)
-            .unwrap()
-            .split("    rts")
-            .next()
-            .unwrap();
-        assert_eq!(read_input.matches("    lda $D00").count(), 2, "{assembly}");
-        assert!(!read_input.contains("($F0),y"), "{assembly}");
-        assert_eq!(
-            assembly.matches("    jsr _read_input").count(),
-            1,
-            "{assembly}"
-        );
+    let assembly = emit(source);
+    let read_input = assembly
+        .split("_read_input:")
+        .nth(1)
+        .unwrap()
+        .split("    rts")
+        .next()
+        .unwrap();
+    assert_eq!(read_input.matches("    lda $D00").count(), 2, "{assembly}");
+    assert!(!read_input.contains("($F0),y"), "{assembly}");
+    assert_eq!(
+        assembly.matches("    jsr _read_input").count(),
+        1,
+        "{assembly}"
+    );
 
-        let memory = run(source, 5_000);
-        assert_eq!(memory.byte(0xFF00), 0x34);
-        assert_eq!(memory.byte(0xFF01), 0x00);
-        assert_eq!(memory.byte(0xFF02), 1);
-    }
+    let memory = run(source, 5_000);
+    assert_eq!(memory.byte(0xFF00), 0x34);
+    assert_eq!(memory.byte(0xFF01), 0x00);
+    assert_eq!(memory.byte(0xFF02), 1);
+}
 
-    #[test]
-    fn executes_signed_constant_multiplication_after_volatile_u16_load() {
-        let source = r#"
+#[test]
+fn executes_signed_constant_multiplication_after_volatile_u16_load() {
+    let source = r#"
             volatile mmio INPUT: ptr<u16> = 0xD000
             volatile mmio RESULT0: ptr<u8> = 0xFF00
             volatile mmio RESULT1: ptr<u8> = 0xFF01
@@ -481,21 +482,21 @@
                 *(RESULT1) = calls
             }
         "#;
-        let assembly = emit(source);
-        assert!(assembly.contains("    jsr _read_input"), "{assembly}");
-        assert!(assembly.contains("    lda $D000"), "{assembly}");
-        assert!(assembly.contains("    lda $D001"), "{assembly}");
-        assert!(!assembly.contains("($F0),y"), "{assembly}");
+    let assembly = emit(source);
+    assert!(assembly.contains("    jsr _read_input"), "{assembly}");
+    assert!(assembly.contains("    lda $D000"), "{assembly}");
+    assert!(assembly.contains("    lda $D001"), "{assembly}");
+    assert!(!assembly.contains("($F0),y"), "{assembly}");
 
-        let memory = run(source, 5_000);
-        assert_eq!(memory.byte(0xFF00), 0xEB);
-        assert_eq!(memory.byte(0xFF01), 1);
-    }
+    let memory = run(source, 5_000);
+    assert_eq!(memory.byte(0xFF00), 0xEB);
+    assert_eq!(memory.byte(0xFF01), 1);
+}
 
-    #[test]
-    fn executes_constant_shifts_across_bytes_and_width_boundaries() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_constant_shifts_across_bytes_and_width_boundaries() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
                 volatile mmio RESULT2: ptr<u8> = 0xFF02
@@ -509,18 +510,18 @@
                     *(RESULT3) = cast<u8>(value << 24)
                 }
             "#,
-            2_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 0x23);
-        assert_eq!(memory.byte(0xFF01), 0x45);
-        assert_eq!(memory.byte(0xFF02), 0xFF);
-        assert_eq!(memory.byte(0xFF03), 0);
-    }
+        2_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 0x23);
+    assert_eq!(memory.byte(0xFF01), 0x45);
+    assert_eq!(memory.byte(0xFF02), 0xFF);
+    assert_eq!(memory.byte(0xFF03), 0);
+}
 
-    #[test]
-    fn lowers_single_bit_masked_conditions_without_re_evaluating_the_value() {
-        let assembly = emit(
-            r#"
+#[test]
+fn lowers_single_bit_masked_conditions_without_re_evaluating_the_value() {
+    let assembly = emit(
+        r#"
                 global calls: u8 = 0
                 global result: u8 = 0
                 fn sample() -> u8 { calls += 1; return calls }
@@ -530,12 +531,12 @@
                     while (sample() & 4) == 4 { result += 4 }
                 }
             "#,
-        );
-        assert_eq!(assembly.matches("    bit $").count(), 3, "{assembly}");
-        assert!(!assembly.contains("    and $"), "{assembly}");
+    );
+    assert_eq!(assembly.matches("    bit $").count(), 3, "{assembly}");
+    assert!(!assembly.contains("    and $"), "{assembly}");
 
-        let memory = run(
-            r#"
+    let memory = run(
+        r#"
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
                 global calls: u8 = 0
@@ -549,16 +550,16 @@
                     *(RESULT1) = result
                 }
             "#,
-            20_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 3);
-        assert_eq!(memory.byte(0xFF01), 3);
-    }
+        20_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 3);
+    assert_eq!(memory.byte(0xFF01), 3);
+}
 
-    #[test]
-    fn executes_calls_and_recursion() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_calls_and_recursion() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT: ptr<u8> = 0xFF00
                 fn factorial(n: u8) -> u8 {
                     if n <= 1 { return 1 }
@@ -566,15 +567,15 @@
                 }
                 fn main() { *(RESULT) = factorial(5) }
             "#,
-            100_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 120);
-    }
+        100_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 120);
+}
 
-    #[test]
-    fn executes_mutual_recursion_with_preserved_static_locals() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_mutual_recursion_with_preserved_static_locals() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT: ptr<u8> = 0xFF00
                 fn left(value: u8) -> u8 {
                     let saved: u8 = value
@@ -590,28 +591,28 @@
                 }
                 fn main() { *(RESULT) = left(4) }
             "#,
-            100_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 10);
-    }
+        100_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 10);
+}
 
-    #[test]
-    fn executes_nested_calls_without_clobbering_outer_arguments() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_nested_calls_without_clobbering_outer_arguments() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT: ptr<u8> = 0xFF00
                 fn sum(left: u8, right: u8) -> u8 { return left + right }
                 fn main() { *(RESULT) = sum(5, sum(2, 3)) }
             "#,
-            20_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 10);
-    }
+        20_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 10);
+}
 
-    #[test]
-    fn executes_aggregates_pointers_and_memory_builtins() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_aggregates_pointers_and_memory_builtins() {
+    let memory = run(
+        r#"
                 struct Pair { left: u8 right: u16 }
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
@@ -628,16 +629,16 @@
                     *(RESULT1) = cast<u8>(pair_copy.right)
                 }
             "#,
-            100_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 9);
-        assert_eq!(memory.byte(0xFF01), 0x34);
-    }
+        100_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 9);
+    assert_eq!(memory.byte(0xFF01), 0x34);
+}
 
-    #[test]
-    fn executes_short_circuit_boolean_expressions() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_short_circuit_boolean_expressions() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT: ptr<u8> = 0xFF00
                 global calls: u8 = 0
                 fn called() -> bool { calls += 1 return true }
@@ -647,15 +648,15 @@
                     *(RESULT) = calls
                 }
             "#,
-            20_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 0);
-    }
+        20_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 0);
+}
 
-    #[test]
-    fn executes_wide_and_signed_arithmetic() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_wide_and_signed_arithmetic() {
+    let memory = run(
+        r#"
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
                 volatile mmio RESULT2: ptr<u8> = 0xFF02
@@ -672,18 +673,18 @@
                     *(RESULT4) = cast<u8>(dividend % divisor)
                 }
             "#,
-            100_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 0x05);
-        assert_eq!(memory.byte(0xFF01), 0x03);
-        assert_eq!(memory.byte(0xFF02), 0x01);
-        assert_eq!(memory.byte(0xFF03), 0xFA);
-        assert_eq!(memory.byte(0xFF04), 0xFE);
-    }
+        100_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 0x05);
+    assert_eq!(memory.byte(0xFF01), 0x03);
+    assert_eq!(memory.byte(0xFF02), 0x01);
+    assert_eq!(memory.byte(0xFF03), 0xFA);
+    assert_eq!(memory.byte(0xFF04), 0xFE);
+}
 
-    #[test]
-    fn executes_wrapping_scaled_indexes_above_255() {
-        let source = r#"
+#[test]
+fn executes_wrapping_scaled_indexes_above_255() {
+    let source = r#"
             volatile mmio INDEX: ptr<u16> = 0xFF10
             volatile mmio RESULT0: ptr<u8> = 0xFF00
             volatile mmio RESULT1: ptr<u8> = 0xFF01
@@ -698,27 +699,27 @@
                 *(RESULT2) = cast<u8>(word >> 8)
             }
         "#;
-        let (memory, assembly, _) = run_with_setup(source, 20_000, |bus| {
-            bus.set_byte(0xFF10, 0x01);
-            bus.set_byte(0xFF11, 0x01);
-            bus.set_byte(0x00FF, 0xA1);
-            bus.set_byte(0x0082, 0xC3);
-            bus.set_byte(0x0083, 0xB2);
-        });
+    let (memory, assembly, _) = run_with_setup(source, 20_000, |bus| {
+        bus.set_byte(0xFF10, 0x01);
+        bus.set_byte(0xFF11, 0x01);
+        bus.set_byte(0x00FF, 0xA1);
+        bus.set_byte(0x0082, 0xC3);
+        bus.set_byte(0x0083, 0xB2);
+    });
 
-        assert_eq!(memory.byte(0xFF00), 0xA1);
-        assert_eq!(memory.byte(0xFF01), 0xC3);
-        assert_eq!(memory.byte(0xFF02), 0xB2);
-        assert_eq!(assembly.matches("    lda $FF10").count(), 1, "{assembly}");
-        assert_eq!(assembly.matches("    lda $FF11").count(), 1, "{assembly}");
-        assert!(!assembly.contains("index_scale"), "{assembly}");
-        assert!(!assembly.contains("mul_loop"), "{assembly}");
-    }
+    assert_eq!(memory.byte(0xFF00), 0xA1);
+    assert_eq!(memory.byte(0xFF01), 0xC3);
+    assert_eq!(memory.byte(0xFF02), 0xB2);
+    assert_eq!(assembly.matches("    lda $FF10").count(), 1, "{assembly}");
+    assert_eq!(assembly.matches("    lda $FF11").count(), 1, "{assembly}");
+    assert!(!assembly.contains("index_scale"), "{assembly}");
+    assert!(!assembly.contains("mul_loop"), "{assembly}");
+}
 
-    #[test]
-    fn executes_dynamic_indexes_and_loop_control() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_dynamic_indexes_and_loop_control() {
+    let memory = run(
+        r#"
                 struct Point { x: u8 y: u16 }
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
                 volatile mmio RESULT1: ptr<u8> = 0xFF01
@@ -740,16 +741,16 @@
                     mem.poke8(RESULT1, sum)
                 }
             "#,
-            100_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 4);
-        assert_eq!(memory.byte(0xFF01), 8);
-    }
+        100_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 4);
+    assert_eq!(memory.byte(0xFF01), 8);
+}
 
-    #[test]
-    fn executes_global_embed_and_string_initialization() {
-        let memory = run(
-            r#"
+#[test]
+fn executes_global_embed_and_string_initialization() {
+    let memory = run(
+        r#"
                 embed data: bytes = bytes [0x11, 0x22, 0x33]
                 global values: [u8; 3] = [4, 5, 6]
                 volatile mmio RESULT0: ptr<u8> = 0xFF00
@@ -762,9 +763,9 @@
                     *(RESULT2) = *text
                 }
             "#,
-            20_000,
-        );
-        assert_eq!(memory.byte(0xFF00), 5);
-        assert_eq!(memory.byte(0xFF01), 0x22);
-        assert_eq!(memory.byte(0xFF02), b'O');
-    }
+        20_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 5);
+    assert_eq!(memory.byte(0xFF01), 0x22);
+    assert_eq!(memory.byte(0xFF02), b'O');
+}

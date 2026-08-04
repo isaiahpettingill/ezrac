@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
 use crate::{
     asm::{
         AssemblyOptions,
@@ -7,6 +5,7 @@ use crate::{
         reachability::{RoutineProfile, strip_unreachable_generated_routines},
     },
     ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, Type, UnaryOp},
+    compat::prelude::*,
     diagnostic::Diagnostic,
     hir::HirProgram,
     regalloc::{
@@ -112,11 +111,23 @@ struct Emitter {
     return_types: Vec<Option<Type>>,
     local_plans: Vec<HashMap<String, Binding>>,
     r1: Storage,
+    multiply_addend: Storage,
+    multiply_result: Storage,
 }
 
 impl Emitter {
     fn new(mut model: SemanticModel, cpu: CpuFamily) -> Result<Self, Diagnostic> {
         let r1 = model.allocate(1)?;
+        let multiply_addend = if cpu == CpuFamily::M6800 {
+            model.allocate(1)?
+        } else {
+            r1
+        };
+        let multiply_result = if cpu == CpuFamily::M6800 {
+            model.allocate(1)?
+        } else {
+            r1
+        };
         Ok(Self {
             model,
             cpu,
@@ -128,6 +139,8 @@ impl Emitter {
             return_types: Vec::new(),
             local_plans: Vec::new(),
             r1,
+            multiply_addend,
+            multiply_result,
         })
     }
 
@@ -532,11 +545,7 @@ impl Emitter {
                 self.line("    mul");
                 self.line("    tfr b,a");
             }
-            BinaryOp::Mul => {
-                return Err(Diagnostic::new(
-                    "M6800 source emitter does not support non-strength-reduced multiplication",
-                ));
-            }
+            BinaryOp::Mul => self.multiply(),
             BinaryOp::BitAnd => self.line("    anda >__ezra_r1"),
             BinaryOp::BitOr => self.line("    oraa >__ezra_r1"),
             BinaryOp::BitXor => self.line("    eora >__ezra_r1"),
@@ -548,6 +557,29 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn multiply(&mut self) {
+        self.staa(self.multiply_addend.address);
+        self.ldaa_imm(0);
+        self.staa(self.multiply_result.address);
+        self.line("    ldab >__ezra_r1");
+
+        let loop_label = self.next_label("multiply_loop");
+        let skip_add = self.next_label("multiply_skip_add");
+        self.line(&format!("{loop_label}:"));
+        self.line("    bitb #01h");
+        self.branch_long("beq", &skip_add);
+        self.ldaa(self.multiply_result.address);
+        self.line(&format!("    adda >{:04X}h", self.multiply_addend.address));
+        self.staa(self.multiply_result.address);
+        self.line(&format!("{skip_add}:"));
+        self.ldaa(self.multiply_addend.address);
+        self.line("    asla");
+        self.staa(self.multiply_addend.address);
+        self.line("    lsrb");
+        self.branch_long("bne", &loop_label);
+        self.ldaa(self.multiply_result.address);
     }
 
     fn compare(&mut self, op: BinaryOp) {
@@ -617,6 +649,13 @@ impl Emitter {
     }
 
     fn emit_logical(&mut self, left: &Expr, op: BinaryOp, right: &Expr) -> Result<(), Diagnostic> {
+        if matches!(
+            (left, op),
+            (Expr::Bool(false), BinaryOp::And) | (Expr::Bool(true), BinaryOp::Or)
+        ) {
+            self.ldaa_imm(u8::from(op == BinaryOp::Or));
+            return Ok(());
+        }
         let decisive = self.next_label("logical_decisive");
         let done = self.next_label("logical_done");
         self.emit_expr(left, &bool_type())?;

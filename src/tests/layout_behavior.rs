@@ -34,10 +34,10 @@ fn commands_report_source_locations_for_layout_errors() {
 
     let parse_prefix = format!("{}:1:1:", parse_layout_path.display());
     let parse_error = emit_assembly_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(parse_layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(parse_layout_path.clone()),
         target: None,
     })
     .unwrap_err();
@@ -48,10 +48,10 @@ fn commands_report_source_locations_for_layout_errors() {
 
     let invalid_prefix = format!("{}:1:1:", invalid_layout_path.display());
     let invalid_error = emit_assembly_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(invalid_layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(invalid_layout_path.clone()),
         target: None,
     })
     .unwrap_err();
@@ -95,10 +95,10 @@ fn commands_reject_custom_layouts_missing_required_sections() {
     .unwrap();
 
     let error = check(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(layout_path.clone()),
         target: None,
     })
     .unwrap_err();
@@ -127,7 +127,7 @@ fn zxspectrum_target_uses_spectrum_layout() {
 
     let settings = resolve_build_settings(
         &CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
@@ -185,7 +185,7 @@ fn ti_ce_targets_use_tice_layout_and_sdk() {
         .unwrap();
 
         let outputs = build_source_with_command_options(&CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: false,
             layout_path: None,
@@ -194,7 +194,7 @@ fn ti_ce_targets_use_tice_layout_and_sdk() {
         .unwrap();
         let settings = resolve_build_settings(
             &CommandOptions {
-                path: source_path.to_string_lossy().into_owned(),
+                path: source_path.clone(),
                 debug_comments: false,
                 default_sdk_symbols: false,
                 layout_path: None,
@@ -252,7 +252,7 @@ fn ti_z80_targets_use_ti_layout_and_sdk() {
         .unwrap();
 
         let outputs = build_source_with_command_options(&CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: false,
             layout_path: None,
@@ -261,7 +261,7 @@ fn ti_z80_targets_use_ti_layout_and_sdk() {
         .unwrap();
         let settings = resolve_build_settings(
             &CommandOptions {
-                path: source_path.to_string_lossy().into_owned(),
+                path: source_path.clone(),
                 debug_comments: false,
                 default_sdk_symbols: false,
                 layout_path: None,
@@ -303,7 +303,7 @@ fn cpm_z80_target_uses_com_layout() {
 
     let settings = resolve_build_settings(
         &CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
@@ -343,7 +343,7 @@ fn ez80_split_harness_target_uses_split_layout_and_memory() {
     .unwrap();
 
     test_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -352,7 +352,7 @@ fn ez80_split_harness_target_uses_split_layout_and_memory() {
     .unwrap();
 
     let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -412,10 +412,10 @@ fn z80_target_rejects_layout_addresses_above_16_bit_space() {
     .unwrap();
 
     let error = check(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(layout_path.clone()),
         target: Some("zxspectrum-z80".to_owned()),
     })
     .unwrap_err();
@@ -487,10 +487,10 @@ fn test_command_can_use_custom_layout_file() {
     .unwrap();
 
     test_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(layout_path.clone()),
         target: None,
     })
     .unwrap();
@@ -543,10 +543,10 @@ fn check_command_can_use_custom_layout_file() {
     .unwrap();
 
     check(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(layout_path.clone()),
         target: None,
     })
     .unwrap();
@@ -648,10 +648,10 @@ fn build_can_use_custom_layout_file() {
     .unwrap();
 
     let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(layout_path.clone()),
         target: None,
     })
     .unwrap();
@@ -664,10 +664,10 @@ fn build_can_use_custom_layout_file() {
         ezra::layout::parse_layout(&std::fs::read_to_string(&layout_path).unwrap()).unwrap();
     let resolved = resolve_build_settings(
         &CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
-            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            layout_path: Some(layout_path.clone()),
             target: None,
         },
         &source_path,
@@ -739,15 +739,64 @@ fn emit_asm_can_use_custom_layout_file() {
     .unwrap();
 
     let asm = emit_assembly_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
-        layout_path: Some(layout_path.to_string_lossy().into_owned()),
+        layout_path: Some(layout_path.clone()),
         target: None,
     })
     .unwrap();
 
     assert!(asm.contains("    ld sp, EFFE00h"), "{asm}");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_command_rejects_generated_code_that_does_not_fit_its_region() {
+    let root = temp_root("test_text_fit");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    let layout_path = root.join("tiny.ezralayout");
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+    std::fs::write(
+        &layout_path,
+        r#"
+            layout tiny_z80 {
+                load 0x0000;
+                entry 0x0000;
+                stack 0xFFFF;
+
+                region code 0x0000..0x0000 read execute;
+                region rodata 0x0001..0x1FFF read;
+                region ram 0x2000..0x7FFF read write;
+                region assets 0x8000..0x9FFF read;
+                region scratch 0xA000..0xAFFF read write;
+                region stack 0xB000..0xFFFF read write reserved;
+                section .header -> code align 1;
+                section .text -> code align 1;
+                section .rodata -> rodata align 1;
+                section .data -> ram align 1;
+                section .bss -> ram align 1;
+                section .assets -> assets align 1;
+                section .scratch -> scratch align 1;
+            }
+        "#,
+    )
+    .unwrap();
+
+    let error = test_source_with_command_options(&CommandOptions {
+        path: source_path.clone(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        layout_path: Some(layout_path.clone()),
+        target: Some("bare-z80".to_owned()),
+    })
+    .unwrap_err();
+    assert!(
+        error.contains("assembly section `.text`") && error.contains("does not fit"),
+        "{error}"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

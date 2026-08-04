@@ -379,6 +379,13 @@ pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
 pub const MSDOS_COM_I8086_TARGET: &str = "msdos-com-i8086";
 pub const NES_2A03_TARGET: &str = "nes-2a03";
 
+pub fn is_msdos_i8086_target(target: &str) -> bool {
+    target == MSDOS_COM_I8086_TARGET
+        || target
+            .strip_prefix(MSDOS_COM_I8086_TARGET)
+            .is_some_and(|suffix| suffix.len() > 1 && suffix.starts_with('-'))
+}
+
 pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, String> {
     let triple = parse_target_triple(target.unwrap_or(DEFAULT_TARGET_TRIPLE))?;
     validate_target_cpu_combination(&triple)?;
@@ -439,7 +446,7 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
             triple.cpu.as_str()
         ));
     }
-    if target.starts_with("msdos-") && target != MSDOS_COM_I8086_TARGET {
+    if target.starts_with("msdos-") && !is_msdos_i8086_target(target) {
         return Err(format!(
             "unsupported MS-DOS target `{target}`; expected `{MSDOS_COM_I8086_TARGET}`"
         ));
@@ -452,7 +459,7 @@ fn is_bare_target(triple: &TargetTriple) -> bool {
 }
 
 fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
-    if triple.value == MSDOS_COM_I8086_TARGET
+    if is_msdos_i8086_target(&triple.value)
         || (matches!(
             triple.cpu,
             CpuFamily::Z80

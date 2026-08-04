@@ -121,12 +121,14 @@ const M6800_SOURCE: &str = r#"
     global shift_at_width: u8 = 1
     global shift_above_width: u8 = 1
     global mul_power_two: u8 = 0
+    global mul_non_power_two: u8 = 0
     fn main() {
         add_wrap = value + rhs
         signed_shift = signed >> 3
         shift_at_width = value << 8
         shift_above_width = value >> 11
         mul_power_two = rhs * 8
+        mul_non_power_two = rhs * 10
     }
 "#;
 
@@ -307,14 +309,15 @@ fn m6800_differential_arithmetic_corpus_assembles() {
 
     #[cfg(feature = "test-runner")]
     {
-        const NAMES: [&str; 5] = [
+        const NAMES: [&str; 6] = [
             "add_wrap",
             "signed_shift",
             "shift_at_width",
             "shift_above_width",
             "mul_power_two",
+            "mul_non_power_two",
         ];
-        const EXPECTED: [u8; 5] = [2, 0xF0, 0, 0, 24];
+        const EXPECTED: [u8; 6] = [2, 0xF0, 0, 0, 24, 30];
         let writes = NAMES
             .iter()
             .enumerate()

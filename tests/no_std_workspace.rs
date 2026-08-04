@@ -154,6 +154,93 @@ fn reports_missing_virtual_workspace_assets() {
 
 #[cfg(feature = "z80")]
 #[test]
+fn skips_inactive_root_and_imported_workspace_embeds_before_materializing() {
+    let files = [
+        WorkspaceFile::text(
+            "src/main.ezra",
+            r#"
+                @cfg(cpu("ez80"))
+                embed root_missing: bytes = file("assets/root-missing.bin")
+                import lib.media
+                fn main() {}
+            "#,
+        ),
+        WorkspaceFile::text(
+            "src/lib/media.ezra",
+            r#"
+                @cfg(cpu("ez80"))
+                pub embed imported_missing: bytes = file("assets/imported-missing.bin")
+            "#,
+        ),
+    ];
+    let compilation = compile_workspace_to_assembly(
+        &Workspace::new(&files),
+        "src/main.ezra",
+        &CompileRequest::new("src/main.ezra", "cpm-2.2-z80"),
+    )
+    .expect("inactive workspace assets should not be required");
+
+    assert!(!compilation.program.declarations.iter().any(|declaration| {
+        matches!(
+            declaration,
+            Declaration::Embed(embed)
+                if matches!(embed.name.as_str(), "root_missing" | "imported_missing")
+        )
+    }));
+}
+
+#[cfg(feature = "z80")]
+#[test]
+fn active_root_workspace_embeds_still_require_assets() {
+    let files = [WorkspaceFile::text(
+        "src/main.ezra",
+        r#"
+            @cfg(cpu("z80"))
+            embed root_missing: bytes = file("assets/root-missing.bin")
+            fn main() {}
+        "#,
+    )];
+    let error = compile_workspace_to_assembly(
+        &Workspace::new(&files),
+        "src/main.ezra",
+        &CompileRequest::new("src/main.ezra", "cpm-2.2-z80"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "virtual workspace asset `assets/root-missing.bin` referenced from `src/main.ezra` was not found (resolved as `src/assets/root-missing.bin`)"
+    );
+}
+
+#[cfg(feature = "z80")]
+#[test]
+fn active_imported_workspace_embeds_still_require_assets() {
+    let files = [
+        WorkspaceFile::text("src/main.ezra", "import lib.media\nfn main() {}\n"),
+        WorkspaceFile::text(
+            "src/lib/media.ezra",
+            r#"
+                @cfg(cpu("z80"))
+                pub embed imported_missing: bytes = file("assets/imported-missing.bin")
+            "#,
+        ),
+    ];
+    let error = compile_workspace_to_assembly(
+        &Workspace::new(&files),
+        "src/main.ezra",
+        &CompileRequest::new("src/main.ezra", "cpm-2.2-z80"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "virtual workspace asset `assets/imported-missing.bin` referenced from `src/lib/media.ezra` was not found (resolved as `src/lib/assets/imported-missing.bin`)"
+    );
+}
+
+#[cfg(feature = "z80")]
+#[test]
 fn builds_and_packages_ez80_workspace_without_host_io() {
     let files = [WorkspaceFile::text("main.ezra", "fn main() {}\n")];
     let build = build_workspace(

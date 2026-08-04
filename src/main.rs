@@ -1,5 +1,8 @@
 use std::{
-    env, fs,
+    collections::HashSet,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -59,29 +62,39 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args = env::args().skip(1).collect::<Vec<_>>();
-    match args.first().map(String::as_str) {
-        Some("check") => {
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    if args.is_empty() {
+        print_usage();
+        return Ok(());
+    }
+    let command = args.first().and_then(|arg| arg.to_str()).ok_or_else(|| {
+        format!(
+            "unknown command (command names must be valid UTF-8)\n{}",
+            usage()
+        )
+    })?;
+    match command {
+        "check" => {
             let options = CommandOptions::parse(&args[1..])?;
             check(&options)
         }
-        Some("build") => {
+        "build" => {
             let options = BuildCommandOptions::parse(&args[1..])?;
             build(&options)
         }
-        Some("disk") => {
+        "disk" => {
             let options = DiskCommandOptions::parse(&args[1..])?;
             create_disk(&options)
         }
-        Some("emit-asm") => {
+        "emit-asm" => {
             let options = CommandOptions::parse(&args[1..])?;
             emit_asm(&options)
         }
-        Some("emit-ir") => {
+        "emit-ir" => {
             let options = EmitIrOptions::parse(&args[1..])?;
             emit_ir(&options)
         }
-        Some("test") => {
+        "test" => {
             let options = TestCommandOptions::parse(&args[1..])?;
             match options.path.as_ref() {
                 Some(path) => {
@@ -90,30 +103,30 @@ fn run() -> Result<(), String> {
                 None => test_project_with_command_options(&options),
             }
         }
-        Some("assemble") => {
+        "assemble" => {
             let options = AssembleOptions::parse(&args[1..])?;
             assemble_file(&options)
         }
-        Some("init") => {
+        "init" => {
             let options = InitOptions::parse(&args[1..])?;
             init_project(&options)
         }
-        Some("install-syntax") => {
+        "install-syntax" => {
             let options = InstallSyntaxOptions::parse(&args[1..])?;
             install_syntax(&options)
         }
-        Some("targets") => {
+        "targets" => {
             print_targets();
             Ok(())
         }
-        Some("lsp") => run_lsp(),
-        Some("layout") => print_layout(args.get(1).map(String::as_str)),
-        Some("header") => print_header(),
-        Some("-h" | "--help") | None => {
+        "lsp" => run_lsp(),
+        "layout" => print_layout(args.get(1).map(PathBuf::from).as_deref()),
+        "header" => print_header(),
+        "-h" | "--help" => {
             print_usage();
             Ok(())
         }
-        Some(command) => Err(format!("unknown command `{command}`\n{}", usage())),
+        command => Err(format!("unknown command `{command}`\n{}", usage())),
     }
 }
 
@@ -127,6 +140,14 @@ fn run_lsp() -> Result<(), String> {
     Err("`ezrac lsp` requires building with `--features lsp`".to_owned())
 }
 
+fn cli_text<T: AsRef<OsStr>>(value: &T) -> Result<String, String> {
+    value
+        .as_ref()
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "non-UTF-8 command option; paths may be non-UTF-8".to_owned())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InitOptions {
     path: PathBuf,
@@ -136,25 +157,24 @@ struct InitOptions {
 }
 
 impl InitOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
         let mut path = None;
         let mut name = None;
         let mut target = "agonlight-mos-ez80".to_owned();
         let mut force = false;
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--name" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    name = Some(value.clone());
+        while let Some(raw_arg) = iter.next() {
+            let arg = raw_arg.as_ref();
+            match arg.to_str() {
+                Some("--name") => name = Some(cli_text(iter.next().ok_or_else(usage)?)?),
+                Some("--target") => {
+                    let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                    resolve_target_profile(Some(&value))?;
+                    target = value;
                 }
-                "--target" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    resolve_target_profile(Some(value))?;
-                    target = value.clone();
-                }
-                "--force" => force = true,
-                _ if path.is_none() => path = Some(PathBuf::from(arg)),
+                Some("--force") => force = true,
+                Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
+                None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
             }
         }
@@ -182,28 +202,33 @@ struct DiskInput {
 }
 
 impl DiskCommandOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
         let mut output = None;
         let mut format = None;
         let mut label = "EZRA DISK".to_owned();
         let mut files = Vec::new();
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--output" | "-o" => {
-                    output = Some(PathBuf::from(iter.next().ok_or_else(usage)?));
+        while let Some(raw_arg) = iter.next() {
+            let arg = raw_arg.as_ref();
+            match arg.to_str() {
+                Some("--output" | "-o") => {
+                    output = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()));
                 }
-                "--format" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    format = Some(DiskFormat::from_name(value).ok_or_else(|| {
+                Some("--format") => {
+                    let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                    format = Some(DiskFormat::from_name(&value).ok_or_else(|| {
                         format!(
                             "unknown disk format `{value}`; expected m35fd, m35fd-be, fat12-720, fat12-720k, fat12-1440, fat12-1440k, d64, dcpu, dcpu-be, cpm, mos, dos, or c64"
                         )
                     })?);
                 }
-                "--label" => label = iter.next().ok_or_else(usage)?.clone(),
-                "--file" => files.push(DiskInput::parse(iter.next().ok_or_else(usage)?)?),
-                value if !value.starts_with('-') => files.push(DiskInput::parse(value)?),
+                Some("--label") => label = cli_text(iter.next().ok_or_else(usage)?)?,
+                Some("--file") => files.push(DiskInput::parse(iter.next().ok_or_else(usage)?)?),
+                Some(value) if value.starts_with("--file=") => {
+                    files.push(DiskInput::from_path(&value["--file=".len()..])?)
+                }
+                Some(value) if !value.starts_with('-') => files.push(DiskInput::parse(raw_arg)?),
+                None => files.push(DiskInput::parse(raw_arg)?),
                 _ => return Err(usage()),
             }
         }
@@ -225,31 +250,40 @@ impl DiskCommandOptions {
 }
 
 impl DiskInput {
-    fn parse(specification: &str) -> Result<Self, String> {
-        let (name, path) = match specification.split_once('=') {
-            Some((name, path)) if !name.is_empty() && !path.is_empty() => {
-                (name.to_owned(), PathBuf::from(path))
-            }
-            Some(_) => {
-                return Err(format!(
-                    "invalid disk file `{specification}`; expected PATH or NAME=PATH"
-                ));
-            }
-            None => {
-                let path = PathBuf::from(specification);
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| !name.is_empty())
-                    .ok_or_else(|| {
-                        format!(
-                            "cannot derive a disk file name from `{specification}`; use NAME=PATH"
-                        )
-                    })?
-                    .to_owned();
-                (name, path)
-            }
+    fn parse<T: AsRef<OsStr>>(specification: &T) -> Result<Self, String> {
+        let specification = specification.as_ref();
+        let Some(text) = specification.to_str() else {
+            return Self::from_path_os(specification);
         };
+        match text.split_once('=') {
+            Some((name, path)) if !name.is_empty() && !path.is_empty() => Ok(Self {
+                name: name.to_owned(),
+                path: PathBuf::from(path),
+            }),
+            Some(_) => Err(format!(
+                "invalid disk file `{text}`; expected PATH or NAME=PATH"
+            )),
+            None => Self::from_path(text),
+        }
+    }
+
+    fn from_path(specification: &str) -> Result<Self, String> {
+        Self::from_path_os(OsStr::new(specification))
+    }
+
+    fn from_path_os(specification: &OsStr) -> Result<Self, String> {
+        let path = PathBuf::from(specification);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "cannot derive a disk file name from `{}`; use NAME=PATH",
+                    path.display()
+                )
+            })?
+            .to_owned();
         Ok(Self { name, path })
     }
 }
@@ -275,20 +309,21 @@ struct InstallSyntaxOptions {
 }
 
 impl InstallSyntaxOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
         let mut editors = Vec::new();
         let mut all = false;
         let mut dry_run = false;
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--all" => all = true,
-                "--dry-run" => dry_run = true,
-                "--editor" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    editors.push(SyntaxEditor::parse(value)?);
+        while let Some(raw_arg) = iter.next() {
+            let arg = raw_arg.as_ref();
+            match arg.to_str() {
+                Some("--all") => all = true,
+                Some("--dry-run") => dry_run = true,
+                Some("--editor") => {
+                    let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                    editors.push(SyntaxEditor::parse(&value)?);
                 }
-                value if !value.starts_with('-') => editors.push(SyntaxEditor::parse(value)?),
+                Some(value) if !value.starts_with('-') => editors.push(SyntaxEditor::parse(value)?),
                 _ => return Err(usage()),
             }
         }
@@ -368,17 +403,17 @@ impl SyntaxEditor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildCommandOptions {
-    path: Option<String>,
+    path: Option<PathBuf>,
     debug_comments: bool,
     default_sdk_symbols: bool,
     input_kind: Option<InputKind>,
     assembler_cpu: Option<AssemblerCpu>,
-    layout_path: Option<String>,
+    layout_path: Option<PathBuf>,
     target: Option<String>,
 }
 
 impl BuildCommandOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
         let mut path = None;
         let mut debug_comments = false;
         let mut default_sdk_symbols = true;
@@ -387,27 +422,27 @@ impl BuildCommandOptions {
         let mut layout_path = None;
         let mut target = None;
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--debug-comments" => debug_comments = true,
-                "--no-default-sdk-symbols" => default_sdk_symbols = false,
-                "--input-kind" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    input_kind = Some(InputKind::parse(value)?);
+        while let Some(raw_arg) = iter.next() {
+            let arg = raw_arg.as_ref();
+            match arg.to_str() {
+                Some("--debug-comments") => debug_comments = true,
+                Some("--no-default-sdk-symbols") => default_sdk_symbols = false,
+                Some("--input-kind") => {
+                    let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                    input_kind = Some(InputKind::parse(&value)?);
                 }
-                "--cpu" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    assembler_cpu = Some(AssemblerCpu::parse(value)?);
+                Some("--cpu") => {
+                    let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                    assembler_cpu = Some(AssemblerCpu::parse(&value)?);
                 }
-                "--layout" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    layout_path = Some(value.clone());
+                Some("--layout") => {
+                    layout_path = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()));
                 }
-                "--target" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    target = Some(value.clone());
+                Some("--target") => {
+                    target = Some(cli_text(iter.next().ok_or_else(usage)?)?);
                 }
-                _ if path.is_none() => path = Some(arg.clone()),
+                Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
+                None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
             }
         }
@@ -423,9 +458,9 @@ impl BuildCommandOptions {
     }
 
     #[cfg(test)]
-    fn with_path(path: String, debug_comments: bool) -> Self {
+    fn with_path<P: Into<PathBuf>>(path: P, debug_comments: bool) -> Self {
         Self {
-            path: Some(path),
+            path: Some(path.into()),
             debug_comments,
             default_sdk_symbols: true,
             input_kind: None,
@@ -440,7 +475,7 @@ trait BuildOptionsView {
     fn default_sdk_symbols(&self) -> bool;
     fn input_kind(&self) -> Option<InputKind>;
     fn assembler_cpu(&self) -> Option<AssemblerCpu>;
-    fn layout_path(&self) -> Option<&String>;
+    fn layout_path(&self) -> Option<&Path>;
     fn target(&self) -> Option<&String>;
 }
 
@@ -457,8 +492,8 @@ impl BuildOptionsView for BuildCommandOptions {
         self.assembler_cpu
     }
 
-    fn layout_path(&self) -> Option<&String> {
-        self.layout_path.as_ref()
+    fn layout_path(&self) -> Option<&Path> {
+        self.layout_path.as_deref()
     }
 
     fn target(&self) -> Option<&String> {
@@ -468,34 +503,32 @@ impl BuildOptionsView for BuildCommandOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CommandOptions {
-    path: String,
+    path: PathBuf,
     debug_comments: bool,
     default_sdk_symbols: bool,
-    layout_path: Option<String>,
+    layout_path: Option<PathBuf>,
     target: Option<String>,
 }
 
 impl CommandOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
         let mut path = None;
         let mut debug_comments = false;
         let mut default_sdk_symbols = true;
         let mut layout_path = None;
         let mut target = None;
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--debug-comments" => debug_comments = true,
-                "--no-default-sdk-symbols" => default_sdk_symbols = false,
-                "--layout" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    layout_path = Some(value.clone());
+        while let Some(raw_arg) = iter.next() {
+            let arg = raw_arg.as_ref();
+            match arg.to_str() {
+                Some("--debug-comments") => debug_comments = true,
+                Some("--no-default-sdk-symbols") => default_sdk_symbols = false,
+                Some("--layout") => {
+                    layout_path = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()))
                 }
-                "--target" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    target = Some(value.clone());
-                }
-                _ if path.is_none() => path = Some(arg.clone()),
+                Some("--target") => target = Some(cli_text(iter.next().ok_or_else(usage)?)?),
+                Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
+                None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
             }
         }
@@ -511,28 +544,32 @@ impl CommandOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TestCommandOptions {
-    path: Option<String>,
+    path: Option<PathBuf>,
     debug_comments: bool,
     default_sdk_symbols: bool,
-    layout_path: Option<String>,
+    layout_path: Option<PathBuf>,
     target: Option<String>,
 }
 
 impl TestCommandOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
         let mut path = None;
         let mut debug_comments = false;
         let mut default_sdk_symbols = true;
         let mut layout_path = None;
         let mut target = None;
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--debug-comments" => debug_comments = true,
-                "--no-default-sdk-symbols" => default_sdk_symbols = false,
-                "--layout" => layout_path = Some(iter.next().ok_or_else(usage)?.clone()),
-                "--target" => target = Some(iter.next().ok_or_else(usage)?.clone()),
-                _ if path.is_none() => path = Some(arg.clone()),
+        while let Some(raw_arg) = iter.next() {
+            let arg = raw_arg.as_ref();
+            match arg.to_str() {
+                Some("--debug-comments") => debug_comments = true,
+                Some("--no-default-sdk-symbols") => default_sdk_symbols = false,
+                Some("--layout") => {
+                    layout_path = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()))
+                }
+                Some("--target") => target = Some(cli_text(iter.next().ok_or_else(usage)?)?),
+                Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
+                None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
             }
         }
@@ -545,7 +582,7 @@ impl TestCommandOptions {
         })
     }
 
-    fn command_with_path(&self, path: String) -> CommandOptions {
+    fn command_with_path(&self, path: PathBuf) -> CommandOptions {
         CommandOptions {
             path,
             debug_comments: self.debug_comments,
@@ -569,8 +606,8 @@ impl BuildOptionsView for CommandOptions {
         None
     }
 
-    fn layout_path(&self) -> Option<&String> {
-        self.layout_path.as_ref()
+    fn layout_path(&self) -> Option<&Path> {
+        self.layout_path.as_deref()
     }
 
     fn target(&self) -> Option<&String> {
@@ -580,12 +617,12 @@ impl BuildOptionsView for CommandOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AssembleOptions {
-    path: String,
-    output: Option<String>,
+    path: PathBuf,
+    output: Option<PathBuf>,
     base_addr: Option<u32>,
     assembler_cpu: Option<AssemblerCpu>,
-    layout_path: Option<String>,
-    map_path: Option<String>,
+    layout_path: Option<PathBuf>,
+    map_path: Option<PathBuf>,
     target: Option<String>,
 }
 
@@ -602,16 +639,16 @@ enum IrStage {
 }
 
 impl EmitIrOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
-        let mut rest = Vec::new();
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
+        let mut rest = Vec::<OsString>::new();
         let mut stage = IrStage::Tbir;
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            if arg == "--stage" {
-                let value = iter.next().ok_or_else(usage)?;
-                stage = IrStage::parse(value)?;
+        while let Some(raw_arg) = iter.next() {
+            if raw_arg.as_ref() == OsStr::new("--stage") {
+                let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                stage = IrStage::parse(&value)?;
             } else {
-                rest.push(arg.clone());
+                rest.push(raw_arg.as_ref().to_os_string());
             }
         }
         Ok(Self {
@@ -634,7 +671,7 @@ impl IrStage {
 }
 
 impl AssembleOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse<T: AsRef<OsStr>>(args: &[T]) -> Result<Self, String> {
         let mut path = None;
         let mut output = None;
         let mut base_addr = None;
@@ -643,33 +680,29 @@ impl AssembleOptions {
         let mut map_path = None;
         let mut target = None;
         let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--output" | "-o" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    output = Some(value.clone());
+        while let Some(raw_arg) = iter.next() {
+            let arg = raw_arg.as_ref();
+            match arg.to_str() {
+                Some("--output" | "-o") => {
+                    output = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()))
                 }
-                "--base" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    base_addr = Some(parse_cli_u24(value)?);
+                Some("--base") => {
+                    let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                    base_addr = Some(parse_cli_u24(&value)?);
                 }
-                "--cpu" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    assembler_cpu = Some(AssemblerCpu::parse(value)?);
+                Some("--cpu") => {
+                    let value = cli_text(iter.next().ok_or_else(usage)?)?;
+                    assembler_cpu = Some(AssemblerCpu::parse(&value)?);
                 }
-                "--layout" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    layout_path = Some(value.clone());
+                Some("--layout") => {
+                    layout_path = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()))
                 }
-                "--map" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    map_path = Some(value.clone());
+                Some("--map") => {
+                    map_path = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()))
                 }
-                "--target" => {
-                    let value = iter.next().ok_or_else(usage)?;
-                    target = Some(value.clone());
-                }
-                _ if path.is_none() => path = Some(arg.clone()),
+                Some("--target") => target = Some(cli_text(iter.next().ok_or_else(usage)?)?),
+                Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
+                None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
             }
         }
@@ -703,9 +736,9 @@ fn parse_cli_u24(text: &str) -> Result<u32, String> {
 }
 
 fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
-    let source_path = PathBuf::from(&options.path);
+    let source_path = options.path.clone();
     let target = resolve_target_profile(options.target.as_deref())?;
-    let layout_path = options.layout_path.as_ref().map(PathBuf::from);
+    let layout_path = options.layout_path.clone();
     let layout = load_layout(layout_path.as_deref(), &target.triple.value)?;
     if let Err(errors) = layout.validate() {
         let message = format_layout_errors(layout_path.as_deref(), errors);
@@ -762,8 +795,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     let output_path = options
         .output
-        .as_ref()
-        .map(PathBuf::from)
+        .clone()
         .unwrap_or_else(|| source_path.with_extension(executable_extension(&settings)));
     let mut build_request = shared_build_request(&settings, &source_path)?;
     if settings.executable_name.is_none()
@@ -784,13 +816,26 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         ezra::api::link_assembly_program(&source_path, &preprocessed.program, &build_request)
     }
     .map_err(|error| error.to_string())?;
+    create_parent_directory(&output_path)?;
     fs::write(&output_path, linked.executable)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     println!("wrote {}", output_path.display());
-    if let Some(map_path) = options.map_path.as_ref().map(PathBuf::from) {
-        fs::write(&map_path, linked.map)
+    if let Some(map_path) = options.map_path.as_ref() {
+        create_parent_directory(map_path)?;
+        fs::write(map_path, linked.map)
             .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
         println!("wrote {}", map_path.display());
+    }
+    Ok(())
+}
+
+fn create_parent_directory(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
     Ok(())
 }
@@ -954,7 +999,7 @@ fn resolve_build_settings(
     if target.triple.value.starts_with("nes-") && output_format != OutputFormat::NesRom {
         return Err("NES targets require `.nes` output".to_owned());
     }
-    let layout_path = options.layout_path().map(PathBuf::from).or_else(|| {
+    let layout_path = options.layout_path().map(Path::to_path_buf).or_else(|| {
         project
             .as_ref()
             .and_then(|project| project.layout_file.clone())
@@ -1285,7 +1330,7 @@ fn build(options: &BuildCommandOptions) -> Result<(), String> {
 
     for target in targets {
         let mut target_options = options.clone();
-        target_options.path = Some(source_path.to_string_lossy().into_owned());
+        target_options.path = Some(source_path.clone());
         target_options.target = target;
         let outputs = build_source_with_build_options(&target_options)?;
         println!("wrote {}", outputs.asm.display());
@@ -1341,17 +1386,22 @@ fn build_source_with_build_options(options: &BuildCommandOptions) -> Result<Buil
 
 fn resolve_build_source_path(options: &BuildCommandOptions) -> Result<PathBuf, String> {
     if let Some(path) = &options.path {
-        return Ok(PathBuf::from(path));
+        return Ok(path.clone());
     }
 
     let cwd =
         env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?;
-    let project_path = cwd.join("Ezra.toml");
-    let project = load_project_config(&project_path).map_err(|error| error.to_string())?;
+    let project_probe = cwd.join("Ezra.toml");
+    let project = load_nearest_project_config(&project_probe)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "build requires a source path or an ancestor `Ezra.toml` must define `build.input`"
+                .to_owned()
+        })?;
     project.input.ok_or_else(|| {
         format!(
             "build requires a source path or `{}` must define `build.input`",
-            project_path.display()
+            project.path.display()
         )
     })
 }
@@ -1369,8 +1419,12 @@ fn detect_input_kind(source_path: &Path, settings: &BuildSettings) -> Result<Inp
         return Ok(input_kind);
     }
     match source_path.extension().and_then(|ext| ext.to_str()) {
-        Some("ezra") => Ok(InputKind::Ezra),
-        Some("asm" | "s" | "z80" | "ez80" | "i8080" | "8080" | "i8086" | "8086") => {
+        Some(ext) if ext.eq_ignore_ascii_case("ezra") => Ok(InputKind::Ezra),
+        Some(ext)
+            if ["asm", "s", "z80", "ez80", "i8080", "8080", "i8086", "8086"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known)) =>
+        {
             Ok(InputKind::Assembly)
         }
         Some(ext) => Err(format!(
@@ -1522,16 +1576,60 @@ fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Resul
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| format!("source path `{}` has no file stem", source_path.display()))?,
     };
-    Ok(settings
-        .output_root
-        .join(&settings.target.triple.value)
-        .join(source_stem))
+    validate_artifact_basename(source_stem)?;
+    let mut output_directory = settings.output_root.join(&settings.target.triple.value);
+    if let Some(relative) = source_relative_directory(settings, source_path)? {
+        output_directory.push(relative);
+    }
+    Ok(output_directory.join(source_stem))
+}
+
+fn validate_artifact_basename(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(format!(
+            "artifact executable name `{name}` must be a file basename, not a path"
+        ));
+    }
+    Ok(())
+}
+
+fn source_relative_directory(
+    settings: &BuildSettings,
+    source_path: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let Some(project_root) = settings.output_root.parent() else {
+        return Ok(None);
+    };
+    let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let project_root = absolute_path(project_root)?;
+    let source_dir = absolute_path(source_dir)?;
+    let Ok(relative) = source_dir.strip_prefix(&project_root) else {
+        return Ok(None);
+    };
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Ok(None);
+    }
+    Ok(Some(relative.to_path_buf()))
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(env::current_dir()
+            .map_err(|error| format!("failed to read current directory: {error}"))?
+            .join(path))
+    }
 }
 
 #[cfg(test)]
 fn test_source(path: &str) -> Result<(), String> {
     test_source_with_command_options(&CommandOptions {
-        path: path.to_owned(),
+        path: PathBuf::from(path),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -1562,7 +1660,7 @@ fn test_project_with_command_options(options: &TestCommandOptions) -> Result<(),
             .clone()
             .or_else(|| project.test_target.clone());
         let command = CommandOptions {
-            path: source.display().to_string(),
+            path: source.clone(),
             debug_comments: options.debug_comments,
             default_sdk_symbols: options.default_sdk_symbols,
             layout_path: options.layout_path.clone(),
@@ -1603,25 +1701,49 @@ fn test_project_with_command_options(options: &TestCommandOptions) -> Result<(),
 }
 
 fn discover_ezra_test_sources(root: &Path, sources: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
+    let mut visited = HashSet::new();
+    discover_ezra_test_sources_inner(root, sources, &mut visited)
+}
+
+fn discover_ezra_test_sources_inner(
+    root: &Path,
+    sources: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    let canonical_root = match fs::canonicalize(root) {
+        Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(format!(
-                "failed to read test directory `{}`: {error}",
+                "failed to resolve test directory `{}`: {error}",
                 root.display()
             ));
         }
     };
+    if !visited.insert(canonical_root) {
+        return Ok(());
+    }
+    let entries = fs::read_dir(root).map_err(|error| {
+        format!(
+            "failed to read test directory `{}`: {error}",
+            root.display()
+        )
+    })?;
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("failed to read test directory entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect test directory entry: {error}"))?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
-            discover_ezra_test_sources(&path, sources)?;
+        if file_type.is_dir() {
+            discover_ezra_test_sources_inner(&path, sources, visited)?;
         } else if path
             .extension()
-            .is_some_and(|extension| extension == "ezra")
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("ezra"))
         {
             sources.push(path);
         }
@@ -1642,7 +1764,7 @@ fn test_source_with_command_options(options: &CommandOptions) -> Result<(), Stri
 }
 
 fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm::TestRun, String> {
-    let source_path = PathBuf::from(&options.path);
+    let source_path = options.path.clone();
     let source_location = command_source_start_location(&source_path);
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
@@ -1673,7 +1795,12 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
         )
         .map_err(|error| error.to_string())?,
     )
-    .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
+    .map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    validate_generated_assembly_for_command(&source_path, &source_location, &settings, &assembly)?;
     let run = ezra::vm::run_assembly_test_with_cpu_options_at(
         settings.target.triple.cpu,
         &assembly,
@@ -1798,7 +1925,7 @@ fn emit_asm(options: &CommandOptions) -> Result<(), String> {
 }
 
 fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
-    let source_path = PathBuf::from(&options.command.path);
+    let source_path = options.command.path.clone();
     let source_location = command_source_start_location(&source_path);
     let settings = resolve_build_settings(&options.command, &source_path)?;
     let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
@@ -1842,7 +1969,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
 }
 
 fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String, String> {
-    let source_path = PathBuf::from(&options.path);
+    let source_path = options.path.clone();
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let source_location = command_source_start_location(&source_path);
@@ -1907,7 +2034,7 @@ fn validate_generated_assembly_for_command(
 }
 
 fn check(options: &CommandOptions) -> Result<(), String> {
-    let source_path = PathBuf::from(&options.path);
+    let source_path = options.path.clone();
     let source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     check_source_with_layout(options, &source_path, &source)
@@ -1998,8 +2125,8 @@ fn create_disk(options: &DiskCommandOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn print_layout(path: Option<&str>) -> Result<(), String> {
-    let layout_path = path.map(PathBuf::from);
+fn print_layout(layout_path: Option<&Path>) -> Result<(), String> {
+    let layout_path = layout_path.map(Path::to_path_buf);
     let layout = load_layout(layout_path.as_deref(), ezra::target::DEFAULT_TARGET_TRIPLE)?;
     if let Err(errors) = layout.validate() {
         eprintln!(
@@ -2063,27 +2190,39 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
         .clone()
         .unwrap_or_else(|| default_project_name(root));
     validate_project_name(&project_name)?;
+    let target = resolve_target_profile(Some(&options.target))?;
+    let gitignore_path = root.join(".gitignore");
+    let project_path = root.join("Ezra.toml");
+    let readme_path = root.join("README.md");
+    let assets_gitkeep_path = root.join("assets/.gitkeep");
+    let source_path = root.join("src/main.ezra");
+    let paths = [
+        gitignore_path.clone(),
+        project_path.clone(),
+        readme_path.clone(),
+        assets_gitkeep_path.clone(),
+        source_path.clone(),
+    ];
+    preflight_init(root, &paths, options.force)?;
 
     fs::create_dir_all(root)
         .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
     write_scaffold_file(
-        &root.join(".gitignore"),
+        &gitignore_path,
         options.force,
         "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.tap\n*.gb\n*.prg\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
     )?;
     write_scaffold_file(
-        &root.join("Ezra.toml"),
+        &project_path,
         options.force,
         &format!(
             "[project]\nname = \"{project_name}\"\n\n[build]\ninput = \"src/main.ezra\"\ntarget = \"{}\"\noutput = \"{}\"\nexecutable = \"{project_name}\"\n",
             options.target,
-            resolve_target_profile(Some(&options.target))?
-                .output_format
-                .extension()
+            target.output_format.extension()
         ),
     )?;
     write_scaffold_file(
-        &root.join("README.md"),
+        &readme_path,
         options.force,
         &format!(
             "# {project_name}\n\nBuild with:\n\n```sh\nezrac build\n```\n\nOr from an ezrac checkout:\n\n```sh\ncargo run -- build\n```\n"
@@ -2093,13 +2232,39 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
         .map_err(|error| format!("failed to create {}/src: {error}", root.display()))?;
     fs::create_dir_all(root.join("assets"))
         .map_err(|error| format!("failed to create {}/assets: {error}", root.display()))?;
-    write_scaffold_file(&root.join("assets/.gitkeep"), options.force, "")?;
+    write_scaffold_file(&assets_gitkeep_path, options.force, "")?;
     write_scaffold_file(
-        &root.join("src/main.ezra"),
+        &source_path,
         options.force,
         &initial_main_source(&options.target),
     )?;
     println!("initialized {}", root.display());
+    Ok(())
+}
+
+fn preflight_init(root: &Path, paths: &[PathBuf], force: bool) -> Result<(), String> {
+    if root.exists() && !root.is_dir() {
+        return Err(format!(
+            "cannot initialize project: {} is not a directory",
+            root.display()
+        ));
+    }
+    for directory in [root.to_path_buf(), root.join("src"), root.join("assets")] {
+        if directory.exists() && !directory.is_dir() {
+            return Err(format!(
+                "cannot initialize project: {} is not a directory",
+                directory.display()
+            ));
+        }
+    }
+    for path in paths {
+        if path.exists() && !force {
+            return Err(format!(
+                "refusing to overwrite {}; pass --force to replace existing scaffold files",
+                path.display()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2805,7 +2970,7 @@ mod i8086_review_tests {
     fn cli_builds_msdos_target_as_a_raw_com_from_0100h() {
         let source_path = temp_source("msdos_com", "fn main() {}");
         let outputs = build_source_with_build_options(&BuildCommandOptions {
-            path: Some(source_path.to_string_lossy().into_owned()),
+            path: Some(source_path.clone()),
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: None,
@@ -2840,7 +3005,7 @@ mod i8086_review_tests {
     fn arbitrary_i8086_target_uses_a_16_bit_default_layout() {
         let source_path = temp_source("generic_layout", "fn main() {}");
         let options = CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
@@ -2866,7 +3031,7 @@ mod i8086_review_tests {
     fn cli_check_strictly_rejects_post_8086_inline_assembly() {
         let source_path = temp_source("strict_check", "fn main() { asm volatile { \"pusha\" } }");
         let error = check(&CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
@@ -2885,7 +3050,7 @@ mod i8086_review_tests {
     fn cli_emit_asm_strictly_rejects_post_8086_inline_assembly() {
         let source_path = temp_source("strict_emit", "fn main() { asm volatile { \"pusha\" } }");
         let error = emit_asm(&CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
@@ -2939,10 +3104,10 @@ mod i8086_review_tests {
         .unwrap();
 
         let error = emit_asm(&CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
-            layout_path: Some(layout_path.to_string_lossy().into_owned()),
+            layout_path: Some(layout_path.clone()),
             target: Some("bare-i8086".to_owned()),
         })
         .unwrap_err();

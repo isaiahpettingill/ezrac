@@ -29,15 +29,33 @@ const POINTER_ZP: u32 = 0xF0;
 const U16_MUL_HELPER: &str = "__ezra_u16_mul";
 const U16_DIVMOD_HELPER: &str = "__ezra_u16_divmod";
 
+fn reject_banked_declarations(program: &Program) -> Result<(), Diagnostic> {
+    let Some(bank) = program.declarations.iter().find_map(declaration_bank) else {
+        return Ok(());
+    };
+    Err(Diagnostic::new(format!(
+        "MOS 6502-family targets do not support banked declaration placement in bank {bank}"
+    )))
+}
+
+fn declaration_bank(declaration: &Declaration) -> Option<u32> {
+    match declaration {
+        Declaration::Cfg { declaration, .. } => declaration_bank(declaration),
+        Declaration::Bank { bank, .. } => Some(*bank),
+        _ => None,
+    }
+}
+
 pub fn emit_mos6502_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
+    reject_banked_declarations(program)?;
     let hir = HirProgram::from_ast(program)?;
     let tbir = TbirProgram::lower(&hir, program, &options)?;
     let model = SemanticModel::from_program(
         &tbir.lowered_program,
-        16,
+        options.cpu.capabilities().memory.pointer_width_bits,
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
@@ -3676,7 +3694,10 @@ mod structural_tests {
 
     use super::*;
 
-    fn emit_for_cpu(source: &str, cpu: CpuFamily) -> String {
+    fn emit_for_cpu_result(
+        source: &str,
+        cpu: CpuFamily,
+    ) -> Result<String, crate::diagnostic::Diagnostic> {
         let program = parse_program(Path::new("test.ezra"), source).unwrap();
         emit_mos6502_assembly_with_options(
             &program,
@@ -3689,7 +3710,10 @@ mod structural_tests {
                 ..AssemblyOptions::default()
             },
         )
-        .unwrap()
+    }
+
+    fn emit_for_cpu(source: &str, cpu: CpuFamily) -> String {
+        emit_for_cpu_result(source, cpu).unwrap()
     }
 
     fn emit(source: &str) -> String {
@@ -3717,6 +3741,44 @@ mod structural_tests {
         let start = model.next_ram_address();
         let bindings = plan_static_locals(program.main_function().unwrap(), &mut model).unwrap();
         (bindings, model.next_ram_address() - start)
+    }
+
+    #[test]
+    fn rejects_banked_declarations_instead_of_omitting_them() {
+        let source = "@cfg(bank(2)) fn banked() {}\nfn main() { banked() }";
+        for cpu in [
+            CpuFamily::Mos6502,
+            CpuFamily::Cmos65C02,
+            CpuFamily::Wdc65C816,
+            CpuFamily::Ricoh2A03,
+        ] {
+            let error = emit_for_cpu_result(source, cpu).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("do not support banked declaration placement"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn uses_24_bit_semantic_pointers_for_65c816_addresses() {
+        let assembly = emit_for_cpu(
+            r#"
+                global observed: u24 = 0
+                volatile mmio far: ptr<u8> = 0x123456
+                fn main() {
+                    let pointer: ptr<u8> = 0x123456
+                    observed = pointer
+                    *far = 0x42
+                }
+            "#,
+            CpuFamily::Wdc65C816,
+        );
+
+        assert!(assembly.contains("    lda #$12"), "{assembly}");
+        assert!(assembly.contains("    sta $123456"), "{assembly}");
     }
 
     #[test]

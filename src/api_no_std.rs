@@ -4,23 +4,28 @@ use crate::compat::prelude::*;
 
 pub use crate::workspace::{Workspace, WorkspaceFile};
 
+#[cfg(feature = "avr")]
+use crate::asm::emit_avr_assembly_with_options;
 #[cfg(feature = "i8086")]
 use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "mos6502")]
 use crate::asm::emit_mos6502_assembly_with_options;
 
 use crate::{
-    asm::{AssemblyOptions, emit_ez80_assembly_with_options},
+    asm::{AssemblyOptions, AssemblyProgram, emit_ez80_assembly_with_options},
     ast::{CfgPredicate, Declaration, Program},
     diagnostic::Diagnostic,
     layout::{Layout, default_layout_for_target},
-    package::{PackageRequest, package_executable},
+    package::{PackageContext, PackageRequest, package_executable_with_context},
     parser::parse_program,
     target::{
-        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, OutputFormat,
-        memory_model_for_cpu, resolve_target_profile,
+        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, OutputFormat, TargetProfile,
+        is_msdos_i8086_target, memory_model_for_cpu, resolve_target_profile,
     },
-    vm::{AssemblySymbol, assemble_subset_with_symbols_at},
+    vm::{
+        AssemblerSourceOptions, AssemblySymbol, assemble_program_with_options_at,
+        assemble_subset_with_options_at, assemble_subset_with_symbols_at,
+    },
     workspace::{materialize_workspace_embeds, normalize_virtual_path},
 };
 
@@ -70,12 +75,66 @@ pub struct AssemblyCompilation {
     pub assembly: String,
 }
 
+/// Resolved build configuration for filesystem-free alloc-only consumers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildRequest {
+    pub target: TargetProfile,
+    pub output_format: OutputFormat,
+    pub assembler_cpu: AssemblerCpu,
+    pub layout: Layout,
+    pub executable_name: Option<String>,
+    pub package_context: PackageContext,
+}
+
+impl BuildRequest {
+    pub fn for_target(target: impl AsRef<str>) -> Result<Self, Diagnostic> {
+        let target = resolve_target_profile(Some(target.as_ref())).map_err(Diagnostic::new)?;
+        let layout = layout_for_target(&target.triple.value, target.triple.cpu);
+        validate_layout_for_cpu(&layout, target.triple.cpu, &target.triple.value)?;
+        Ok(Self {
+            output_format: target.output_format,
+            assembler_cpu: AssemblerCpu::from(target.triple.cpu),
+            target,
+            layout,
+            executable_name: None,
+            package_context: PackageContext::new(),
+        })
+    }
+
+    fn package_request(&self) -> PackageRequest {
+        PackageRequest {
+            target: self.target.triple.value.clone(),
+            output_format: self.output_format,
+            load_addr: self.layout.load.get(),
+            entry_addr: self.layout.entry.get(),
+            executable_name: self.executable_name.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkInput {
+    Generated,
+    Assembly,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkedCompilation {
+    pub machine_code: Vec<u8>,
+    pub map: String,
+    pub symbols: Vec<AssemblySymbol>,
+    pub executable: Vec<u8>,
+    pub output_format: OutputFormat,
+    pub executable_extension: &'static str,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuildCompilation {
     pub report: CompileReport,
     pub program: Program,
     pub assembly: String,
     pub machine_code: Vec<u8>,
+    pub map: String,
     pub symbols: Vec<AssemblySymbol>,
     pub executable: Vec<u8>,
     pub output_format: OutputFormat,
@@ -101,6 +160,44 @@ pub fn compile_workspace_to_assembly(
     let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
     let layout = layout_for_target(&request.target, target.triple.cpu);
     validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
+    compile_workspace_to_assembly_with_resolved_request(workspace, root, request, &target, &layout)
+}
+
+/// Compile a virtual workspace using an explicit target layout and code-generation settings.
+pub fn compile_workspace_to_assembly_with_request(
+    workspace: &Workspace<'_>,
+    root: &str,
+    request: &CompileRequest,
+    build: &BuildRequest,
+) -> Result<AssemblyCompilation, Diagnostic> {
+    if request.target != build.target.triple.value {
+        return Err(Diagnostic::new(format!(
+            "compile target `{}` does not match build target `{}`",
+            request.target, build.target.triple.value
+        )));
+    }
+    validate_layout_for_cpu(
+        &build.layout,
+        build.target.triple.cpu,
+        &build.target.triple.value,
+    )?;
+    compile_workspace_to_assembly_with_resolved_request(
+        workspace,
+        root,
+        request,
+        &build.target,
+        &build.layout,
+    )
+}
+
+fn compile_workspace_to_assembly_with_resolved_request(
+    workspace: &Workspace<'_>,
+    root: &str,
+    request: &CompileRequest,
+    target: &TargetProfile,
+    layout: &Layout,
+) -> Result<AssemblyCompilation, Diagnostic> {
+    reject_assembly_only_source_target(target)?;
     if !matches!(
         target.triple.cpu,
         CpuFamily::Ez80
@@ -110,21 +207,21 @@ pub fn compile_workspace_to_assembly(
             | CpuFamily::I8080
             | CpuFamily::I8085
             | CpuFamily::I8086
+            | CpuFamily::Avr
             | CpuFamily::Mos6502
             | CpuFamily::Cmos65C02
             | CpuFamily::Wdc65C816
             | CpuFamily::Ricoh2A03
     ) {
         return Err(Diagnostic::new(format!(
-            "no-std source code generation is currently available only for eZ80/Z80, i8086, and MOS 6502-family targets, not `{}`",
+            "no-std source code generation is currently available only for eZ80/Z80, i8086, AVR, and MOS 6502-family targets, not `{}`",
             target.triple.cpu.as_str()
         )));
     }
 
     let root = normalize_virtual_path(root);
     let source = workspace_text(workspace, &root)?;
-    let mut root_program = parse_program(&root, source)?;
-    materialize_workspace_embeds(&mut root_program, workspace)?;
+    let root_program = parse_program(&root, source)?;
     let imports = root_program
         .declarations
         .iter()
@@ -150,9 +247,10 @@ pub fn compile_workspace_to_assembly(
         declarations: program.declarations.len(),
         has_main,
     };
-    let options = assembly_options_for_target(
-        &request.target,
+    let options = assembly_options_for_layout(
+        layout,
         target.triple.cpu,
+        &request.target,
         request.debug_comments,
         request.default_sdk_symbols,
     );
@@ -166,6 +264,18 @@ pub fn compile_workspace_to_assembly(
             {
                 return Err(Diagnostic::new(
                     "i8086 source compilation requires the `i8086` Cargo feature",
+                ));
+            }
+        }
+        CpuFamily::Avr => {
+            #[cfg(feature = "avr")]
+            {
+                emit_avr_assembly_with_options(&program, options)?
+            }
+            #[cfg(not(feature = "avr"))]
+            {
+                return Err(Diagnostic::new(
+                    "AVR source compilation requires the `avr` Cargo feature",
                 ));
             }
         }
@@ -183,7 +293,7 @@ pub fn compile_workspace_to_assembly(
         }
         _ => emit_ez80_assembly_with_options(&program, options)?,
     };
-    validate_generated_assembly(&assembly, target.triple.cpu, &layout)?;
+    validate_generated_assembly(&assembly, target.triple.cpu, layout)?;
     Ok(AssemblyCompilation {
         report,
         program,
@@ -197,43 +307,147 @@ pub fn build_workspace(
     root: &str,
     request: &CompileRequest,
 ) -> Result<BuildCompilation, Diagnostic> {
-    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
-    let layout = layout_for_target(&request.target, target.triple.cpu);
-    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
-    let compilation = compile_workspace_to_assembly(workspace, root, request)?;
-    let assembled = assemble_subset_with_symbols_at(
-        AssemblerCpu::from(target.triple.cpu),
-        &compilation.assembly,
-        layout.entry.get(),
+    let mut build = BuildRequest::for_target(&request.target)?;
+    build.executable_name = normalize_virtual_path(root)
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.split('.').next())
+        .map(str::to_owned);
+    build_workspace_with_request(workspace, root, request, &build)
+}
+
+/// Compile, assemble, and package a virtual workspace with explicit build settings.
+pub fn build_workspace_with_request(
+    workspace: &Workspace<'_>,
+    root: &str,
+    request: &CompileRequest,
+    build: &BuildRequest,
+) -> Result<BuildCompilation, Diagnostic> {
+    if request.target != build.target.triple.value {
+        return Err(Diagnostic::new(format!(
+            "compile target `{}` does not match build target `{}`",
+            request.target, build.target.triple.value
+        )));
+    }
+    validate_layout_for_cpu(
+        &build.layout,
+        build.target.triple.cpu,
+        &build.target.triple.value,
     )?;
-    validate_text_section_fit(&layout, assembled_text_len(&assembled))?;
+    let compilation = compile_workspace_to_assembly_with_request(workspace, root, request, build)?;
     let root = normalize_virtual_path(root);
-    let package_request = PackageRequest {
-        target: request.target.clone(),
-        output_format: target.output_format,
-        load_addr: layout.load.get(),
-        entry_addr: layout.entry.get(),
-        executable_name: root
-            .rsplit('/')
-            .next()
-            .and_then(|name| name.split('.').next())
-            .map(str::to_owned),
-    };
-    let executable = package_executable(&package_request, &assembled.bytes)
-        .map_err(|error| Diagnostic::new(error.message))?;
+    let linked =
+        link_generated_assembly(&root, &compilation.assembly, &compilation.program, build)?;
 
     Ok(BuildCompilation {
         report: compilation.report,
         program: compilation.program,
         assembly: compilation.assembly,
-        machine_code: assembled.bytes,
-        symbols: assembled.symbols,
+        machine_code: linked.machine_code,
+        map: linked.map,
+        symbols: linked.symbols,
+        executable: linked.executable,
+        output_format: linked.output_format,
+        executable_extension: linked.executable_extension,
+    })
+}
+
+/// Link generated assembly and package it with caller-owned build settings.
+pub fn link_generated_assembly(
+    source_path: &str,
+    assembly: &str,
+    _program: &Program,
+    build: &BuildRequest,
+) -> Result<LinkedCompilation, Diagnostic> {
+    validate_layout_for_cpu(
+        &build.layout,
+        build.target.triple.cpu,
+        &build.target.triple.value,
+    )?;
+    let assembled = assemble_subset_with_options_at(
+        build.assembler_cpu,
+        assembly,
+        build.layout.entry.get(),
+        &assembly_source_options(source_path, &build.layout),
+    )?;
+    validate_text_section_fit(&build.layout, assembled_text_len(&assembled))?;
+    let map = flat_assembly_map_at(
+        assembled.bytes.len(),
+        &assembled.symbols,
+        build.layout.entry.get(),
+    )?;
+    package_linked(build, assembled.bytes, map, assembled.symbols)
+}
+
+/// Link a preprocessed standalone assembly program at the layout load address.
+pub fn link_assembly_program(
+    source_path: &str,
+    program: &AssemblyProgram,
+    build: &BuildRequest,
+) -> Result<LinkedCompilation, Diagnostic> {
+    link_assembly_program_at(source_path, program, build.layout.load.get(), build)
+}
+
+/// Link a preprocessed standalone assembly program at an explicit base address.
+pub fn link_assembly_program_at(
+    source_path: &str,
+    program: &AssemblyProgram,
+    base_addr: u32,
+    build: &BuildRequest,
+) -> Result<LinkedCompilation, Diagnostic> {
+    validate_layout_for_cpu(
+        &build.layout,
+        build.target.triple.cpu,
+        &build.target.triple.value,
+    )?;
+    let max_addr = if build.target.memory.address_width_bits >= 24 {
+        Address24::MAX
+    } else {
+        (1u32 << build.target.memory.address_width_bits) - 1
+    };
+    if base_addr > max_addr {
+        return Err(Diagnostic::new(format!(
+            "base address 0x{base_addr:X} is outside the {}-bit address space for target `{}`",
+            build.target.memory.address_width_bits, build.target.triple.value
+        )));
+    }
+    if build.output_format == OutputFormat::GameBoyGb && base_addr != 0x0150 {
+        return Err(Diagnostic::new(
+            "Game Boy assembly must use base address 0x0150",
+        ));
+    }
+    let assembled = assemble_program_with_options_at(
+        build.assembler_cpu,
+        program,
+        base_addr,
+        &assembly_source_options(source_path, &build.layout),
+    )?;
+    let map = flat_assembly_map_at(assembled.bytes.len(), &assembled.symbols, base_addr)?;
+    package_linked(build, assembled.bytes, map, assembled.symbols)
+}
+
+fn package_linked(
+    build: &BuildRequest,
+    machine_code: Vec<u8>,
+    map: String,
+    symbols: Vec<AssemblySymbol>,
+) -> Result<LinkedCompilation, Diagnostic> {
+    let executable = package_executable_with_context(
+        &build.package_request(),
+        &build.package_context,
+        &machine_code,
+    )
+    .map_err(|error| Diagnostic::new(error.message))?;
+    Ok(LinkedCompilation {
+        machine_code,
+        map,
+        symbols,
         executable,
-        output_format: target.output_format,
-        executable_extension: if request.target.starts_with("gameboy-color-") {
+        output_format: build.output_format,
+        executable_extension: if build.target.triple.value.starts_with("gameboy-color-") {
             "gbc"
         } else {
-            target.output_format.extension()
+            build.output_format.extension()
         },
     })
 }
@@ -269,6 +483,7 @@ fn resolve_program(
     }
 
     program.declarations = active_declarations(program.declarations, request)?;
+    materialize_workspace_embeds(&mut program, workspace)?;
     let short_counts = direct_import_short_module_counts(&program);
     stack.push(path.clone());
     let mut declarations = Vec::new();
@@ -288,8 +503,8 @@ fn resolve_program(
         }
         let source = workspace_text(workspace, &import_path)?;
         let mut imported = parse_program(&import_path, source)?;
-        materialize_workspace_embeds(&mut imported, workspace)?;
         imported.declarations = active_declarations(imported.declarations, request)?;
+        materialize_workspace_embeds(&mut imported, workspace)?;
         let short = import.rsplit('.').next().unwrap_or(import);
         let aliases = module_alias_declarations(
             import,
@@ -511,6 +726,16 @@ pub fn assembly_options_for_target(
     default_sdk_symbols: bool,
 ) -> AssemblyOptions {
     let layout = layout_for_target(target, cpu);
+    assembly_options_for_layout(&layout, cpu, target, debug_comments, default_sdk_symbols)
+}
+
+pub fn assembly_options_for_layout(
+    layout: &Layout,
+    cpu: CpuFamily,
+    target: &str,
+    debug_comments: bool,
+    default_sdk_symbols: bool,
+) -> AssemblyOptions {
     let symbol = |name: &str| {
         layout
             .symbols
@@ -524,7 +749,7 @@ pub fn assembly_options_for_target(
         cpu,
         debug_comments,
         default_sdk_symbols,
-        dos_executable: target == crate::target::MSDOS_COM_I8086_TARGET,
+        dos_executable: is_msdos_i8086_target(target),
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         ti_os_executable: target.starts_with("ti83-z80")
@@ -693,6 +918,54 @@ fn validate_text_section_fit(layout: &Layout, code_len: usize) -> Result<(), Dia
         return Err(Diagnostic::new(format!(
             "section `.text` does not fit in region `{}`",
             region.name
+        )));
+    }
+    Ok(())
+}
+
+fn assembly_source_options(source_path: &str, layout: &Layout) -> AssemblerSourceOptions {
+    AssemblerSourceOptions {
+        source_path: Some(source_path.to_owned()),
+        symbols: layout
+            .symbols
+            .iter()
+            .map(|symbol| AssemblySymbol {
+                name: symbol.name.clone(),
+                addr: symbol.value.get(),
+            })
+            .collect(),
+        ..AssemblerSourceOptions::default()
+    }
+}
+
+fn flat_assembly_map_at(
+    code_len: usize,
+    symbols: &[AssemblySymbol],
+    base_addr: u32,
+) -> Result<String, Diagnostic> {
+    let code_len = u32::try_from(code_len)
+        .map_err(|_| Diagnostic::new("assembled program exceeds the 24-bit address space"))?;
+    let end = base_addr
+        .checked_add(code_len.saturating_sub(1))
+        .ok_or_else(|| Diagnostic::new("assembled program exceeds the 24-bit address space"))?;
+    let mut out = format!(
+        "section      start      end        size\n{:<12} 0x{:06X} 0x{:06X} 0x{:06X}\n",
+        ".text", base_addr, end, code_len
+    );
+    if !symbols.is_empty() {
+        out.push_str("\nsymbol       address\n");
+        for symbol in symbols {
+            out.push_str(&format!("{:<12} 0x{:06X}\n", symbol.name, symbol.addr));
+        }
+    }
+    Ok(out)
+}
+
+fn reject_assembly_only_source_target(target: &TargetProfile) -> Result<(), Diagnostic> {
+    if target.triple.value.starts_with("nes-") {
+        return Err(Diagnostic::new(format!(
+            "target `{}` is assembly-only; use NES assembly input instead of EZRA source",
+            target.triple.value
         )));
     }
     Ok(())

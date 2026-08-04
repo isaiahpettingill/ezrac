@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::{
     asm::{
         AssemblyOptions,
@@ -11,6 +9,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
     },
+    compat::prelude::*,
     diagnostic::Diagnostic,
     hir::HirProgram,
     regalloc::{

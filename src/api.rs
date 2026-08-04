@@ -30,7 +30,7 @@ use crate::{
     parser::parse_program,
     target::{
         Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, OutputFormat, TargetProfile,
-        resolve_target_profile,
+        is_msdos_i8086_target, resolve_target_profile,
     },
     tbir::diagnostics::validate_program,
     vm::{
@@ -41,6 +41,8 @@ use crate::{
     workspace::normalize_virtual_path,
 };
 
+#[cfg(feature = "avr")]
+use crate::asm::emit_avr_assembly_with_options;
 #[cfg(feature = "dcpu")]
 use crate::asm::emit_dcpu_assembly_with_options;
 #[cfg(feature = "i8086")]
@@ -234,6 +236,7 @@ pub fn compile_workspace_to_assembly_with_request(
     request: &CompileRequest,
     build: &BuildRequest,
 ) -> Result<AssemblyCompilation, Diagnostic> {
+    reject_assembly_only_source_target(&build.target)?;
     if request.target != build.target.triple.value {
         return Err(Diagnostic::new(format!(
             "compile target `{}` does not match build target `{}`",
@@ -961,6 +964,8 @@ fn build_output_map(
 
 fn uses_flat_output_map(build: &BuildRequest) -> bool {
     build.output_format == OutputFormat::CpmCom
+        || (build.target.triple.cpu == CpuFamily::I8086
+            && build.output_format == OutputFormat::RawBin)
         || bare_target_cpu(&build.target.triple.value).is_some()
         || build.target.triple.value.starts_with("zxspectrum-z80")
         || build.target.triple.value.starts_with("gameboy-")
@@ -1018,6 +1023,7 @@ fn compile_source_to_assembly_with_overrides(
     source_overrides: &HashMap<PathBuf, String>,
 ) -> Result<AssemblyCompilation, Diagnostic> {
     let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    reject_assembly_only_source_target(&target)?;
     let layout = layout_for_target(&request.target, target.triple.cpu);
     validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
     let sdk = request.sdk_resolver();
@@ -1082,7 +1088,7 @@ pub fn assembly_options_for_layout(
         cpu,
         debug_comments,
         default_sdk_symbols,
-        dos_executable: target == crate::target::MSDOS_COM_I8086_TARGET,
+        dos_executable: is_msdos_i8086_target(target),
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         ti_os_executable: target.starts_with("ti83-z80")
@@ -1349,12 +1355,30 @@ fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<S
                 ))
             }
         }
-        CpuFamily::Avr => Err(Diagnostic::new(format!(
-            "EZRA source code generation is not implemented for CPU `{}`",
-            options.cpu.as_str()
-        ))),
+        CpuFamily::Avr => {
+            #[cfg(feature = "avr")]
+            {
+                emit_avr_assembly_with_options(program, options)
+            }
+            #[cfg(not(feature = "avr"))]
+            {
+                Err(Diagnostic::new(
+                    "AVR source compilation requires the `avr` Cargo feature",
+                ))
+            }
+        }
         _ => emit_ez80_assembly_with_options(program, options),
     }
+}
+
+fn reject_assembly_only_source_target(target: &TargetProfile) -> Result<(), Diagnostic> {
+    if target.triple.value.starts_with("nes-") {
+        return Err(Diagnostic::new(format!(
+            "target `{}` is assembly-only; use NES assembly input instead of EZRA source",
+            target.triple.value
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve the source path used by a compilation request relative to a host

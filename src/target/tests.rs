@@ -62,6 +62,25 @@ fn resolves_i8086_aliases_and_bare_target_capabilities() {
 }
 
 #[test]
+fn classifies_canonical_and_versioned_msdos_i8086_targets() {
+    assert!(is_msdos_i8086_target("msdos-com-i8086"));
+    assert!(is_msdos_i8086_target("msdos-com-i8086-6.22"));
+    assert!(!is_msdos_i8086_target("msdos-com-i8086-"));
+    assert!(!is_msdos_i8086_target("msdos-com-z80-6.22"));
+}
+
+#[cfg(feature = "i8086")]
+#[test]
+fn versioned_msdos_i8086_targets_use_the_canonical_profile() {
+    let profile = resolve_target_profile(Some("msdos-com-i8086-6.22")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::I8086);
+    assert_eq!(profile.output_format, OutputFormat::CpmCom);
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert!(profile.default_sdk_symbols);
+}
+
+#[test]
 fn rejects_targets_without_known_cpu_family() {
     let error = parse_target_triple("agonlight-console8").unwrap_err();
     assert!(error.contains("missing a supported CPU family"), "{error}");

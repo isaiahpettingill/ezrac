@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::diagnostic::Diagnostic;
+use crate::{compat::prelude::*, diagnostic::Diagnostic};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperandMode {

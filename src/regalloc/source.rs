@@ -289,7 +289,12 @@ impl Builder<'_> {
                 let mut instruction = Instruction::new();
                 let has_call = self.collect_expr(value, &mut instruction);
                 self.add_def(name, &mut instruction);
-                self.push_instruction(block, instruction, has_call);
+                if has_call {
+                    // A let result is defined after its call; only the call's
+                    // source locals need opaque storage.
+                    self.opaque_locals.extend(instruction.uses.iter().copied());
+                }
+                self.push_instruction(block, instruction, false);
                 Some(block)
             }
             Stmt::Assign { target, op, value } => {

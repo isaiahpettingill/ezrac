@@ -18,7 +18,7 @@ fn ez80_flat_harness_target_runs_and_captures_output() {
     .unwrap();
 
     let run = run_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -51,7 +51,7 @@ fn ez80_harness_target_reports_execution_traps() {
     .unwrap();
 
     let error = test_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -88,7 +88,7 @@ fn ez80_harness_preserves_port_output_ordering() {
     .unwrap();
 
     let run = run_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -128,7 +128,7 @@ fn ez80_harness_preserves_inline_asm_memory_clobber_barrier() {
     .unwrap();
 
     test_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -160,7 +160,7 @@ fn ez80_harness_preserves_volatile_memory_ordering() {
     .unwrap();
 
     test_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -178,7 +178,7 @@ fn ez80_flat_harness_runs_complex_sdk_fixture_and_raw_artifacts() {
     let source_path = copy_fixture(&root, "flat_complex.ezra");
 
     let options = CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -210,7 +210,7 @@ fn ez80_split_harness_runs_complex_sdk_fixture_and_split_artifacts() {
     let source_path = copy_fixture(&root, "split_complex.ezra");
 
     let options = CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -327,7 +327,7 @@ fn commands_run_z80_source_on_emulator() {
     .unwrap();
 
     test_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -363,7 +363,7 @@ fn test_command_runs_cpm_8080_and_8085_source_targets() {
         .unwrap();
 
         test_source_with_command_options(&CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: false,
             layout_path: None,

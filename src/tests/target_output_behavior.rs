@@ -31,8 +31,8 @@ fn game_boy_targets_write_valid_dmg_and_cgb_roms() {
     ] {
         let output = root.join(format!("{target}.gb"));
         assemble_file(&AssembleOptions {
-            path: source_path.to_string_lossy().into_owned(),
-            output: Some(output.to_string_lossy().into_owned()),
+            path: source_path.clone(),
+            output: Some(output.clone()),
             base_addr: None,
             assembler_cpu: None,
             layout_path: None,
@@ -107,7 +107,7 @@ fn game_boy_targets_compile_ezra_source_with_embedded_assets() {
 
     for target in ["gameboy-dmg-lr35902", "gameboy-color-lr35902"] {
         let outputs = build_source_with_build_options(&BuildCommandOptions {
-            path: Some(source_path.to_string_lossy().into_owned()),
+            path: Some(source_path.clone()),
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: Some(InputKind::Ezra),
@@ -178,7 +178,7 @@ fn game_boy_explicit_banking_packages_banked_embed_and_emits_bank_zero_runtime()
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -217,7 +217,7 @@ fn game_boy_source_examples_build_as_roms() {
             ("gameboy-color-lr35902", 0xC0),
         ] {
             let outputs = build_source_with_build_options(&BuildCommandOptions {
-                path: Some(source.to_string_lossy().into_owned()),
+                path: Some(source.clone()),
                 debug_comments: false,
                 default_sdk_symbols: true,
                 input_kind: Some(InputKind::Ezra),
@@ -256,7 +256,7 @@ fn commodore64_source_example_builds_as_prg() {
     let source =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/commodore64/hello/src/main.ezra");
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source.to_string_lossy().into_owned()),
+        path: Some(source.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -301,11 +301,9 @@ fn commodore64_crt_build_writes_a_standard_autostart_cartridge() {
     )
     .unwrap();
 
-    let outputs = build_source_with_build_options(&BuildCommandOptions::with_path(
-        source.to_string_lossy().into_owned(),
-        false,
-    ))
-    .unwrap();
+    let outputs =
+        build_source_with_build_options(&BuildCommandOptions::with_path(source.clone(), false))
+            .unwrap();
     assert_eq!(
         outputs
             .executable
@@ -400,7 +398,7 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
     .unwrap();
 
     let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: false,
         layout_path: None,
@@ -579,7 +577,7 @@ fn zxspectrum_bank_configuration_requires_the_128k_target() {
 fn spectrum_tap_preserves_a_custom_load_address() {
     let mut settings = resolve_build_settings(
         &CommandOptions {
-            path: "game.ezra".to_owned(),
+            path: PathBuf::from("game.ezra"),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
@@ -772,7 +770,7 @@ fn cpm_z80_source_build_writes_com_binary() {
     std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
 
     let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -801,7 +799,7 @@ fn cpm_z80_source_examples_use_sdk_and_write_com_binaries() {
         let source_path = root.join(format!("{name}.ezra"));
         std::fs::copy(examples.join(format!("{name}.ezra")), &source_path).unwrap();
         let outputs = build_source_with_command_options(&CommandOptions {
-            path: source_path.to_string_lossy().into_owned(),
+            path: source_path.clone(),
             debug_comments: false,
             default_sdk_symbols: true,
             layout_path: None,
@@ -842,7 +840,7 @@ fn cpm_8080_source_build_uses_sdk_and_writes_com_binary() {
     .unwrap();
 
     let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: false,
         layout_path: None,
@@ -888,7 +886,7 @@ fn cpm_8085_source_build_uses_sdk_and_writes_com_binary() {
     .unwrap();
 
     let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: false,
         layout_path: None,

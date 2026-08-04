@@ -31,8 +31,8 @@ use crate::{
     layout::{Layout, default_layout_for_target},
     parser::parse_program,
     target::{
-        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, memory_model_for_cpu,
-        parse_target_triple,
+        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, is_msdos_i8086_target,
+        memory_model_for_cpu, parse_target_triple,
     },
     workspace::{Workspace, materialize_workspace_embeds},
 };
@@ -274,7 +274,7 @@ fn diagnostic_assembly_options(
         cpu,
         debug_comments,
         default_sdk_symbols,
-        dos_executable: target == crate::target::MSDOS_COM_I8086_TARGET,
+        dos_executable: is_msdos_i8086_target(target),
         mos_executable: layout.name == "agon_light_mos",
         c64_executable: matches!(layout.name.as_str(), "commodore64_6502" | "commodore64_crt"),
         ti_os_executable: target.starts_with("ti83-z80")
@@ -1146,9 +1146,6 @@ fn resolve_program_imports(
     source_overrides: &HashMap<PathBuf, String>,
     workspace: Option<&Workspace<'_>>,
 ) -> Result<Program, Diagnostic> {
-    if let Some(workspace) = workspace {
-        materialize_workspace_embeds(&mut program, workspace)?;
-    }
     let path = normalize_path(&program.source_path);
     if stack.contains(&path) {
         let mut cycle = stack
@@ -1171,6 +1168,9 @@ fn resolve_program_imports(
     }
 
     program.declarations = active_declarations(program.declarations, sdk)?;
+    if let Some(workspace) = workspace {
+        materialize_workspace_embeds(&mut program, workspace)?;
+    }
 
     validate_private_import_access(&program, sdk, source_overrides)?;
 
@@ -1193,10 +1193,10 @@ fn resolve_program_imports(
         }
         let source = source_override(source_overrides, &import_path).unwrap_or(source);
         let mut imported = parse_program(&import_path, &source)?;
+        imported.declarations = active_declarations(imported.declarations, sdk)?;
         if let Some(workspace) = workspace {
             materialize_workspace_embeds(&mut imported, workspace)?;
         }
-        imported.declarations = active_declarations(imported.declarations, sdk)?;
         let short_module = import.rsplit('.').next().unwrap_or(import);
         let include_short_aliases = short_module_counts
             .get(short_module)
@@ -1490,7 +1490,7 @@ fn import_file_candidates(source_path: &Path, import: &str, sdk: &SdkResolver) -
 }
 
 fn builtin_sdk_path(target: Option<&str>, import: &str) -> PathBuf {
-    if target == Some(crate::target::MSDOS_COM_I8086_TARGET) && import.starts_with("dos.") {
+    if target.is_some_and(is_msdos_i8086_target) && import.starts_with("dos.") {
         PathBuf::from(format!(
             "toolchains/msdos-i8086/sdk/{}.ezra",
             import.replace('.', "/")
@@ -1525,7 +1525,7 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
-    } else if target == Some(crate::target::MSDOS_COM_I8086_TARGET) {
+    } else if target.is_some_and(is_msdos_i8086_target) {
         match import {
             "dos.constants" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/msdos-i8086/sdk/dos/constants.ezra"),

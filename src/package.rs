@@ -181,6 +181,14 @@ pub fn package_executable_with_context(
     code: &[u8],
 ) -> Result<Vec<u8>, PackageError> {
     if request.target.starts_with("agonlight-mos-ez80") {
+        if matches!(
+            request.output_format,
+            OutputFormat::IntelHex | OutputFormat::ArduinoHex
+        ) {
+            return Err(PackageError::new(
+                "Agon MOS targets do not support Intel HEX output; use `.bin` output",
+            ));
+        }
         return match context.image_kind {
             PackageImageKind::EntryCode => agon_mos_bytes(request.entry_addr, code),
             PackageImageKind::LoadImage => agon_mos_load_image_bytes(request, code),
@@ -189,7 +197,11 @@ pub fn package_executable_with_context(
     match request.output_format {
         OutputFormat::RawBin | OutputFormat::CpmCom | OutputFormat::Ez180nGaem => Ok(code.to_vec()),
         OutputFormat::IntelHex | OutputFormat::ArduinoHex => {
-            Ok(intel_hex_bytes(request.load_addr, code))
+            let base_addr = match context.image_kind {
+                PackageImageKind::EntryCode => request.entry_addr,
+                PackageImageKind::LoadImage => request.load_addr,
+            };
+            intel_hex_bytes(base_addr, code)
         }
         OutputFormat::Arduboy => arduboy_package_bytes(request, context, code),
         OutputFormat::Ti8xp => ti8xp_bytes(request, context, code),
@@ -356,20 +368,47 @@ fn agon_mos_load_image_bytes(
     Ok(image)
 }
 
-fn intel_hex_bytes(base_addr: u32, code: &[u8]) -> Vec<u8> {
+fn intel_hex_bytes(base_addr: u32, code: &[u8]) -> Result<Vec<u8>, PackageError> {
+    if base_addr > Address24::MAX {
+        return Err(PackageError::new(format!(
+            "Intel HEX base address 0x{base_addr:X} is outside the 24-bit address space"
+        )));
+    }
+    if !code.is_empty() {
+        let code_len = u32::try_from(code.len())
+            .map_err(|_| PackageError::new("Intel HEX payload exceeds the 24-bit address space"))?;
+        base_addr
+            .checked_add(code_len - 1)
+            .filter(|end| *end <= Address24::MAX)
+            .ok_or_else(|| {
+                PackageError::new("Intel HEX payload exceeds the 24-bit address space")
+            })?;
+    }
+
     let mut out = String::new();
     let mut current_upper = None;
-    for (offset, chunk) in code.chunks(16).enumerate() {
-        let addr = base_addr + (offset * 16) as u32;
-        let upper = (addr >> 16) as u16;
+    let mut offset = 0usize;
+    while offset < code.len() {
+        let offset_u32 = u32::try_from(offset)
+            .map_err(|_| PackageError::new("Intel HEX payload exceeds host addressable memory"))?;
+        let addr = base_addr.checked_add(offset_u32).ok_or_else(|| {
+            PackageError::new("Intel HEX payload exceeds the 24-bit address space")
+        })?;
+        let upper = addr >> 16;
+        let upper = u16::try_from(upper)
+            .map_err(|_| PackageError::new("Intel HEX address exceeds the 24-bit address space"))?;
         if current_upper != Some(upper) {
             current_upper = Some(upper);
             push_ihex_record(&mut out, 0, 4, &upper.to_be_bytes());
         }
-        push_ihex_record(&mut out, addr as u16, 0, chunk);
+        let segment_remaining = (0x1_0000u32 - (addr & 0xFFFF)) as usize;
+        let chunk_len = code.len() - offset;
+        let chunk_len = chunk_len.min(16).min(segment_remaining);
+        push_ihex_record(&mut out, addr as u16, 0, &code[offset..offset + chunk_len]);
+        offset += chunk_len;
     }
     push_ihex_record(&mut out, 0, 1, &[]);
-    out.into_bytes()
+    Ok(out.into_bytes())
 }
 fn push_ihex_record(out: &mut String, address: u16, kind: u8, data: &[u8]) {
     let mut sum = (data.len() as u8)
@@ -415,7 +454,11 @@ fn arduboy_package_bytes(
             PackageError::new("Arduboy packaging requires a resolved executable name")
         })?;
     let hex_filename = format!("{executable}.hex");
-    let hex = intel_hex_bytes(request.load_addr, code);
+    let hex_base_addr = match context.image_kind {
+        PackageImageKind::EntryCode => request.entry_addr,
+        PackageImageKind::LoadImage => request.load_addr,
+    };
+    let hex = intel_hex_bytes(hex_base_addr, code)?;
     let info = arduboy_info_json(options, &hex_filename);
     stored_zip_bytes(&[("info.json", info.as_bytes()), (&hex_filename, &hex)])
 }

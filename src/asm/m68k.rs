@@ -1,7 +1,6 @@
-use std::{
-    collections::HashMap,
-    panic::{AssertUnwindSafe, catch_unwind},
-};
+use crate::compat::prelude::*;
+#[cfg(feature = "std")]
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use m68000::{
     addressing_modes::{AddressingMode as AM, BriefExtensionWord},
@@ -22,12 +21,15 @@ pub fn encode(
     pc: u32,
     resolve: bool,
 ) -> Result<Vec<u8>, Diagnostic> {
+    #[cfg(feature = "std")]
     let words = catch_unwind(AssertUnwindSafe(|| encode_words(text, labels, pc, resolve)))
         .map_err(|_| {
             Diagnostic::new(format!(
                 "invalid 68000 instruction or addressing mode `{text}`"
             ))
         })??;
+    #[cfg(not(feature = "std"))]
+    let words = encode_words(text, labels, pc, resolve)?;
     let mut out = Vec::with_capacity(words.len() * 2);
     for w in words {
         out.push((w >> 8) as u8);

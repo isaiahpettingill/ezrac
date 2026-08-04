@@ -69,7 +69,7 @@ fn build_uses_project_input_kind_for_assembly() {
     .unwrap();
 
     let outputs = build_source(source_path.to_str().unwrap()).unwrap();
-    let expected_base = root.join("target/cpm-2.2-z80/demo");
+    let expected_base = root.join("target/cpm-2.2-z80/src/demo");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
     assert_eq!(outputs.map, expected_base.with_extension("map"));
@@ -122,7 +122,7 @@ fn build_uses_project_input_when_path_is_omitted() {
         target: None,
     })
     .unwrap();
-    let expected_base = root.join("target/cpm-2.2-z80/demo");
+    let expected_base = root.join("target/cpm-2.2-z80/src/demo");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
     assert_eq!(outputs.map, expected_base.with_extension("map"));
@@ -153,7 +153,7 @@ fn build_builds_every_configured_project_target() {
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
     build(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: None,
@@ -163,10 +163,10 @@ fn build_builds_every_configured_project_target() {
     })
     .unwrap();
 
-    assert!(root.join("target/cpm-2.2-z80/demo.asm").exists());
-    assert!(root.join("target/cpm-2.2-z80/demo.com").exists());
-    assert!(root.join("target/zxspectrum-z80/demo.asm").exists());
-    assert!(root.join("target/zxspectrum-z80/demo.tap").exists());
+    assert!(root.join("target/cpm-2.2-z80/src/demo.asm").exists());
+    assert!(root.join("target/cpm-2.2-z80/src/demo.com").exists());
+    assert!(root.join("target/zxspectrum-z80/src/demo.asm").exists());
+    assert!(root.join("target/zxspectrum-z80/src/demo.tap").exists());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -188,7 +188,7 @@ fn explicit_build_target_overrides_project_target_array() {
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
     build(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: None,
@@ -199,7 +199,7 @@ fn explicit_build_target_overrides_project_target_array() {
     .unwrap();
 
     assert!(!root.join("target/cpm-2.2-z80").exists());
-    assert!(root.join("target/zxspectrum-z80/demo.tap").exists());
+    assert!(root.join("target/zxspectrum-z80/src/demo.tap").exists());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -234,6 +234,7 @@ fn ez80_harness_project_config_writes_target_artifacts() {
     let expected_base = root
         .join("target")
         .join("ezra-test-flat-ez80")
+        .join("src")
         .join("harness-game");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
@@ -302,7 +303,7 @@ fn commands_use_ezra_toml_target_and_layout() {
     .unwrap();
 
     check(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -329,13 +330,118 @@ fn cli_target_overrides_project_target() {
     .unwrap();
 
     check(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ti84plusce-ez80".to_owned()),
     })
     .unwrap();
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn init_preflight_does_not_leave_partial_scaffolds() {
+    let root = temp_root("init_preflight");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Ezra.toml"), "existing\n").unwrap();
+
+    let error = init_project(&InitOptions {
+        path: root.clone(),
+        name: Some("demo".to_owned()),
+        target: "agonlight-mos-ez80".to_owned(),
+        force: false,
+    })
+    .unwrap_err();
+
+    assert!(error.contains("refusing to overwrite"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("Ezra.toml")).unwrap(),
+        "existing\n"
+    );
+    assert!(!root.join(".gitignore").exists());
+    assert!(!root.join("README.md").exists());
+    assert!(!root.join("src").exists());
+    assert!(!root.join("assets").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_less_build_finds_the_nearest_ancestor_project() {
+    let _lock = CWD_LOCK.lock().unwrap();
+    let root = temp_root("nearest_source_less_build");
+    let nested = root.join("work/deeper");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        "[build]\ninput = \"src/main.asm\"\ntarget = \"cpm-2.2-z80\"\ninput_kind = \"assembly\"\nexecutable = \"demo\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/main.asm"), "ld c, 00h\ncall 0005h\n").unwrap();
+
+    let _cwd = CurrentDirGuard::switch_to(&nested);
+    let outputs = build_source_with_build_options(&BuildCommandOptions {
+        path: None,
+        debug_comments: false,
+        default_sdk_symbols: true,
+        input_kind: None,
+        assembler_cpu: None,
+        layout_path: None,
+        target: None,
+    })
+    .unwrap();
+    assert_eq!(
+        outputs.executable,
+        root.join("target/cpm-2.2-z80/src/demo.com")
+    );
+
+    drop(_cwd);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_artifacts_preserve_source_directories_for_same_stems() {
+    let root = temp_root("same_stem_artifacts");
+    let first = root.join("src/one/main.ezra");
+    let second = root.join("src/two/main.ezra");
+    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+    std::fs::write(root.join("Ezra.toml"), "[build]\ntarget = \"bare-z80\"\n").unwrap();
+    std::fs::write(&first, "fn main() {}\n").unwrap();
+    std::fs::write(&second, "fn main() {}\n").unwrap();
+
+    let first_outputs = build_source(first.to_str().unwrap()).unwrap();
+    let second_outputs = build_source(second.to_str().unwrap()).unwrap();
+    assert_eq!(
+        first_outputs.executable,
+        root.join("target/bare-z80/src/one/main.bin")
+    );
+    assert_eq!(
+        second_outputs.executable,
+        root.join("target/bare-z80/src/two/main.bin")
+    );
+    assert_ne!(first_outputs.executable, second_outputs.executable);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_discovery_does_not_follow_symlink_cycles() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("test_discovery_symlink_cycle");
+    let tests_root = root.join("tests");
+    std::fs::create_dir_all(&tests_root).unwrap();
+    std::fs::write(tests_root.join("real.EZRA"), "fn main() {}\n").unwrap();
+    symlink(".", tests_root.join("cycle")).unwrap();
+
+    let mut sources = Vec::new();
+    discover_ezra_test_sources(&tests_root, &mut sources).unwrap();
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].ends_with(Path::new("real.EZRA")));
 
     let _ = std::fs::remove_dir_all(root);
 }

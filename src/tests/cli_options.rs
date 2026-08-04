@@ -11,8 +11,8 @@ fn assemble_options_parse_base_and_output() {
     ])
     .unwrap();
 
-    assert_eq!(options.path, "main.asm");
-    assert_eq!(options.output, Some("out.bin".to_owned()));
+    assert_eq!(options.path, PathBuf::from("main.asm"));
+    assert_eq!(options.output, Some(PathBuf::from("out.bin")));
     assert_eq!(options.base_addr, Some(0x04_0000));
     assert_eq!(options.target, None);
 }
@@ -26,7 +26,7 @@ fn assemble_options_parse_target() {
     ])
     .unwrap();
 
-    assert_eq!(options.path, "main.asm");
+    assert_eq!(options.path, PathBuf::from("main.asm"));
     assert_eq!(options.target, Some("cpm-2.2-z80".to_owned()));
     assert_eq!(options.output, None);
     assert_eq!(options.base_addr, None);
@@ -43,7 +43,7 @@ fn build_options_parse_input_kind() {
     ])
     .unwrap();
 
-    assert_eq!(options.path.as_deref(), Some("main.txt"));
+    assert_eq!(options.path.as_deref(), Some(Path::new("main.txt")));
     assert_eq!(options.input_kind, Some(InputKind::Assembly));
     assert_eq!(options.assembler_cpu, Some(AssemblerCpu::Z180));
 }
@@ -54,7 +54,7 @@ fn assemble_options_parse_cpu() {
         AssembleOptions::parse(&["--cpu".to_owned(), "z80n".to_owned(), "main.asm".to_owned()])
             .unwrap();
 
-    assert_eq!(options.path, "main.asm");
+    assert_eq!(options.path, PathBuf::from("main.asm"));
     assert_eq!(options.assembler_cpu, Some(AssemblerCpu::Z80N));
 }
 
@@ -68,7 +68,7 @@ fn emit_ir_options_parse_stage() {
     .unwrap();
 
     assert_eq!(options.stage, IrStage::Hir);
-    assert_eq!(options.command.path, "game.ezra");
+    assert_eq!(options.command.path, PathBuf::from("game.ezra"));
 }
 
 #[test]
@@ -136,8 +136,34 @@ fn disk_options_infer_common_image_extensions() {
 }
 
 #[test]
+fn disk_options_accept_an_equals_path_with_an_explicit_file_syntax() {
+    let options = DiskCommandOptions::parse(&[
+        "--output".to_owned(),
+        "image.dsk".to_owned(),
+        "--file=assets/level=one.bin".to_owned(),
+    ])
+    .unwrap();
+
+    assert_eq!(options.files[0].name, "level=one.bin");
+    assert_eq!(options.files[0].path, PathBuf::from("assets/level=one.bin"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_option_parsing_preserves_non_utf8_paths() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let path = std::ffi::OsString::from_vec(b"source-\xFF.asm".to_vec());
+    let options = BuildCommandOptions::parse(&[path.clone()]).unwrap();
+    assert_eq!(
+        options.path.as_deref().unwrap().as_os_str().as_bytes(),
+        path.as_os_str().as_bytes()
+    );
+}
+
+#[test]
 fn install_syntax_options_require_editor_selection() {
-    let error = InstallSyntaxOptions::parse(&[]).unwrap_err();
+    let error = InstallSyntaxOptions::parse::<String>(&[]).unwrap_err();
 
     assert!(error.contains("requires `--all`"), "{error}");
 }

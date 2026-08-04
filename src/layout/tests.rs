@@ -182,6 +182,23 @@ fn cpm_z80_com_layout_uses_com_entry_and_stays_in_16_bit_address_space() {
 }
 
 #[test]
+fn versioned_msdos_i8086_targets_use_the_com_layout() {
+    for target in ["msdos-com-i8086", "msdos-com-i8086-6.22"] {
+        let layout = default_layout_for_target(target);
+
+        assert_eq!(layout.name, "msdos_i8086_com");
+        assert_eq!(layout.load.get(), 0x0100);
+        assert_eq!(layout.entry.get(), 0x0100);
+        assert!(
+            layout
+                .regions
+                .iter()
+                .all(|region| region.end.get() <= 0xFFFF)
+        );
+    }
+}
+
+#[test]
 fn overlapping_regions_are_reported() {
     let mut layout = Layout::ezra_default();
     layout

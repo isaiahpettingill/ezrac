@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::diagnostic::Diagnostic;
+use crate::{compat::prelude::*, diagnostic::Diagnostic};
 
 pub fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
     Ok(encode(text, &HashMap::new(), 0, false)?.len())

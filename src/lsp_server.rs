@@ -13,7 +13,7 @@ use ezra::{
         CompileOptions, SdkResolver, builtin_sdk_modules,
         check_module_diagnostics_with_sdk_and_overrides,
         check_source_semantic_diagnostics_with_sdk_and_overrides,
-        parse_and_resolve_imports_with_sdk, resolve_import_source,
+        parse_and_resolve_imports_with_sdk_and_overrides, resolve_import_source,
     },
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
     layout::parse_layout,
@@ -30,9 +30,11 @@ use serde_json::{Value, json};
 struct Server {
     documents: BTreeMap<String, OpenDocument>,
     published_diagnostic_uris: BTreeSet<String>,
+    workspace_roots: BTreeSet<PathBuf>,
     shutdown_requested: bool,
 }
 
+#[derive(Clone)]
 struct OpenDocument {
     path: PathBuf,
     text: String,
@@ -200,6 +202,7 @@ impl Server {
         }
         match message.method.as_str() {
             "initialize" => {
+                self.capture_workspace_roots(&message.params);
                 if let Some(id) = message.id {
                     write_response(output, id, initialize_result())?;
                 }
@@ -219,9 +222,11 @@ impl Server {
                 if let Some(id) = message.id {
                     let params: CompletionParams = serde_json::from_value(message.params)
                         .map_err(|error| format!("invalid completion params: {error}"))?;
-                    let result = completion_items(
+                    let source_overrides = self.source_overrides();
+                    let result = completion_items_with_overrides(
                         self.documents.get(&params.text_document.uri),
                         params.position,
+                        &source_overrides,
                     );
                     write_response(output, id, result)?;
                 }
@@ -230,9 +235,11 @@ impl Server {
                 if let Some(id) = message.id {
                     let params: HoverParams = serde_json::from_value(message.params)
                         .map_err(|error| format!("invalid hover params: {error}"))?;
-                    let result = hover(
+                    let source_overrides = self.source_overrides();
+                    let result = hover_with_overrides(
                         self.documents.get(&params.text_document.uri),
                         params.position,
+                        &source_overrides,
                     );
                     write_response(output, id, result)?;
                 }
@@ -241,9 +248,11 @@ impl Server {
                 if let Some(id) = message.id {
                     let params: CompletionParams = serde_json::from_value(message.params)
                         .map_err(|error| format!("invalid signature help params: {error}"))?;
-                    let result = signature_help(
+                    let source_overrides = self.source_overrides();
+                    let result = signature_help_with_overrides(
                         self.documents.get(&params.text_document.uri),
                         params.position,
+                        &source_overrides,
                     );
                     write_response(output, id, result)?;
                 }
@@ -252,9 +261,11 @@ impl Server {
                 if let Some(id) = message.id {
                     let params: CompletionParams = serde_json::from_value(message.params)
                         .map_err(|error| format!("invalid definition params: {error}"))?;
-                    let result = definition(
+                    let source_overrides = self.source_overrides();
+                    let result = definition_with_overrides(
                         self.documents.get(&params.text_document.uri),
                         params.position,
+                        &source_overrides,
                     );
                     write_response(output, id, result)?;
                 }
@@ -325,6 +336,38 @@ impl Server {
         self.publish_workspace_diagnostics(output)
     }
 
+    fn capture_workspace_roots(&mut self, params: &Value) {
+        let mut roots = Vec::new();
+        if let Some(uri) = params.get("rootUri").and_then(Value::as_str) {
+            roots.push(uri.to_owned());
+        }
+        if let Some(folders) = params.get("workspaceFolders").and_then(Value::as_array) {
+            roots.extend(
+                folders
+                    .iter()
+                    .filter_map(|folder| folder.get("uri").and_then(Value::as_str))
+                    .map(str::to_owned),
+            );
+        }
+        for uri in roots {
+            if let Ok(path) = uri_to_path(&uri) {
+                self.workspace_roots.insert(path);
+            }
+        }
+    }
+
+    fn source_overrides(&self) -> HashMap<PathBuf, String> {
+        let mut overrides = HashMap::new();
+        for document in self.documents.values() {
+            overrides.insert(document.path.clone(), document.text.clone());
+            overrides.insert(
+                normalize_document_path(&document.path),
+                document.text.clone(),
+            );
+        }
+        overrides
+    }
+
     fn did_close(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
         let params: DidCloseParams = serde_json::from_value(params)
             .map_err(|error| format!("invalid didClose params: {error}"))?;
@@ -352,19 +395,21 @@ impl Server {
     }
 
     fn publish_workspace_diagnostics(&mut self, output: &mut impl Write) -> Result<(), String> {
-        let source_overrides = self
-            .documents
-            .values()
-            .map(|document| {
-                (
-                    normalize_document_path(&document.path),
-                    document.text.clone(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        let source_overrides = self.source_overrides();
         let mut roots = BTreeSet::new();
+        let mut layout_projects = BTreeSet::new();
         let mut diagnostics = Vec::new();
         for document in self.documents.values() {
+            if is_layout_document(&document.path) {
+                match load_nearest_project_config(&document.path) {
+                    Ok(Some(project)) => {
+                        layout_projects.insert(normalize_document_path(&project.path));
+                    }
+                    Ok(None) => {}
+                    Err(error) => diagnostics.push((document.path.clone(), error, false)),
+                }
+                continue;
+            }
             if is_assembly_document(&document.path) {
                 match check_assembly_document_diagnostics(document) {
                     Ok(document_diagnostics) => diagnostics.extend(
@@ -448,13 +493,19 @@ impl Server {
                     (diagnostic_path, diagnostic, warning)
                 }));
             }
-            if !is_bundled_sdk && !is_library {
-                diagnostics.extend(
-                    project_layout_diagnostics(&path)
-                        .into_iter()
-                        .map(|(path, diagnostic)| (path, diagnostic, false)),
-                );
+            if !is_bundled_sdk
+                && !is_library
+                && let Ok(Some(project)) = load_nearest_project_config(&path)
+            {
+                layout_projects.insert(normalize_document_path(&project.path));
             }
+        }
+        for project_path in layout_projects {
+            diagnostics.extend(
+                project_layout_diagnostics(&project_path, &source_overrides)
+                    .into_iter()
+                    .map(|(path, diagnostic)| (path, diagnostic, false)),
+            );
         }
 
         let mut publications = self
@@ -518,9 +569,58 @@ impl Server {
     }
 
     fn workspace_symbols(&self, query: &str) -> Value {
+        let source_overrides = self.source_overrides();
+        let mut documents = self
+            .documents
+            .iter()
+            .map(|(uri, document)| (uri.clone(), document.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut project_roots = self
+            .workspace_roots
+            .iter()
+            .map(|root| {
+                if root.is_dir() {
+                    root.clone()
+                } else {
+                    root.parent().unwrap_or(root).to_path_buf()
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        for document in self.documents.values() {
+            if let Ok(Some(project)) = load_nearest_project_config(&document.path) {
+                project_roots.insert(project.root);
+            }
+        }
+        let mut open_paths = self
+            .documents
+            .values()
+            .map(|document| normalize_document_path(&document.path))
+            .collect::<BTreeSet<_>>();
+        for root in project_roots {
+            let mut paths = Vec::new();
+            collect_project_source_paths(&root, &mut paths);
+            for path in paths {
+                let normalized = normalize_document_path(&path);
+                if !open_paths.insert(normalized) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                documents.insert(
+                    path_to_uri(&path),
+                    OpenDocument {
+                        path,
+                        text,
+                        version: None,
+                    },
+                );
+            }
+        }
+
         let mut symbols = BTreeMap::new();
-        for (uri, document) in &self.documents {
-            for symbol in document_symbol_values(document, uri) {
+        for (uri, document) in &documents {
+            for symbol in document_symbol_values_with_overrides(document, uri, &source_overrides) {
                 let Some(name) = symbol.get("name").and_then(Value::as_str) else {
                     continue;
                 };
@@ -537,6 +637,9 @@ impl Server {
 
 #[cfg(test)]
 fn check_document_diagnostics(document: &OpenDocument) -> Vec<Diagnostic> {
+    if is_layout_document(&document.path) {
+        return Vec::new();
+    }
     let sdk = match sdk_for_path(&document.path) {
         Ok(sdk) => sdk,
         Err(error) => return vec![error],
@@ -654,6 +757,7 @@ fn bundled_sdk_context(path: &Path) -> Option<BundledSdkContext> {
         "msdos-i8086" => "msdos-com-i8086",
         "ez180n-ez80" => "ez180n-ez80",
         "ezra-test-ez80" => "ezra-test-ez80",
+        "arduboy-avr" => "arduboy-avr",
         "zxspectrum-z80" => "zxspectrum-z80",
         _ => return None,
     };
@@ -697,6 +801,10 @@ fn sdks_for_path(path: &Path) -> Result<Vec<SdkResolver>, Diagnostic> {
         .collect())
 }
 
+fn is_layout_document(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("ezralayout")
+}
+
 fn is_project_input(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == "Ezra.toml")
         || matches!(
@@ -705,7 +813,49 @@ fn is_project_input(path: &Path) -> bool {
         )
 }
 
-fn project_layout_diagnostics(root: &Path) -> Vec<(PathBuf, Diagnostic)> {
+fn source_override(source_overrides: &HashMap<PathBuf, String>, path: &Path) -> Option<String> {
+    source_overrides
+        .get(path)
+        .or_else(|| source_overrides.get(&normalize_document_path(path)))
+        .cloned()
+        .or_else(|| {
+            let portable = path.to_string_lossy().replace('\\', "/");
+            source_overrides
+                .iter()
+                .find(|(candidate, _)| candidate.to_string_lossy().replace('\\', "/") == portable)
+                .map(|(_, source)| source.clone())
+        })
+}
+
+fn collect_project_source_paths(directory: &Path, paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if matches!(entry.file_name().to_str(), Some(".git" | "target")) {
+                continue;
+            }
+            collect_project_source_paths(&path, paths);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("ezra") {
+            paths.push(path);
+        }
+    }
+}
+
+fn project_layout_diagnostics(
+    root: &Path,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Vec<(PathBuf, Diagnostic)> {
     let Ok(Some(project)) = load_nearest_project_config(root) else {
         return Vec::new();
     };
@@ -718,7 +868,10 @@ fn project_layout_diagnostics(root: &Path) -> Vec<(PathBuf, Diagnostic)> {
 
     let mut diagnostics = Vec::new();
     for path in layout_paths {
-        match std::fs::read_to_string(&path) {
+        let source = source_override(source_overrides, &path)
+            .map(Ok)
+            .unwrap_or_else(|| std::fs::read_to_string(&path));
+        match source {
             Ok(source) => match parse_layout(&source) {
                 Ok(layout) => {
                     if let Err(errors) = layout.validate() {
@@ -790,7 +943,16 @@ fn register_file_watchers(output: &mut impl Write) -> Result<(), String> {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn completion_items(document: Option<&OpenDocument>, position: Position) -> Value {
+    completion_items_with_overrides(document, position, &HashMap::new())
+}
+
+fn completion_items_with_overrides(
+    document: Option<&OpenDocument>,
+    position: Position,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Value {
     let mut prefix = document
         .map(|document| completion_prefix(&document.text, position))
         .unwrap_or_default();
@@ -809,7 +971,7 @@ fn completion_items(document: Option<&OpenDocument>, position: Position) -> Valu
         standard_completion_items()
     };
     if let Some(document) = document {
-        let index = symbol_index(document);
+        let index = symbol_index_with_overrides(document, source_overrides);
         for module in &index.modules {
             items.push(completion_item(module, 9, "module"));
         }
@@ -1038,14 +1200,23 @@ fn completion_item(label: &str, kind: u8, detail: &str) -> Value {
     json!({ "label": label, "kind": kind, "detail": detail })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn hover(document: Option<&OpenDocument>, position: Position) -> Value {
+    hover_with_overrides(document, position, &HashMap::new())
+}
+
+fn hover_with_overrides(
+    document: Option<&OpenDocument>,
+    position: Position,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Value {
     let Some(document) = document else {
         return Value::Null;
     };
     let Some(symbol) = symbol_at_position(&document.text, position) else {
         return Value::Null;
     };
-    let index = symbol_index(document);
+    let index = symbol_index_with_overrides(document, source_overrides);
     if let Some(info) = index.symbols.get(&symbol) {
         let mut body = format!("```ezra\n{}\n```", info.detail);
         if let Some(comment) = function_comment(&document.text, &symbol) {
@@ -1102,14 +1273,23 @@ fn function_comment(source: &str, name: &str) -> Option<String> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn definition(document: Option<&OpenDocument>, position: Position) -> Value {
+    definition_with_overrides(document, position, &HashMap::new())
+}
+
+fn definition_with_overrides(
+    document: Option<&OpenDocument>,
+    position: Position,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Value {
     let Some(document) = document else {
         return Value::Null;
     };
     let Some(symbol) = symbol_at_position(&document.text, position) else {
         return Value::Null;
     };
-    let index = symbol_index(document);
+    let index = symbol_index_with_overrides(document, source_overrides);
     index
         .definitions
         .get(&symbol)
@@ -1129,7 +1309,15 @@ fn document_symbols(document: Option<&OpenDocument>, uri: &str) -> Value {
 }
 
 fn document_symbol_values(document: &OpenDocument, uri: &str) -> Vec<Value> {
-    let index = symbol_index(document);
+    document_symbol_values_with_overrides(document, uri, &HashMap::new())
+}
+
+fn document_symbol_values_with_overrides(
+    document: &OpenDocument,
+    uri: &str,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Vec<Value> {
+    let index = symbol_index_with_overrides(document, source_overrides);
     index
         .symbols
         .values()
@@ -1257,14 +1445,23 @@ fn collect_line_semantic_tokens(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn signature_help(document: Option<&OpenDocument>, position: Position) -> Value {
+    signature_help_with_overrides(document, position, &HashMap::new())
+}
+
+fn signature_help_with_overrides(
+    document: Option<&OpenDocument>,
+    position: Position,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> Value {
     let Some(document) = document else {
         return Value::Null;
     };
     let Some((name, active_parameter)) = call_at_position(&document.text, position) else {
         return Value::Null;
     };
-    let index = symbol_index(document);
+    let index = symbol_index_with_overrides(document, source_overrides);
     let Some(symbol) = index.symbols.get(&name) else {
         return Value::Null;
     };
@@ -1346,9 +1543,19 @@ fn call_at_position(source: &str, position: Position) -> Option<(String, usize)>
 }
 
 fn symbol_index(document: &OpenDocument) -> SymbolIndex {
+    symbol_index_with_overrides(document, &HashMap::new())
+}
+
+fn symbol_index_with_overrides(
+    document: &OpenDocument,
+    source_overrides: &HashMap<PathBuf, String>,
+) -> SymbolIndex {
     let sdk = sdk_for_path(&document.path).ok();
     let mut index = SymbolIndex::default();
     add_builtin_modules(&mut index, sdk.as_ref());
+    if is_layout_document(&document.path) {
+        return index;
+    }
     match parse_program(&document.path, &document.text) {
         Ok(program) => {
             add_program_symbols(&mut index, &program.declarations);
@@ -1362,15 +1569,21 @@ fn symbol_index(document: &OpenDocument) -> SymbolIndex {
         Err(_) => add_recovery_symbols(&mut index, &document.text),
     }
     if let Some(sdk) = sdk.as_ref() {
-        match parse_and_resolve_imports_with_sdk(&document.path, &document.text, sdk) {
+        match parse_and_resolve_imports_with_sdk_and_overrides(
+            &document.path,
+            &document.text,
+            sdk,
+            source_overrides,
+        ) {
             Ok(program) => add_program_symbols(&mut index, &program.declarations),
-            Err(_) => add_recovery_import_symbols(&mut index, document, sdk),
+            Err(_) => add_recovery_import_symbols(&mut index, document, sdk, source_overrides),
         }
         add_import_definitions(
             &mut index,
             &document.path,
             &document.text,
             sdk,
+            source_overrides,
             &mut BTreeSet::new(),
         );
     }
@@ -1444,12 +1657,14 @@ fn add_import_definitions(
     importer: &Path,
     source: &str,
     sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
     seen: &mut BTreeSet<PathBuf>,
 ) {
     for import in source_imports(source) {
-        let Ok((path, imported_source)) = resolve_import_source(importer, &import, sdk) else {
+        let Ok((path, disk_source)) = resolve_import_source(importer, &import, sdk) else {
             continue;
         };
+        let imported_source = source_override(source_overrides, &path).unwrap_or(disk_source);
         if path.to_string_lossy().starts_with('<') || !seen.insert(path.clone()) {
             continue;
         }
@@ -1495,7 +1710,7 @@ fn add_import_definitions(
                     .insert(format!("{import}.{}", symbol.label), definition);
             }
         }
-        add_import_definitions(index, &path, &imported_source, sdk, seen);
+        add_import_definitions(index, &path, &imported_source, sdk, source_overrides, seen);
     }
 }
 
@@ -1552,6 +1767,7 @@ fn add_recovery_import_symbols(
     index: &mut SymbolIndex,
     document: &OpenDocument,
     sdk: &SdkResolver,
+    source_overrides: &HashMap<PathBuf, String>,
 ) {
     let imports = document
         .text
@@ -1569,7 +1785,12 @@ fn add_recovery_import_symbols(
         .collect::<BTreeSet<_>>();
     for import in imports {
         let source = format!("import {import}\nfn main() {{}}\n");
-        if let Ok(program) = parse_and_resolve_imports_with_sdk(&document.path, &source, sdk) {
+        if let Ok(program) = parse_and_resolve_imports_with_sdk_and_overrides(
+            &document.path,
+            &source,
+            sdk,
+            source_overrides,
+        ) {
             add_program_symbols(index, &program.declarations);
         }
     }

@@ -6,7 +6,7 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085/8086, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800, and M68k. Some families require their optional Cargo feature; 8086 requires `i8086`, MOS 6502 requires `mos6502`, TMS9900 requires `tms9900`, AVR requires `avr`, M68k requires `m68k`, and DCPU-16 requires `dcpu`.
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085/8086, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800/M6809, and M68k. Default builds enable every compiler backend. Consumers using `--no-default-features` can enable only the backend features they need; every backend supports `no_std + alloc` compilation.
 
 Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have complete EZRA source code generation; optional DCPU-16, M6800, M68k, and TMS9900 targets have target-specific source emitters. MOS 6502 variants also have a source emitter; the initial TMS9900 backend is a documented 8-/16-bit scalar subset. AVR has a complete register-ABI source backend.
 
@@ -29,7 +29,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | --- | ---: | --- | ---: | --- | --- | --- |
 | `agonlight-mos-ez80` | 2 | eZ80 ADL | 24 | Agon MOS `.bin` | `agon.*` | Main source target; real-core publication pending |
 | `custom-unknown-ez80` | 2 | eZ80 ADL | 24 | `.bin` | none | Generic eZ80 source target |
-| `ez180n-ez80` | 1 | eZ80 ADL | 24 | `.gaem` | `ez180n.*` | Three examples verified on ez180N nightly |
+| `ez180n-ez80` | 1 | eZ80 ADL | 24 | `.gaem` | `ez180n.*` | Four examples verified on ez180N nightly |
 | `ezra-test-flat-ez80` | 2 | eZ80 ADL | 24 | `.bin` | `harness.*` | Automated test harness target |
 | `ezra-test-split-ez80` | 2 | eZ80 ADL | 24 | `.bin` | `harness.*` | Automated test harness target |
 | `ti84plusce-ez80` | 2 | eZ80 ADL | 24 | `.8xp` | `tice.*` | Protected programs and 16-bit graphics verified on CEmu |
@@ -214,7 +214,7 @@ Target:
 ez180n-ez80
 ```
 
-The `ez180n-ez80` target emits raw `.gaem` files that load directly in the ez180N libretro core. Its default layout keeps the compiler's required metadata header just before the console load address and starts executable code at `0x010000`, matching the core's raw cartridge loader. The console exposes an `80x56` character framebuffer at `0x080000`.
+The `ez180n-ez80` target emits raw `.gaem` entry-code files that load directly at `0x010000` in the ez180N libretro core. The default memory map reserves `0x00FFC0..0x00FFFF` for console metadata, but those reserved bytes are not prefixed to the raw `.gaem` file. The console exposes an `80x56` character framebuffer at `0x080000`.
 
 Built-in SDK modules:
 

@@ -2192,6 +2192,21 @@ impl Emitter {
     }
 
     fn short_circuit(&mut self, left: &Expr, op: BinaryOp, right: &Expr) -> Result<(), Diagnostic> {
+        if let Ok(value) = self.model.const_value(left) {
+            let left_is_true = value != 0;
+            let short_circuits = match op {
+                BinaryOp::And => !left_is_true,
+                BinaryOp::Or => left_is_true,
+                _ => false,
+            };
+            if short_circuits {
+                self.load_constant(i64::from(op == BinaryOp::Or), 1);
+            } else {
+                self.emit_expr(right, &bool_ty())?;
+            }
+            return Ok(());
+        }
+
         let decisive = self.next_label("logical_decisive");
         let done = self.next_label("logical_done");
         self.emit_expr_preserving(left, &bool_ty(), &[right])?;

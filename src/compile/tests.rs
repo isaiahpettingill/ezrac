@@ -1689,6 +1689,43 @@ fn rejects_cyclic_imports() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "i8086")]
+#[test]
+fn versioned_msdos_i8086_targets_use_the_dos_sdk_and_startup() {
+    let target = "msdos-com-i8086-6.22";
+    let sdk = SdkResolver {
+        target: Some(target.to_owned()),
+        sdk_roots: Vec::new(),
+    };
+
+    assert!(builtin_sdk_modules(Some(target)).contains(&"dos.console"));
+    let (path, source) = resolve_import_source(Path::new("main.ezra"), "dos.console", &sdk)
+        .expect("versioned MS-DOS target should resolve the DOS SDK");
+    assert_eq!(
+        path,
+        PathBuf::from("toolchains/msdos-i8086/sdk/dos/console.ezra")
+    );
+    assert!(!source.is_empty());
+
+    let options = diagnostic_assembly_options(Some(target), CpuFamily::I8086, false, true);
+    assert!(options.dos_executable);
+    assert_eq!(
+        layout_for_target(target, CpuFamily::I8086).name,
+        "msdos_i8086_com"
+    );
+
+    check_source_with_sdk(
+        "import dos.console\nfn main() {}\n",
+        &CompileOptions {
+            source: PathBuf::from("main.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        },
+        &sdk,
+    )
+    .expect("versioned MS-DOS target should compile with the DOS SDK");
+}
+
 #[cfg(feature = "avr")]
 #[test]
 fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {

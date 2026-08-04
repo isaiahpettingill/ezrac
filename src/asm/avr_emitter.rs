@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
 use crate::{
     asm::{
         AssemblyOptions,
@@ -10,6 +8,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
     },
+    compat::prelude::*,
     diagnostic::Diagnostic,
     hir::HirProgram,
     regalloc::{
@@ -310,7 +309,7 @@ impl Emitter {
             .map(|(value, storage)| (value.clone(), *storage))
             .collect::<Vec<_>>();
         for (value, storage) in strings {
-            for (offset, byte) in value.bytes().chain(std::iter::once(0)).enumerate() {
+            for (offset, byte) in value.bytes().chain(core::iter::once(0)).enumerate() {
                 self.lda_imm(byte);
                 self.sta(storage.address + offset as u32);
             }

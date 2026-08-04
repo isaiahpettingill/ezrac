@@ -75,7 +75,7 @@ fn build_writes_artifacts() {
 fn build_accepts_assembly_input_by_extension() {
     let root = temp_root("build_asm_extension");
     std::fs::create_dir_all(&root).unwrap();
-    let source_path = root.join("exit.asm");
+    let source_path = root.join("exit.ASM");
     std::fs::write(
         &source_path,
         r#"
@@ -87,7 +87,7 @@ fn build_accepts_assembly_input_by_extension() {
     .unwrap();
 
     let outputs = build_source_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -118,7 +118,7 @@ fn agon_mos_assembly_build_emits_mos_wrapper() {
     std::fs::write(&source_path, "ret\n").unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Assembly),
@@ -168,7 +168,7 @@ fn agon_assembly_links_cross_section_symbols_and_preserves_sections() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Assembly),
@@ -204,7 +204,7 @@ fn bare_z80_source_build_starts_at_zero_without_header() {
     std::fs::write(&source_path, "fn main() {}\n").unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -243,7 +243,7 @@ fn generic_6502_source_build_writes_raw_binary() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -285,7 +285,7 @@ fn generic_m68k_source_build_writes_raw_binary_with_24_bit_layout() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: false,
         input_kind: Some(InputKind::Ezra),
@@ -301,7 +301,7 @@ fn generic_m68k_source_build_writes_raw_binary_with_24_bit_layout() {
     assert!(assembly.contains("; target: Motorola 68000"), "{assembly}");
     assert!(assembly.contains("move.l #$FF0000,sp"), "{assembly}");
     assert!(map.contains(".text        0x000100"), "{map}");
-    assert!(map.contains(".rodata      0x040000"), "{map}");
+    assert!(map.contains("EZRA_RODATA_BASE 0x040000"), "{map}");
     assert!(!binary.starts_with(b"EZRA"), "{binary:02X?}");
     assert!(!binary.is_empty());
 
@@ -333,7 +333,7 @@ fn generic_m68k_build_accepts_dereference_assignment_from_call() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: false,
         input_kind: Some(InputKind::Ezra),
@@ -370,7 +370,7 @@ fn bare_z80n_source_build_accepts_z80n_inline_asm() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -406,7 +406,7 @@ fn z80_source_build_rejects_z80n_inline_asm() {
     .unwrap();
 
     let error = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -442,7 +442,7 @@ fn bare_z180_source_build_accepts_z180_inline_asm() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -479,7 +479,7 @@ fn z80_family_source_builds_reject_z180_only_inline_asm() {
         .unwrap();
 
         let error = build_source_with_build_options(&BuildCommandOptions {
-            path: Some(source_path.to_string_lossy().into_owned()),
+            path: Some(source_path.clone()),
             debug_comments: false,
             default_sdk_symbols: true,
             input_kind: Some(InputKind::Ezra),
@@ -506,7 +506,7 @@ fn bare_i8080_source_build_emits_intel_assembly() {
     std::fs::write(&source_path, "fn main() { test.pass() }\n").unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -537,10 +537,11 @@ fn bare_i8080_source_builds_core_language_program() {
     std::fs::write(
         &source_path,
         r#"
+                volatile mmio LEFT: ptr<u8> = 0x8000
+                volatile mmio RIGHT: ptr<u8> = 0x8001
+
                 fn main() {
-                    let left: u8 = 2
-                    let right: u8 = 3
-                    let sum: u8 = left + right
+                    let sum: u8 = *LEFT + *RIGHT
                     if sum == 5 {
                         test.pass()
                     } else {
@@ -552,7 +553,7 @@ fn bare_i8080_source_builds_core_language_program() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -593,7 +594,7 @@ fn bare_i8085_source_build_accepts_i8085_inline_asm() {
     .unwrap();
 
     let outputs = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -629,7 +630,7 @@ fn bare_i8080_source_build_rejects_i8085_inline_asm() {
     .unwrap();
 
     let error = build_source_with_build_options(&BuildCommandOptions {
-        path: Some(source_path.to_string_lossy().into_owned()),
+        path: Some(source_path.clone()),
         debug_comments: false,
         default_sdk_symbols: true,
         input_kind: Some(InputKind::Ezra),
@@ -688,7 +689,7 @@ fn commands_report_source_locations_for_semantic_errors() {
         "expected `{build_error}` to start with `{prefix}`"
     );
     let emit_error = emit_assembly_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -723,7 +724,7 @@ fn z80_source_check_accepts_16_bit_cfg() {
     .unwrap();
 
     check(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -752,7 +753,7 @@ fn commands_can_disable_default_sdk_symbols() {
     .unwrap();
 
     let error = check(&CommandOptions {
-        path: default_port_path.to_string_lossy().into_owned(),
+        path: default_port_path.clone(),
         debug_comments: false,
         default_sdk_symbols: false,
         layout_path: None,
@@ -778,7 +779,7 @@ fn commands_can_disable_default_sdk_symbols() {
     .unwrap();
 
     test_source_with_command_options(&CommandOptions {
-        path: explicit_port_path.to_string_lossy().into_owned(),
+        path: explicit_port_path.clone(),
         debug_comments: false,
         default_sdk_symbols: false,
         layout_path: None,
@@ -806,7 +807,7 @@ fn z80_source_rejects_24bit_literals_before_assembly() {
     .unwrap();
 
     let options = CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,
@@ -843,7 +844,7 @@ fn z80_source_emits_z80_assembly_without_ez80_adl_forms() {
     .unwrap();
 
     let asm = emit_assembly_with_command_options(&CommandOptions {
-        path: source_path.to_string_lossy().into_owned(),
+        path: source_path.clone(),
         debug_comments: false,
         default_sdk_symbols: true,
         layout_path: None,

@@ -435,7 +435,10 @@ fn selects_legal_immediate_constant_shifts() {
     assert!(assembly.contains("lsl.w #3,d0"), "{assembly}");
     assert!(assembly.contains("lsr.w #8,d0"), "{assembly}");
     assert!(assembly.contains("asr.w #2,d0"), "{assembly}");
-    assert!(assembly.contains("lsl.w d2,d0"), "{assembly}");
+    assert!(
+        assembly.contains("lsl.w #8,d0\n    lsl.w #1,d0"),
+        "{assembly}"
+    );
     assert!(assembly.contains("lsl.w #2,d0"), "{assembly}");
     assert!(!assembly.contains("lsl.w #0,d0"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
@@ -555,15 +558,19 @@ fn emits_and_assembles_u24_arithmetic() {
     let program = parse_program(
         Path::new("test.ezra"),
         r#"
+            global left: u24 = 0x010001
+            global right: u24 = 3
+            global product: u24 = 0
+            global quotient: u24 = 0
+            global remainder: u24 = 0
+            global signed_left: i24 = -9
+            global signed_right: i24 = 2
+            global signed_quotient: i24 = 0
             fn main() {
-                let left: u24 = 0x010001
-                let right: u24 = 3
-                let product: u24 = left * right
-                let quotient: u24 = product / right
-                let remainder: u24 = product % right
-                let signed_left: i24 = -9
-                let signed_right: i24 = 2
-                let signed_quotient: i24 = signed_left / signed_right
+                product = left * right
+                quotient = product / right
+                remainder = product % right
+                signed_quotient = signed_left / signed_right
             }
         "#,
     )
@@ -588,23 +595,26 @@ fn emits_and_assembles_u32_and_i32_arithmetic() {
         r#"
             global unsigned_sink: u32 = 0
             global signed_sink: i32 = 0
+            global xor_left: u32 = 0x12345678
+            global xor_right: u32 = 3
+            global comparison_sink: bool = false
             fn main() {
                 let left: u32 = 0x12345678
                 let right: u32 = 3
                 unsigned_sink = ((left + right) - 1) & 0xFFFFFFFF
-                unsigned_sink = unsigned_sink | (left ^ right)
+                unsigned_sink = unsigned_sink | (xor_left ^ xor_right)
                 unsigned_sink = unsigned_sink << right
                 unsigned_sink = unsigned_sink >> 2
                 unsigned_sink = left * right
                 unsigned_sink = unsigned_sink / right
                 unsigned_sink = unsigned_sink % right
-                let unsigned_less: bool = left < right
+                comparison_sink = left < right
                 let signed_left: i32 = -9
                 let signed_right: i32 = 2
                 signed_sink = signed_left >> 1
                 signed_sink = signed_left * signed_right
                 signed_sink = signed_left / signed_right
-                let signed_less: bool = signed_left < signed_right
+                comparison_sink = signed_left < signed_right
             }
         "#,
     )

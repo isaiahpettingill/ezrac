@@ -1021,3 +1021,151 @@ fn symbols_and_semantic_tokens_cover_an_open_document() {
     assert!(kinds.contains(&2));
     assert!(kinds.contains(&5));
 }
+
+#[test]
+fn layout_documents_are_not_checked_as_ezra_sources() {
+    let path = std::env::temp_dir().join(format!(
+        "ezrac-lsp-layout-source-{}.ezralayout",
+        std::process::id()
+    ));
+    let document = OpenDocument {
+        path: path.clone(),
+        text: "this is not EZRA source\n".to_owned(),
+        version: None,
+    };
+
+    assert!(check_document_diagnostics(&document).is_empty());
+
+    let mut server = Server::default();
+    server.documents.insert(path_to_uri(&path), document);
+    let mut output = Vec::new();
+    server.publish_workspace_diagnostics(&mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("missing required `fn main()`"), "{output}");
+}
+
+#[test]
+fn workspace_symbols_include_closed_project_source_files() {
+    let root =
+        std::env::temp_dir().join(format!("ezrac-lsp-closed-symbols-{}", std::process::id()));
+    let main_path = root.join("src/main.ezra");
+    let closed_path = root.join("src/lib/closed.ezra");
+    fs::create_dir_all(closed_path.parent().unwrap()).unwrap();
+    fs::write(
+        root.join("Ezra.toml"),
+        "[build]\ntarget = \"custom-unknown-ez80\"\n",
+    )
+    .unwrap();
+    fs::write(&main_path, "fn main() {}\n").unwrap();
+    fs::write(&closed_path, "pub fn closed_helper() {}\n").unwrap();
+
+    let mut server = Server::default();
+    server.capture_workspace_roots(&json!({
+        "rootUri": path_to_uri(&root),
+    }));
+
+    let symbols = server.workspace_symbols("closed_helper");
+    assert!(
+        symbols.as_array().is_some_and(|symbols| {
+            symbols.iter().any(|symbol| {
+                symbol["name"] == "closed_helper"
+                    && symbol["location"]["uri"] == path_to_uri(&closed_path)
+            })
+        }),
+        "{symbols}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn navigation_and_completion_use_unsaved_imported_document_overlays() {
+    let root = std::env::temp_dir().join(format!(
+        "ezrac-lsp-navigation-overlay-{}",
+        std::process::id()
+    ));
+    let main_path = root.join("src/main.ezra");
+    let import_path = root.join("src/lib/math.ezra");
+    fs::create_dir_all(import_path.parent().unwrap()).unwrap();
+    fs::write(
+        root.join("Ezra.toml"),
+        "[build]\ntarget = \"custom-unknown-ez80\"\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import lib.math\nfn main() { lib.math.old() }\n",
+    )
+    .unwrap();
+    fs::write(&import_path, "pub fn old() -> u8 { return 1 }\n").unwrap();
+
+    let main_source = "import lib.math\nfn main() { lib.math.new() }\n";
+    let imported_source = "// unsaved declaration\npub fn new() -> u8 { return 2 }\n";
+    let main_document = OpenDocument {
+        path: main_path.clone(),
+        text: main_source.to_owned(),
+        version: Some(1),
+    };
+    let mut server = Server::default();
+    server
+        .documents
+        .insert(path_to_uri(&main_path), main_document.clone());
+    server.documents.insert(
+        path_to_uri(&import_path),
+        OpenDocument {
+            path: import_path.clone(),
+            text: imported_source.to_owned(),
+            version: Some(2),
+        },
+    );
+    let source_overrides = server.source_overrides();
+    let line = "fn main() { lib.math.new() }";
+    let new_start = line.find("new").unwrap();
+    let position = Position {
+        line: 1,
+        character: (new_start + 1) as u32,
+    };
+
+    let completion = completion_items_with_overrides(
+        Some(&main_document),
+        Position {
+            line: 1,
+            character: (new_start + 3) as u32,
+        },
+        &source_overrides,
+    );
+    assert!(
+        completion["items"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["label"]
+                    .as_str()
+                    .is_some_and(|label| label.ends_with(".new") || label == "new")
+            })
+        }),
+        "{completion}"
+    );
+
+    let hover = hover_with_overrides(Some(&main_document), position, &source_overrides);
+    assert!(hover.to_string().contains("fn lib.math.new()"), "{hover}");
+
+    let definition = definition_with_overrides(Some(&main_document), position, &source_overrides);
+    assert_eq!(definition["uri"], path_to_uri(&import_path));
+    assert_eq!(definition["range"]["start"]["line"], 1);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn arduboy_eeprom_lsp_context_and_update_protocol_are_correct() {
+    let path = repository_path("toolchains/arduboy-avr/sdk/arduboy/eeprom.ezra");
+    let source = fs::read_to_string(&path).unwrap();
+
+    let sdk = sdk_for_path(&path).unwrap();
+    assert_eq!(sdk.target.as_deref(), Some("arduboy-avr"));
+    assert!(source.contains(".eeprom_read_wait_ready:"));
+    assert!(source.contains(".eeprom_update_wait_ready:"));
+    assert!(source.contains("\"in r19, 3Fh\""));
+    assert!(source.contains("\"out 3Fh, r19\""));
+    assert!(source.contains("\"cli\""));
+    assert!(source.contains("\"breq .eeprom_restore_interrupts\""));
+}

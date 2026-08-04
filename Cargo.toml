@@ -34,10 +34,16 @@ default = [
     "std",
     "test-runner",
     "intel",
+    "i8086",
     "z80",
     "lr35902",
+    "avr",
+    "m6800",
+    "m6809",
+    "m68k",
     "mos6502",
     "tms9900",
+    "dcpu",
 ]
 std = ["dep:toml", "pest/std", "pest_derive/std"]
 no-std = []

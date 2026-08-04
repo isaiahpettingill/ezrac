@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
-use crate::diagnostic::Diagnostic;
 use crate::target::Address24;
+use crate::{compat::prelude::*, diagnostic::Diagnostic};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AddrMode {

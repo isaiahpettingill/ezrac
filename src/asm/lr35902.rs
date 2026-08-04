@@ -1,8 +1,10 @@
-use std::fs;
+#[cfg(feature = "std")]
+use std::{fs, path::Path};
 
 use crate::{
     asm::AssemblyOptions,
     ast::{Declaration, EmbedSource, Expr, Program, Stmt},
+    compat::prelude::*,
     diagnostic::Diagnostic,
     target::CpuFamily,
 };
@@ -151,13 +153,15 @@ fn emit_call_arguments(out: &mut String, args: &[Expr]) -> Result<(), Diagnostic
     Ok(())
 }
 
+#[cfg_attr(not(feature = "std"), allow(unused_variables))]
 fn embed_bytes(program: &Program, source: &EmbedSource) -> Result<Vec<u8>, Diagnostic> {
     match source {
+        #[cfg(feature = "std")]
         EmbedSource::File(path) => {
             let path = program
                 .source_path
                 .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
+                .unwrap_or_else(|| Path::new("."))
                 .join(path);
             fs::read(&path).map_err(|error| {
                 Diagnostic::new(format!(
@@ -166,6 +170,10 @@ fn embed_bytes(program: &Program, source: &EmbedSource) -> Result<Vec<u8>, Diagn
                 ))
             })
         }
+        #[cfg(not(feature = "std"))]
+        EmbedSource::File(path) => Err(Diagnostic::new(format!(
+            "file embeds require the `std` feature: `{path}`"
+        ))),
         EmbedSource::Bytes(values) => values.iter().map(const_u8).collect(),
         EmbedSource::Text(text) => Ok(text.as_bytes().to_vec()),
         EmbedSource::CStr(text) => {

@@ -1,7 +1,5 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+#[cfg(feature = "std")]
+use std::{fs, path::Path};
 
 use crate::{
     asm::{
@@ -14,6 +12,7 @@ use crate::{
         AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
         Stmt, Type, UnaryOp,
     },
+    compat::prelude::*,
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
@@ -183,18 +182,25 @@ impl Emitter {
                                     .map_err(|_| Diagnostic::new("DCPU embed length is invalid"))?
                             ]
                         }
+                        #[cfg(feature = "std")]
                         crate::ast::EmbedSource::File(file) => {
                             let path = program
                                 .source_path
                                 .parent()
                                 .unwrap_or_else(|| Path::new("."))
                                 .join(file);
-                            std::fs::read(&path).map_err(|error| {
+                            fs::read(&path).map_err(|error| {
                                 Diagnostic::new(format!(
                                     "failed to read DCPU embed `{}`: {error}",
                                     path.display()
                                 ))
                             })?
+                        }
+                        #[cfg(not(feature = "std"))]
+                        crate::ast::EmbedSource::File(file) => {
+                            return Err(Diagnostic::new(format!(
+                                "DCPU file embeds require the `std` feature: `{file}`"
+                            )));
                         }
                     };
                     self.embeds.insert(value.name.clone(), bytes);

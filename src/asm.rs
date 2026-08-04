@@ -74,8 +74,10 @@ pub use ez80::{
 pub use lr35902_emitter::emit_lr35902_assembly_with_options;
 #[cfg(feature = "m68k")]
 pub use m68k_emitter::emit_m68k_assembly_with_options;
-#[cfg(any(feature = "m6800", feature = "m6809"))]
-pub use m6800_emitter::{emit_m6800_assembly_with_options, emit_m6809_assembly_with_options};
+#[cfg(feature = "m6800")]
+pub use m6800_emitter::emit_m6800_assembly_with_options;
+#[cfg(feature = "m6809")]
+pub use m6800_emitter::emit_m6809_assembly_with_options;
 #[cfg(any(feature = "std", feature = "mos6502"))]
 pub use mos6502_emitter::emit_mos6502_assembly_with_options;
 #[cfg(feature = "tms9900")]

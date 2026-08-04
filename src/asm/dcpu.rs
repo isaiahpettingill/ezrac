@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
 use crate::{
     asm::{
         AssemblyBinaryOperator, AssemblyExpression, AssemblyUnaryOperator,
         parse_assembly_expression,
     },
+    compat::prelude::*,
     diagnostic::Diagnostic,
 };
 

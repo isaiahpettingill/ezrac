@@ -14,13 +14,29 @@ jobs:
 
   no-std:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - intel
+          - i8086
+          - z80
+          - lr35902
+          - avr
+          - m6800
+          - m6809
+          - m68k
+          - mos6502
+          - tms9900
+          - dcpu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --lib --no-default-features --features no-std,z80
-      - run: cargo test --test no_std_workspace --no-default-features --features no-std,z80
-      - run: cargo check --lib --no-default-features --features no-std,mos6502
-      - run: cargo test --test no_std_workspace --no-default-features --features no-std,mos6502
+      - run: cargo check --lib --no-default-features --features no-std,${{ matrix.backend }}
+      - if: matrix.backend == 'z80'
+        run: cargo test --test no_std_workspace --no-default-features --features no-std,z80
+      - if: matrix.backend == 'mos6502'
+        run: cargo test --test no_std_workspace --no-default-features --features no-std,mos6502
 
   wasm:
     runs-on: ubuntu-latest
