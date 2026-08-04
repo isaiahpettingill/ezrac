@@ -30,6 +30,14 @@ pub(super) struct Variable {
     pub(super) len: Option<u32>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(super) struct StaticLiveness {
+    pub(super) constants: HashSet<String>,
+    pub(super) globals: HashSet<String>,
+    pub(super) embeds: HashSet<String>,
+    pub(super) string_literals: HashSet<String>,
+}
+
 impl Variable {
     pub(super) fn width(self) -> Result<ValueWidth, Diagnostic> {
         if self.element_size.is_some() {
@@ -85,6 +93,7 @@ pub(super) struct Symbols {
     pub(super) global_types: HashMap<String, Type>,
     pub(super) readonly_global_pointer_aliases: HashMap<String, u32>,
     pub(super) functions: HashMap<String, FunctionSig>,
+    static_liveness: Option<StaticLiveness>,
     function_pointer_width: ValueWidth,
     next_addr: u32,
     asset_next_addr: u32,
@@ -129,6 +138,7 @@ impl Symbols {
     pub(super) fn from_program(
         program: &Program,
         options: AssemblyOptions,
+        static_liveness: Option<&StaticLiveness>,
     ) -> Result<Self, Diagnostic> {
         let mut symbols = Self {
             constants: sdk_constants(&options),
@@ -143,6 +153,7 @@ impl Symbols {
             global_types: HashMap::new(),
             readonly_global_pointer_aliases: HashMap::new(),
             functions: HashMap::new(),
+            static_liveness: static_liveness.cloned(),
             function_pointer_width: match memory_model_for_cpu(options.cpu)
                 .map(|memory| memory.pointer_width_bits)
                 .unwrap_or(24)
@@ -430,6 +441,18 @@ impl Symbols {
         }
         let size =
             u32::try_from(len).map_err(|_| Diagnostic::new("string literal is too large"))?;
+        if self
+            .static_liveness
+            .as_ref()
+            .is_some_and(|liveness| !liveness.string_literals.contains(value))
+        {
+            return Ok(Variable {
+                addr: 0,
+                size,
+                element_size: Some(u32::from(ValueWidth::U8.bytes())),
+                len: Some(size),
+            });
+        }
         let variable = Variable {
             addr: self.rodata_next_addr,
             size,
@@ -641,6 +664,22 @@ impl Symbols {
         let bytes = self.embed_bytes(&decl.source, &program.source_path)?;
         let len = u32::try_from(bytes.len())
             .map_err(|_| Diagnostic::new("embedded asset exceeds 24-bit address space"))?;
+        if self
+            .static_liveness
+            .as_ref()
+            .is_some_and(|liveness| !liveness.embeds.contains(&decl.name))
+        {
+            let variable = Variable {
+                addr: 0,
+                size: len,
+                element_size: Some(u32::from(ValueWidth::U8.bytes())),
+                len: Some(len),
+            };
+            self.register_embed_properties(&decl.name, variable, len);
+            self.embeds
+                .insert(decl.name.clone(), EmbedObject { variable, bytes });
+            return Ok(());
+        }
         let section = decl.section.as_deref().unwrap_or(".assets");
         let variable = self.alloc_section_bytes(section, align, len)?;
         self.register_embed_properties(&decl.name, variable, len);
@@ -675,7 +714,15 @@ impl Symbols {
             return Ok(());
         }
         self.ensure_type_const_dependencies_evaluated(&decl.ty, program)?;
-        let variable = self.alloc_storage(&decl.ty)?;
+        let variable = if self
+            .static_liveness
+            .as_ref()
+            .is_some_and(|liveness| !liveness.globals.contains(&decl.name))
+        {
+            self.storage_at(0, &decl.ty)?
+        } else {
+            self.alloc_storage(&decl.ty)?
+        };
         self.globals.insert(decl.name.clone(), variable);
         self.global_types.insert(decl.name.clone(), decl.ty.clone());
         Ok(())

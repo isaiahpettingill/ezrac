@@ -43,6 +43,84 @@ fn emits_and_runs_inline_embedded_bytes() {
 }
 
 #[test]
+fn omits_unreferenced_private_static_initializers_and_strings() {
+    let source = r#"
+            const UNUSED_TEXT: ptr<u8> = "UNUSED CONST STRING"
+
+            global live_value: u8 = 7
+            global dead_values: [u8; 64] = []
+            global dead_text: ptr<u8> = UNUSED_TEXT
+
+            embed live_asset: bytes = bytes [0x11, 0x22, 0x33]
+            embed dead_asset: bytes = repeat(0xA5, 96)
+
+            fn main() {
+                test.assert_eq_u8(live_value, 7, 1)
+                test.assert_eq_u8(*(live_asset.ptr + 2), 0x33, 2)
+                debug.str("LIVE")
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+
+    assert!(!asm.contains("ld a, A5h"), "{asm}");
+    assert!(!asm.contains("UNUSED CONST STRING"), "{asm}");
+    assert!(!asm.contains("dead_text"), "{asm}");
+    assert!(asm.contains("ld a, 11h"), "{asm}");
+    assert!(asm.contains(".dm \"LIVE\", 00h"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+    assert_eq!(run.debug_output, b"LIVE", "{asm}");
+}
+
+#[test]
+fn opaque_inline_assembly_keeps_static_and_function_roots() {
+    let source = r#"
+            global hidden_value: u8 = 0x5A
+
+            fn hidden_function() {
+                test.pass()
+            }
+
+            fn main() {
+                asm volatile(clobber af, clobber memory) {
+                    "nop"
+                }
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+
+    assert!(asm.contains("ld a, 5Ah"), "{asm}");
+    assert!(asm.contains("_hidden_function:"), "{asm}");
+}
+
+#[test]
+fn preserves_public_static_and_function_roots() {
+    let source = r#"
+            pub global exported_value: u8 = 0x6B
+            pub embed exported_asset: bytes = bytes [0xC1, 0xC2]
+
+            pub fn exported_function() {
+                test.pass()
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+
+    assert!(asm.contains("ld a, 6Bh"), "{asm}");
+    assert!(asm.contains("ld a, C1h"), "{asm}");
+    assert!(asm.contains("_exported_function:"), "{asm}");
+}
+
+#[test]
 fn emits_and_runs_custom_section_embedded_bytes_at_section_base() {
     let source = r#"
             embed banked: bytes = bytes [0xA1, 0xA2] section .bank1 align 256

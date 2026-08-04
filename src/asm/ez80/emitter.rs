@@ -40,7 +40,7 @@ use crate::asm::{
     reachability::{RoutineProfile, strip_unreachable_generated_routines_with_roots},
 };
 use intel8080::{is_intel_8080_family, translate_assembly_for_cpu};
-use symbols::{FunctionSig, StructLayout, Symbols, ValueWidth, Variable};
+use symbols::{FunctionSig, StaticLiveness, StructLayout, Symbols, ValueWidth, Variable};
 
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
     emit_ez80_assembly_with_options(program, AssemblyOptions::default())
@@ -139,7 +139,7 @@ fn validate_source_program_before_optimization(
     program: &Program,
     options: &AssemblyOptions,
 ) -> Result<(), Diagnostic> {
-    let symbols = Symbols::from_program(program, options.clone())?;
+    let symbols = Symbols::from_program(program, options.clone(), None)?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
@@ -159,7 +159,7 @@ pub fn collect_ez80_semantic_diagnostics(
     program: &Program,
     options: AssemblyOptions,
 ) -> Vec<Diagnostic> {
-    let symbols = match Symbols::from_program(program, options.clone()) {
+    let symbols = match Symbols::from_program(program, options.clone(), None) {
         Ok(symbols) => symbols,
         Err(error) => return vec![error],
     };
@@ -180,6 +180,7 @@ pub fn collect_ez80_semantic_diagnostics(
             options.clone(),
             recursive_call_edges(program, &symbols.functions),
             HashSet::new(),
+            None,
         );
         emitter.disable_dead_code_elimination();
         if let Err(error) = emitter.emit_function(function) {
@@ -280,14 +281,33 @@ pub fn emit_ez80_assembly_from_checked(
     let program = &checked.tbir.lowered_program;
     debug_assert_eq!(checked.hir.source_path, program.source_path);
     let tail_call_edges = checked.tbir.optimizations.tail_call_edges();
-    let symbols = Symbols::from_program(program, options.clone())?;
+    let analysis_symbols = Symbols::from_program(program, options.clone(), None)?;
     let main = program
         .main_function()
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
     validate_main_signature(main)?;
-    validate_all_function_calls(program, &symbols.functions)?;
-    let recursive_call_edges = recursive_call_edges(program, &symbols.functions);
-    let emitted_functions = reachable_function_names(program, &symbols);
+    validate_all_function_calls(program, &analysis_symbols.functions)?;
+    let recursive_call_edges = recursive_call_edges(program, &analysis_symbols.functions);
+    let emitted_functions = reachable_function_names(program, &analysis_symbols);
+    let static_liveness = static_liveness(program, &emitted_functions);
+    let mut validation_emitter = Emitter::new(
+        analysis_symbols.clone(),
+        options.clone(),
+        recursive_call_edges.clone(),
+        tail_call_edges.clone(),
+        None,
+    );
+    validation_emitter.emit_global_initializers(program)?;
+    let symbols = Symbols::from_program(program, options.clone(), Some(&static_liveness))?;
+    let opaque_assembly = emitted_functions.iter().any(|name| {
+        function_declaration(program, name)
+            .is_some_and(|function| function_contains_inline_asm(&function.body))
+    }) || program.declarations.iter().any(|declaration| {
+        matches!(
+            unwrapped_declaration(declaration),
+            Declaration::ExternAsmFunction(_)
+        )
+    });
     let cpu = options.cpu;
 
     let mut emitter = Emitter::new(
@@ -295,6 +315,7 @@ pub fn emit_ez80_assembly_from_checked(
         options.clone(),
         recursive_call_edges,
         tail_call_edges,
+        Some(static_liveness),
     );
     emitter.emit_prelude();
     emitter.emit_embed_initializers();
@@ -318,18 +339,28 @@ pub fn emit_ez80_assembly_from_checked(
         } else {
             RoutineProfile::Ez80
         };
-        let naked_roots = program
+        let assembly_roots = program
             .declarations
             .iter()
             .filter_map(|declaration| match unwrapped_declaration(declaration) {
-                Declaration::Function(function) if has_attr(function, "naked") => {
+                Declaration::Function(function)
+                    if emitted_functions.contains(&function.name)
+                        && (opaque_assembly
+                            || function.public
+                            || has_attr(function, "naked")
+                            || has_attr(function, "interrupt")) =>
+                {
                     Some(function_label(&function.name))
                 }
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let naked_root_refs = naked_roots.iter().map(String::as_str).collect::<Vec<_>>();
-        let asm = strip_unreachable_generated_routines_with_roots(&asm, profile, &naked_root_refs);
+        let assembly_root_refs = assembly_roots
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let asm =
+            strip_unreachable_generated_routines_with_roots(&asm, profile, &assembly_root_refs);
         with_readability_comments(
             asm,
             original_program,
@@ -913,6 +944,7 @@ struct Emitter {
     storage_required_names_stack: Vec<HashSet<String>>,
     recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
+    static_liveness: Option<StaticLiveness>,
 
     cpu: CpuFamily,
     mos_executable: bool,
@@ -928,6 +960,7 @@ impl Emitter {
         options: AssemblyOptions,
         recursive_call_edges: HashSet<(String, String)>,
         tail_call_edges: HashSet<(String, String)>,
+        static_liveness: Option<StaticLiveness>,
     ) -> Self {
         let string_literals = symbols.string_literals.clone();
         let cacheable_ranges = symbols
@@ -960,6 +993,7 @@ impl Emitter {
             storage_required_names_stack: Vec::new(),
             recursive_call_edges,
             tail_call_edges,
+            static_liveness,
 
             cpu: options.cpu,
             mos_executable: options.mos_executable,
@@ -1024,6 +1058,11 @@ impl Emitter {
         let literals = self
             .string_literals
             .iter()
+            .filter(|(value, _)| {
+                self.static_liveness
+                    .as_ref()
+                    .is_none_or(|liveness| liveness.string_literals.contains(*value))
+            })
             .map(|(value, variable)| (value.clone(), *variable))
             .collect::<Vec<_>>();
         for (value, variable) in literals {
@@ -1431,22 +1470,36 @@ impl Emitter {
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
         for declaration in &program.declarations {
-            let Declaration::Global(decl) = declaration else {
+            let Declaration::Global(decl) = unwrapped_declaration(declaration) else {
                 continue;
             };
-            let variable = self
-                .symbols
-                .globals
-                .get(&decl.name)
-                .copied()
-                .expect("global allocation exists");
+            if self
+                .static_liveness
+                .as_ref()
+                .is_some_and(|liveness| !liveness.globals.contains(&decl.name))
+            {
+                continue;
+            }
+            let Some(variable) = self.symbols.globals.get(&decl.name).copied() else {
+                continue;
+            };
             self.emit_storage_initializer(variable, &decl.ty, &decl.value)?;
         }
         Ok(())
     }
 
     fn emit_embed_initializers(&mut self) {
-        let embeds = self.symbols.embeds.values().cloned().collect::<Vec<_>>();
+        let embeds = self
+            .symbols
+            .embeds
+            .iter()
+            .filter(|(name, _)| {
+                self.static_liveness
+                    .as_ref()
+                    .is_none_or(|liveness| liveness.embeds.contains(*name))
+            })
+            .map(|(_, embed)| embed.clone())
+            .collect::<Vec<_>>();
         for embed in embeds {
             for (offset, byte) in embed.bytes.into_iter().enumerate() {
                 self.line(&format!("    ld a, {byte:02X}h"));
@@ -1463,6 +1516,11 @@ impl Emitter {
             .string_literals
             .iter()
             .chain(self.symbols.string_literals.iter())
+            .filter(|(value, _)| {
+                self.static_liveness
+                    .as_ref()
+                    .is_none_or(|liveness| liveness.string_literals.contains(*value))
+            })
             .map(|(value, variable)| (variable.addr, value.clone(), *variable))
             .collect::<Vec<_>>();
         literals.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
@@ -8001,6 +8059,7 @@ fn validate_all_function_bodies(
         options.clone(),
         recursive_call_edges,
         tail_call_edges,
+        None,
     );
     emitter.disable_dead_code_elimination();
     if let Some(main) = program.main_function() {
@@ -8282,17 +8341,25 @@ fn builtin_arity_error(name: &str) -> String {
 fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<String> {
     let mut graph = HashMap::new();
     let mut seeds = Vec::new();
+    let mut has_extern_assembly = false;
     for declaration in &program.declarations {
-        let Declaration::Function(function) = declaration else {
-            continue;
-        };
-        let mut calls = Vec::new();
-        collect_reachable_stmt_calls(&function.body, &mut calls, symbols);
-        calls.retain(|name| symbols.functions.contains_key(name));
-        graph.insert(function.name.clone(), calls);
-        if function.name == "main" || has_attr(function, "naked") || has_attr(function, "interrupt")
-        {
-            seeds.push(function.name.clone());
+        match unwrapped_declaration(declaration) {
+            Declaration::Function(function) => {
+                let mut calls = Vec::new();
+                collect_reachable_stmt_calls(&function.body, &mut calls, symbols);
+                calls.retain(|name| symbols.functions.contains_key(name));
+                graph.insert(function.name.clone(), calls);
+                if function.name == "main"
+                    || function.public
+                    || has_attr(function, "naked")
+                    || has_attr(function, "interrupt")
+                    || declaration_is_banked(declaration)
+                {
+                    seeds.push(function.name.clone());
+                }
+            }
+            Declaration::ExternAsmFunction(_) => has_extern_assembly = true,
+            _ => {}
         }
     }
 
@@ -8306,7 +8373,357 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
             stack.extend(calls.iter().cloned());
         }
     }
+    if has_extern_assembly
+        || reachable.iter().any(|name| {
+            function_declaration(program, name)
+                .is_some_and(|function| function_contains_inline_asm(&function.body))
+        })
+    {
+        return graph.keys().cloned().collect();
+    }
     reachable
+}
+
+fn function_declaration<'a>(program: &'a Program, name: &str) -> Option<&'a Function> {
+    program.declarations.iter().find_map(|declaration| {
+        let Declaration::Function(function) = unwrapped_declaration(declaration) else {
+            return None;
+        };
+        (function.name == name).then_some(function)
+    })
+}
+
+fn function_contains_inline_asm(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Asm { .. } => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => function_contains_inline_asm(then_body) || function_contains_inline_asm(else_body),
+        Stmt::While { body, .. } | Stmt::Loop { body } => function_contains_inline_asm(body),
+        _ => false,
+    })
+}
+
+#[derive(Default)]
+struct StaticReferences {
+    names: HashSet<String>,
+    string_literals: HashSet<String>,
+}
+
+fn static_liveness(program: &Program, emitted_functions: &HashSet<String>) -> StaticLiveness {
+    let mut all_constants = HashSet::new();
+    let mut all_globals = HashSet::new();
+    let mut all_embeds = HashSet::new();
+    for declaration in &program.declarations {
+        match unwrapped_declaration(declaration) {
+            Declaration::Const(decl) => {
+                all_constants.insert(decl.name.clone());
+            }
+            Declaration::Global(decl) => {
+                all_globals.insert(decl.name.clone());
+            }
+            Declaration::Embed(decl) => {
+                all_embeds.insert(decl.name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let mut liveness = StaticLiveness::default();
+    for declaration in &program.declarations {
+        let declaration_is_root = declaration_is_banked(declaration);
+        match unwrapped_declaration(declaration) {
+            Declaration::Const(decl) if decl.public || declaration_is_root => {
+                liveness.constants.insert(decl.name.clone());
+            }
+            Declaration::Global(decl) if decl.public || declaration_is_root => {
+                liveness.globals.insert(decl.name.clone());
+            }
+            Declaration::Embed(decl) if decl.public || declaration_is_root => {
+                liveness.embeds.insert(decl.name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let mut opaque_assembly = program.declarations.iter().any(|declaration| {
+        matches!(
+            unwrapped_declaration(declaration),
+            Declaration::ExternAsmFunction(_)
+        )
+    });
+    for declaration in &program.declarations {
+        let Declaration::Function(function) = unwrapped_declaration(declaration) else {
+            continue;
+        };
+        if !emitted_functions.contains(&function.name) {
+            continue;
+        }
+        opaque_assembly |= function_contains_inline_asm(&function.body);
+        if !opaque_assembly {
+            let mut references = StaticReferences::default();
+            collect_stmt_static_references(&function.body, &mut references);
+            apply_static_references(
+                &mut liveness,
+                &references,
+                &all_constants,
+                &all_globals,
+                &all_embeds,
+            );
+        }
+    }
+
+    if opaque_assembly {
+        liveness.constants = all_constants;
+        liveness.globals = all_globals;
+        liveness.embeds = all_embeds;
+        let mut references = StaticReferences::default();
+        for declaration in &program.declarations {
+            match unwrapped_declaration(declaration) {
+                Declaration::Const(decl) => {
+                    collect_expr_static_references(&decl.value, &mut references)
+                }
+                Declaration::Global(decl) => {
+                    collect_expr_static_references(&decl.value, &mut references)
+                }
+                Declaration::Embed(decl) => {
+                    collect_embed_static_references(&decl.source, &mut references)
+                }
+                Declaration::Function(function) => {
+                    collect_stmt_static_references(&function.body, &mut references)
+                }
+                _ => {}
+            }
+        }
+        liveness.string_literals = references.string_literals;
+        return liveness;
+    }
+
+    loop {
+        let before = (
+            liveness.constants.len(),
+            liveness.globals.len(),
+            liveness.embeds.len(),
+            liveness.string_literals.len(),
+        );
+        for declaration in &program.declarations {
+            match unwrapped_declaration(declaration) {
+                Declaration::Const(decl) if liveness.constants.contains(&decl.name) => {
+                    let mut references = StaticReferences::default();
+                    collect_expr_static_references(&decl.value, &mut references);
+                    apply_static_references(
+                        &mut liveness,
+                        &references,
+                        &all_constants,
+                        &all_globals,
+                        &all_embeds,
+                    );
+                }
+                Declaration::Global(decl) if liveness.globals.contains(&decl.name) => {
+                    let mut references = StaticReferences::default();
+                    collect_expr_static_references(&decl.value, &mut references);
+                    apply_static_references(
+                        &mut liveness,
+                        &references,
+                        &all_constants,
+                        &all_globals,
+                        &all_embeds,
+                    );
+                }
+                Declaration::Embed(decl) if liveness.embeds.contains(&decl.name) => {
+                    let mut references = StaticReferences::default();
+                    collect_embed_static_references(&decl.source, &mut references);
+                    if let Some(align) = &decl.align {
+                        collect_expr_static_references(align, &mut references);
+                    }
+                    apply_static_references(
+                        &mut liveness,
+                        &references,
+                        &all_constants,
+                        &all_globals,
+                        &all_embeds,
+                    );
+                }
+                _ => {}
+            }
+        }
+        let after = (
+            liveness.constants.len(),
+            liveness.globals.len(),
+            liveness.embeds.len(),
+            liveness.string_literals.len(),
+        );
+        if before == after {
+            break;
+        }
+    }
+    liveness
+}
+
+fn apply_static_references(
+    liveness: &mut StaticLiveness,
+    references: &StaticReferences,
+    all_constants: &HashSet<String>,
+    all_globals: &HashSet<String>,
+    all_embeds: &HashSet<String>,
+) {
+    liveness
+        .string_literals
+        .extend(references.string_literals.iter().cloned());
+    for name in &references.names {
+        if all_constants.contains(name) {
+            liveness.constants.insert(name.clone());
+        }
+        if all_globals.contains(name) {
+            liveness.globals.insert(name.clone());
+        }
+        if all_embeds.contains(name) {
+            liveness.embeds.insert(name.clone());
+        }
+    }
+}
+
+fn collect_stmt_static_references(stmts: &[Stmt], references: &mut StaticReferences) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Expr(value) => {
+                collect_expr_static_references(value, references)
+            }
+            Stmt::Assign { target, value, .. } => {
+                collect_place_static_references(target, references);
+                collect_expr_static_references(value, references);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_static_references(condition, references);
+                collect_stmt_static_references(then_body, references);
+                collect_stmt_static_references(else_body, references);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_static_references(condition, references);
+                collect_stmt_static_references(body, references);
+            }
+            Stmt::Loop { body } => collect_stmt_static_references(body, references),
+            Stmt::Return(Some(value)) | Stmt::Out { value, .. } => {
+                collect_expr_static_references(value, references)
+            }
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_place_static_references(place: &Place, references: &mut StaticReferences) {
+    match place {
+        Place::Ident(name) => {
+            references.names.insert(name.clone());
+        }
+        Place::Index { name, index } => {
+            references.names.insert(name.clone());
+            collect_expr_static_references(index, references);
+        }
+        Place::Field { base, .. } => {
+            references.names.insert(base.clone());
+        }
+        Place::Access(path) => {
+            references.names.insert(path.root.clone());
+            collect_access_static_references(path, references);
+        }
+        Place::Deref(pointer) => collect_expr_static_references(pointer, references),
+    }
+}
+
+fn collect_expr_static_references(expr: &Expr, references: &mut StaticReferences) {
+    match expr {
+        Expr::String(value) => {
+            references.string_literals.insert(value.clone());
+        }
+        Expr::Ident(name)
+        | Expr::Index { name, .. }
+        | Expr::AddressOfIndex { name, .. }
+        | Expr::AddressOf(name) => {
+            references.names.insert(name.clone());
+            match expr {
+                Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+                    collect_expr_static_references(index, references)
+                }
+                _ => {}
+            }
+        }
+        Expr::Field { base, field } | Expr::AddressOfField { base, field } => {
+            references.names.insert(base.clone());
+            references.names.insert(format!("{base}.{field}"));
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            references.names.insert(path.root.clone());
+            collect_access_static_references(path, references);
+        }
+        Expr::Array(values) => {
+            for value in values {
+                collect_expr_static_references(value, references);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_static_references(value, references);
+            }
+        }
+        Expr::Deref(pointer)
+        | Expr::Unary { expr: pointer, .. }
+        | Expr::Cast { expr: pointer, .. }
+        | Expr::BankedPointer { pointer, .. } => {
+            collect_expr_static_references(pointer, references)
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_static_references(arg, references);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_static_references(left, references);
+            collect_expr_static_references(right, references);
+        }
+        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) | Expr::In(_) => {}
+    }
+}
+
+fn collect_access_static_references(path: &AccessPath, references: &mut StaticReferences) {
+    let mut qualified_name = path.root.clone();
+    references.names.insert(qualified_name.clone());
+    for segment in &path.segments {
+        match segment {
+            AccessSegment::Field(field) => {
+                qualified_name.push('.');
+                qualified_name.push_str(field);
+                references.names.insert(qualified_name.clone());
+            }
+            AccessSegment::Index(index) => collect_expr_static_references(index, references),
+        }
+    }
+}
+
+fn collect_embed_static_references(
+    source: &crate::ast::EmbedSource,
+    references: &mut StaticReferences,
+) {
+    match source {
+        crate::ast::EmbedSource::Bytes(values) => {
+            for value in values {
+                collect_expr_static_references(value, references);
+            }
+        }
+        crate::ast::EmbedSource::Repeat { value, len } => {
+            collect_expr_static_references(value, references);
+            collect_expr_static_references(len, references);
+        }
+        crate::ast::EmbedSource::File(_)
+        | crate::ast::EmbedSource::Text(_)
+        | crate::ast::EmbedSource::CStr(_) => {}
+    }
 }
 
 fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
@@ -8525,6 +8942,14 @@ fn storage_ranges_overlap(left: Variable, right: Variable) -> bool {
     let right_start = u64::from(right.addr);
     let right_end = right_start + u64::from(right.size);
     left_start < right_end && right_start < left_end
+}
+
+fn declaration_is_banked(declaration: &Declaration) -> bool {
+    match declaration {
+        Declaration::Bank { .. } => true,
+        Declaration::Cfg { declaration, .. } => declaration_is_banked(declaration),
+        _ => false,
+    }
 }
 
 fn declaration_name(declaration: &Declaration) -> Option<&str> {

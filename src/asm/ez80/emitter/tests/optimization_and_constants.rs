@@ -1007,7 +1007,7 @@ fn emits_and_runs_recursive_function_with_stack_arguments() {
 }
 
 #[test]
-fn omits_unused_functions_regardless_of_visibility() {
+fn preserves_public_functions_and_omits_unused_private_functions() {
     let source = r#"
             fn used(value: u8) -> u8 {
                 return value + 1
@@ -1037,8 +1037,8 @@ fn omits_unused_functions_regardless_of_visibility() {
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
     assert!(asm.contains("_used:"));
-    assert!(!asm.contains("_exported:"));
-    assert!(!asm.contains("_exported_inline:"));
+    assert!(asm.contains("_exported:"));
+    assert!(asm.contains("_exported_inline:"));
     assert!(!asm.contains("_unused_private:"));
 }
 
