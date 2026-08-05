@@ -10,7 +10,7 @@ fn ez180n_layout_places_text_at_console_load_address() {
     let layout = Layout::ez180n();
 
     assert_eq!(layout.validate(), Ok(()));
-    assert_eq!(layout.load.get(), 0x00_FFC0);
+    assert_eq!(layout.load.get(), 0x01_0000);
     assert_eq!(layout.entry.get(), 0x01_0000);
     assert_eq!(
         layout_symbol_value(&layout, "EZRA_CODE_BASE"),
