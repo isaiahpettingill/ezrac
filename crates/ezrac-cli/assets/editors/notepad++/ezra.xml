@@ -25,7 +25,7 @@
       <Keywords name="Folders in comment, middle"></Keywords>
       <Keywords name="Folders in comment, close"></Keywords>
       <Keywords name="Keywords1">import const alias port mmio embed global struct extern asm fn layout load entry stack region section symbol let if else while loop break continue return out in cast</Keywords>
-      <Keywords name="Keywords2">pub inline comptime no-comptime naked interrupt volatile as clobber align read write execute reserved</Keywords>
+      <Keywords name="Keywords2">pub inline comptime no-comptime extern naked interrupt volatile as clobber align read write execute reserved</Keywords>
       <Keywords name="Keywords3">file bytes text cstr repeat ptr u8 i8 u16 i16 u24 i24</Keywords>
       <Keywords name="Keywords4">true false</Keywords>
       <Keywords name="Keywords5"></Keywords>

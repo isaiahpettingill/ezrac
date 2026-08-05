@@ -42,6 +42,75 @@ use crate::asm::{
 use intel8080::{is_intel_8080_family, translate_assembly_for_cpu};
 use symbols::{FunctionSig, StaticLiveness, StructLayout, Symbols, ValueWidth, Variable};
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum RuntimeHelper {
+    Pass,
+    Fail,
+    Memcpy,
+    Memset,
+    MulU8,
+    MulU16,
+    MulU24,
+    MulI24,
+    DivU8,
+    DivU16,
+    DivU24,
+    DivI24,
+    ModU8,
+    ModU16,
+    ModU24,
+    ModI24,
+}
+
+const RUNTIME_HELPER_ORDER: [RuntimeHelper; 16] = [
+    RuntimeHelper::Pass,
+    RuntimeHelper::Fail,
+    RuntimeHelper::Memcpy,
+    RuntimeHelper::Memset,
+    RuntimeHelper::MulU8,
+    RuntimeHelper::MulU16,
+    RuntimeHelper::MulU24,
+    RuntimeHelper::MulI24,
+    RuntimeHelper::DivU8,
+    RuntimeHelper::DivU16,
+    RuntimeHelper::DivU24,
+    RuntimeHelper::DivI24,
+    RuntimeHelper::ModU8,
+    RuntimeHelper::ModU16,
+    RuntimeHelper::ModU24,
+    RuntimeHelper::ModI24,
+];
+
+impl RuntimeHelper {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "__ezra_pass",
+            Self::Fail => "__ezra_fail",
+            Self::Memcpy => "__ezra_memcpy",
+            Self::Memset => "__ezra_memset",
+            Self::MulU8 => "__ezra_mul_u8",
+            Self::MulU16 => "__ezra_mul_u16",
+            Self::MulU24 => "__ezra_mul_u24",
+            Self::MulI24 => "__ezra_mul_i24",
+            Self::DivU8 => "__ezra_div_u8",
+            Self::DivU16 => "__ezra_div_u16",
+            Self::DivU24 => "__ezra_div_u24",
+            Self::DivI24 => "__ezra_div_i24",
+            Self::ModU8 => "__ezra_mod_u8",
+            Self::ModU16 => "__ezra_mod_u16",
+            Self::ModU24 => "__ezra_mod_u24",
+            Self::ModI24 => "__ezra_mod_i24",
+        }
+    }
+
+    fn dependencies(self) -> &'static [Self] {
+        match self {
+            Self::MulI24 => &[Self::MulU24],
+            _ => &[],
+        }
+    }
+}
+
 pub fn emit_ez80_assembly(program: &Program) -> Result<String, Diagnostic> {
     emit_ez80_assembly_with_options(program, AssemblyOptions::default())
 }
@@ -346,6 +415,7 @@ pub fn emit_ez80_assembly_from_checked(
                 Declaration::Function(function)
                     if emitted_functions.contains(&function.name)
                         && (opaque_assembly
+                            || has_attr(function, "extern")
                             || has_attr(function, "naked")
                             || has_attr(function, "interrupt")
                             || declaration_is_banked(declaration)) =>
@@ -361,6 +431,7 @@ pub fn emit_ez80_assembly_from_checked(
             .collect::<Vec<_>>();
         let asm =
             strip_unreachable_generated_routines_with_roots(&asm, profile, &assembly_root_refs);
+        let asm = cleanup_lowered_cfg(&asm, &assembly_root_refs);
         with_readability_comments(
             asm,
             original_program,
@@ -555,6 +626,7 @@ fn peephole_cleanup(assembly: &str) -> String {
 fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)]) -> String {
     let mut out = String::new();
     let mut register_values = HashMap::<&'static str, String>::new();
+    let mut cached_memory_loads = HashMap::<(u32, u32), &'static str>::new();
     let mut last_memory_transfer: Option<AbsoluteMemoryTransfer> = None;
     let mut in_inline_asm = false;
 
@@ -563,6 +635,7 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
         if trimmed == "; end asm" {
             in_inline_asm = false;
             register_values.clear();
+            cached_memory_loads.clear();
             last_memory_transfer = None;
             out.push_str(line);
             out.push('\n');
@@ -571,6 +644,7 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
         if trimmed.starts_with("; asm") {
             in_inline_asm = true;
             register_values.clear();
+            cached_memory_loads.clear();
             last_memory_transfer = None;
             out.push_str(line);
             out.push('\n');
@@ -581,6 +655,7 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
         }
         if is_peephole_block_boundary(trimmed) {
             register_values.clear();
+            cached_memory_loads.clear();
             last_memory_transfer = None;
         }
 
@@ -601,17 +676,22 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
         };
         let remove_line = if let Some(transfer) = memory_transfer {
             if cacheable_ranges_contain(cacheable_ranges, transfer.address, transfer.width) {
-                let redundant = last_memory_transfer.is_some_and(|previous| {
+                let redundant_load = !transfer.is_store
+                    && cached_memory_loads
+                        .get(&(transfer.address, transfer.width))
+                        .is_some_and(|register| *register == transfer.register);
+                let redundant_transfer = last_memory_transfer.is_some_and(|previous| {
                     previous.address == transfer.address
                         && previous.width == transfer.width
                         && previous.register == transfer.register
                         && previous.is_store != transfer.is_store
                 });
-                if !redundant {
+                if !redundant_load && !redundant_transfer {
                     last_memory_transfer = Some(transfer);
                 }
-                redundant
+                redundant_load || redundant_transfer
             } else {
+                cached_memory_loads.clear();
                 last_memory_transfer = None;
                 false
             }
@@ -636,12 +716,28 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
             let effects = instruction_effects(trimmed);
             for register in effects.modified_registers {
                 invalidate_register_value_aliases(&mut register_values, register);
+                cached_memory_loads.retain(|_, cached| !registers_overlap(cached, register));
+            }
+            if effects.uses_memory || effects.uses_ports || trimmed.starts_with("call ") {
+                cached_memory_loads.clear();
+            }
+        }
+        if let Some(transfer) = memory_transfer
+            && cacheable_ranges_contain(cacheable_ranges, transfer.address, transfer.width)
+        {
+            if transfer.is_store {
+                cached_memory_loads.retain(|(address, width), _| {
+                    !memory_ranges_overlap(*address, *width, transfer.address, transfer.width)
+                });
+            } else {
+                cached_memory_loads.insert((transfer.address, transfer.width), transfer.register);
             }
         }
         if is_indirect_memory_access(trimmed) {
             // A memory access may be volatile. Do not reuse an immediate
             // address load across it, even when the instruction only changes A.
             register_values.clear();
+            cached_memory_loads.clear();
         }
 
         if is_peephole_block_terminator(trimmed) {
@@ -768,6 +864,17 @@ fn cacheable_ranges_contain(ranges: &[(u32, u32)], address: u32, width: u32) -> 
     })
 }
 
+fn memory_ranges_overlap(
+    left_address: u32,
+    left_width: u32,
+    right_address: u32,
+    right_width: u32,
+) -> bool {
+    let left_end = left_address.saturating_add(left_width);
+    let right_end = right_address.saturating_add(right_width);
+    left_address < right_end && right_address < left_end
+}
+
 fn is_peephole_block_boundary(line: &str) -> bool {
     line.starts_with("section ") || (line.ends_with(':') && !line.starts_with(' '))
 }
@@ -778,6 +885,178 @@ fn is_peephole_block_terminator(line: &str) -> bool {
         mnemonic,
         "call" | "djnz" | "halt" | "jp" | "jr" | "ret" | "reti" | "retn" | "rst"
     )
+}
+
+fn cleanup_lowered_cfg(assembly: &str, roots: &[&str]) -> String {
+    // Inline assembly may branch to labels or enter code through an address
+    // that the compiler cannot inspect. Keep those programs byte-for-byte
+    // intact rather than treating an incomplete CFG as proof of dead code.
+    if assembly
+        .lines()
+        .any(|line| line.trim_start().starts_with("; asm"))
+    {
+        return assembly.to_owned();
+    }
+
+    let mut lines = assembly.lines().collect::<Vec<_>>();
+    let Some(text_start) = lines.iter().position(|line| line.trim() == "section .text") else {
+        return assembly.to_owned();
+    };
+    let text_end = lines[text_start + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with("section "))
+        .map_or(lines.len(), |offset| text_start + 1 + offset);
+
+    let mut label_indices = Vec::new();
+    for (index, line) in lines.iter().enumerate().take(text_end).skip(text_start) {
+        let trimmed = line.trim();
+        let Some(label) = trimmed.strip_suffix(':') else {
+            continue;
+        };
+        if label.is_empty() || label.contains(char::is_whitespace) {
+            continue;
+        }
+        label_indices.push(index);
+    }
+    if label_indices.is_empty() {
+        return assembly.to_owned();
+    }
+
+    let mut block_for_label = HashMap::<String, usize>::new();
+    for (block, index) in label_indices.iter().enumerate() {
+        if let Some(label) = lines[*index].trim().strip_suffix(':') {
+            block_for_label.insert(label.to_owned(), block);
+        }
+    }
+    let mut successors = vec![Vec::<usize>::new(); label_indices.len()];
+    for (block, start) in label_indices.iter().enumerate() {
+        let end = label_indices.get(block + 1).copied().unwrap_or(text_end);
+        let mut fallthrough = true;
+        for line in &lines[*start + 1..end] {
+            let Some(branch) = lowered_branch(line) else {
+                continue;
+            };
+            if let Some(target) = branch.target.and_then(|target| block_for_label.get(target))
+                && !successors[block].contains(target)
+            {
+                successors[block].push(*target);
+            }
+            if branch.terminal && !branch.conditional {
+                fallthrough = false;
+                break;
+            }
+        }
+        if fallthrough && block + 1 < label_indices.len() {
+            successors[block].push(block + 1);
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut work = roots
+        .iter()
+        .filter_map(|root| block_for_label.get(*root).copied())
+        .collect::<Vec<_>>();
+    if let Some(start) = block_for_label.get("__ezra_start").copied() {
+        work.push(start);
+    }
+    while let Some(block) = work.pop() {
+        if !reachable.insert(block) {
+            continue;
+        }
+        work.extend(successors[block].iter().copied());
+    }
+
+    let mut remove = vec![false; lines.len()];
+    for (block, start) in label_indices.iter().enumerate() {
+        if reachable.contains(&block) {
+            continue;
+        }
+        let end = label_indices.get(block + 1).copied().unwrap_or(text_end);
+        remove[*start..end].fill(true);
+    }
+    lines = lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, line)| (!remove[index]).then_some(line))
+        .collect();
+    let new_text_start = lines
+        .iter()
+        .position(|line| line.trim() == "section .text")
+        .unwrap_or(text_start.min(lines.len()));
+    let new_text_end = lines[new_text_start + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with("section "))
+        .map_or(lines.len(), |offset| new_text_start + 1 + offset);
+    simplify_lowered_branches(&lines, new_text_start, new_text_end)
+}
+
+#[derive(Clone, Copy)]
+struct LoweredBranch<'a> {
+    target: Option<&'a str>,
+    conditional: bool,
+    terminal: bool,
+}
+
+fn lowered_branch(line: &str) -> Option<LoweredBranch<'_>> {
+    let trimmed = line.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let mnemonic = parts.next()?;
+    let operands = parts.next().unwrap_or_default().trim();
+    match mnemonic {
+        "jp" | "jr" | "jmp" | "jz" | "jnz" | "jc" | "jnc" | "jm" | "jpe" | "jpo" => {
+            if operands.starts_with('(') {
+                return Some(LoweredBranch {
+                    target: None,
+                    conditional: false,
+                    terminal: true,
+                });
+            }
+            let conditional = !matches!(mnemonic, "jp" | "jr" | "jmp") || operands.contains(',');
+            Some(LoweredBranch {
+                target: operands.rsplit(',').next().map(str::trim),
+                conditional,
+                terminal: true,
+            })
+        }
+        "call" => Some(LoweredBranch {
+            target: operands.rsplit(',').next().map(str::trim),
+            conditional: true,
+            terminal: false,
+        }),
+        "ret" | "reti" | "retn" | "rz" | "rnz" | "rc" | "rnc" | "rp" | "rm" | "rpe" | "rpo"
+        | "halt" => Some(LoweredBranch {
+            target: None,
+            conditional: !matches!(mnemonic, "ret" | "reti" | "retn" | "halt"),
+            terminal: true,
+        }),
+        _ => None,
+    }
+}
+
+fn simplify_lowered_branches(lines: &[&str], text_start: usize, text_end: usize) -> String {
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index >= text_start && index < text_end {
+            let next = lines[index + 1..text_end].iter().find_map(|candidate| {
+                let trimmed = candidate.trim();
+                (!trimmed.is_empty() && !trimmed.starts_with(';')).then_some(trimmed)
+            });
+            if let (Some(branch), Some(next)) = (lowered_branch(line), next)
+                && matches!(
+                    line.split_whitespace().next(),
+                    Some("jp" | "jr" | "jmp" | "jz" | "jnz" | "jc" | "jnc" | "jm" | "jpe" | "jpo")
+                )
+                && branch
+                    .target
+                    .is_some_and(|target| next == format!("{target}:"))
+            {
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 #[allow(dead_code)]
@@ -945,6 +1224,7 @@ struct Emitter {
     recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
     static_liveness: Option<StaticLiveness>,
+    required_runtime_helpers: HashSet<RuntimeHelper>,
 
     cpu: CpuFamily,
     mos_executable: bool,
@@ -994,6 +1274,7 @@ impl Emitter {
             recursive_call_edges,
             tail_call_edges,
             static_liveness,
+            required_runtime_helpers: HashSet::new(),
 
             cpu: options.cpu,
             mos_executable: options.mos_executable,
@@ -1055,6 +1336,8 @@ impl Emitter {
     }
 
     fn emit_required_sections(&mut self) {
+        self.require_runtime_helpers_from_output();
+        self.emit_runtime_helpers();
         let literals = self
             .string_literals
             .iter()
@@ -1085,7 +1368,6 @@ impl Emitter {
         if self.mos_executable {
             self.line("    ld hl, 000000h");
             self.line("    ret");
-            self.emit_runtime_helpers();
             self.line("");
             return;
         }
@@ -1094,296 +1376,392 @@ impl Emitter {
         } else {
             self.line("    jp __ezra_exit");
         }
-        self.emit_runtime_helpers();
         self.line("");
     }
 
-    fn emit_runtime_helpers(&mut self) {
-        self.line("__ezra_pass:");
-        self.emit_out(0x0D, 0);
-        self.emit_out(0x0E, 1);
-        self.line("    ret");
-        self.line("__ezra_fail:");
-        self.emit_out_a(0x0D);
-        self.emit_out(0x0E, 1);
-        self.line("    ret");
-        self.line("__ezra_memcpy:");
-        if is_intel_8080_family(self.cpu) {
-            self.line("    mov a, b");
-            self.line("    ora c");
-            self.line("    rz");
-            self.line(".L_memcpy_loop:");
-            self.line("    mov a, m");
-            self.line("    stax d");
-            self.line("    inx h");
-            self.line("    inx d");
-            self.line("    dcx b");
-            self.line("    mov a, b");
-            self.line("    ora c");
-            self.line("    jnz .L_memcpy_loop");
-            self.line("    ret");
-            self.line("__ezra_memset:");
-            self.line("    mov e, a");
-            self.line("    mov a, b");
-            self.line("    ora c");
-            self.line("    rz");
-            self.line("    mov a, e");
-            self.line(".L_memset_loop:");
-            self.line("    mov m, a");
-            self.line("    inx h");
-            self.line("    dcx b");
-            self.line("    mov d, a");
-            self.line("    mov a, b");
-            self.line("    ora c");
-            self.line("    mov a, d");
-            self.line("    jnz .L_memset_loop");
-            self.line("    ret");
+    fn require_runtime_helper(&mut self, helper: RuntimeHelper) {
+        if !self.required_runtime_helpers.insert(helper) {
             return;
         }
-        self.line("    push de");
-        self.line("    push hl");
-        self.line("    push bc");
-        self.line("    pop hl");
-        self.line("    ld de, 000000h");
-        self.line("    or a");
-        self.line("    sbc hl, de");
-        self.line("    pop hl");
-        self.line("    pop de");
-        self.line("    ret z");
-        self.line("    ex de, hl");
-        self.line("    ldir");
-        self.line("    ret");
-        self.line("__ezra_memset:");
-        self.line("    push hl");
-        self.line("    push bc");
-        self.line("    pop hl");
-        self.line("    ld de, 000000h");
-        self.line("    or a");
-        self.line("    sbc hl, de");
-        self.line("    pop hl");
-        self.line("    ret z");
-        self.line("    ld (hl), a");
-        self.line("    dec bc");
-        self.line("    push hl");
-        self.line("    push bc");
-        self.line("    pop hl");
-        self.line("    ld de, 000000h");
-        self.line("    or a");
-        self.line("    sbc hl, de");
-        self.line("    pop hl");
-        self.line("    ret z");
-        self.line("    push hl");
-        self.line("    inc hl");
-        self.line("    ex de, hl");
-        self.line("    pop hl");
-        self.line("    ldir");
-        self.line("    ret");
-        self.line("__ezra_mul_u8:");
-        if is_z80_family_16bit(self.cpu) {
-            self.line("    ld b, a");
-            self.line("    xor a");
-            self.line(".L_mul_u8_loop:");
-            self.line("    ld d, a");
-            self.line("    ld a, b");
-            self.line("    or b");
-            self.line("    ld a, d");
-            self.line("    ret z");
-            self.line("    add a, c");
-            self.line("    dec b");
-            self.line("    jp .L_mul_u8_loop");
-        } else {
-            self.line("    ld b, a");
-            self.line("    mlt bc");
-            self.line("    ld a, c");
+        for dependency in helper.dependencies() {
+            self.require_runtime_helper(*dependency);
+        }
+    }
+
+    fn require_runtime_helpers_from_output(&mut self) {
+        let output = self.out.clone();
+        for helper in RUNTIME_HELPER_ORDER {
+            if output.lines().any(|line| {
+                line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .any(|token| token == helper.label())
+            }) {
+                self.require_runtime_helper(helper);
+            }
+        }
+    }
+
+    fn emit_runtime_helpers(&mut self) {
+        if self.required_runtime_helpers.contains(&RuntimeHelper::Pass) {
+            self.line("__ezra_pass:");
+            self.emit_out(0x0D, 0);
+            self.emit_out(0x0E, 1);
             self.line("    ret");
         }
-        self.line("__ezra_mul_u16:");
-        if is_z80_family_16bit(self.cpu) {
-            self.line("    ld de, 0000h");
-            self.line(".L_mul_u16_loop:");
+        if self.required_runtime_helpers.contains(&RuntimeHelper::Fail) {
+            self.line("__ezra_fail:");
+            self.emit_out_a(0x0D);
+            self.emit_out(0x0E, 1);
+            self.line("    ret");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::Memcpy)
+        {
+            self.line("__ezra_memcpy:");
+            if is_intel_8080_family(self.cpu) {
+                self.line("    mov a, b");
+                self.line("    ora c");
+                self.line("    rz");
+                self.line(".L_memcpy_loop:");
+                self.line("    mov a, m");
+                self.line("    stax d");
+                self.line("    inx h");
+                self.line("    inx d");
+                self.line("    dcx b");
+                self.line("    mov a, b");
+                self.line("    ora c");
+                self.line("    jnz .L_memcpy_loop");
+                self.line("    ret");
+            } else {
+                self.line("    push de");
+                self.line("    push hl");
+                self.line("    push bc");
+                self.line("    pop hl");
+                self.line("    ld de, 000000h");
+                self.line("    or a");
+                self.line("    sbc hl, de");
+                self.line("    pop hl");
+                self.line("    pop de");
+                self.line("    ret z");
+                self.line("    ex de, hl");
+                self.line("    ldir");
+                self.line("    ret");
+            }
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::Memset)
+        {
+            self.line("__ezra_memset:");
+            if is_intel_8080_family(self.cpu) {
+                self.line("    mov e, a");
+                self.line("    mov a, b");
+                self.line("    ora c");
+                self.line("    rz");
+                self.line("    mov a, e");
+                self.line(".L_memset_loop:");
+                self.line("    mov m, a");
+                self.line("    inx h");
+                self.line("    dcx b");
+                self.line("    mov d, a");
+                self.line("    mov a, b");
+                self.line("    ora c");
+                self.line("    mov a, d");
+                self.line("    jnz .L_memset_loop");
+                self.line("    ret");
+            } else {
+                self.line("    push hl");
+                self.line("    push bc");
+                self.line("    pop hl");
+                self.line("    ld de, 000000h");
+                self.line("    or a");
+                self.line("    sbc hl, de");
+                self.line("    pop hl");
+                self.line("    ret z");
+                self.line("    ld (hl), a");
+                self.line("    dec bc");
+                self.line("    push hl");
+                self.line("    push bc");
+                self.line("    pop hl");
+                self.line("    ld de, 000000h");
+                self.line("    or a");
+                self.line("    sbc hl, de");
+                self.line("    pop hl");
+                self.line("    ret z");
+                self.line("    push hl");
+                self.line("    inc hl");
+                self.line("    ex de, hl");
+                self.line("    pop hl");
+                self.line("    ldir");
+                self.line("    ret");
+            }
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::MulU8)
+        {
+            self.line("__ezra_mul_u8:");
+            if is_z80_family_16bit(self.cpu) {
+                self.line("    ld b, a");
+                self.line("    xor a");
+                self.line(".L_mul_u8_loop:");
+                self.line("    ld d, a");
+                self.line("    ld a, b");
+                self.line("    or b");
+                self.line("    ld a, d");
+                self.line("    ret z");
+                self.line("    add a, c");
+                self.line("    dec b");
+                self.line("    jp .L_mul_u8_loop");
+            } else {
+                self.line("    ld b, a");
+                self.line("    mlt bc");
+                self.line("    ld a, c");
+                self.line("    ret");
+            }
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::MulU16)
+        {
+            self.line("__ezra_mul_u16:");
+            if is_z80_family_16bit(self.cpu) {
+                self.line("    ld de, 0000h");
+                self.line(".L_mul_u16_loop:");
+                self.line("    ld a, b");
+                self.line("    or c");
+                self.line("    jp z, .L_mul_u16_done");
+                self.line("    ex de, hl");
+                self.line("    add hl, de");
+                self.line("    ex de, hl");
+                self.line("    dec bc");
+                self.line("    jp .L_mul_u16_loop");
+                self.line(".L_mul_u16_done:");
+                self.line("    ex de, hl");
+                self.line("    ret");
+            } else {
+                self.line("    ld d, h");
+                self.line("    ld e, l");
+                self.line("    ld h, c");
+                self.line("    mlt hl");
+                self.line("    push hl");
+                self.line("    ld h, d");
+                self.line("    ld l, c");
+                self.line("    mlt hl");
+                self.line("    ld a, l");
+                self.line("    ld h, e");
+                self.line("    ld l, b");
+                self.line("    mlt hl");
+                self.line("    add a, l");
+                self.line("    pop de");
+                self.line("    add a, d");
+                self.line("    ld hl, 000000h");
+                self.line("    ld h, a");
+                self.line("    ld l, e");
+                self.line("    ret");
+            }
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::MulU24)
+        {
+            self.line("__ezra_mul_u24:");
+            self.line("    ex de, hl");
+            self.line("    ld hl, 000000h");
+            self.line(".L_mul_u24_loop:");
+            self.line("    push hl");
+            self.line("    ld hl, 000000h");
+            self.line("    or a");
+            self.line("    sbc hl, bc");
+            self.line("    jp z, .L_mul_u24_done");
+            self.line("    pop hl");
+            self.line("    add hl, de");
+            self.line("    dec bc");
+            self.line("    jp .L_mul_u24_loop");
+            self.line(".L_mul_u24_done:");
+            self.line("    pop hl");
+            self.line("    ret");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::MulI24)
+        {
+            self.line("__ezra_mul_i24:");
+            self.line("    jp __ezra_mul_u24");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::DivU8)
+        {
+            self.line("__ezra_div_u8:");
+            self.line("    ld d, a");
+            self.line("    xor a");
+            self.line("    ld b, a");
+            self.line("    ld a, c");
+            self.line("    or a");
+            self.line("    jp z, .L_div_u8_zero");
+            self.line(".L_div_u8_loop:");
+            self.line("    ld a, d");
+            self.line("    cp c");
+            self.line("    jp c, .L_div_u8_done");
+            self.line("    sub c");
+            self.line("    ld d, a");
+            self.line("    inc b");
+            self.line("    jp .L_div_u8_loop");
+            self.line(".L_div_u8_zero:");
+            self.line("    xor a");
+            self.line("    ret");
+            self.line(".L_div_u8_done:");
+            self.line("    ld a, b");
+            self.line("    ret");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::DivU16)
+        {
+            self.line("__ezra_div_u16:");
             self.line("    ld a, b");
             self.line("    or c");
-            self.line("    jp z, .L_mul_u16_done");
+            self.line("    jp z, .L_div_u16_zero");
             self.line("    ex de, hl");
-            self.line("    add hl, de");
-            self.line("    ex de, hl");
-            self.line("    dec bc");
-            self.line("    jp .L_mul_u16_loop");
-            self.line(".L_mul_u16_done:");
-            self.line("    ex de, hl");
-            self.line("    ret");
-        } else {
-            self.line("    ld d, h");
-            self.line("    ld e, l");
-            self.line("    ld h, c");
-            self.line("    mlt hl");
-            self.line("    push hl");
-            self.line("    ld h, d");
-            self.line("    ld l, c");
-            self.line("    mlt hl");
-            self.line("    ld a, l");
-            self.line("    ld h, e");
-            self.line("    ld l, b");
-            self.line("    mlt hl");
-            self.line("    add a, l");
-            self.line("    pop de");
-            self.line("    add a, d");
             self.line("    ld hl, 000000h");
-            self.line("    ld h, a");
-            self.line("    ld l, e");
+            self.line(".L_div_u16_loop:");
+            self.line("    push hl");
+            self.line("    push de");
+            self.line("    pop hl");
+            self.line("    or a");
+            self.line("    sbc hl, bc");
+            self.line("    jp c, .L_div_u16_done");
+            self.line("    ex de, hl");
+            self.line("    pop hl");
+            self.line("    inc hl");
+            self.line("    jp .L_div_u16_loop");
+            self.line(".L_div_u16_zero:");
+            self.line("    ld hl, 000000h");
+            self.line("    ret");
+            self.line(".L_div_u16_done:");
+            self.line("    pop hl");
             self.line("    ret");
         }
-        self.line("__ezra_mul_u24:");
-        self.line("    ex de, hl");
-        self.line("    ld hl, 000000h");
-        self.line(".L_mul_u24_loop:");
-        self.line("    push hl");
-        self.line("    ld hl, 000000h");
-        self.line("    or a");
-        self.line("    sbc hl, bc");
-        self.line("    jp z, .L_mul_u24_done");
-        self.line("    pop hl");
-        self.line("    add hl, de");
-        self.line("    dec bc");
-        self.line("    jp .L_mul_u24_loop");
-        self.line(".L_mul_u24_done:");
-        self.line("    pop hl");
-        self.line("    ret");
-        self.line("__ezra_mul_i24:");
-        self.line("    jp __ezra_mul_u24");
-        self.line("__ezra_div_u8:");
-        self.line("    ld d, a");
-        self.line("    xor a");
-        self.line("    ld b, a");
-        self.line("    ld a, c");
-        self.line("    or a");
-        self.line("    jp z, .L_div_u8_zero");
-        self.line(".L_div_u8_loop:");
-        self.line("    ld a, d");
-        self.line("    cp c");
-        self.line("    jp c, .L_div_u8_done");
-        self.line("    sub c");
-        self.line("    ld d, a");
-        self.line("    inc b");
-        self.line("    jp .L_div_u8_loop");
-        self.line(".L_div_u8_zero:");
-        self.line("    xor a");
-        self.line("    ret");
-        self.line(".L_div_u8_done:");
-        self.line("    ld a, b");
-        self.line("    ret");
-        self.line("__ezra_div_u16:");
-        self.line("    ld a, b");
-        self.line("    or c");
-        self.line("    jp z, .L_div_u16_zero");
-        self.line("    ex de, hl");
-        self.line("    ld hl, 000000h");
-        self.line(".L_div_u16_loop:");
-        self.line("    push hl");
-        self.line("    push de");
-        self.line("    pop hl");
-        self.line("    or a");
-        self.line("    sbc hl, bc");
-        self.line("    jp c, .L_div_u16_done");
-        self.line("    ex de, hl");
-        self.line("    pop hl");
-        self.line("    inc hl");
-        self.line("    jp .L_div_u16_loop");
-        self.line(".L_div_u16_zero:");
-        self.line("    ld hl, 000000h");
-        self.line("    ret");
-        self.line(".L_div_u16_done:");
-        self.line("    pop hl");
-        self.line("    ret");
-        self.line("__ezra_div_u24:");
-        self.line("    push hl");
-        self.line("    ld hl, 000000h");
-        self.line("    or a");
-        self.line("    sbc hl, bc");
-        self.line("    jp z, .L_div_u24_zero");
-        self.line("    pop de");
-        self.line("    ld hl, 000000h");
-        self.line(".L_div_u24_loop:");
-        self.line("    push hl");
-        self.line("    push de");
-        self.line("    pop hl");
-        self.line("    or a");
-        self.line("    sbc hl, bc");
-        self.line("    jp c, .L_div_u24_done");
-        self.line("    ex de, hl");
-        self.line("    pop hl");
-        self.line("    inc hl");
-        self.line("    jp .L_div_u24_loop");
-        self.line(".L_div_u24_zero:");
-        self.line("    pop hl");
-        self.line("    ld hl, 000000h");
-        self.line("    ret");
-        self.line(".L_div_u24_done:");
-        self.line("    pop hl");
-        self.line("    ret");
-        self.line("__ezra_mod_u8:");
-        self.line("    ld d, a");
-        self.line("    ld a, c");
-        self.line("    or a");
-        self.line("    jp z, .L_mod_u8_zero");
-        self.line(".L_mod_u8_loop:");
-        self.line("    ld a, d");
-        self.line("    cp c");
-        self.line("    jp c, .L_mod_u8_done");
-        self.line("    sub c");
-        self.line("    ld d, a");
-        self.line("    jp .L_mod_u8_loop");
-        self.line(".L_mod_u8_zero:");
-        self.line("    xor a");
-        self.line("    ret");
-        self.line(".L_mod_u8_done:");
-        self.line("    ld a, d");
-        self.line("    ret");
-        self.line("__ezra_mod_u16:");
-        self.line("    ld a, b");
-        self.line("    or c");
-        self.line("    jp z, .L_mod_u16_zero");
-        self.line("    ex de, hl");
-        self.line(".L_mod_u16_loop:");
-        self.line("    push de");
-        self.line("    pop hl");
-        self.line("    or a");
-        self.line("    sbc hl, bc");
-        self.line("    jp c, .L_mod_u16_done");
-        self.line("    ex de, hl");
-        self.line("    jp .L_mod_u16_loop");
-        self.line(".L_mod_u16_zero:");
-        self.line("    ld hl, 000000h");
-        self.line("    ret");
-        self.line(".L_mod_u16_done:");
-        self.line("    push de");
-        self.line("    pop hl");
-        self.line("    ret");
-        self.line("__ezra_mod_u24:");
-        self.line("    push hl");
-        self.line("    ld hl, 000000h");
-        self.line("    or a");
-        self.line("    sbc hl, bc");
-        self.line("    jp z, .L_mod_u24_zero");
-        self.line("    pop de");
-        self.line(".L_mod_u24_loop:");
-        self.line("    push de");
-        self.line("    pop hl");
-        self.line("    or a");
-        self.line("    sbc hl, bc");
-        self.line("    jp c, .L_mod_u24_done");
-        self.line("    ex de, hl");
-        self.line("    jp .L_mod_u24_loop");
-        self.line(".L_mod_u24_zero:");
-        self.line("    pop hl");
-        self.line("    ld hl, 000000h");
-        self.line("    ret");
-        self.line(".L_mod_u24_done:");
-        self.line("    push de");
-        self.line("    pop hl");
-        self.line("    ret");
-        self.emit_signed_i24_div_mod_helper("__ezra_div_i24", BinaryOp::Div);
-        self.emit_signed_i24_div_mod_helper("__ezra_mod_i24", BinaryOp::Mod);
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::DivU24)
+        {
+            self.line("__ezra_div_u24:");
+            self.line("    push hl");
+            self.line("    ld hl, 000000h");
+            self.line("    or a");
+            self.line("    sbc hl, bc");
+            self.line("    jp z, .L_div_u24_zero");
+            self.line("    pop de");
+            self.line("    ld hl, 000000h");
+            self.line(".L_div_u24_loop:");
+            self.line("    push hl");
+            self.line("    push de");
+            self.line("    pop hl");
+            self.line("    or a");
+            self.line("    sbc hl, bc");
+            self.line("    jp c, .L_div_u24_done");
+            self.line("    ex de, hl");
+            self.line("    pop hl");
+            self.line("    inc hl");
+            self.line("    jp .L_div_u24_loop");
+            self.line(".L_div_u24_zero:");
+            self.line("    pop hl");
+            self.line("    ld hl, 000000h");
+            self.line("    ret");
+            self.line(".L_div_u24_done:");
+            self.line("    pop hl");
+            self.line("    ret");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::ModU8)
+        {
+            self.line("__ezra_mod_u8:");
+            self.line("    ld d, a");
+            self.line("    ld a, c");
+            self.line("    or a");
+            self.line("    jp z, .L_mod_u8_zero");
+            self.line(".L_mod_u8_loop:");
+            self.line("    ld a, d");
+            self.line("    cp c");
+            self.line("    jp c, .L_mod_u8_done");
+            self.line("    sub c");
+            self.line("    ld d, a");
+            self.line("    jp .L_mod_u8_loop");
+            self.line(".L_mod_u8_zero:");
+            self.line("    xor a");
+            self.line("    ret");
+            self.line(".L_mod_u8_done:");
+            self.line("    ld a, d");
+            self.line("    ret");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::ModU16)
+        {
+            self.line("__ezra_mod_u16:");
+            self.line("    ld a, b");
+            self.line("    or c");
+            self.line("    jp z, .L_mod_u16_zero");
+            self.line("    ex de, hl");
+            self.line(".L_mod_u16_loop:");
+            self.line("    push de");
+            self.line("    pop hl");
+            self.line("    or a");
+            self.line("    sbc hl, bc");
+            self.line("    jp c, .L_mod_u16_done");
+            self.line("    ex de, hl");
+            self.line("    jp .L_mod_u16_loop");
+            self.line(".L_mod_u16_zero:");
+            self.line("    ld hl, 000000h");
+            self.line("    ret");
+            self.line(".L_mod_u16_done:");
+            self.line("    push de");
+            self.line("    pop hl");
+            self.line("    ret");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::ModU24)
+        {
+            self.line("__ezra_mod_u24:");
+            self.line("    push hl");
+            self.line("    ld hl, 000000h");
+            self.line("    or a");
+            self.line("    sbc hl, bc");
+            self.line("    jp z, .L_mod_u24_zero");
+            self.line("    pop de");
+            self.line(".L_mod_u24_loop:");
+            self.line("    push de");
+            self.line("    pop hl");
+            self.line("    or a");
+            self.line("    sbc hl, bc");
+            self.line("    jp c, .L_mod_u24_done");
+            self.line("    ex de, hl");
+            self.line("    jp .L_mod_u24_loop");
+            self.line(".L_mod_u24_zero:");
+            self.line("    pop hl");
+            self.line("    ld hl, 000000h");
+            self.line("    ret");
+            self.line(".L_mod_u24_done:");
+            self.line("    push de");
+            self.line("    pop hl");
+            self.line("    ret");
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::DivI24)
+        {
+            self.emit_signed_i24_div_mod_helper("__ezra_div_i24", BinaryOp::Div);
+        }
+        if self
+            .required_runtime_helpers
+            .contains(&RuntimeHelper::ModI24)
+        {
+            self.emit_signed_i24_div_mod_helper("__ezra_mod_i24", BinaryOp::Mod);
+        }
     }
 
     fn emit_signed_i24_div_mod_helper(&mut self, label: &str, op: BinaryOp) {
@@ -1852,13 +2230,21 @@ impl Emitter {
     }
 
     fn emit_frame_prologue(&mut self) {
-        self.line("    push ix");
-        self.line("    ld ix, 000000h");
-        self.line("    add ix, sp");
+        if is_z80_family_16bit(self.cpu) {
+            self.line("    push bc");
+        } else {
+            self.line("    push ix");
+            self.line("    ld ix, 000000h");
+            self.line("    add ix, sp");
+        }
     }
 
     fn emit_frame_epilogue(&mut self) {
-        self.line("    pop ix");
+        if is_z80_family_16bit(self.cpu) {
+            self.line("    pop bc");
+        } else {
+            self.line("    pop ix");
+        }
     }
 
     fn emit_interrupt_prologue(&mut self) {
@@ -4645,6 +5031,24 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_compare_hl_de(&mut self) {
+        if is_intel_8080_family(self.cpu) {
+            let low_byte = self.next_label("compare_low_byte");
+            let end = self.next_label("compare_end");
+            self.line("    ld a, h");
+            self.line("    cp d");
+            self.line(&format!("    jp z, {low_byte}"));
+            self.line(&format!("    jp {end}"));
+            self.line(&format!("{low_byte}:"));
+            self.line("    ld a, l");
+            self.line("    cp e");
+            self.line(&format!("{end}:"));
+        } else {
+            self.line("    or a");
+            self.line("    sbc hl, de");
+        }
+    }
+
     fn emit_wide_comparison(
         &mut self,
         left: &Expr,
@@ -4657,8 +5061,7 @@ impl Emitter {
         self.emit_expr_to_hl(right, width)?;
         self.line("    ex de, hl");
         self.line("    pop hl");
-        self.line("    or a");
-        self.line("    sbc hl, de");
+        self.emit_compare_hl_de();
         self.emit_comparison_from_flags(op);
         Ok(())
     }
@@ -4735,8 +5138,7 @@ impl Emitter {
             self.emit_load_width(right_var);
             self.line("    ex de, hl");
             self.line("    pop hl");
-            self.line("    or a");
-            self.line("    sbc hl, de");
+            self.emit_compare_hl_de();
         }
         match op {
             BinaryOp::Lt => self.line(&format!("    jp c, {true_label}")),
@@ -5916,8 +6318,7 @@ impl Emitter {
         self.emit_expr_to_hl(right, width)?;
         self.line("    ex de, hl");
         self.line("    pop hl");
-        self.line("    or a");
-        self.line("    sbc hl, de");
+        self.emit_compare_hl_de();
         match op {
             BinaryOp::Eq => self.line(&format!("    jp nz, {false_label}")),
             BinaryOp::Ne => self.line(&format!("    jp z, {false_label}")),
@@ -6051,10 +6452,16 @@ impl Emitter {
             let displacement = offset as u32 + byte_offset;
             if displacement > 0x7F {
                 return Err(Diagnostic::new(format!(
-                    "stack argument offset {displacement} exceeds IX displacement range"
+                    "stack argument offset {displacement} exceeds frame displacement range"
                 )));
             }
-            self.line(&format!("    ld a, (ix+{displacement})"));
+            if is_z80_family_16bit(self.cpu) {
+                self.line(&format!("    ld hl, {displacement:04X}h"));
+                self.line("    add hl, sp");
+                self.line("    ld a, (hl)");
+            } else {
+                self.line(&format!("    ld a, (ix+{displacement})"));
+            }
             self.line(&format!("    ld ({:06X}h), a", variable.addr + byte_offset));
         }
         Ok(())
@@ -8350,6 +8757,7 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
                 calls.retain(|name| symbols.functions.contains_key(name));
                 graph.insert(function.name.clone(), calls);
                 if function.name == "main"
+                    || has_attr(function, "extern")
                     || has_attr(function, "naked")
                     || has_attr(function, "interrupt")
                     || declaration_is_banked(declaration)

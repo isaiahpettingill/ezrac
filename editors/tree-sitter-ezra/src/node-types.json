@@ -2510,6 +2510,10 @@
     "named": false
   },
   {
+    "type": "@extern",
+    "named": false
+  },
+  {
     "type": "@inline",
     "named": false
   },

@@ -13,7 +13,15 @@ behavior, and emulator-backed test behavior.
 - Unreachable statement elimination after terminators, provided removed
   statements are unreachable in source semantics.
 - Peephole cleanup for exact duplicate register loads with no intervening
-  memory, port, call, or inline-asm effects.
+  memory, port, call, or inline-asm effects. The eZ80 pass may also reuse a
+  cached load from a proven nonvolatile absolute local/global range across
+  register-only instructions; stores, indirect memory, ports, calls, branches,
+  and inline assembly invalidate the cache.
+- Lowered CFG cleanup that removes only blocks unreachable from `__ezra_start`
+  and explicit public, banked, interrupt, naked, or inline-assembly roots. It
+  keeps programs containing inline assembly opaque because assembly may enter
+  or branch to labels the compiler cannot model, and it removes a jump only
+  when both outcomes reach the same immediately following label.
 - Target-specific multiply lowering when the selected CPU supports the emitted
   instruction sequence and emulator tests cover the result.
 - Explicit function inlining in TBIR when it approves a source-shaped body outside
@@ -77,6 +85,19 @@ behavior, and emulator-backed test behavior.
   asm clobbers.
 - Block-copy lowering. `ldir`/`otir`-style lowering is target-specific and must
   preserve volatile and overlap behavior.
+
+## Root and helper rules
+
+- Public functions and public constants, globals, and embeds are executable or
+  storage roots. Banked declarations, interrupt functions, naked functions,
+  `main`, exact function labels named by inline assembly, and programs with
+  extern assembly are roots as well. Private declarations remain removable
+  when no reachable code or root references them.
+- eZ80 runtime helpers are selected from a fixed dependency graph after code
+  emission. A helper is emitted only when generated or inline assembly refers
+  to it; signed 24-bit multiplication also retains its unsigned 24-bit helper
+  dependency. This selection happens before section output, not by pruning a
+  monolithic helper block after emission.
 
 ## Required Regression Coverage
 

@@ -11,9 +11,43 @@ fn emits_test_pass_ports() {
 
     assert!(asm.contains("__ezra_pass:"));
     assert!(!asm.contains("__ezra_fail:"));
+    assert!(!asm.contains("__ezra_memcpy:"));
+    assert!(!asm.contains("__ezra_mul_u24:"));
     assert!(asm.contains("    call __ezra_pass"));
     assert!(asm.contains("out0 (0Dh), a"));
     assert!(asm.contains("out0 (0Eh), a"));
+    assert!(
+        asm.lines().count() < 80,
+        "pass-only output grew: {} lines",
+        asm.lines().count()
+    );
+}
+
+#[test]
+fn emits_runtime_helpers_on_demand_with_dependencies() {
+    let source = r#"
+            fn main() {
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber memory) {
+                    "ld hl, 000001h"
+                    "ld bc, 000002h"
+                    "call __ezra_mul_i24"
+                }
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+
+    assert!(asm.contains("__ezra_mul_i24:"), "{asm}");
+    assert!(asm.contains("__ezra_mul_u24:"), "{asm}");
+    assert!(asm.contains("__ezra_pass:"), "{asm}");
+    assert!(!asm.contains("__ezra_div_u8:"), "{asm}");
+    assert!(!asm.contains("__ezra_memcpy:"), "{asm}");
+    assert!(
+        asm.lines().count() < 180,
+        "helper output grew: {} lines",
+        asm.lines().count()
+    );
 }
 
 #[test]
@@ -327,6 +361,52 @@ section .text
     assert_eq!(asm.matches("    ld e, 02h").count(), 1, "{asm}");
     assert_eq!(asm.matches("    ld iy, 040000h").count(), 1, "{asm}");
     assert!(asm.contains("    ld b, a"), "{asm}");
+}
+
+#[test]
+fn peephole_reuses_cached_absolute_local_loads_across_register_only_code() {
+    let asm = peephole_cleanup_with_ranges(
+        r#"
+section .text
+_main:
+    ld a, (040000h)
+    ld b, 01h
+    ld a, (040000h)
+    ld c, 02h
+    ld a, (040001h)
+    ld a, (040000h)
+    ret
+"#,
+        &[(0x040000, 2)],
+    );
+
+    assert_eq!(asm.matches("    ld a, (040000h)").count(), 2, "{asm}");
+    assert_eq!(asm.matches("    ld a, (040001h)").count(), 1, "{asm}");
+}
+
+#[test]
+fn lowered_cfg_removes_unreachable_blocks_and_fallthrough_jumps() {
+    let input = r#"
+section .text
+__ezra_start:
+    jp live
+unused:
+    out0 (0Ch), a
+live:
+    jp live_end
+live_end:
+    ret
+section .rodata
+"#;
+    let output = cleanup_lowered_cfg(input, &["__ezra_start"]);
+
+    assert!(!output.contains("unused:"), "{output}");
+    assert!(!output.contains("out0 (0Ch), a"), "{output}");
+    assert!(!output.contains("    jp live_end"), "{output}");
+    assert!(
+        output.len() < input.len(),
+        "CFG cleanup did not reduce output"
+    );
 }
 
 #[test]

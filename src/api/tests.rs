@@ -24,6 +24,66 @@ fn materialized_embed_bytes(program: &Program, name: &str) -> Vec<u8> {
 }
 
 #[test]
+fn artifact_size_report_is_stable_and_separates_payload_from_address_gaps() {
+    let report = ArtifactSizeReport::from_sections(
+        &[
+            ArtifactSectionMeasurement {
+                name: ".text".to_owned(),
+                start: 0x100,
+                end: 0x110,
+                size: 0x10,
+            },
+            ArtifactSectionMeasurement {
+                name: ".bss".to_owned(),
+                start: 0x120,
+                end: 0x128,
+                size: 8,
+            },
+            ArtifactSectionMeasurement {
+                name: ".assets".to_owned(),
+                start: 0x200,
+                end: 0x203,
+                size: 3,
+            },
+        ],
+        &[],
+        23,
+    );
+
+    assert_eq!(report.text, 0x10);
+    assert_eq!(report.assets, 3);
+    assert_eq!(report.bss, 8);
+    assert_eq!(report.machine_code_payload, 0x13);
+    assert_eq!(report.address_span, 0x103);
+    assert_eq!(report.address_gaps, 0x103 - 0x1B);
+    assert_eq!(report.final_package, 23);
+    assert_eq!(
+        report.to_stable_string(),
+        "ezrac-size-v1\ntext=16\nrodata=0\ninitialized_data=0\nassets=3\nbss=8\nruntime_helpers=unknown\nmachine_code_payload=19\naddress_span=259\naddress_gaps=232\nfinal_package=23\nsection:.assets=3\nsection:.bss=8\nsection:.text=16\n"
+    );
+}
+
+#[test]
+fn size_budget_diagnostics_name_the_overflowing_section() {
+    let files = [WorkspaceFile::text("main.ezra", "fn main() {}")];
+    let mut build = BuildRequest::for_target("cpm-2.2-z80").unwrap();
+    build.size_budgets = SizeBudgets::default().section(".text", 0);
+    let error = build_workspace_with_request(
+        &Workspace::new(&files),
+        "main.ezra",
+        &CompileRequest::new("main.ezra", "cpm-2.2-z80"),
+        &build,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.message.contains("size budget exceeded for `.text`"),
+        "{error}"
+    );
+    assert!(error.message.contains("reduce that section"), "{error}");
+}
+
+#[test]
 fn compiles_in_memory_source_to_ez80_assembly() {
     let request = CompileRequest::new("memory.ezra", "custom-unknown-ez80");
     let compilation = compile_source_to_assembly("fn main() {}", &request).unwrap();

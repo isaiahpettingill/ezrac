@@ -1,5 +1,5 @@
 pub volatile mmio FLAT_DEVICE: ptr<u8> = 0x050020
-pub volatile mmio SPLIT_DEVICE: ptr<u8> = 0x100020
+pub volatile mmio SPLIT_DEVICE: ptr<u8> = 0x17FFF0
 
 pub fn load8(address: ptr<u8>) -> u8 {
     return *address

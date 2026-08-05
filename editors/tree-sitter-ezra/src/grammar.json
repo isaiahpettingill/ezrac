@@ -90,6 +90,10 @@
         {
           "type": "STRING",
           "value": "@no-comptime"
+        },
+        {
+          "type": "STRING",
+          "value": "@extern"
         }
       ]
     },
@@ -584,6 +588,10 @@
               {
                 "type": "STRING",
                 "value": "@no-comptime"
+              },
+              {
+                "type": "STRING",
+                "value": "@extern"
               },
               {
                 "type": "STRING",

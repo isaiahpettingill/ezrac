@@ -187,6 +187,7 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
                     }
                     Rule::comptime_attr => attrs.push("comptime".to_owned()),
                     Rule::no_comptime_attr => attrs.push("no-comptime".to_owned()),
+                    Rule::extern_attr => attrs.push("extern".to_owned()),
                     _ => declaration = Some(build_decl(file, inner)?),
                 }
             }
@@ -249,6 +250,9 @@ fn apply_declaration_attrs(
                 if attr == "comptime" {
                     return Err(Diagnostic::new("`@comptime` is only valid on functions"));
                 }
+                if attr == "extern" {
+                    return Err(Diagnostic::new("`@extern` is only valid on functions"));
+                }
                 declaration.attrs.push(attr);
             }
             Ok(Declaration::Const(declaration))
@@ -258,7 +262,7 @@ fn apply_declaration_attrs(
             Ok(Declaration::Function(function))
         }
         _ => Err(Diagnostic::new(
-            "`@comptime` and `@no-comptime` are only valid on constants or functions",
+            "declaration attributes are only valid on constants or functions",
         )),
     }
 }
@@ -584,6 +588,7 @@ fn build_fn(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Function, Diagnos
             Rule::inline_attr => attrs.push("inline".to_owned()),
             Rule::comptime_attr => attrs.push("comptime".to_owned()),
             Rule::no_comptime_attr => attrs.push("no-comptime".to_owned()),
+            Rule::extern_attr => attrs.push("extern".to_owned()),
             Rule::visibility => {
                 if public {
                     return Err(Diagnostic::new("duplicate visibility `pub` on function"));

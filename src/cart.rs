@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -512,6 +512,41 @@ fn section_usage_without_assets(program: &Program) -> Result<HashMap<String, u32
         section_usage_from_string_literals(program)?,
     )?;
     Ok(usage)
+}
+
+/// Return the logical storage required by source-level sections.
+///
+/// These sizes describe address-backed data, not the bytes in the linked
+/// machine image. For example, an eZ80 source embed may be initialized by
+/// `.text` stores while still occupying `.assets` storage at its target
+/// address. The result is ordered for stable reports and includes an
+/// aggregate `.assets` entry for all embeds.
+pub fn source_section_sizes(program: &Program) -> Result<BTreeMap<String, usize>, Diagnostic> {
+    let mut sizes = BTreeMap::new();
+    for (section, size) in section_usage_without_assets(program)? {
+        sizes.insert(
+            section,
+            usize::try_from(size).map_err(|_| {
+                Diagnostic::new("source section size exceeds host addressable memory")
+            })?,
+        );
+    }
+
+    let mut assets = 0usize;
+    for asset in collect_assets(program)? {
+        let size = asset.bytes.len();
+        assets = assets
+            .checked_add(size)
+            .ok_or_else(|| Diagnostic::new("asset storage exceeds host addressable memory"))?;
+        let entry = sizes.entry(asset.section).or_default();
+        *entry = entry
+            .checked_add(size)
+            .ok_or_else(|| Diagnostic::new("asset section exceeds host addressable memory"))?;
+    }
+    if assets > 0 {
+        sizes.insert(".assets".to_owned(), assets);
+    }
+    Ok(sizes)
 }
 
 fn layout_section_starts(

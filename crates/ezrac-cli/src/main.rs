@@ -79,8 +79,9 @@ fn run() -> Result<(), String> {
             check(&options)
         }
         "build" => {
-            let options = BuildCommandOptions::parse(&args[1..])?;
-            build(&options)
+            let (build_args, size_budgets) = parse_size_budget_args(&args[1..])?;
+            let options = BuildCommandOptions::parse(&build_args)?;
+            build_with_size_budgets(&options, &size_budgets)
         }
         "disk" => {
             let options = DiskCommandOptions::parse(&args[1..])?;
@@ -772,6 +773,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
             .unwrap_or_else(|| Path::new("."))
             .join("target"),
         executable_name: None,
+        size_budgets: ezra::api::SizeBudgets::default(),
     };
     if let Some(base_addr) = options.base_addr {
         let max_addr = max_address_for_target(&settings.target);
@@ -857,6 +859,7 @@ struct BuildSettings {
     default_sdk_symbols: bool,
     output_root: PathBuf,
     executable_name: Option<String>,
+    size_budgets: ezra::api::SizeBudgets,
 }
 
 fn shared_build_request(
@@ -940,6 +943,7 @@ fn shared_build_request(
         executable_name,
         gameboy_banking: settings.gameboy_banking,
         package_context,
+        size_budgets: settings.size_budgets.clone(),
     })
 }
 
@@ -964,6 +968,14 @@ impl InputKind {
 fn resolve_build_settings(
     options: &impl BuildOptionsView,
     source_path: &Path,
+) -> Result<BuildSettings, String> {
+    resolve_build_settings_with_budgets(options, source_path, &ezra::api::SizeBudgets::default())
+}
+
+fn resolve_build_settings_with_budgets(
+    options: &impl BuildOptionsView,
+    source_path: &Path,
+    size_budgets: &ezra::api::SizeBudgets,
 ) -> Result<BuildSettings, String> {
     let project = load_nearest_project_config(source_path).map_err(|error| error.to_string())?;
     let target_name = options.target().map(String::as_str).or_else(|| {
@@ -1101,6 +1113,7 @@ fn resolve_build_settings(
         default_sdk_symbols,
         output_root,
         executable_name,
+        size_budgets: size_budgets.clone(),
     })
 }
 
@@ -1320,7 +1333,71 @@ fn validate_layout_for_target_profile(
     ))
 }
 
+fn parse_size_budget_args<T: AsRef<OsStr>>(
+    args: &[T],
+) -> Result<(Vec<OsString>, ezra::api::SizeBudgets), String> {
+    let mut remaining = Vec::new();
+    let mut budgets = ezra::api::SizeBudgets::default();
+    let mut iter = args.iter();
+    while let Some(raw_arg) = iter.next() {
+        let arg = raw_arg.as_ref();
+        let specification = if arg == OsStr::new("--size-budget") {
+            Some(cli_text(iter.next().ok_or_else(usage)?)?)
+        } else {
+            arg.to_str()
+                .and_then(|value| value.strip_prefix("--size-budget=").map(str::to_owned))
+        };
+        if let Some(specification) = specification {
+            add_size_budget(&mut budgets, &specification)?;
+        } else {
+            remaining.push(arg.to_os_string());
+        }
+    }
+    Ok((remaining, budgets))
+}
+
+fn add_size_budget(
+    budgets: &mut ezra::api::SizeBudgets,
+    specification: &str,
+) -> Result<(), String> {
+    let (name, raw_limit) = specification.split_once('=').ok_or_else(|| {
+        format!("invalid size budget `{specification}`; expected NAME=BYTES, such as `.text=4096`")
+    })?;
+    if name.is_empty() {
+        return Err("size budget name cannot be empty".to_owned());
+    }
+    let limit = parse_size_bytes(raw_limit)?;
+    match name {
+        "target" | "package" | "final_package" => budgets.target = Some(limit),
+        "runtime_helpers" | "runtime-helpers" | "helpers" => budgets.runtime_helpers = Some(limit),
+        _ => {
+            budgets.sections.insert(name.to_owned(), limit);
+        }
+    }
+    Ok(())
+}
+
+fn parse_size_bytes(text: &str) -> Result<usize, String> {
+    let value = text.replace('_', "");
+    let parsed = if let Some(hex) = value.strip_prefix("0x") {
+        usize::from_str_radix(hex, 16)
+    } else if let Some(hex) = value.strip_suffix('h') {
+        usize::from_str_radix(hex, 16)
+    } else {
+        value.parse()
+    }
+    .map_err(|_| format!("invalid size budget byte count `{text}`"))?;
+    Ok(parsed)
+}
+
 fn build(options: &BuildCommandOptions) -> Result<(), String> {
+    build_with_size_budgets(options, &ezra::api::SizeBudgets::default())
+}
+
+fn build_with_size_budgets(
+    options: &BuildCommandOptions,
+    size_budgets: &ezra::api::SizeBudgets,
+) -> Result<(), String> {
     let source_path = resolve_build_source_path(options)?;
     let targets = if let Some(target) = &options.target {
         vec![Some(target.clone())]
@@ -1336,9 +1413,10 @@ fn build(options: &BuildCommandOptions) -> Result<(), String> {
         let mut target_options = options.clone();
         target_options.path = Some(source_path.clone());
         target_options.target = target;
-        let outputs = build_source_with_build_options(&target_options)?;
+        let outputs = build_source_with_build_options_and_budgets(&target_options, size_budgets)?;
         println!("wrote {}", outputs.asm.display());
         println!("wrote {}", outputs.map.display());
+        println!("wrote {}", outputs.size.display());
         println!("wrote {}", outputs.executable.display());
     }
     Ok(())
@@ -1348,6 +1426,7 @@ fn build(options: &BuildCommandOptions) -> Result<(), String> {
 struct BuildOutputs {
     asm: PathBuf,
     map: PathBuf,
+    size: PathBuf,
     executable: PathBuf,
 }
 
@@ -1377,10 +1456,18 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
     })
 }
 
+#[cfg(test)]
 fn build_source_with_build_options(options: &BuildCommandOptions) -> Result<BuildOutputs, String> {
+    build_source_with_build_options_and_budgets(options, &ezra::api::SizeBudgets::default())
+}
+
+fn build_source_with_build_options_and_budgets(
+    options: &BuildCommandOptions,
+    size_budgets: &ezra::api::SizeBudgets,
+) -> Result<BuildOutputs, String> {
     let source_path = resolve_build_source_path(options)?;
     let source_location = command_source_start_location(&source_path);
-    let settings = resolve_build_settings(options, &source_path)?;
+    let settings = resolve_build_settings_with_budgets(options, &source_path, size_budgets)?;
     validate_build_layout(&settings)?;
     match detect_input_kind(&source_path, &settings)? {
         InputKind::Ezra => build_ezra_source(&source_path, source_location, &settings, options),
@@ -1501,6 +1588,7 @@ fn write_assembly_build_artifacts(
     let output_base = build_output_base_path(settings, source_path)?;
     let asm_path = output_base.with_extension("asm");
     let map_path = output_base.with_extension("map");
+    let size_path = output_base.with_extension("size");
     let executable_path = output_base.with_extension(executable_extension(settings));
     let preprocessed = preprocess_assembly_file(
         source_path,
@@ -1524,12 +1612,15 @@ fn write_assembly_build_artifacts(
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, linked.map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
+    fs::write(&size_path, linked.size_report.to_stable_string())
+        .map_err(|error| format!("failed to write {}: {error}", size_path.display()))?;
     fs::write(&executable_path, linked.executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
     Ok(BuildOutputs {
         asm: asm_path,
         map: map_path,
+        size: size_path,
         executable: executable_path,
     })
 }
@@ -1544,6 +1635,7 @@ fn write_build_artifacts(
     let output_base = build_output_base_path(settings, source_path)?;
     let asm_path = output_base.with_extension("asm");
     let map_path = output_base.with_extension("map");
+    let size_path = output_base.with_extension("size");
     let executable_path = output_base.with_extension(executable_extension(settings));
 
     let build_request = shared_build_request(settings, source_path)?;
@@ -1562,12 +1654,15 @@ fn write_build_artifacts(
         .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
     fs::write(&map_path, linked.map)
         .map_err(|error| format!("failed to write {}: {error}", map_path.display()))?;
+    fs::write(&size_path, linked.size_report.to_stable_string())
+        .map_err(|error| format!("failed to write {}: {error}", size_path.display()))?;
     fs::write(&executable_path, linked.executable)
         .map_err(|error| format!("failed to write {}: {error}", executable_path.display()))?;
 
     Ok(BuildOutputs {
         asm: asm_path,
         map: map_path,
+        size: size_path,
         executable: executable_path,
     })
 }
@@ -2946,7 +3041,7 @@ fn print_targets() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, and target executable artifacts\n  disk [--format <format>] [--label <label>] --output <image> [--file [NAME=]PATH]...
+    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--size-budget NAME=BYTES]... [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, .size, and target executable artifacts\n  disk [--format <format>] [--label <label>] --output <image> [--file [NAME=]PATH]...
                                        create an emulator-ready disk image with named files
   emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
 }

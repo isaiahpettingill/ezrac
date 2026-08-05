@@ -274,7 +274,7 @@ impl Symbols {
             let mut stack_arg_offsets = vec![None; params.len()];
             let mut stack_arg_bytes = 0u8;
             if params.len() > 3 {
-                let mut offset = 6u8;
+                let mut offset = symbols.function_pointer_width.bytes().saturating_mul(2);
                 for (index, width) in param_widths.iter().enumerate().skip(3) {
                     let bytes = width.bytes();
                     if offset as u16 + bytes as u16 > 0x80 {

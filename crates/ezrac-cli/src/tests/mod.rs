@@ -10,4 +10,5 @@ mod disk_behavior;
 mod emulator_behavior;
 mod layout_behavior;
 mod project_behavior;
+mod size_behavior;
 mod target_output_behavior;

@@ -187,6 +187,8 @@ fn translate_8080_exact(text: &str) -> Result<Option<String>, Diagnostic> {
         "rrca" => "rrc".to_owned(),
         "rla" => "ral".to_owned(),
         "rra" => "rar".to_owned(),
+        "srl a" => "ora a
+rar".to_owned(),
         "cpl" => "cma".to_owned(),
         "scf" => "stc".to_owned(),
         "ccf" => "cmc".to_owned(),
@@ -246,11 +248,21 @@ fn translate_8080_ld(dst: &str, src: &str) -> Result<String, Diagnostic> {
         if src == "hl" {
             return Ok(format!("shld {dst}"));
         }
+        if let Some((high, low)) = intel_8080_rp_bytes(src) {
+            return Ok(format!(
+                "push h\nmov h, {high}\nmov l, {low}\nshld {dst}\npop h"
+            ));
+        }
     }
-    if let Some(src) = unwrap_asm_indirect(src)
-        && dst == "hl"
-    {
-        return Ok(format!("lhld {src}"));
+    if let Some(src) = unwrap_asm_indirect(src) {
+        if dst == "hl" {
+            return Ok(format!("lhld {src}"));
+        }
+        if let Some((high, low)) = intel_8080_rp_bytes(dst) {
+            return Ok(format!(
+                "push h\nlhld {src}\nmov {high}, h\nmov {low}, l\npop h"
+            ));
+        }
     }
     if dst == "(bc)" && src == "a" {
         return Ok("stax b".to_owned());

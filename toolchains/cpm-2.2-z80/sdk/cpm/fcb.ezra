@@ -28,6 +28,11 @@ pub const DIRECTORY_RECORD_SIZE: u8 = 128
 pub const DIRECTORY_ENTRIES_PER_RECORD: u8 = 4
 pub const DIRECTORY_UNUSED: u8 = 0xE5
 pub const SEARCH_NO_MATCH: u8 = 0xFF
+pub const DIRECTORY_ATTRIBUTE_MASK: u8 = 0x80
+pub const DIRECTORY_CHARACTER_MASK: u8 = 0x7F
+pub const DIRECTORY_ATTRIBUTE_READ_ONLY: u8 = 0x80
+pub const DIRECTORY_ATTRIBUTE_SYSTEM: u8 = 0x40
+pub const DIRECTORY_ATTRIBUTE_ARCHIVE: u8 = 0x20
 pub const USER_DEFAULT: u8 = 0
 pub const USER_MAX: u8 = 15
 pub const BYTE_STREAM_SEEK_UNSUPPORTED: u8 = 1
@@ -222,7 +227,8 @@ pub fn record_for_byte_offset(offset: u24) -> u24 {
 }
 
 pub fn byte_offset_in_record(offset: u24) -> u8 {
-    return cast<u8>(offset & 127u24)
+    let remainder: u24 = offset & 127u24
+    return cast<u8>(remainder)
 }
 
 pub fn byte_offset_for_record(record: u24) -> u24 {
@@ -440,8 +446,24 @@ pub fn directory_entry_user(buffer: ptr<u8>, result: u8) -> u8 {
     return *entry
 }
 
+// This returns the FCB drive selector. Zero intentionally means the current
+// drive, not physical drive A:. Use directory_entry_drive_for_current when a
+// physical/current selector is needed.
 pub fn directory_entry_drive(directory_search_fcb: ptr<u8>) -> u8 {
     return get_drive(directory_search_fcb)
+}
+
+// `physical_disk` is the BDOS physical disk number: 0 for A:, 1 for B:, and so
+// on. The returned value is an FCB selector: 1 for A: through 16 for P:.
+pub fn directory_entry_drive_for_current(directory_search_fcb: ptr<u8>, physical_disk: u8) -> u8 {
+    let selected_drive: u8 = get_drive(directory_search_fcb)
+    if selected_drive == DRIVE_DEFAULT {
+        if physical_disk > MAX_DRIVE - DRIVE_A {
+            return RESULT_ERROR
+        }
+        return physical_disk + DRIVE_A
+    }
+    return selected_drive
 }
 
 pub fn directory_entry_name_char(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
@@ -452,7 +474,18 @@ pub fn directory_entry_name_char(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
     if entry == cast<ptr<u8>>(cast<u24>(0)) {
         return 0
     }
-    return *(entry + NAME + index)
+    return *(entry + NAME + index) & DIRECTORY_CHARACTER_MASK
+}
+
+pub fn directory_entry_name_attribute(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
+    if index >= 3 {
+        return 0
+    }
+    let entry: ptr<u8> = directory_entry(buffer, result)
+    if entry == cast<ptr<u8>>(cast<u24>(0)) {
+        return 0
+    }
+    return *(entry + NAME + index) & DIRECTORY_ATTRIBUTE_MASK
 }
 
 pub fn directory_entry_extension_char(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
@@ -463,7 +496,18 @@ pub fn directory_entry_extension_char(buffer: ptr<u8>, result: u8, index: u8) ->
     if entry == cast<ptr<u8>>(cast<u24>(0)) {
         return 0
     }
-    return *(entry + EXTENSION + index)
+    return *(entry + EXTENSION + index) & DIRECTORY_CHARACTER_MASK
+}
+
+pub fn directory_entry_extension_attribute(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
+    if index >= EXTENSION_LENGTH {
+        return 0
+    }
+    let entry: ptr<u8> = directory_entry(buffer, result)
+    if entry == cast<ptr<u8>>(cast<u24>(0)) {
+        return 0
+    }
+    return *(entry + EXTENSION + index) & DIRECTORY_ATTRIBUTE_MASK
 }
 
 // Decode a search result into a normal FCB. The returned byte is the user
@@ -476,12 +520,20 @@ pub fn decode_directory_entry(buffer: ptr<u8>, result: u8, destination: ptr<u8>,
     init(destination, get_drive(directory_search_fcb))
     let index: u8 = 0
     while index < NAME_LENGTH {
-        set_name_char(destination, index, *(entry + NAME + index))
+        set_name_char(
+            destination,
+            index,
+            *(entry + NAME + index) & DIRECTORY_CHARACTER_MASK,
+        )
         index += 1
     }
     let extension_index: u8 = 0
     while extension_index < EXTENSION_LENGTH {
-        set_extension_char(destination, extension_index, *(entry + EXTENSION + extension_index))
+        set_extension_char(
+            destination,
+            extension_index,
+            *(entry + EXTENSION + extension_index) & DIRECTORY_CHARACTER_MASK,
+        )
         extension_index += 1
     }
     return *entry

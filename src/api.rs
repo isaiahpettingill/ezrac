@@ -18,13 +18,16 @@ use crate::{
         emit_mos6502_assembly_with_options, preprocess_assembly_source,
     },
     ast::{Declaration, Program},
-    cart::{build_cartridge_map, collect_gameboy_banked_embeds, layout_section_bases},
+    cart::{
+        build_cartridge_map, collect_gameboy_banked_embeds, layout_section_bases,
+        source_section_sizes,
+    },
     compile::{
         CompileOptions, CompileReport, SdkResolver, check_source_with_sdk_and_overrides,
         parse_and_resolve_imports_with_sdk_and_overrides,
         parse_and_resolve_imports_with_sdk_and_workspace,
     },
-    diagnostic::Diagnostic,
+    diagnostic::{Diagnostic, SourceLocation},
     layout::{Layout, default_layout_for_target},
     package::{PackageContext, PackageRequest, package_executable_with_context},
     parser::parse_program,
@@ -126,6 +129,316 @@ pub struct AssemblyCompilation {
     pub assembly: String,
 }
 
+/// A named byte budget applied after linking and packaging.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SizeBudgets {
+    /// Maximum final package size. This is the target artifact size budget.
+    pub target: Option<usize>,
+    /// Maximum sizes keyed by section name, or by one of the report fields such as
+    /// `machine_code_payload`, `address_span`, or `final_package`.
+    pub sections: BTreeMap<String, usize>,
+    /// Maximum runtime-helper size when helper symbols make that size derivable.
+    pub runtime_helpers: Option<usize>,
+}
+
+impl SizeBudgets {
+    pub fn section(mut self, name: impl Into<String>, limit: usize) -> Self {
+        self.sections.insert(name.into(), limit);
+        self
+    }
+
+    pub fn with_target(mut self, limit: usize) -> Self {
+        self.target = Some(limit);
+        self
+    }
+
+    pub fn with_runtime_helpers(mut self, limit: usize) -> Self {
+        self.runtime_helpers = Some(limit);
+        self
+    }
+}
+
+/// Size of one emitted address section. `size` excludes address gaps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactSectionSize {
+    pub name: String,
+    pub size: usize,
+}
+
+/// Deterministic size breakdown for a linked and packaged artifact.
+///
+/// `machine_code_payload` is the sum of emitted section bytes excluding `.bss`.
+/// `address_span` includes the address gaps between placed sections. `final_package`
+/// is the number of bytes in the selected output format, including format headers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactSizeReport {
+    pub text: usize,
+    pub rodata: usize,
+    pub initialized_data: usize,
+    pub assets: usize,
+    pub bss: usize,
+    pub runtime_helpers: Option<usize>,
+    pub machine_code_payload: usize,
+    pub address_span: usize,
+    pub address_gaps: usize,
+    pub final_package: usize,
+    pub sections: Vec<ArtifactSectionSize>,
+}
+
+impl ArtifactSizeReport {
+    #[cfg(test)]
+    fn from_sections(
+        sections: &[ArtifactSectionMeasurement],
+        symbols: &[AssemblySymbol],
+        final_package: usize,
+    ) -> Self {
+        Self::from_sections_with_storage(sections, symbols, final_package, None)
+    }
+
+    fn from_sections_with_storage(
+        sections: &[ArtifactSectionMeasurement],
+        symbols: &[AssemblySymbol],
+        final_package: usize,
+        source_storage: Option<&BTreeMap<String, usize>>,
+    ) -> Self {
+        let mut named = BTreeMap::<String, usize>::new();
+        let mut min_start = None;
+        let mut max_end = None;
+        let mut physical_payload = 0usize;
+        let mut physical_bytes = 0usize;
+
+        for section in sections {
+            *named.entry(section.name.clone()).or_default() += section.size;
+            physical_bytes = physical_bytes.saturating_add(section.size);
+            if section.name != ".bss" {
+                physical_payload = physical_payload.saturating_add(section.size);
+            }
+            if section.size > 0 {
+                min_start =
+                    Some(min_start.map_or(section.start, |start: u32| start.min(section.start)));
+                max_end = Some(max_end.map_or(section.end, |end: u32| end.max(section.end)));
+            }
+        }
+
+        let address_span = match (min_start, max_end) {
+            (Some(start), Some(end)) => usize::try_from(end.saturating_sub(start)).unwrap_or(0),
+            _ => 0,
+        };
+        let address_gaps = address_span.saturating_sub(physical_bytes);
+
+        // Source-level storage is separate from the linked byte payload. The
+        // eZ80 emitter, for example, initializes globals and embeds from `.text`
+        // but their address-backed `.data`/`.assets` sizes still belong in the
+        // report. Keep physical payload accounting based only on linked sections.
+        if let Some(storage) = source_storage {
+            for (name, size) in storage {
+                named.insert(name.clone(), *size);
+            }
+        }
+
+        let text = named.get(".text").copied().unwrap_or(0);
+        let rodata = named.get(".rodata").copied().unwrap_or(0);
+        let initialized_data = named.get(".data").copied().unwrap_or(0);
+        let bss = named.get(".bss").copied().unwrap_or(0);
+        let assets = source_storage
+            .and_then(|storage| storage.get(".assets").copied())
+            .unwrap_or_else(|| {
+                named
+                    .iter()
+                    .filter(|(name, _)| name.as_str() == ".assets" || name.starts_with(".assets:"))
+                    .map(|(_, size)| *size)
+                    .sum()
+            });
+        let runtime_helpers = runtime_helper_bytes(sections, symbols);
+        let sections = named
+            .into_iter()
+            .map(|(name, size)| ArtifactSectionSize { name, size })
+            .collect();
+
+        Self {
+            text,
+            rodata,
+            initialized_data,
+            assets,
+            bss,
+            runtime_helpers,
+            machine_code_payload: physical_payload,
+            address_span,
+            address_gaps,
+            final_package,
+            sections,
+        }
+    }
+
+    /// Serialize the report in a versioned, deterministic line format suitable
+    /// for checked-in baselines and build output files.
+    pub fn to_stable_string(&self) -> String {
+        let mut output = format!(
+            "ezrac-size-v1\ntext={}\nrodata={}\ninitialized_data={}\nassets={}\nbss={}\nruntime_helpers={}\nmachine_code_payload={}\naddress_span={}\naddress_gaps={}\nfinal_package={}\n",
+            self.text,
+            self.rodata,
+            self.initialized_data,
+            self.assets,
+            self.bss,
+            self.runtime_helpers
+                .map_or_else(|| "unknown".to_owned(), |size| size.to_string()),
+            self.machine_code_payload,
+            self.address_span,
+            self.address_gaps,
+            self.final_package,
+        );
+        for section in &self.sections {
+            output.push_str(&format!("section:{}={}\n", section.name, section.size));
+        }
+        output
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactSectionMeasurement {
+    name: String,
+    start: u32,
+    end: u32,
+    size: usize,
+}
+
+fn runtime_helper_bytes(
+    sections: &[ArtifactSectionMeasurement],
+    symbols: &[AssemblySymbol],
+) -> Option<usize> {
+    let text_ranges = sections
+        .iter()
+        .filter(|section| section.name == ".text" && section.size > 0)
+        .collect::<Vec<_>>();
+    if text_ranges.is_empty() {
+        return None;
+    }
+
+    let mut addresses = symbols.iter().map(|symbol| symbol.addr).collect::<Vec<_>>();
+    addresses.sort_unstable();
+    addresses.dedup();
+    let helper_symbols = symbols
+        .iter()
+        .filter(|symbol| is_runtime_helper_symbol(&symbol.name))
+        .collect::<Vec<_>>();
+    if helper_symbols.is_empty() {
+        return None;
+    }
+
+    let mut intervals = Vec::<(u32, u32)>::new();
+    for symbol in helper_symbols {
+        let Some(end) = addresses
+            .iter()
+            .copied()
+            .find(|address| *address > symbol.addr)
+        else {
+            continue;
+        };
+        for text in &text_ranges {
+            let start = symbol.addr.max(text.start);
+            let end = end.min(text.end);
+            if start < end {
+                intervals.push((start, end));
+            }
+        }
+    }
+    if intervals.is_empty() {
+        return None;
+    }
+    intervals.sort_unstable();
+    let mut total = 0usize;
+    let mut current = intervals[0];
+    for interval in intervals.into_iter().skip(1) {
+        if interval.0 <= current.1 {
+            current.1 = current.1.max(interval.1);
+        } else {
+            total += usize::try_from(current.1.saturating_sub(current.0)).unwrap_or(0);
+            current = interval;
+        }
+    }
+    total += usize::try_from(current.1.saturating_sub(current.0)).unwrap_or(0);
+    Some(total)
+}
+
+fn is_runtime_helper_symbol(name: &str) -> bool {
+    [
+        "__ezra_pass",
+        "__ezra_fail",
+        "__ezra_mem",
+        "__ezra_mul_",
+        "__ezra_div_",
+        "__ezra_mod_",
+        "__ezra_u16_",
+        "__ezra_gb_",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+}
+
+fn report_budget_value(report: &ArtifactSizeReport, name: &str) -> Option<usize> {
+    match name {
+        "text" | ".text" => Some(report.text),
+        "rodata" | ".rodata" => Some(report.rodata),
+        "data" | ".data" | "initialized_data" | "initialized-data" => Some(report.initialized_data),
+        "assets" | ".assets" => Some(report.assets),
+        "bss" | ".bss" => Some(report.bss),
+        "runtime_helpers" | "runtime-helpers" | "helpers" => report.runtime_helpers,
+        "machine_code_payload" | "machine-code-payload" => Some(report.machine_code_payload),
+        "address_span" | "address-span" => Some(report.address_span),
+        "address_gaps" | "address-gaps" => Some(report.address_gaps),
+        "final_package" | "final-package" | "package" => Some(report.final_package),
+        _ => report
+            .sections
+            .iter()
+            .find(|section| section.name == name)
+            .map(|section| section.size),
+    }
+}
+
+fn validate_size_budgets(
+    report: &ArtifactSizeReport,
+    budgets: &SizeBudgets,
+) -> Result<(), Diagnostic> {
+    if let Some(limit) = budgets.target
+        && report.final_package > limit
+    {
+        return Err(Diagnostic::new(format!(
+            "target package size budget exceeded: final package is {} bytes, limit is {}; reduce packaged headers/payload or raise the target budget",
+            report.final_package, limit
+        )));
+    }
+    if let Some(limit) = budgets.runtime_helpers {
+        match report.runtime_helpers {
+            Some(actual) if actual > limit => {
+                return Err(Diagnostic::new(format!(
+                    "runtime-helper size budget exceeded: helpers use {} bytes, limit is {}; remove helper-using calls or raise the runtime-helper budget",
+                    actual, limit
+                )));
+            }
+            None => {
+                return Err(Diagnostic::new(
+                    "runtime-helper size budget cannot be checked: the linked artifact has no derivable helper symbol spans",
+                ));
+            }
+            _ => {}
+        }
+    }
+    for (name, limit) in &budgets.sections {
+        let Some(actual) = report_budget_value(report, name) else {
+            return Err(Diagnostic::new(format!(
+                "size budget names unknown section or metric `{name}`; use `.text`, `.rodata`, `.data`, `.bss`, `.assets`, `runtime_helpers`, `machine_code_payload`, `address_span`, or `final_package`"
+            )));
+        };
+        if actual > *limit {
+            return Err(Diagnostic::new(format!(
+                "size budget exceeded for `{name}`: {} bytes, limit is {}; reduce that section or raise its budget",
+                actual, limit
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Resolved build configuration independent of CLI flags, project discovery, and host paths.
 ///
 /// Applications may construct this directly to use custom layouts, output formats,
@@ -139,6 +452,7 @@ pub struct BuildRequest {
     pub executable_name: Option<String>,
     pub gameboy_banking: Option<GameBoyBankingOptions>,
     pub package_context: PackageContext,
+    pub size_budgets: SizeBudgets,
 }
 
 impl BuildRequest {
@@ -155,6 +469,7 @@ impl BuildRequest {
             executable_name: None,
             gameboy_banking: None,
             package_context: PackageContext::new(),
+            size_budgets: SizeBudgets::default(),
         })
     }
 
@@ -181,6 +496,7 @@ pub enum LinkInput {
 pub struct LinkedCompilation {
     pub machine_code: Vec<u8>,
     pub map: String,
+    pub size_report: ArtifactSizeReport,
     pub symbols: Vec<AssemblySymbol>,
     pub executable: Vec<u8>,
     pub output_format: OutputFormat,
@@ -195,6 +511,7 @@ pub struct BuildCompilation {
     pub assembly: String,
     pub machine_code: Vec<u8>,
     pub map: String,
+    pub size_report: ArtifactSizeReport,
     pub symbols: Vec<AssemblySymbol>,
     pub executable: Vec<u8>,
     pub output_format: OutputFormat,
@@ -236,7 +553,6 @@ pub fn compile_workspace_to_assembly_with_request(
     request: &CompileRequest,
     build: &BuildRequest,
 ) -> Result<AssemblyCompilation, Diagnostic> {
-
     if request.target != build.target.triple.value {
         return Err(Diagnostic::new(format!(
             "compile target `{}` does not match build target `{}`",
@@ -355,6 +671,7 @@ pub fn build_workspace_with_request(
         machine_code: linked.machine_code,
         map: linked.map,
         symbols: linked.symbols,
+        size_report: linked.size_report,
         executable: linked.executable,
         output_format: linked.output_format,
         executable_extension: linked.executable_extension,
@@ -402,37 +719,35 @@ pub fn link_generated_assembly(
         build.target.triple.cpu,
         &build.target.triple.value,
     )?;
-    let (machine_code, map, symbols) = if build.target.triple.cpu == CpuFamily::M68k {
-        let preprocessed = preprocess_assembly_source(
-            &source_path.to_string_lossy(),
-            assembly,
-            AssemblyPreprocessOptions::for_compiled_features(
-                &build.target.triple.value,
-                build.assembler_cpu.as_str(),
-            ),
-        )?;
-        let image = link_assembly_program_image(source_path, &preprocessed.program, build)?;
-        (image.bytes, image.map, image.symbols)
+    let preprocessed = preprocess_assembly_source(
+        &source_path.to_string_lossy(),
+        assembly,
+        AssemblyPreprocessOptions::for_compiled_features(
+            &build.target.triple.value,
+            build.assembler_cpu.as_str(),
+        ),
+    )?;
+    let image = link_assembly_program_image(source_path, &preprocessed.program, build)?;
+    let text_len = image
+        .sections
+        .iter()
+        .find(|section| section.name == ".text")
+        .map(|section| section.size)
+        .unwrap_or(0);
+    validate_assembled_section_fit(&build.layout, ".text", build.layout.entry.get(), text_len)?;
+    let map = if build.target.triple.cpu == CpuFamily::M68k {
+        image.map.clone()
     } else {
-        let assembled = assemble_subset_with_options_at(
-            build.assembler_cpu,
-            assembly,
-            build.layout.entry.get(),
-            &assembly_source_options(source_path, &build.layout),
-        )?;
-        let text = assembled
-            .section_ranges
-            .iter()
-            .find(|section| section.name == ".text");
-        let text_start = text.map_or(build.layout.entry.get(), |section| section.start);
-        let text_len = text.map_or(assembled.bytes.len(), |section| {
-            section.end.saturating_sub(section.start) as usize
-        });
-        validate_assembled_section_fit(&build.layout, ".text", text_start, text_len)?;
-        let map = build_output_map(build, program, text_len, &assembled.symbols)?;
-        (assembled.bytes, map, assembled.symbols)
+        build_output_map(build, program, text_len, &image.symbols)?
     };
-    package_generated_linked(build, program, machine_code, map, symbols)
+    package_generated_linked(
+        build,
+        program,
+        image.bytes,
+        map,
+        image.symbols,
+        image.sections,
+    )
 }
 
 fn package_generated_linked(
@@ -441,9 +756,11 @@ fn package_generated_linked(
     machine_code: Vec<u8>,
     map: String,
     symbols: Vec<AssemblySymbol>,
+    sections: Vec<ArtifactSectionMeasurement>,
 ) -> Result<LinkedCompilation, Diagnostic> {
     let mut build = build.clone();
     let mut resident_code = machine_code;
+    let has_game_boy_package = build.package_context.game_boy.is_some();
     if let Some(options) = build.package_context.game_boy.as_mut() {
         let generated =
             game_boy_banked_code_payloads(&resident_code, &symbols, build.layout.entry.get())?;
@@ -488,7 +805,38 @@ fn package_generated_linked(
             }
         }
     }
-    package_linked(&build, resident_code, map, symbols)
+    let is_compact_entry_code = !build.target.triple.value.starts_with("agonlight-mos-ez80")
+        && sections.iter().all(|section| section.name == ".text");
+    if is_compact_entry_code {
+        build.package_context.image_kind = crate::package::PackageImageKind::EntryCode;
+        if !has_game_boy_package {
+            resident_code = compact_text_payload(&build, &resident_code, &sections)?;
+        }
+    } else {
+        build.package_context.image_kind = crate::package::PackageImageKind::LoadImage;
+    }
+    package_linked(&build, resident_code, map, symbols, sections, Some(program))
+}
+
+fn compact_text_payload(
+    build: &BuildRequest,
+    image: &[u8],
+    sections: &[ArtifactSectionMeasurement],
+) -> Result<Vec<u8>, Diagnostic> {
+    let Some(text) = sections.iter().find(|section| section.name == ".text") else {
+        return Ok(image.to_vec());
+    };
+    let offset = usize::try_from(text.start.saturating_sub(build.layout.load.get()))
+        .map_err(|_| Diagnostic::new("text section exceeds host addressable memory"))?;
+    let end = offset
+        .checked_add(text.size)
+        .ok_or_else(|| Diagnostic::new("text section exceeds host addressable memory"))?;
+    let Some(payload) = image.get(offset..end) else {
+        return Err(Diagnostic::new(
+            "text section extends beyond the linked image",
+        ));
+    };
+    Ok(payload.to_vec())
 }
 
 fn game_boy_banked_code_payloads(
@@ -572,7 +920,14 @@ pub fn link_assembly_program(
         return link_assembly_program_at(source_path, program, build.layout.load.get(), build);
     }
     let image = link_assembly_program_image(source_path, program, build)?;
-    package_linked(build, image.bytes, image.map, image.symbols)
+    package_linked(
+        build,
+        image.bytes,
+        image.map,
+        image.symbols,
+        image.sections,
+        None,
+    )
 }
 
 /// Link a preprocessed standalone assembly program as flat code at an explicit
@@ -615,7 +970,20 @@ pub fn link_assembly_program_at(
     } else {
         flat_assembly_map(&build.layout, assembled.bytes.len(), &assembled.symbols)?
     };
-    package_linked(build, assembled.bytes, map, assembled.symbols)
+    let assembled_len = assembled.bytes.len();
+    package_linked(
+        build,
+        assembled.bytes,
+        map,
+        assembled.symbols,
+        vec![ArtifactSectionMeasurement {
+            name: ".text".to_owned(),
+            start: base_addr,
+            end: base_addr.saturating_add(assembled_len as u32),
+            size: assembled_len,
+        }],
+        None,
+    )
 }
 
 fn package_linked(
@@ -623,6 +991,8 @@ fn package_linked(
     machine_code: Vec<u8>,
     map: String,
     symbols: Vec<AssemblySymbol>,
+    sections: Vec<ArtifactSectionMeasurement>,
+    program: Option<&Program>,
 ) -> Result<LinkedCompilation, Diagnostic> {
     let executable = package_executable_with_context(
         &build.package_request(),
@@ -630,9 +1000,18 @@ fn package_linked(
         &machine_code,
     )
     .map_err(|error| Diagnostic::new(error.message))?;
+    let source_storage = program.map(source_section_sizes).transpose()?;
+    let size_report = ArtifactSizeReport::from_sections_with_storage(
+        &sections,
+        &symbols,
+        executable.len(),
+        source_storage.as_ref(),
+    );
+    validate_size_budgets(&size_report, &build.size_budgets)?;
     Ok(LinkedCompilation {
         machine_code,
         map,
+        size_report,
         symbols,
         executable,
         output_format: build.output_format,
@@ -649,6 +1028,7 @@ struct LinkedImage {
     bytes: Vec<u8>,
     map: String,
     symbols: Vec<AssemblySymbol>,
+    sections: Vec<ArtifactSectionMeasurement>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -679,9 +1059,10 @@ fn link_assembly_program_image(
             addr: *start,
         })
         .collect();
+    let linked_program = order_assembly_sections(source_path, &section_bases, &sections);
     let assembled = assemble_program_with_options_at(
         build.assembler_cpu,
-        program,
+        &linked_program,
         build.layout.load.get(),
         &options,
     )?;
@@ -704,10 +1085,20 @@ fn link_assembly_program_image(
             bytes: assembled.bytes[offset..end].to_vec(),
         });
     }
+    let sections = placed
+        .iter()
+        .map(|section| ArtifactSectionMeasurement {
+            name: section.name.clone(),
+            start: section.start,
+            end: section.start.saturating_add(section.bytes.len() as u32),
+            size: section.bytes.len(),
+        })
+        .collect();
     Ok(LinkedImage {
         bytes: assembly_image_bytes(build, &placed)?,
         map: assembly_section_map(&placed, &assembled.symbols),
         symbols: assembled.symbols,
+        sections,
     })
 }
 
@@ -747,6 +1138,9 @@ fn placed_assembly_section_bases(
         let Some(len) = lengths.get(&section.name).copied() else {
             continue;
         };
+        if len == 0 {
+            continue;
+        }
         let region = build
             .layout
             .regions
@@ -807,6 +1201,47 @@ fn split_assembly_sections(program: &AssemblyProgram) -> Vec<AssemblySectionSour
         .collect()
 }
 
+fn order_assembly_sections(
+    source_path: &Path,
+    section_bases: &[(String, u32, usize)],
+    sections: &[AssemblySectionSource],
+) -> AssemblyProgram {
+    let location = SourceLocation {
+        file: source_path.to_path_buf(),
+        line: 1,
+        column: 1,
+    };
+    let mut ordered = Vec::new();
+    let mut used = BTreeMap::<String, bool>::new();
+    let mut placed_names = section_bases.iter().collect::<Vec<_>>();
+    placed_names.sort_by_key(|(name, start, _)| (*start, name.as_str()));
+    for (name, _, size) in placed_names {
+        let Some(section) = sections.iter().find(|section| section.name == *name) else {
+            continue;
+        };
+        used.insert(section.name.clone(), true);
+        if *size == 0 {
+            continue;
+        }
+        ordered.push(crate::asm::LocatedAssemblyItem {
+            location: location.clone(),
+            kind: AssemblyItem::Section(section.name.clone()),
+        });
+        ordered.extend(section.program.items.iter().cloned());
+    }
+    for section in sections {
+        if used.contains_key(&section.name) {
+            continue;
+        }
+        ordered.push(crate::asm::LocatedAssemblyItem {
+            location: location.clone(),
+            kind: AssemblyItem::Section(section.name.clone()),
+        });
+        ordered.extend(section.program.items.iter().cloned());
+    }
+    AssemblyProgram { items: ordered }
+}
+
 fn validate_assembled_section_fit(
     layout: &Layout,
     name: &str,
@@ -865,7 +1300,7 @@ fn assembly_image_bytes(
     }
     let max_end = sections
         .iter()
-        .filter(|section| !section.bytes.is_empty())
+        .filter(|section| section.name != ".bss" && !section.bytes.is_empty())
         .map(|section| section.start + section.bytes.len() as u32)
         .max()
         .unwrap_or(build.layout.load.get());
@@ -873,6 +1308,9 @@ fn assembly_image_bytes(
         .map_err(|_| Diagnostic::new("assembly image exceeds host addressable memory"))?;
     let mut image = vec![0; len];
     for section in sections {
+        if section.name == ".bss" || section.bytes.is_empty() {
+            continue;
+        }
         let offset = section
             .start
             .checked_sub(build.layout.load.get())
@@ -963,9 +1401,11 @@ fn build_output_map(
 }
 
 fn uses_flat_output_map(build: &BuildRequest) -> bool {
-    build.output_format == OutputFormat::CpmCom
-        || (build.target.triple.cpu == CpuFamily::I8086
-            && build.output_format == OutputFormat::RawBin)
+    matches!(
+        build.output_format,
+        OutputFormat::CpmCom | OutputFormat::Ez180nGaem
+    ) || (build.target.triple.cpu == CpuFamily::I8086
+        && build.output_format == OutputFormat::RawBin)
         || bare_target_cpu(&build.target.triple.value).is_some()
         || build.target.triple.value.starts_with("zxspectrum-z80")
         || build.target.triple.value.starts_with("gameboy-")
@@ -1370,8 +1810,6 @@ fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<S
         _ => emit_ez80_assembly_with_options(program, options),
     }
 }
-
-
 
 /// Resolve the source path used by a compilation request relative to a host
 /// application without requiring it to exist on disk.

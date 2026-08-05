@@ -3,7 +3,7 @@ COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 program = { SOI ~ decl* ~ EOI }
 decl = { decl_attr* ~ decl_core }
-decl_attr = { bank_attr | cfg_attr | comptime_attr | no_comptime_attr }
+decl_attr = { bank_attr | cfg_attr | comptime_attr | no_comptime_attr | extern_attr }
 decl_core = _{ import_decl | const_decl | alias_decl | port_decl | mmio_decl | embed_decl | global_decl | struct_decl | extern_decl | fn_decl }
 // `bank` is placement metadata, not a conditional-compilation predicate.
 bank_attr = { "@cfg" ~ "(" ~ "bank" ~ "(" ~ int_lit ~ ")" ~ ")" }
@@ -16,6 +16,7 @@ cfg_call = { ident ~ "(" ~ (string_lit | int_lit) ~ ")" }
 cfg_flag = { "debug" | "release" }
 comptime_attr = { "@comptime" }
 no_comptime_attr = { "@no-comptime" }
+extern_attr = { "@extern" }
 cfg_predicates = { cfg_predicate ~ ("," ~ cfg_predicate)* ~ ","? }
 
 layout_file = { SOI ~ layout_decl ~ EOI }
@@ -33,7 +34,7 @@ visibility = { "pub" }
 volatile_kw = { "volatile" }
 attr = { "inline" | "naked" | "interrupt" }
 inline_attr = { "@inline" }
-fn_modifier = _{ inline_attr | comptime_attr | no_comptime_attr | attr | visibility }
+fn_modifier = _{ inline_attr | comptime_attr | no_comptime_attr | extern_attr | attr | visibility }
 import_decl = { "import" ~ path ~ semi? }
 const_decl = { visibility? ~ "const" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
 alias_decl = { visibility? ~ "alias" ~ ident ~ "=" ~ ty ~ semi? }

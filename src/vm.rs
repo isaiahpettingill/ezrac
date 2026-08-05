@@ -107,6 +107,139 @@ mod runner {
         pub stack_top: u32,
     }
 
+    pub const CPM_RECORD_SIZE: usize = 128;
+    pub const CPM_FCB_SIZE: usize = 36;
+    const CPM_MAX_SEARCH_RESULTS: usize = 256;
+    const CPM_DEFAULT_DMA: u16 = 0x0080;
+    const CPM_DIRECTORY_UNUSED: u8 = 0xE5;
+    const CPM_RESULT_OK: u8 = 0;
+    const CPM_RESULT_EOF: u8 = 1;
+    const CPM_RESULT_DISK_FULL: u8 = 1;
+    const CPM_RESULT_DIRECTORY_FULL: u8 = 2;
+    const CPM_RESULT_ERROR: u8 = 0xFF;
+
+    /// A fixed-storage file supplied by a CP/M BDOS fixture caller.
+    ///
+    /// The fixture never allocates file data. `records` remains owned by the
+    /// caller and contains one 128-byte slot for each possible record.
+    pub struct CpmFixtureFile<'a> {
+        pub present: bool,
+        pub drive: u8,
+        pub user: u8,
+        pub name: [u8; 11],
+        pub records: &'a mut [[u8; CPM_RECORD_SIZE]],
+        pub record_count: usize,
+        /// CP/M extension attribute bits. Bit 7 applies to F1, bit 6 to F2,
+        /// and bit 5 to F3 in a directory entry.
+        pub attributes: u8,
+    }
+
+    impl<'a> CpmFixtureFile<'a> {
+        pub fn new(name: [u8; 11], records: &'a mut [[u8; CPM_RECORD_SIZE]]) -> Self {
+            let record_count = records.len();
+            Self {
+                present: true,
+                drive: 0,
+                user: 0,
+                name,
+                records,
+                record_count,
+                attributes: 0,
+            }
+        }
+
+        pub fn empty(records: &'a mut [[u8; CPM_RECORD_SIZE]]) -> Self {
+            let mut file = Self::new([b' '; 11], records);
+            file.present = false;
+            file.record_count = 0;
+            file
+        }
+
+        pub fn with_record_count(
+            name: [u8; 11],
+            records: &'a mut [[u8; CPM_RECORD_SIZE]],
+            record_count: usize,
+        ) -> Self {
+            let mut file = Self::new(name, records);
+            file.record_count = record_count.min(file.records.len());
+            file
+        }
+    }
+
+    /// In-process CP/M 2.2 BDOS state for VM tests.
+    ///
+    /// All storage that can hold program data is borrowed from the caller:
+    /// files use caller-owned 128-byte record arrays, and console input and the
+    /// command tail use caller-owned byte slices. The fixture's search index is
+    /// a fixed array and does not grow during a test.
+    pub struct CpmBdosFixture<'a> {
+        pub files: &'a mut [CpmFixtureFile<'a>],
+        pub command_tail: &'a [u8],
+        pub console_input: &'a [u8],
+        pub current_drive: u8,
+        pub current_user: u8,
+        /// Return disk-full from a write once this many writes have succeeded.
+        pub disk_full_after: Option<usize>,
+        /// Return directory-full from create when enabled and no slot is free.
+        pub directory_full: bool,
+        console_input_position: usize,
+        dma_address: u16,
+        write_count: usize,
+        search_matches: [usize; CPM_MAX_SEARCH_RESULTS],
+        search_count: usize,
+        search_position: usize,
+    }
+
+    impl<'a> CpmBdosFixture<'a> {
+        pub fn new(
+            files: &'a mut [CpmFixtureFile<'a>],
+            command_tail: &'a [u8],
+            console_input: &'a [u8],
+        ) -> Self {
+            Self {
+                files,
+                command_tail,
+                console_input,
+                current_drive: 0,
+                current_user: 0,
+                disk_full_after: None,
+                directory_full: false,
+                console_input_position: 0,
+                dma_address: CPM_DEFAULT_DMA,
+                write_count: 0,
+                search_matches: [0; CPM_MAX_SEARCH_RESULTS],
+                search_count: 0,
+                search_position: 0,
+            }
+        }
+
+        pub fn inject_disk_full_after(&mut self, successful_writes: usize) {
+            self.disk_full_after = Some(successful_writes)
+        }
+
+        fn reset_runtime_state(&mut self) {
+            self.console_input_position = 0;
+            self.dma_address = CPM_DEFAULT_DMA;
+            self.write_count = 0;
+            self.search_count = 0;
+            self.search_position = 0;
+        }
+
+        fn input_available(&self) -> bool {
+            self.console_input_position < self.console_input.len()
+        }
+
+        fn next_input(&mut self) -> u8 {
+            let byte = self
+                .console_input
+                .get(self.console_input_position)
+                .copied()
+                .unwrap_or(0);
+            self.console_input_position = self.console_input_position.saturating_add(1);
+            byte
+        }
+    }
+
     /// A fully assembled test image that an emulator backend can load and execute.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct TestImage {
@@ -225,21 +358,85 @@ mod runner {
         )
     }
 
-    impl EmulatorBackend for Ez80Emulator {
-        fn supports(&self, cpu_family: CpuFamily) -> bool {
-            matches!(
+    pub fn run_assembly_test_with_cpm_bdos_fixture(
+        cpu_family: CpuFamily,
+        assembly: &str,
+        options: &TestRunOptions,
+        fixture: &mut CpmBdosFixture<'_>,
+    ) -> Result<TestRun, Diagnostic> {
+        run_assembly_test_with_cpm_bdos_fixture_at(cpu_family, assembly, options, fixture, 0x0100)
+    }
+
+    pub fn run_assembly_test_with_cpm_bdos_fixture_at(
+        cpu_family: CpuFamily,
+        assembly: &str,
+        options: &TestRunOptions,
+        fixture: &mut CpmBdosFixture<'_>,
+        base_addr: u32,
+    ) -> Result<TestRun, Diagnostic> {
+        if !is_cpm_cpu(cpu_family) {
+            return Err(Diagnostic::new(format!(
+                "CP/M BDOS fixtures require a Z80, i8080, or i8085 CPU, not `{}`",
+                cpu_family.as_str()
+            )));
+        }
+        let code = assemble_subset_at(cpu_family, assembly, base_addr)?;
+        Ez80Emulator.run_cpm_bdos_fixture(
+            &TestImage {
                 cpu_family,
-                CpuFamily::Ez80
-                    | CpuFamily::Z80
-                    | CpuFamily::Z80N
-                    | CpuFamily::Z180
-                    | CpuFamily::I8080
-                    | CpuFamily::I8085
-                    | CpuFamily::Lr35902
-            )
+                base_addr,
+                bytes: code,
+            },
+            options,
+            fixture,
+        )
+    }
+
+    impl Ez80Emulator {
+        pub fn run_cpm_bdos_fixture(
+            &self,
+            image: &TestImage,
+            options: &TestRunOptions,
+            fixture: &mut CpmBdosFixture<'_>,
+        ) -> Result<TestRun, Diagnostic> {
+            if !is_cpm_cpu(image.cpu_family) {
+                return Err(Diagnostic::new(format!(
+                    "CP/M BDOS fixtures require a Z80, i8080, or i8085 CPU, not `{}`",
+                    image.cpu_family.as_str()
+                )));
+            }
+            if fixture.current_drive > 15 {
+                return Err(Diagnostic::new(
+                    "CP/M fixture current drive must be 0 through 15",
+                ));
+            }
+            if fixture.current_user > 15 {
+                return Err(Diagnostic::new(
+                    "CP/M fixture current user must be 0 through 15",
+                ));
+            }
+            for file in fixture.files.iter() {
+                if file.drive > 15 || file.user > 15 {
+                    return Err(Diagnostic::new(
+                        "CP/M fixture file drives must be 0 through 15 and users 0 through 15",
+                    ));
+                }
+                if file.record_count > file.records.len() {
+                    return Err(Diagnostic::new(
+                        "CP/M fixture file record count exceeds caller-owned storage",
+                    ));
+                }
+            }
+            fixture.reset_runtime_state();
+            self.run_internal(image, options, Some(fixture))
         }
 
-        fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+        fn run_internal(
+            &self,
+            image: &TestImage,
+            options: &TestRunOptions,
+            mut fixture: Option<&mut CpmBdosFixture<'_>>,
+        ) -> Result<TestRun, Diagnostic> {
             let address_limit = address_limit_for_family(image.cpu_family);
             if image.base_addr > address_limit {
                 return Err(Diagnostic::new(format!(
@@ -275,6 +472,17 @@ mod runner {
             for (address, value) in &options.initial_memory {
                 machine.poke(*address, *value);
             }
+            if let Some(cpm_fixture) = fixture.as_deref_mut() {
+                let tail_length = cpm_fixture.command_tail.len().min(127);
+                machine.poke(0x0080, tail_length as u8);
+                for (index, byte) in cpm_fixture.command_tail[..tail_length]
+                    .iter()
+                    .copied()
+                    .enumerate()
+                {
+                    machine.poke(0x0081 + index as u32, byte);
+                }
+            }
             for (address, byte) in image.bytes.iter().copied().enumerate() {
                 machine.poke(image.base_addr + address as u32, byte);
             }
@@ -293,7 +501,16 @@ mod runner {
 
             for instruction in 0..options.instruction_budget {
                 let pc = cpu.state.pc();
-                if is_cpm_cpu(image.cpu_family) && handle_cpm_bdos_call(&mut cpu, &mut machine)? {
+                let bdos_handled = if is_cpm_cpu(image.cpu_family) {
+                    if let Some(cpm_fixture) = fixture.as_deref_mut() {
+                        handle_cpm_bdos_call_with_fixture(&mut cpu, &mut machine, cpm_fixture)?
+                    } else {
+                        handle_cpm_bdos_call(&mut cpu, &mut machine)?
+                    }
+                } else {
+                    false
+                };
+                if bdos_handled {
                     if machine.halted {
                         return Ok(TestRun {
                             halted: true,
@@ -362,6 +579,25 @@ mod runner {
                 ports: machine.ports,
                 failure: Some(TestRunFailure::Timeout),
             })
+        }
+    }
+
+    impl EmulatorBackend for Ez80Emulator {
+        fn supports(&self, cpu_family: CpuFamily) -> bool {
+            matches!(
+                cpu_family,
+                CpuFamily::Ez80
+                    | CpuFamily::Z80
+                    | CpuFamily::Z80N
+                    | CpuFamily::Z180
+                    | CpuFamily::I8080
+                    | CpuFamily::I8085
+                    | CpuFamily::Lr35902
+            )
+        }
+
+        fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+            self.run_internal(image, options, None)
         }
     }
 
@@ -1165,6 +1401,585 @@ mod runner {
             | CpuFamily::Avr
             | CpuFamily::Dcpu => CpuMode::Z80,
         }
+    }
+
+    const CPM_FCB_DRIVE_OFFSET: u32 = 0;
+    const CPM_FCB_NAME_OFFSET: u32 = 1;
+
+    const CPM_FCB_EXTENT_OFFSET: u32 = 12;
+    const CPM_FCB_RECORD_COUNT_OFFSET: u32 = 15;
+    const CPM_FCB_CURRENT_RECORD_OFFSET: u32 = 32;
+    const CPM_FCB_RANDOM_RECORD_OFFSET: u32 = 33;
+    const CPM_DIRECTORY_ENTRY_SIZE: u32 = 32;
+
+    fn set_cpm_a(cpu: &mut Cpu, value: u8) {
+        let af = cpu.state.reg.get16(Reg16::AF);
+        cpu.state
+            .reg
+            .set16(Reg16::AF, (u16::from(value) << 8) | (af & 0x00FF));
+    }
+
+    fn return_from_cpm_call(cpu: &mut Cpu, machine: &TestMachine) {
+        let sp = cpu.state.reg.get16(Reg16::SP) as u32;
+        let return_addr =
+            machine.peek(sp) as u32 | ((machine.peek(sp.wrapping_add(1)) as u32) << 8);
+        cpu.state.reg.set16(Reg16::SP, sp.wrapping_add(2) as u16);
+        cpu.state.set_pc(return_addr);
+    }
+
+    fn cpm_fcb_byte(machine: &TestMachine, fcb: u32, offset: u32) -> u8 {
+        machine.peek(fcb.wrapping_add(offset))
+    }
+
+    fn cpm_fcb_name(machine: &TestMachine, fcb: u32, base: u32) -> [u8; 11] {
+        let mut name = [b' '; 11];
+        for (index, byte) in name.iter_mut().enumerate() {
+            *byte = cpm_fcb_byte(machine, fcb, base + index as u32);
+        }
+        name
+    }
+
+    fn cpm_fcb_drive(machine: &TestMachine, fcb: u32, base: u32) -> u8 {
+        cpm_fcb_byte(machine, fcb, base + CPM_FCB_DRIVE_OFFSET)
+    }
+
+    fn cpm_selector_to_physical(selector: u8, current_drive: u8) -> Option<u8> {
+        if selector == 0 {
+            Some(current_drive)
+        } else if selector <= 16 {
+            Some(selector - 1)
+        } else {
+            None
+        }
+    }
+
+    fn cpm_name_matches(query: &[u8; 11], actual: &[u8; 11], wildcard: bool) -> bool {
+        query.iter().zip(actual).all(|(query_byte, actual_byte)| {
+            if wildcard && *query_byte == b'?' {
+                true
+            } else {
+                (*query_byte & 0x7F) == (*actual_byte & 0x7F)
+            }
+        })
+    }
+
+    fn cpm_file_matches(
+        fixture: &CpmBdosFixture<'_>,
+        file: &CpmFixtureFile<'_>,
+        selector: u8,
+        name: &[u8; 11],
+        wildcard: bool,
+    ) -> bool {
+        file.present
+            && file.user == fixture.current_user
+            && cpm_selector_to_physical(selector, fixture.current_drive) == Some(file.drive)
+            && cpm_name_matches(name, &file.name, wildcard)
+    }
+
+    fn cpm_find_file(
+        fixture: &CpmBdosFixture<'_>,
+        selector: u8,
+        name: &[u8; 11],
+        wildcard: bool,
+    ) -> Option<usize> {
+        fixture
+            .files
+            .iter()
+            .position(|file| cpm_file_matches(fixture, file, selector, name, wildcard))
+    }
+
+    fn cpm_sequence_position(machine: &TestMachine, fcb: u32) -> usize {
+        usize::from(cpm_fcb_byte(machine, fcb, CPM_FCB_EXTENT_OFFSET)) * CPM_RECORD_SIZE
+            + usize::from(cpm_fcb_byte(machine, fcb, CPM_FCB_CURRENT_RECORD_OFFSET))
+    }
+
+    fn cpm_set_sequence_position(machine: &mut TestMachine, fcb: u32, position: usize) {
+        machine.poke(
+            fcb.wrapping_add(CPM_FCB_EXTENT_OFFSET),
+            (position / CPM_RECORD_SIZE) as u8,
+        );
+        machine.poke(
+            fcb.wrapping_add(CPM_FCB_CURRENT_RECORD_OFFSET),
+            (position % CPM_RECORD_SIZE) as u8,
+        );
+    }
+
+    fn cpm_random_position(machine: &TestMachine, fcb: u32) -> usize {
+        usize::from(cpm_fcb_byte(machine, fcb, CPM_FCB_RANDOM_RECORD_OFFSET))
+            | (usize::from(cpm_fcb_byte(machine, fcb, CPM_FCB_RANDOM_RECORD_OFFSET + 1)) << 8)
+            | (usize::from(cpm_fcb_byte(machine, fcb, CPM_FCB_RANDOM_RECORD_OFFSET + 2)) << 16)
+    }
+
+    fn cpm_set_random_position(machine: &mut TestMachine, fcb: u32, position: usize) {
+        machine.poke(
+            fcb.wrapping_add(CPM_FCB_RANDOM_RECORD_OFFSET),
+            position as u8,
+        );
+        machine.poke(
+            fcb.wrapping_add(CPM_FCB_RANDOM_RECORD_OFFSET + 1),
+            (position >> 8) as u8,
+        );
+        machine.poke(
+            fcb.wrapping_add(CPM_FCB_RANDOM_RECORD_OFFSET + 2),
+            (position >> 16) as u8,
+        );
+    }
+
+    fn cpm_set_file_metadata(machine: &mut TestMachine, fcb: u32, record_count: usize) {
+        machine.poke(
+            fcb.wrapping_add(CPM_FCB_RECORD_COUNT_OFFSET),
+            record_count as u8,
+        );
+        cpm_set_sequence_position(machine, fcb, 0);
+    }
+
+    fn cpm_copy_record_from_dma(
+        machine: &TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+        file_index: usize,
+        record: usize,
+    ) {
+        let dma = u32::from(fixture.dma_address);
+        for offset in 0..CPM_RECORD_SIZE {
+            fixture.files[file_index].records[record][offset] =
+                machine.peek(dma.wrapping_add(offset as u32));
+        }
+    }
+
+    fn cpm_copy_record_to_dma(
+        machine: &mut TestMachine,
+        fixture: &CpmBdosFixture<'_>,
+        file_index: usize,
+        record: usize,
+    ) {
+        let dma = u32::from(fixture.dma_address);
+        for offset in 0..CPM_RECORD_SIZE {
+            machine.poke(
+                dma.wrapping_add(offset as u32),
+                fixture.files[file_index].records[record][offset],
+            );
+        }
+    }
+
+    fn cpm_open_file(cpu: &Cpu, machine: &mut TestMachine, fixture: &CpmBdosFixture<'_>) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, CPM_FCB_NAME_OFFSET);
+        let selector = cpm_fcb_drive(machine, fcb, CPM_FCB_DRIVE_OFFSET);
+        let Some(file_index) = cpm_find_file(fixture, selector, &name, false) else {
+            return CPM_RESULT_ERROR;
+        };
+        cpm_set_file_metadata(machine, fcb, fixture.files[file_index].record_count);
+        CPM_RESULT_OK
+    }
+
+    fn cpm_close_file(cpu: &Cpu, machine: &TestMachine, fixture: &CpmBdosFixture<'_>) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, CPM_FCB_NAME_OFFSET);
+        let selector = cpm_fcb_drive(machine, fcb, CPM_FCB_DRIVE_OFFSET);
+        cpm_find_file(fixture, selector, &name, false)
+            .map(|_| CPM_RESULT_OK)
+            .unwrap_or(CPM_RESULT_ERROR)
+    }
+
+    fn cpm_read_record(
+        cpu: &Cpu,
+        machine: &mut TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+        random: bool,
+    ) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, CPM_FCB_NAME_OFFSET);
+        let selector = cpm_fcb_drive(machine, fcb, CPM_FCB_DRIVE_OFFSET);
+        let Some(file_index) = cpm_find_file(fixture, selector, &name, false) else {
+            return CPM_RESULT_ERROR;
+        };
+        let record = if random {
+            cpm_random_position(machine, fcb)
+        } else {
+            cpm_sequence_position(machine, fcb)
+        };
+        if record >= fixture.files[file_index].record_count {
+            return CPM_RESULT_EOF;
+        }
+        cpm_copy_record_to_dma(machine, fixture, file_index, record);
+        if !random {
+            cpm_set_sequence_position(machine, fcb, record + 1);
+        }
+        CPM_RESULT_OK
+    }
+
+    fn cpm_write_record(
+        cpu: &Cpu,
+        machine: &mut TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+        random: bool,
+        zero_fill: bool,
+    ) -> u8 {
+        if fixture
+            .disk_full_after
+            .is_some_and(|limit| fixture.write_count >= limit)
+        {
+            return CPM_RESULT_DISK_FULL;
+        }
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, CPM_FCB_NAME_OFFSET);
+        let selector = cpm_fcb_drive(machine, fcb, CPM_FCB_DRIVE_OFFSET);
+        let Some(file_index) = cpm_find_file(fixture, selector, &name, false) else {
+            return CPM_RESULT_ERROR;
+        };
+        let record = if random {
+            cpm_random_position(machine, fcb)
+        } else {
+            cpm_sequence_position(machine, fcb)
+        };
+        if record >= fixture.files[file_index].records.len() {
+            return CPM_RESULT_DISK_FULL;
+        }
+        if zero_fill && record > fixture.files[file_index].record_count {
+            for index in fixture.files[file_index].record_count..record {
+                fixture.files[file_index].records[index].fill(0);
+            }
+        }
+        cpm_copy_record_from_dma(machine, fixture, file_index, record);
+        fixture.files[file_index].record_count =
+            fixture.files[file_index].record_count.max(record + 1);
+        fixture.write_count += 1;
+        if !random {
+            cpm_set_sequence_position(machine, fcb, record + 1);
+        }
+        CPM_RESULT_OK
+    }
+
+    fn cpm_delete_file(cpu: &Cpu, machine: &TestMachine, fixture: &mut CpmBdosFixture<'_>) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, CPM_FCB_NAME_OFFSET);
+        let selector = cpm_fcb_drive(machine, fcb, CPM_FCB_DRIVE_OFFSET);
+        let current_drive = fixture.current_drive;
+        let current_user = fixture.current_user;
+        let Some(physical_drive) = cpm_selector_to_physical(selector, current_drive) else {
+            return CPM_RESULT_ERROR;
+        };
+        let mut deleted = false;
+        for file in fixture.files.iter_mut() {
+            if file.present
+                && file.user == current_user
+                && file.drive == physical_drive
+                && cpm_name_matches(&name, &file.name, true)
+            {
+                file.present = false;
+                deleted = true;
+            }
+        }
+        if deleted {
+            CPM_RESULT_OK
+        } else {
+            CPM_RESULT_ERROR
+        }
+    }
+
+    fn cpm_create_file(
+        cpu: &Cpu,
+        machine: &mut TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+    ) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, CPM_FCB_NAME_OFFSET);
+        let selector = cpm_fcb_drive(machine, fcb, CPM_FCB_DRIVE_OFFSET);
+        if cpm_find_file(fixture, selector, &name, false).is_some() {
+            return CPM_RESULT_ERROR;
+        }
+        let Some(drive) = cpm_selector_to_physical(selector, fixture.current_drive) else {
+            return CPM_RESULT_ERROR;
+        };
+        let Some(file) = fixture.files.iter_mut().find(|file| !file.present) else {
+            return if fixture.directory_full {
+                CPM_RESULT_DIRECTORY_FULL
+            } else {
+                CPM_RESULT_ERROR
+            };
+        };
+        file.present = true;
+        file.drive = drive;
+        file.user = fixture.current_user;
+        file.name = name;
+        file.record_count = 0;
+        file.attributes = 0;
+        cpm_set_file_metadata(machine, fcb, 0);
+        CPM_RESULT_OK
+    }
+
+    fn cpm_rename_file(
+        cpu: &Cpu,
+        machine: &mut TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+    ) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let old_name = cpm_fcb_name(machine, fcb, 1);
+        let old_selector = cpm_fcb_drive(machine, fcb, 0);
+        let new_name = cpm_fcb_name(machine, fcb, 17);
+        let new_selector = cpm_fcb_drive(machine, fcb, 16);
+        let Some(old_index) = cpm_find_file(fixture, old_selector, &old_name, false) else {
+            return CPM_RESULT_ERROR;
+        };
+        if cpm_find_file(fixture, new_selector, &new_name, false).is_some() {
+            return CPM_RESULT_ERROR;
+        }
+        let Some(new_drive) = cpm_selector_to_physical(new_selector, fixture.current_drive) else {
+            return CPM_RESULT_ERROR;
+        };
+        fixture.files[old_index].name = new_name;
+        fixture.files[old_index].drive = new_drive;
+        CPM_RESULT_OK
+    }
+
+    fn cpm_set_file_attributes(
+        cpu: &Cpu,
+        machine: &TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+    ) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, 1);
+        let selector = cpm_fcb_drive(machine, fcb, 0);
+        let Some(file_index) = cpm_find_file(fixture, selector, &name, false) else {
+            return CPM_RESULT_ERROR;
+        };
+        let mut attributes = 0;
+        if cpm_fcb_byte(machine, fcb, 9) & 0x80 != 0 {
+            attributes |= 0x80;
+        }
+        if cpm_fcb_byte(machine, fcb, 10) & 0x80 != 0 {
+            attributes |= 0x40;
+        }
+        if cpm_fcb_byte(machine, fcb, 11) & 0x80 != 0 {
+            attributes |= 0x20;
+        }
+        fixture.files[file_index].attributes = attributes;
+        CPM_RESULT_OK
+    }
+
+    fn cpm_write_search_record(machine: &mut TestMachine, fixture: &mut CpmBdosFixture<'_>) -> u8 {
+        if fixture.search_position >= fixture.search_count {
+            return CPM_RESULT_ERROR;
+        }
+        let dma = u32::from(fixture.dma_address);
+        for slot in 0..4 {
+            let entry = dma + slot as u32 * CPM_DIRECTORY_ENTRY_SIZE;
+            machine.poke(entry, CPM_DIRECTORY_UNUSED);
+            for offset in 1..CPM_DIRECTORY_ENTRY_SIZE {
+                machine.poke(entry + offset, 0);
+            }
+        }
+        let start = fixture.search_position;
+        let end = (start + 4).min(fixture.search_count);
+        for slot in 0..(end - start) {
+            let file_index = fixture.search_matches[start + slot];
+            let file = &fixture.files[file_index];
+            let entry = dma + slot as u32 * CPM_DIRECTORY_ENTRY_SIZE;
+            machine.poke(entry, file.user);
+            for index in 0..8 {
+                machine.poke(entry + 1 + index as u32, file.name[index]);
+            }
+            for index in 0..3 {
+                let attribute = match index {
+                    0 => file.attributes & 0x80,
+                    1 => file.attributes & 0x40,
+                    _ => file.attributes & 0x20,
+                };
+                machine.poke(entry + 9 + index as u32, file.name[8 + index] | attribute);
+            }
+        }
+        fixture.search_position = end;
+        CPM_RESULT_OK
+    }
+
+    fn cpm_search_first(
+        cpu: &Cpu,
+        machine: &mut TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+    ) -> u8 {
+        let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+        let name = cpm_fcb_name(machine, fcb, CPM_FCB_NAME_OFFSET);
+        let selector = cpm_fcb_drive(machine, fcb, 0);
+        fixture.search_count = 0;
+        fixture.search_position = 0;
+        for index in 0..fixture.files.len() {
+            if fixture.search_count == CPM_MAX_SEARCH_RESULTS {
+                break;
+            }
+            if cpm_file_matches(fixture, &fixture.files[index], selector, &name, true) {
+                fixture.search_matches[fixture.search_count] = index;
+                fixture.search_count += 1;
+            }
+        }
+        if cpm_write_search_record(machine, fixture) == CPM_RESULT_OK {
+            0
+        } else {
+            CPM_RESULT_ERROR
+        }
+    }
+
+    fn cpm_search_next(machine: &mut TestMachine, fixture: &mut CpmBdosFixture<'_>) -> u8 {
+        if cpm_write_search_record(machine, fixture) == CPM_RESULT_OK {
+            0
+        } else {
+            CPM_RESULT_ERROR
+        }
+    }
+
+    fn handle_cpm_bdos_call_with_fixture(
+        cpu: &mut Cpu,
+        machine: &mut TestMachine,
+        fixture: &mut CpmBdosFixture<'_>,
+    ) -> Result<bool, Diagnostic> {
+        if cpu.state.pc() != 0x0005 {
+            return Ok(false);
+        }
+        let function = cpu.state.reg.get8(Reg8::C);
+        match function {
+            0 => machine.halted = true,
+            1 | 3 => set_cpm_a(cpu, fixture.next_input()),
+            2 | 4 | 5 => machine.debug_output.push(cpu.state.reg.get8(Reg8::E)),
+            6 => {
+                let value = cpu.state.reg.get8(Reg8::E);
+                if value == 0xFF {
+                    set_cpm_a(
+                        cpu,
+                        if fixture.input_available() {
+                            fixture.next_input()
+                        } else {
+                            0
+                        },
+                    );
+                } else if value == 0xFE {
+                    set_cpm_a(cpu, if fixture.input_available() { 0xFF } else { 0 });
+                } else {
+                    machine.debug_output.push(value);
+                    set_cpm_a(cpu, value);
+                }
+            }
+            7 => set_cpm_a(cpu, 0),
+            8 => {}
+            9 => {
+                let mut address = cpu.state.reg.get16(Reg16::DE) as u32;
+                for _ in 0..0x1_0000 {
+                    let byte = machine.peek(address);
+                    if byte == b'$' {
+                        break;
+                    }
+                    machine.debug_output.push(byte);
+                    address = address.wrapping_add(1) & 0xFFFF;
+                }
+            }
+            10 => {
+                let address = cpu.state.reg.get16(Reg16::DE) as u32;
+                let maximum = machine.peek(address) as usize;
+                let mut length = 0;
+                while length < maximum && fixture.input_available() {
+                    let byte = fixture.next_input();
+                    if byte == 13 {
+                        break;
+                    }
+                    machine.poke(address + 2 + length as u32, byte);
+                    length += 1;
+                }
+                machine.poke(address + 1, length as u8);
+            }
+            11 => set_cpm_a(cpu, if fixture.input_available() { 0xFF } else { 0 }),
+            12 => cpu.state.reg.set16(Reg16::HL, 0x0022),
+            13 => {}
+            14 => {
+                if cpu.state.reg.get8(Reg8::E) <= 15 {
+                    fixture.current_drive = cpu.state.reg.get8(Reg8::E);
+                }
+            }
+            15 => {
+                let result = cpm_open_file(cpu, machine, fixture);
+                set_cpm_a(cpu, result);
+            }
+            16 => {
+                let result = cpm_close_file(cpu, machine, fixture);
+                set_cpm_a(cpu, result);
+            }
+            17 => {
+                let result = cpm_search_first(cpu, machine, fixture);
+                set_cpm_a(cpu, result);
+            }
+            18 => {
+                let result = cpm_search_next(machine, fixture);
+                set_cpm_a(cpu, result);
+            }
+            19 => {
+                let result = cpm_delete_file(cpu, machine, fixture);
+                set_cpm_a(cpu, result);
+            }
+            20 => {
+                let result = cpm_read_record(cpu, machine, fixture, false);
+                set_cpm_a(cpu, result);
+            }
+            21 => {
+                let result = cpm_write_record(cpu, machine, fixture, false, false);
+                set_cpm_a(cpu, result);
+            }
+            22 => {
+                let result = cpm_create_file(cpu, machine, fixture);
+                set_cpm_a(cpu, result);
+            }
+            23 => {
+                let result = cpm_rename_file(cpu, machine, fixture);
+                set_cpm_a(cpu, result);
+            }
+            25 => set_cpm_a(cpu, fixture.current_drive),
+            26 => fixture.dma_address = cpu.state.reg.get16(Reg16::DE),
+            30 => set_cpm_a(cpu, cpm_set_file_attributes(cpu, machine, fixture)),
+            32 => {
+                if cpu.state.reg.get8(Reg8::E) == 0xFF {
+                    set_cpm_a(cpu, fixture.current_user);
+                } else if cpu.state.reg.get8(Reg8::E) <= 15 {
+                    fixture.current_user = cpu.state.reg.get8(Reg8::E);
+                    set_cpm_a(cpu, fixture.current_user);
+                } else {
+                    set_cpm_a(cpu, CPM_RESULT_ERROR);
+                }
+            }
+            33 => {
+                let result = cpm_read_record(cpu, machine, fixture, true);
+                set_cpm_a(cpu, result);
+            }
+            34 => {
+                let result = cpm_write_record(cpu, machine, fixture, true, false);
+                set_cpm_a(cpu, result);
+            }
+            35 => {
+                let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+                let name = cpm_fcb_name(machine, fcb, 1);
+                let selector = cpm_fcb_drive(machine, fcb, 0);
+                let result = if let Some(file_index) =
+                    cpm_find_file(fixture, selector, &name, false)
+                {
+                    cpm_set_random_position(machine, fcb, fixture.files[file_index].record_count);
+                    CPM_RESULT_OK
+                } else {
+                    CPM_RESULT_ERROR
+                };
+                set_cpm_a(cpu, result);
+            }
+            36 => {
+                let fcb = cpu.state.reg.get16(Reg16::DE) as u32;
+                cpm_set_random_position(machine, fcb, cpm_sequence_position(machine, fcb));
+            }
+            37 => {}
+            40 => {
+                let result = cpm_write_record(cpu, machine, fixture, true, true);
+                set_cpm_a(cpu, result);
+            }
+            function => {
+                return Err(Diagnostic::new(format!(
+                    "CP/M BDOS function {function} is not implemented by the fixture"
+                )));
+            }
+        }
+        return_from_cpm_call(cpu, machine);
+        Ok(true)
     }
 
     fn handle_cpm_bdos_call(cpu: &mut Cpu, machine: &mut TestMachine) -> Result<bool, Diagnostic> {

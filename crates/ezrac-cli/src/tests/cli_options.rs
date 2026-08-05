@@ -49,6 +49,30 @@ fn build_options_parse_input_kind() {
 }
 
 #[test]
+fn size_budget_options_parse_target_sections_and_hex_counts() {
+    let (remaining, budgets) = parse_size_budget_args(&[
+        "--size-budget".to_owned(),
+        "target=0x200".to_owned(),
+        "--size-budget=.text=1_024".to_owned(),
+        "--size-budget".to_owned(),
+        "runtime_helpers=20h".to_owned(),
+        "main.ezra".to_owned(),
+    ])
+    .unwrap();
+
+    assert_eq!(remaining, ["main.ezra"]);
+    assert_eq!(budgets.target, Some(0x200));
+    assert_eq!(budgets.sections.get(".text"), Some(&1_024));
+    assert_eq!(budgets.runtime_helpers, Some(0x20));
+}
+
+#[test]
+fn size_budget_options_report_invalid_specifications() {
+    let error = parse_size_budget_args(&["--size-budget=.text=nope".to_owned()]).unwrap_err();
+    assert!(error.contains("invalid size budget byte count"), "{error}");
+}
+
+#[test]
 fn assemble_options_parse_cpu() {
     let options =
         AssembleOptions::parse(&["--cpu".to_owned(), "z80n".to_owned(), "main.asm".to_owned()])

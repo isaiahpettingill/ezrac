@@ -78,10 +78,10 @@ ezrac emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-de
 Build source or assembly artifacts:
 
 ```sh
-ezrac build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]
+ezrac build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--size-budget <name=bytes>]... [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]
 ```
 
-`build` does not accept `-o`/`--output`; it writes `.asm`, `.map`, and executable artifacts under the target directory described in [Build Artifacts](#build-artifacts). Use `[build].executable` to choose the artifact basename. The standalone `assemble` command accepts `-o`/`--output` for a specific output path.
+`build` does not accept `-o`/`--output`; it writes `.asm`, `.map`, `.size`, and executable artifacts under the target directory described in [Build Artifacts](#build-artifacts). Use `[build].executable` to choose the artifact basename. The standalone `assemble` command accepts `-o`/`--output` for a specific output path.
 
 Create an emulator-ready disk image with named support files:
 
@@ -136,6 +136,8 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 `--no-default-sdk-symbols` prevents automatic default SDK/runtime symbols when the target would normally provide them.
 
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, `.8080`, `.i8086`, and `.8086` are treated as assembly. NES raw assembly projects use the `nes-2a03` target and produce validating `.nes` images.
+
+`--size-budget NAME=BYTES` adds a repeatable post-link budget to `build`. Use `target=BYTES` (or `package=BYTES`) for the final package, or a section/metric such as `.text=4096`, `.rodata=1024`, `.data=256`, `.assets=8192`, `runtime_helpers=512`, `machine_code_payload=4096`, `address_span=65536`, or `address_gaps=0`. Decimal, `0x` hexadecimal, and `h`-suffixed hexadecimal byte counts are accepted. An overflow names the measured section or helper class and suggests what to reduce.
 
 `--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support every compiler backend: `i8080`, `i8085`, `i8086`, `z80`, `z80n`, `z180`, `ez80`, `lr35902`, `avr`, `dcpu`, `m6800`, `m6809`, `m68k`, `6502`, and `tms9900`. Consumers using `--no-default-features` can enable only the backend features they need. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800/M6809, M68k, and 8086 have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The 8086 source ABI supports scalar recursion and constrained interrupt handlers while requiring aggregate parameters and returns to be passed by pointer. CLI and library source compilation run generated assembly through the strict assembler for the selected target and require its assembled `.text` bytes to fit the layout's `.text` region; `emit-asm` prints only after validation succeeds. See [`dcpu-assembly.md`](dcpu-assembly.md), [`i8086-assembly.md`](i8086-assembly.md), [`msdos-sdk.md`](msdos-sdk.md), and [`tms9900-assembly.md`](tms9900-assembly.md) for details.
 
@@ -343,13 +345,18 @@ The parser also accepts a `[cartridge]` table with `layout` and optional `manife
 
 ## Build Artifacts
 
-`ezrac build` writes three artifacts:
+`ezrac build` writes four artifacts:
 
 ```text
 <name>.asm        generated or copied assembly
 <name>.map        section and symbol map
+<name>.size       stable ezrac-size-v1 section/package report
 <name>.<ext>      executable image for the selected output format
 ```
+
+The `.size` report contains `.text`, `.rodata`, initialized `.data`, `.assets`, `.bss`, derivable runtime-helper bytes, the compact machine-code payload, the linked address span, address gaps, and final package size. It also lists named sections in sorted order. The report is stable text so it can be checked into a baseline test without including host paths or timestamps.
+
+`machine_code_payload` counts emitted non-BSS section bytes and excludes address gaps. `address_span` is the address range from the first to last placed byte and can be much larger on sparse layouts. `final_package` is the actual output file size, including format headers, fixed ROM capacity, loaders, or required sparse load-image gaps. BSS is reported as address-backed storage but is not serialized into compact payloads. A target format that needs a load image can still require zero-filled address space; that cost appears in `address_span` and `final_package`, not in `machine_code_payload`.
 
 If the source belongs to a project, artifacts are written under:
 

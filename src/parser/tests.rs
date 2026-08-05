@@ -801,6 +801,31 @@ fn parses_comptime_attributes_and_the_exact_no_comptime_spelling() {
 }
 
 #[test]
+fn parses_extern_binary_root_attributes() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        "@extern pub fn api() {}\nfn main() {}",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &program.declarations[0],
+        Declaration::Function(function) if function.public && function.attrs == ["extern"]
+    ));
+}
+
+#[test]
+fn rejects_extern_on_non_function_declarations() {
+    let error = parse_program(
+        Path::new("game.ezra"),
+        "@extern const VALUE: u8 = 1\nfn main() {}",
+    )
+    .unwrap_err();
+
+    assert_eq!(error.message, "`@extern` is only valid on functions");
+}
+
+#[test]
 fn rejects_comptime_on_non_function_declarations() {
     let error = parse_program(
         Path::new("game.ezra"),
@@ -821,7 +846,7 @@ fn rejects_comptime_attributes_on_non_const_non_function_declarations() {
 
     assert_eq!(
         error.message,
-        "`@comptime` and `@no-comptime` are only valid on constants or functions"
+        "declaration attributes are only valid on constants or functions"
     );
 }
 

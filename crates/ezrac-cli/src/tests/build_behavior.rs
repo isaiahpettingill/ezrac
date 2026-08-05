@@ -40,6 +40,7 @@ fn build_writes_artifacts() {
     let outputs = build_source(source_path.to_str().unwrap()).unwrap();
     let asm = std::fs::read_to_string(&outputs.asm).unwrap();
     let map = std::fs::read_to_string(&outputs.map).unwrap();
+    let size = std::fs::read_to_string(&outputs.size).unwrap();
     let bin = std::fs::read(&outputs.executable).unwrap();
 
     assert!(asm.contains("__ezra_start:"));
@@ -67,6 +68,9 @@ fn build_writes_artifacts() {
     );
     assert_eq!(&bin[0..5], &[0xF3, 0x31, 0x00, 0x00, 0xF0]);
     assert!(bin.len() > 5);
+    assert!(size.starts_with("ezrac-size-v1\n"), "{size}");
+    assert!(size.contains("machine_code_payload="), "{size}");
+    assert!(size.contains("section:.text="), "{size}");
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -184,7 +188,10 @@ fn agon_assembly_links_cross_section_symbols_and_preserves_sections() {
     assert_eq!(bin[10], 0xA5);
     assert_eq!(&bin[0x20_000..0x20_002], &[0xAA, 0xBB]);
     assert_eq!(&bin[0x30_000..0x30_002], &[0xCC, 0xDD]);
-    assert_eq!(bin[0x30_010], 0xEE);
+    assert_eq!(
+        bin[0x30_010], 0,
+        "BSS is address-backed storage and is not serialized into the image"
+    );
     assert_eq!(bin[0x80_000], 0xF0);
     assert!(map.contains("rodata_value 0x060000"), "{map}");
     assert!(map.contains("TEXT_DATA    0x060000"), "{map}");
@@ -213,7 +220,7 @@ fn bare_z80_source_build_starts_at_zero_without_header() {
         target: Some("bare-z80".to_owned()),
     })
     .unwrap();
-    let map = std::fs::read_to_string(outputs.map).unwrap();
+    let map = std::fs::read_to_string(&outputs.map).unwrap();
     let bin = std::fs::read(outputs.executable).unwrap();
 
     assert!(map.contains(".text        0x000000"), "{map}");

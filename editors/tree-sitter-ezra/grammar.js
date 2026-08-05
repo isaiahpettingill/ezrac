@@ -58,7 +58,7 @@ module.exports = grammar({
       ),
     ),
 
-    declaration_attribute: _ => choice('@comptime', '@no-comptime'),
+    declaration_attribute: _ => choice('@comptime', '@no-comptime', '@extern'),
 
     import_declaration: $ => seq('import', $.path, optional(';')),
     const_declaration: $ => seq(optional('pub'), 'const', $.identifier, ':', $.type, '=', $._expression, optional(';')),
@@ -69,7 +69,7 @@ module.exports = grammar({
     global_declaration: $ => seq(optional('pub'), 'global', $.identifier, ':', $.type, '=', $._expression, optional(';')),
     struct_item: $ => seq(optional('pub'), 'struct', field('name', $.identifier), '{', repeat($.field_declaration), '}'),
     extern_declaration: $ => seq(optional('pub'), 'extern', 'asm', 'fn', $.identifier, $.parameters, optional($.return_type), optional(';')),
-    function_item: $ => seq(repeat(choice('pub', 'inline', '@inline', '@comptime', '@no-comptime', 'naked', 'interrupt')), 'fn', field('name', $.identifier), $.parameters, optional($.return_type), $.block),
+    function_item: $ => seq(repeat(choice('pub', 'inline', '@inline', '@comptime', '@no-comptime', '@extern', 'naked', 'interrupt')), 'fn', field('name', $.identifier), $.parameters, optional($.return_type), $.block),
 
     layout_declaration: $ => seq('layout', $.identifier, '{', repeat($.layout_item), '}'),
     layout_item: $ => choice(

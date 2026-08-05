@@ -355,13 +355,14 @@ Function modifiers and attributes may appear in either order before `fn`:
 ```ezra
 pub @inline fn helper() -> u8 { return 1 }
 @inline pub fn exported_helper() -> u8 { return 2 }
+@extern pub fn binary_api() -> u8 { return 3 }
 naked fn interrupt_entry() {}
 interrupt fn timer_isr() {}
 ```
 
 `@inline` records the `inline` function attribute. The legacy `inline fn` spelling remains supported and normalizes to the same attribute, so the two spellings should not be combined on one function. The attribute requests inlining when the target backend can safely expand the function. Backends may also inline automatically when their target cost model determines that the function body is cheaper than the call, prologue, return, and associated state preservation. Recursive calls and unsupported body shapes fall back to ordinary calls.
 
-`@comptime` marks a pure function for compile-time evaluation when its inputs are known. `@no-comptime` takes precedence over both compile-time evaluation and inlining. Supported modifiers and attributes are `pub`, `@inline` (or legacy `inline`), `@comptime`, `@no-comptime`, `naked`, and `interrupt`. Backend support for ABI-sensitive modifiers is target-dependent and still evolving.
+`@comptime` marks a pure function for compile-time evaluation when its inputs are known. `@no-comptime` takes precedence over both compile-time evaluation and inlining. `pub` controls source and module visibility but does not keep an unused declaration in the final binary. `@extern` marks a function as part of the binary API and keeps it as a linker/emission root. Supported modifiers and attributes are `pub`, `@inline` (or legacy `inline`), `@comptime`, `@no-comptime`, `@extern`, `naked`, and `interrupt`. Backend support for ABI-sensitive modifiers is target-dependent and still evolving.
 
 External assembly functions declare routines implemented by emitted or linked assembly.
 

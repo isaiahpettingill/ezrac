@@ -240,6 +240,13 @@ Terminators include:
 
 TBIR should preserve source locations through transformations, including inlining and tail-recursion conversion.
 
+After target lowering, the eZ80 backend may run a conservative basic-block CFG
+cleanup. It starts at `__ezra_start` and explicit public, banked, interrupt,
+naked, and inline-assembly roots, removes blocks with no control-flow path to a
+root, and removes branches whose target is the next block. Programs containing
+inline assembly skip this cleanup because assembly can enter or branch to labels
+outside the structured IR.
+
 ## Tail Calls and Recursion
 
 HIR detects recursion, tail recursion, and tail-call candidates. TBIR decides legality using target ABI facts.
@@ -348,9 +355,12 @@ Machine lowering converts optimized TBIR into target instruction choices, regist
 Machine lowering owns:
 
 - register selection and constraints
+- target-local temporary allocation and safe reuse of proven nonvolatile
+  absolute local storage loads
 - stack frame layout
 - parameter and return passing
-- helper ABI calls
+- helper ABI calls. eZ80 helpers are emitted on demand from a dependency graph;
+  a helper is not emitted merely because another helper exists.
 - concrete branch forms
 - target instruction choice
 - target assembly emission

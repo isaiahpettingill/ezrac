@@ -198,12 +198,13 @@ fn inline_assembly_keeps_exact_known_function_labels() {
 }
 
 #[test]
-fn omits_unreferenced_public_declarations_from_executables() {
+fn retains_extern_declarations_and_strips_unused_public_declarations() {
     let source = r#"
-            pub global exported_value: u8 = 0x6B
-            pub embed exported_asset: bytes = bytes [0xC1, 0xC2]
+            pub fn strippable_public_function() {
+                test.fail(1)
+            }
 
-            pub fn exported_function() {
+            @extern pub fn exported_function() {
                 test.pass()
             }
 
@@ -214,9 +215,8 @@ fn omits_unreferenced_public_declarations_from_executables() {
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
     let asm = emit_ez80_assembly(&program).unwrap();
 
-    assert!(!asm.contains("ld a, 6Bh"), "{asm}");
-    assert!(!asm.contains("ld a, C1h"), "{asm}");
-    assert!(!asm.contains("_exported_function:"), "{asm}");
+    assert!(!asm.contains("_strippable_public_function:"), "{asm}");
+    assert!(asm.contains("_exported_function:"), "{asm}");
 }
 
 #[test]

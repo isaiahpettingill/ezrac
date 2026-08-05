@@ -1374,6 +1374,7 @@ inline
 @inline
 @comptime
 @no-comptime
+@extern
 naked
 interrupt
 pub
@@ -1383,6 +1384,8 @@ extern asm
 `@comptime` permits pure, known-input function calls to be evaluated before code generation. Default constant folding covers literal expressions, enabled constant references, and known indexes into immutable constant arrays. Fixed-size array initializers are zero-filled when fewer elements are supplied; `zeroes()` is shorthand for a zero-filled fixed-size array initializer.
 
 `@no-comptime` is an exact opt-out. On a constant it preserves the initializer instead of folding it. On a function it prevents comptime evaluation and inlining, including when both attributes are present. Mutable globals, ports, MMIO, pointers, strings, inline assembly, assignments, loops, recursion, and unknown calls are not comptime inputs or operations. The evaluator has fixed step, call-depth, and aggregate-size limits. When evaluation is unsafe, incomplete, recursive, or over a limit, the original runtime expression is retained instead of producing a partial result.
+
+`pub` controls source and module visibility and does not by itself retain an unused declaration in an executable. `@extern` marks a function as part of the binary API and keeps it as an emission/linker root.
 
 Example:
 
@@ -2506,8 +2509,8 @@ field         = ident ":" ty
 extern_decl   = visibility? "extern" "asm" "fn" ident "(" params? ")" ret_ty?
 
 fn_decl       = fn_modifier* "fn" ident "(" params? ")" ret_ty? block
-fn_modifier   = "pub" | "inline" | "@inline" | "@comptime" | "@no-comptime" | "naked" | "interrupt"
-decl_attr     = "@comptime" | "@no-comptime" | "@cfg" "(" ... ")"
+fn_modifier   = "pub" | "inline" | "@inline" | "@comptime" | "@no-comptime" | "@extern" | "naked" | "interrupt"
+decl_attr     = "@comptime" | "@no-comptime" | "@extern" | "@cfg" "(" ... ")"
 
 params        = param ("," param)*
 param         = ident ":" ty

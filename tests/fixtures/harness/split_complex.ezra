@@ -1,6 +1,6 @@
 // test: port 0x01 = 0x21
 // test: port 0x02 = 0x03
-// test: mem 0x100020 = 0x5A
+// test: mem 0x17FFF0 = 0x5A
 import harness.io
 import harness.layout
 import harness.memory
