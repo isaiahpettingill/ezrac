@@ -1,11 +1,18 @@
 [project]
-name = "ezra-game"
+name = "JUMP!"
 
 [build]
 input = "src/main.ezra"
-target = "ez180n-z80"
+target = [
+    "ez180n-z80",
+    "ez180n-ez80",
+    "ez180n-z80n",
+    "ez180n-z180",
+    "ez180n-i8080",
+    "ez180n-i8085"
+]
 output = "gaem"
-executable = "ezra-game"
+executable = "JUMP"
 
 [sdk]
 paths = ["sdk"]
