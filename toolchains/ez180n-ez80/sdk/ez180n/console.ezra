@@ -1,6 +1,10 @@
 pub const WIDTH: u8 = 80
 pub const HEIGHT: u8 = 56
+@cfg(pointer_width(24))
 pub const FRAMEBUFFER_BASE: u24 = 0x080000u24
+
+@cfg(pointer_width(16))
+pub const FRAMEBUFFER_BASE: u16 = 0xE000u16
 
 pub const CHAR_FIRST: u8 = 0x00
 pub const CHAR_LAST: u8 = 0xFF
@@ -42,7 +46,11 @@ pub port P3_HIGH: u8 = 0x35
 pub port P4_LOW: u8 = 0x36
 pub port P4_HIGH: u8 = 0x37
 
+@cfg(pointer_width(24))
 pub volatile mmio FRAMEBUFFER: ptr<u8> = 0x080000
+
+@cfg(pointer_width(16))
+pub volatile mmio FRAMEBUFFER: ptr<u8> = 0xE000
 
 pub const BUTTON_B: u8 = 0
 pub const BUTTON_Y: u8 = 1
@@ -57,18 +65,37 @@ pub const BUTTON_X: u8 = 9
 pub const BUTTON_L: u8 = 10
 pub const BUTTON_R: u8 = 11
 
+@cfg(pointer_width(24))
 pub fn put_char(x: u8, y: u8, ch: u8) {
     let offset: u24 = cast<u24>(y) * cast<u24>(WIDTH) + cast<u24>(x)
     let cell: ptr<u8> = FRAMEBUFFER + offset
     *cell = ch
 }
 
+@cfg(pointer_width(16))
+pub fn put_char(x: u8, y: u8, ch: u8) {
+    let offset: u16 = cast<u16>(y) * cast<u16>(WIDTH) + cast<u16>(x)
+    let cell: ptr<u8> = FRAMEBUFFER + offset
+    *cell = ch
+}
+
+@cfg(pointer_width(24))
 pub fn fill(ch: u8) {
     let index: u24 = 0
     while index < 4480u24 {
         let cell: ptr<u8> = FRAMEBUFFER + index
         *cell = ch
         index += 1u24
+    }
+}
+
+@cfg(pointer_width(16))
+pub fn fill(ch: u8) {
+    let index: u16 = 0
+    while index < 4480u16 {
+        let cell: ptr<u8> = FRAMEBUFFER + index
+        *cell = ch
+        index += 1u16
     }
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout::default_layout_for_target;
 
 #[test]
 #[cfg(feature = "m68k")]
@@ -329,4 +330,69 @@ fn resolves_arduboy_and_bare_avr_target_profiles() {
     assert_eq!(arduboy_layout.name, "arduboy_atmega32u4");
     assert_eq!(arduboy_layout.stack.get(), 0x0AFF);
     assert_eq!(arduboy_layout.regions[0].end.get(), 0x6FFF);
+}
+
+#[test]
+fn resolves_all_ez180n_cpu_target_profiles() {
+    for (target, cpu, cpu_id, width) in [
+        ("ez180n-i8080", CpuFamily::I8080, 0, 16),
+        ("ez180n-i8085", CpuFamily::I8085, 1, 16),
+        ("ez180n-z80", CpuFamily::Z80, 2, 16),
+        ("ez180n-z80n", CpuFamily::Z80N, 3, 16),
+        ("ez180n-z180", CpuFamily::Z180, 4, 16),
+        ("ez180n-ez80", CpuFamily::Ez80, 5, 24),
+    ] {
+        let profile = resolve_target_profile(Some(target)).unwrap();
+        assert_eq!(profile.triple.cpu, cpu);
+        assert_eq!(profile.output_format, OutputFormat::Ez180nGaem);
+        assert_eq!(profile.memory.pointer_width_bits, width);
+        assert_eq!(profile.memory.address_width_bits, width);
+        assert_eq!(ez180n_cpu_id(target), Some(cpu_id));
+    }
+}
+
+#[test]
+fn ez180n_layouts_match_cpu_address_widths() {
+    let adl = default_layout_for_target("ez180n-ez80");
+    assert_eq!(adl.validate(), Ok(()));
+    assert_eq!(adl.load.get(), 0x010000);
+    assert_eq!(adl.entry.get(), 0x010000);
+    assert!(adl
+        .regions
+        .iter()
+        .all(|region| { !matches!(region.name.as_str(), "low" | "header") }));
+    assert!(adl
+        .sections
+        .iter()
+        .any(|section| { section.name == ".header" && section.region == "code" }));
+    assert!(adl
+        .regions
+        .iter()
+        .any(|region| { region.name == "vram" && region.start.get() == 0x080000 }));
+
+    for target in [
+        "ez180n-i8080",
+        "ez180n-i8085",
+        "ez180n-z80",
+        "ez180n-z80n",
+        "ez180n-z180",
+    ] {
+        let layout = default_layout_for_target(target);
+        assert_eq!(layout.validate(), Ok(()));
+        assert_eq!(layout.name, "ez180n_16");
+        assert_eq!(layout.load.get(), 0);
+        assert_eq!(layout.entry.get(), 0);
+        assert!(layout.stack.get() < 0xE000);
+        assert!(layout
+            .regions
+            .iter()
+            .all(|region| region.end.get() <= 0xFFFF));
+        assert!(layout
+            .symbols
+            .iter()
+            .all(|symbol| symbol.value.get() <= 0xFFFF));
+        assert!(layout.regions.iter().any(|region| {
+            region.name == "vram" && region.start.get() == 0xE000 && region.end.get() == 0xF1FF
+        }));
+    }
 }

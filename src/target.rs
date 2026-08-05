@@ -2,7 +2,12 @@ use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 
 pub const CART_MAGIC: &[u8; 4] = b"EZRA";
 pub const FORMAT_VERSION: u8 = 1;
-pub const CPU_MODE_EZ80_ADL: u8 = 1;
+pub const CPU_MODE_I8080: u8 = 0;
+pub const CPU_MODE_I8085: u8 = 1;
+pub const CPU_MODE_Z80: u8 = 2;
+pub const CPU_MODE_Z80N: u8 = 3;
+pub const CPU_MODE_Z180: u8 = 4;
+pub const CPU_MODE_EZ80_ADL: u8 = 5;
 
 pub const ADDRESS_SPACE_SIZE: u32 = 0x0100_0000;
 pub const MAX_ADDR: Address24 = Address24::new(0xFF_FFFF);
@@ -386,6 +391,25 @@ pub fn is_msdos_i8086_target(target: &str) -> bool {
             .is_some_and(|suffix| suffix.len() > 1 && suffix.starts_with('-'))
 }
 
+/// Return the ez180N cartridge CPU ID for a target triple.
+///
+/// The ID is stored at byte 4 of a GAEM file, immediately after EZRA.
+pub fn ez180n_cpu_id(target: &str) -> Option<u8> {
+    Some(match target {
+        "ez180n-i8080" => CPU_MODE_I8080,
+        "ez180n-i8085" => CPU_MODE_I8085,
+        "ez180n-z80" => CPU_MODE_Z80,
+        "ez180n-z80n" => CPU_MODE_Z80N,
+        "ez180n-z180" => CPU_MODE_Z180,
+        "ez180n-ez80" => CPU_MODE_EZ80_ADL,
+        _ => return None,
+    })
+}
+
+pub fn is_ez180n_target(target: &str) -> bool {
+    ez180n_cpu_id(target).is_some()
+}
+
 pub fn resolve_target_profile(target: Option<&str>) -> Result<TargetProfile, String> {
     let triple = parse_target_triple(target.unwrap_or(DEFAULT_TARGET_TRIPLE))?;
     validate_target_cpu_combination(&triple)?;
@@ -417,11 +441,19 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
         Some(&[CpuFamily::Z80][..])
     } else if target.starts_with("gameboy-") {
         Some(&[CpuFamily::Lr35902][..])
-    } else if target.starts_with("agonlight-")
-        || target.starts_with("ez180n-")
-        || target.starts_with("ezra-test-")
-    {
+    } else if target.starts_with("agonlight-") || target.starts_with("ezra-test-") {
         Some(&[CpuFamily::Ez80][..])
+    } else if is_ez180n_target(target) {
+        Some(
+            &[
+                CpuFamily::I8080,
+                CpuFamily::I8085,
+                CpuFamily::Z80,
+                CpuFamily::Z80N,
+                CpuFamily::Z180,
+                CpuFamily::Ez80,
+            ][..],
+        )
     } else if target.starts_with("commodore64-") {
         Some(&[CpuFamily::Mos6502][..])
     } else if target.starts_with("nes-") {
@@ -470,7 +502,7 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         ) && triple.value.split('-').any(|part| part == "cpm"))
     {
         OutputFormat::CpmCom
-    } else if triple.value.starts_with("ez180n-ez80") {
+    } else if is_ez180n_target(&triple.value) {
         OutputFormat::Ez180nGaem
     } else if is_ti_calculator_target(triple) {
         OutputFormat::Ti8xp

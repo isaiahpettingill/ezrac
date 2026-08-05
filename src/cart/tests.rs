@@ -52,7 +52,7 @@ fn default_header_matches_spec_offsets() {
 
     assert_eq!(&bytes[0x00..0x04], b"EZRA");
     assert_eq!(bytes[0x04], 1);
-    assert_eq!(bytes[0x05], 1);
+    assert_eq!(bytes[0x05], CPU_MODE_EZ80_ADL);
     assert_eq!(&bytes[0x08..0x0B], &[0x40, 0x00, 0x01]);
     assert_eq!(&bytes[0x0B..0x0E], &[0x00, 0x00, 0xF0]);
     assert_eq!(&bytes[0x1A..0x1C], &[0x40, 0x00]);

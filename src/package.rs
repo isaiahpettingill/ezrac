@@ -9,7 +9,7 @@ use alloc::{
 };
 use core::fmt;
 
-use crate::target::{Address24, OutputFormat};
+use crate::target::{Address24, CART_MAGIC, OutputFormat, ez180n_cpu_id};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageError {
@@ -195,7 +195,20 @@ pub fn package_executable_with_context(
         };
     }
     match request.output_format {
-        OutputFormat::RawBin | OutputFormat::CpmCom | OutputFormat::Ez180nGaem => Ok(code.to_vec()),
+        OutputFormat::RawBin | OutputFormat::CpmCom => Ok(code.to_vec()),
+        OutputFormat::Ez180nGaem => {
+            let cpu_id = ez180n_cpu_id(&request.target).ok_or_else(|| {
+                PackageError::new(format!(
+                    "target `{}` is not a supported ez180N CPU target",
+                    request.target
+                ))
+            })?;
+            let mut output = Vec::with_capacity(CART_MAGIC.len() + 1 + code.len());
+            output.extend_from_slice(CART_MAGIC);
+            output.push(cpu_id);
+            output.extend_from_slice(code);
+            Ok(output)
+        }
         OutputFormat::IntelHex | OutputFormat::ArduinoHex => {
             let base_addr = match context.image_kind {
                 PackageImageKind::EntryCode => request.entry_addr,

@@ -1,7 +1,7 @@
 use crate::target::{
     Address24, AssemblerCpu, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
-    EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
-    is_msdos_i8086_target,
+    EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE, ez180n_cpu_id,
+    is_ez180n_target, is_msdos_i8086_target,
 };
 use crate::{compat::prelude::*, diagnostic::Diagnostic};
 use pest::{Parser, iterators::Pair};
@@ -114,8 +114,12 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::ti_z80(target)
     } else if target.starts_with("agonlight-mos-ez80") {
         Layout::agon_light_mos()
-    } else if target.starts_with("ez180n-ez80") {
-        Layout::ez180n()
+    } else if is_ez180n_target(target) {
+        if ez180n_cpu_id(target) == Some(5) {
+            Layout::ez180n()
+        } else {
+            Layout::ez180n_16()
+        }
     } else if target.starts_with("ezra-test-flat-ez80") {
         Layout::ez80_test_flat()
     } else if target.starts_with("ezra-test-split-ez80") {
@@ -837,12 +841,10 @@ impl Layout {
     pub fn ez180n() -> Self {
         Self {
             name: "ez180n".to_owned(),
-            load: Address24::new(0x00_FFC0),
+            load: Address24::new(0x01_0000),
             entry: Address24::new(0x01_0000),
             stack: EZRA_STACK_TOP,
             regions: vec![
-                region("low", 0x00_0000, 0x00_FFBF, &[RegionFlags::RESERVED]),
-                region("header", 0x00_FFC0, 0x00_FFFF, &[RegionFlags::READ]),
                 region(
                     "code",
                     0x01_0000,
@@ -883,7 +885,7 @@ impl Layout {
                 ),
             ],
             sections: vec![
-                section(".header", "header", 1),
+                section(".header", "code", 1),
                 section(".text", "code", 16),
                 section(".rodata", "rodata", 16),
                 section(".data", "ram", 16),
@@ -892,7 +894,7 @@ impl Layout {
                 section(".scratch", "scratch", 16),
             ],
             symbols: vec![
-                symbol("EZRA_LOAD_ADDR", Address24::new(0x00_FFC0)),
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x01_0000)),
                 symbol("EZRA_ENTRY_ADDR", Address24::new(0x01_0000)),
                 symbol("EZRA_CODE_BASE", Address24::new(0x01_0000)),
                 symbol("EZRA_STACK_TOP", EZRA_STACK_TOP),
@@ -901,6 +903,68 @@ impl Layout {
                 symbol("EZRA_AUDIO_BASE", EZRA_AUDIO_BASE),
                 symbol("EZRA_ASSET_BASE", EZRA_ASSET_BASE),
                 symbol("EZRA_RODATA_BASE", EZRA_RODATA_BASE),
+            ],
+        }
+    }
+
+    pub fn ez180n_16() -> Self {
+        Self {
+            name: "ez180n_16".to_owned(),
+            load: Address24::new(0x0000),
+            entry: Address24::new(0x0000),
+            stack: Address24::new(0xDFFF),
+            regions: vec![
+                region(
+                    "code",
+                    0x0000,
+                    0x7FFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x8000, 0x9FFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0xA000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0xC000, 0xCFFF, &[RegionFlags::READ]),
+                region(
+                    "stack",
+                    0xD000,
+                    0xDFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "vram",
+                    0xE000,
+                    0xF1FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::VOLATILE],
+                ),
+                region(
+                    "scratch",
+                    0xF200,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+            ],
+            sections: vec![
+                section(".header", "code", 1),
+                section(".text", "code", 16),
+                section(".rodata", "rodata", 16),
+                section(".data", "ram", 16),
+                section(".bss", "ram", 16),
+                section(".assets", "assets", 256),
+                section(".scratch", "scratch", 16),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xDFFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x8000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
+                symbol("EZRA_VRAM_BASE", Address24::new(0xE000)),
             ],
         }
     }

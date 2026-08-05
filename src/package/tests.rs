@@ -263,3 +263,36 @@ fn splits_intel_hex_records_at_64k_boundaries() {
     assert!(text.contains(":08FFF800"), "{text}");
     assert!(text.contains(":080000000000000000000000F8"), "{text}");
 }
+
+#[test]
+fn packages_all_ez180n_cpu_ids_before_the_payload() {
+    for (target, cpu_id) in [
+        ("ez180n-i8080", 0),
+        ("ez180n-i8085", 1),
+        ("ez180n-z80", 2),
+        ("ez180n-z80n", 3),
+        ("ez180n-z180", 4),
+        ("ez180n-ez80", 5),
+    ] {
+        let payload = [0xC9, 0x42];
+        let packaged = package_executable(
+            &PackageRequest::new(target, OutputFormat::Ez180nGaem, 0, 0),
+            &payload,
+        )
+        .unwrap();
+
+        assert_eq!(&packaged[..4], b"EZRA");
+        assert_eq!(packaged[4], cpu_id);
+        assert_eq!(&packaged[5..], payload);
+    }
+}
+
+#[test]
+fn rejects_gaem_output_for_non_ez180n_targets() {
+    let error = package_executable(
+        &PackageRequest::new("bare-z80", OutputFormat::Ez180nGaem, 0, 0),
+        &[0xC9],
+    )
+    .unwrap_err();
+    assert!(error.message.contains("not a supported ez180N CPU target"));
+}

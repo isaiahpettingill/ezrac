@@ -1784,3 +1784,38 @@ fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
     )
     .unwrap();
 }
+
+#[test]
+fn ez180n_console_builtin_sdk_resolves_for_every_cpu_target() {
+    for target in [
+        "ez180n-i8080",
+        "ez180n-i8085",
+        "ez180n-z80",
+        "ez180n-z80n",
+        "ez180n-z180",
+        "ez180n-ez80",
+    ] {
+        let sdk = SdkResolver {
+            target: Some(target.to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        assert!(builtin_sdk_modules(Some(target)).contains(&"ez180n.console"));
+        let (path, source) =
+            resolve_import_source(Path::new("main.ezra"), "ez180n.console", &sdk).unwrap();
+        assert_eq!(path, PathBuf::from("builtin-sdk/ez180n/console.ezra"));
+        assert!(!source.is_empty());
+
+        check_source_with_sdk(
+            "import ez180n.console
+fn main() { ez180n.console.put_char(0, 0, 65) }
+",
+            &CompileOptions {
+                source: PathBuf::from("main.ezra"),
+                debug_comments: false,
+                default_sdk_symbols: true,
+            },
+            &sdk,
+        )
+        .unwrap_or_else(|error| panic!("{target} SDK failed to compile: {error}"));
+    }
+}

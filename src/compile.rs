@@ -31,8 +31,8 @@ use crate::{
     layout::{Layout, default_layout_for_target},
     parser::parse_program,
     target::{
-        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, is_msdos_i8086_target,
-        memory_model_for_cpu, parse_target_triple,
+        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, is_ez180n_target,
+        is_msdos_i8086_target, memory_model_for_cpu, parse_target_triple,
     },
     workspace::{Workspace, materialize_workspace_embeds},
 };
@@ -1669,7 +1669,7 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
-    } else if target.is_some_and(|target| target.starts_with("ez180n-ez80")) {
+    } else if target.is_some_and(is_ez180n_target) {
         match import {
             "ez180n.console" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/ez180n-ez80/sdk/ez180n/console.ezra"),
