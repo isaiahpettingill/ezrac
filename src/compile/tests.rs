@@ -1807,7 +1807,12 @@ fn ez180n_console_builtin_sdk_resolves_for_every_cpu_target() {
 
         check_source_with_sdk(
             "import ez180n.console
-fn main() { ez180n.console.put_char(0, 0, 65) }
+fn main() {
+    ez180n.console.fill(65)
+    if ez180n.console.button_down(0, ez180n.console.BUTTON_A) {
+        ez180n.console.put_char(0, 0, 65)
+    }
+}
 ",
             &CompileOptions {
                 source: PathBuf::from("main.ezra"),

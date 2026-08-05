@@ -621,3 +621,19 @@ fn rejects_non_i8086_and_noncanonical_msdos_targets() {
         );
     }
 }
+
+
+#[test]
+fn ez180n_gaem_uses_a_flat_output_map() {
+    for target in [
+        "ez180n-i8080",
+        "ez180n-i8085",
+        "ez180n-z80",
+        "ez180n-z80n",
+        "ez180n-z180",
+        "ez180n-ez80",
+    ] {
+        let build = BuildRequest::for_target(target).unwrap();
+        assert!(uses_flat_output_map(&build), "{target}");
+    }
+}
