@@ -23,7 +23,7 @@
   "repository": {
     "attributes": {
       "patterns": [
-        { "name": "storage.modifier.ezra", "match": "\\b(pub|inline|naked|interrupt|volatile)\\b" }
+        { "name": "storage.modifier.ezra", "match": "\\b(pub|inline|comptime|no-comptime|naked|interrupt|volatile)\\b" }
       ]
     },
     "characters": {

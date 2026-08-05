@@ -41,6 +41,7 @@ pub enum HirDeclaration {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirObject {
     pub public: bool,
+    pub attrs: Vec<String>,
     pub name: String,
     pub ty: Type,
 }
@@ -85,14 +86,42 @@ pub struct HirFunctionAnalysis {
     pub tail_recursive: bool,
     pub tail_call_candidates: Vec<String>,
     pub loop_candidates: usize,
+    /// The first deterministic reason a `@comptime` body cannot be evaluated.
+    pub comptime_rejection: Option<String>,
 }
 
 impl HirProgram {
     pub fn from_ast(program: &Program) -> Result<Self, Diagnostic> {
+        let comptime_functions = program
+            .declarations
+            .iter()
+            .filter_map(function_declaration)
+            .filter(|function| {
+                has_attr(&function.attrs, "comptime") && !has_attr(&function.attrs, "no-comptime")
+            })
+            .map(|function| function.name.clone())
+            .collect::<HashSet<_>>();
+        let mutable_globals = program
+            .declarations
+            .iter()
+            .filter_map(global_declaration_name)
+            .collect::<HashSet<_>>();
+        let ports_and_mmio = program
+            .declarations
+            .iter()
+            .filter_map(port_or_mmio_name)
+            .collect::<HashSet<_>>();
         let declarations = program
             .declarations
             .iter()
-            .filter_map(lower_declaration)
+            .filter_map(|declaration| {
+                lower_declaration(
+                    declaration,
+                    &comptime_functions,
+                    &mutable_globals,
+                    &ports_and_mmio,
+                )
+            })
             .collect::<Vec<_>>();
         let function_count = declarations
             .iter()
@@ -113,14 +142,25 @@ impl HirProgram {
     }
 }
 
-fn lower_declaration(declaration: &Declaration) -> Option<HirDeclaration> {
+fn lower_declaration(
+    declaration: &Declaration,
+    comptime_functions: &HashSet<String>,
+    mutable_globals: &HashSet<String>,
+    ports_and_mmio: &HashSet<String>,
+) -> Option<HirDeclaration> {
     match declaration {
         Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
-            lower_declaration(declaration)
+            lower_declaration(
+                declaration,
+                comptime_functions,
+                mutable_globals,
+                ports_and_mmio,
+            )
         }
         Declaration::Import(_) => None,
         Declaration::Const(decl) => Some(HirDeclaration::Const(HirObject {
             public: decl.public,
+            attrs: decl.attrs.clone(),
             name: decl.name.clone(),
             ty: decl.ty.clone(),
         })),
@@ -130,12 +170,14 @@ fn lower_declaration(declaration: &Declaration) -> Option<HirDeclaration> {
         }),
         Declaration::Port(decl) => Some(HirDeclaration::Port(HirObject {
             public: decl.public,
+            attrs: Vec::new(),
             name: decl.name.clone(),
             ty: decl.ty.clone(),
         })),
         Declaration::Mmio(decl) => Some(HirDeclaration::Mmio {
             object: HirObject {
                 public: decl.public,
+                attrs: Vec::new(),
                 name: decl.name.clone(),
                 ty: decl.ty.clone(),
             },
@@ -147,6 +189,7 @@ fn lower_declaration(declaration: &Declaration) -> Option<HirDeclaration> {
         }),
         Declaration::Global(decl) => Some(HirDeclaration::Global(HirObject {
             public: decl.public,
+            attrs: Vec::new(),
             name: decl.name.clone(),
             ty: decl.ty.clone(),
         })),
@@ -169,11 +212,21 @@ fn lower_declaration(declaration: &Declaration) -> Option<HirDeclaration> {
                 &function.return_type,
             )))
         }
-        Declaration::Function(function) => Some(HirDeclaration::Function(lower_function(function))),
+        Declaration::Function(function) => Some(HirDeclaration::Function(lower_function(
+            function,
+            comptime_functions,
+            mutable_globals,
+            ports_and_mmio,
+        ))),
     }
 }
 
-fn lower_function(function: &Function) -> HirFunction {
+fn lower_function(
+    function: &Function,
+    comptime_functions: &HashSet<String>,
+    mutable_globals: &HashSet<String>,
+    ports_and_mmio: &HashSet<String>,
+) -> HirFunction {
     HirFunction {
         sig: lower_function_sig(
             function.public,
@@ -183,7 +236,12 @@ fn lower_function(function: &Function) -> HirFunction {
         ),
         attrs: function.attrs.clone(),
         body: function.body.clone(),
-        analysis: analyze_function(function),
+        analysis: analyze_function(
+            function,
+            comptime_functions,
+            mutable_globals,
+            ports_and_mmio,
+        ),
     }
 }
 
@@ -207,7 +265,12 @@ fn lower_function_sig(
     }
 }
 
-fn analyze_function(function: &Function) -> HirFunctionAnalysis {
+fn analyze_function(
+    function: &Function,
+    comptime_functions: &HashSet<String>,
+    mutable_globals: &HashSet<String>,
+    ports_and_mmio: &HashSet<String>,
+) -> HirFunctionAnalysis {
     let mut analysis = HirFunctionAnalysis::default();
     analyze_stmts(&function.body, &function.name, &mut analysis);
     if function
@@ -217,7 +280,283 @@ fn analyze_function(function: &Function) -> HirFunctionAnalysis {
     {
         analysis.tail_recursive = true;
     }
+    if has_attr(&function.attrs, "comptime") && !has_attr(&function.attrs, "no-comptime") {
+        analysis.comptime_rejection = comptime_rejection(
+            function,
+            comptime_functions,
+            mutable_globals,
+            ports_and_mmio,
+        );
+    }
     analysis
+}
+
+fn function_declaration(declaration: &Declaration) -> Option<&Function> {
+    match declaration {
+        Declaration::Function(function) => Some(function),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            function_declaration(declaration)
+        }
+        _ => None,
+    }
+}
+
+fn global_declaration_name(declaration: &Declaration) -> Option<String> {
+    match declaration {
+        Declaration::Global(global) => Some(global.name.clone()),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            global_declaration_name(declaration)
+        }
+        _ => None,
+    }
+}
+
+fn port_or_mmio_name(declaration: &Declaration) -> Option<String> {
+    match declaration {
+        Declaration::Port(port) => Some(port.name.clone()),
+        Declaration::Mmio(mmio) => Some(mmio.name.clone()),
+        Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+            port_or_mmio_name(declaration)
+        }
+        _ => None,
+    }
+}
+
+fn has_attr(attrs: &[String], wanted: &str) -> bool {
+    attrs.iter().any(|attr| attr == wanted)
+}
+
+fn comptime_rejection(
+    function: &Function,
+    comptime_functions: &HashSet<String>,
+    mutable_globals: &HashSet<String>,
+    ports_and_mmio: &HashSet<String>,
+) -> Option<String> {
+    if function
+        .params
+        .iter()
+        .any(|param| type_contains_pointer(&param.ty))
+    {
+        return Some("pointers are not supported".to_owned());
+    }
+    if function
+        .return_type
+        .as_ref()
+        .is_some_and(type_contains_pointer)
+    {
+        return Some("pointers are not supported".to_owned());
+    }
+    fn visit_stmts(
+        stmts: &[Stmt],
+        function_name: &str,
+        comptime_functions: &HashSet<String>,
+        mutable_globals: &HashSet<String>,
+        ports_and_mmio: &HashSet<String>,
+    ) -> Option<&'static str> {
+        for stmt in stmts {
+            let reason = match stmt {
+                Stmt::Assign { .. } => Some("side effects are not supported"),
+                Stmt::While { .. } | Stmt::Loop { .. } | Stmt::Break | Stmt::Continue => {
+                    Some("loops are not supported")
+                }
+                Stmt::Asm { .. } => Some("inline asm is not supported"),
+                Stmt::Out { .. } => Some("ports are not supported"),
+                Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                    visit_expr(
+                        value,
+                        function_name,
+                        comptime_functions,
+                        mutable_globals,
+                        ports_and_mmio,
+                    )
+                }
+                Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => visit_expr(
+                    condition,
+                    function_name,
+                    comptime_functions,
+                    mutable_globals,
+                    ports_and_mmio,
+                )
+                .or_else(|| {
+                    visit_stmts(
+                        then_body,
+                        function_name,
+                        comptime_functions,
+                        mutable_globals,
+                        ports_and_mmio,
+                    )
+                })
+                .or_else(|| {
+                    visit_stmts(
+                        else_body,
+                        function_name,
+                        comptime_functions,
+                        mutable_globals,
+                        ports_and_mmio,
+                    )
+                }),
+                Stmt::Return(None) => None,
+            };
+            if reason.is_some() {
+                return reason;
+            }
+        }
+        None
+    }
+
+    fn visit_expr(
+        expr: &Expr,
+        function_name: &str,
+        comptime_functions: &HashSet<String>,
+        mutable_globals: &HashSet<String>,
+        ports_and_mmio: &HashSet<String>,
+    ) -> Option<&'static str> {
+        match expr {
+            Expr::Ident(name) if mutable_globals.contains(name) => {
+                Some("mutable globals are not comptime")
+            }
+            Expr::Ident(name) if ports_and_mmio.contains(name) => {
+                Some("MMIO and ports are not supported")
+            }
+            Expr::In(_) => Some("ports are not supported"),
+            Expr::AddressOf(_)
+            | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_)
+            | Expr::Deref(_)
+            | Expr::BankedPointer { .. } => Some("pointers are not supported"),
+            Expr::Call { path, args } => {
+                let name = path.last().map(String::as_str);
+                if name == Some(function_name) {
+                    return Some("recursion is not supported");
+                }
+                if name.is_some_and(|name| !comptime_functions.contains(name)) {
+                    return Some("called function is not @comptime");
+                }
+                args.iter().find_map(|arg| {
+                    visit_expr(
+                        arg,
+                        function_name,
+                        comptime_functions,
+                        mutable_globals,
+                        ports_and_mmio,
+                    )
+                })
+            }
+            Expr::Array(values) => values
+                .iter()
+                .find_map(|value| {
+                    visit_expr(
+                        value,
+                        function_name,
+                        comptime_functions,
+                        mutable_globals,
+                        ports_and_mmio,
+                    )
+                })
+                .or(Some("aggregate values are not supported")),
+            Expr::Index { name, index } => {
+                named_root_rejection(name, mutable_globals, ports_and_mmio).or_else(|| {
+                    visit_expr(
+                        index,
+                        function_name,
+                        comptime_functions,
+                        mutable_globals,
+                        ports_and_mmio,
+                    )
+                })
+            }
+            Expr::Access(path) => named_root_rejection(&path.root, mutable_globals, ports_and_mmio)
+                .or_else(|| {
+                    path.segments.iter().find_map(|segment| {
+                        if let crate::ast::AccessSegment::Index(index) = segment {
+                            visit_expr(
+                                index,
+                                function_name,
+                                comptime_functions,
+                                mutable_globals,
+                                ports_and_mmio,
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                }),
+            Expr::StructInit { .. } => Some("aggregate values are not supported"),
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => visit_expr(
+                expr,
+                function_name,
+                comptime_functions,
+                mutable_globals,
+                ports_and_mmio,
+            ),
+            Expr::Binary { left, right, .. } => visit_expr(
+                left,
+                function_name,
+                comptime_functions,
+                mutable_globals,
+                ports_and_mmio,
+            )
+            .or_else(|| {
+                visit_expr(
+                    right,
+                    function_name,
+                    comptime_functions,
+                    mutable_globals,
+                    ports_and_mmio,
+                )
+            }),
+            Expr::Field { base, .. } if mutable_globals.contains(base) => {
+                Some("mutable globals are not comptime")
+            }
+            Expr::Field { base, .. } if ports_and_mmio.contains(base) => {
+                Some("MMIO and ports are not supported")
+            }
+            Expr::String(_) => Some("pointers are not supported"),
+            Expr::Int(_)
+            | Expr::TypedInt(_, _)
+            | Expr::Bool(_)
+            | Expr::Char(_)
+            | Expr::Field { .. }
+            | Expr::Ident(_) => None,
+        }
+    }
+
+    fn named_root_rejection(
+        name: &str,
+        mutable_globals: &HashSet<String>,
+        ports_and_mmio: &HashSet<String>,
+    ) -> Option<&'static str> {
+        if mutable_globals.contains(name) {
+            Some("mutable globals are not comptime")
+        } else if ports_and_mmio.contains(name) {
+            Some("MMIO and ports are not supported")
+        } else {
+            None
+        }
+    }
+
+    visit_stmts(
+        &function.body,
+        &function.name,
+        comptime_functions,
+        mutable_globals,
+        ports_and_mmio,
+    )
+    .map(str::to_owned)
+}
+
+fn type_contains_pointer(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(_) | Type::Function { .. } => true,
+        Type::Array { element, .. } => type_contains_pointer(element),
+        Type::Named(name) if name == "ptr" => true,
+        Type::Named(_) => false,
+    }
 }
 
 fn analyze_stmts(stmts: &[Stmt], function_name: &str, analysis: &mut HirFunctionAnalysis) {

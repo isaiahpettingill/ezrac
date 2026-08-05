@@ -60,6 +60,7 @@ pub enum CfgPredicate {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConstDecl {
     pub public: bool,
+    pub attrs: Vec<String>,
     pub name: String,
     pub ty: Type,
     pub value: Expr,

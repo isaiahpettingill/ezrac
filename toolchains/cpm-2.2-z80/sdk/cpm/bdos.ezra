@@ -184,20 +184,20 @@ pub fn console_input() -> u8 {
     return call_a(CONSOLE_INPUT)
 }
 
-pub fn console_output(ch: u8) {
-    call_e(CONSOLE_OUTPUT, ch)
+pub fn console_output(console_char: u8) {
+    call_e(CONSOLE_OUTPUT, console_char)
 }
 
 pub fn reader_input() -> u8 {
     return call_a(READER_INPUT)
 }
 
-pub fn punch_output(ch: u8) {
-    call_e(PUNCH_OUTPUT, ch)
+pub fn punch_output(punch_char: u8) {
+    call_e(PUNCH_OUTPUT, punch_char)
 }
 
-pub fn list_output(ch: u8) {
-    call_e(LIST_OUTPUT, ch)
+pub fn list_output(list_char: u8) {
+    call_e(LIST_OUTPUT, list_char)
 }
 
 pub fn direct_console_io(value: u8) -> u8 {

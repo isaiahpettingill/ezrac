@@ -76,7 +76,7 @@ fn omits_unreferenced_private_static_initializers_and_strings() {
 }
 
 #[test]
-fn opaque_inline_assembly_keeps_static_and_function_roots() {
+fn inline_assembly_keeps_static_roots_without_rooting_unknown_functions() {
     let source = r#"
             global hidden_value: u8 = 0x5A
 
@@ -95,11 +95,110 @@ fn opaque_inline_assembly_keeps_static_and_function_roots() {
     let asm = emit_ez80_assembly(&program).unwrap();
 
     assert!(asm.contains("ld a, 5Ah"), "{asm}");
-    assert!(asm.contains("_hidden_function:"), "{asm}");
+    assert!(!asm.contains("_hidden_function:"), "{asm}");
 }
 
 #[test]
-fn preserves_public_static_and_function_roots() {
+fn opaque_extern_assembly_keeps_all_static_and_function_roots() {
+    let source = r#"
+            extern asm fn raw_hook()
+
+            const hidden_text: ptr<u8> = "EXTERN OPAQUE"
+            global hidden_value: u8 = 0x5A
+
+            fn hidden_function() {
+                test.pass()
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+
+    assert!(asm.contains("ld a, 5Ah"), "{asm}");
+    assert!(asm.contains("_hidden_function:"), "{asm}");
+    assert!(asm.contains(".dm \"EXTERN OPAQUE\", 00h"), "{asm}");
+}
+
+#[test]
+fn preserves_uncalled_interrupt_naked_and_banked_functions() {
+    let source = r#"
+            @cfg(bank(7))
+            fn banked_entry() {
+                test.pass()
+            }
+
+            interrupt fn interrupt_entry() {
+                test.pass()
+            }
+
+            naked fn naked_entry() {
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber sp) {
+                    "ret"
+                }
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+
+    assert!(asm.contains("_main:"), "{asm}");
+    assert!(asm.contains("_banked_entry:"), "{asm}");
+    assert!(asm.contains("_interrupt_entry:"), "{asm}");
+    assert!(asm.contains("_naked_entry:"), "{asm}");
+}
+
+#[test]
+fn preserves_uncalled_banked_static_data() {
+    let source = r#"
+            @cfg(bank(7))
+            global banked_value: u8 = 0xA7
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+
+    assert!(asm.contains("ld a, A7h"), "{asm}");
+}
+
+#[test]
+fn inline_assembly_keeps_exact_known_function_labels() {
+    let source = r#"
+            fn keep() {
+                test.pass()
+            }
+
+            fn keep_extra() {
+                test.pass()
+            }
+
+            fn main() {
+                asm volatile(clobber af, clobber bc, clobber de, clobber hl, clobber ix, clobber iy, clobber memory) {
+                    "call _keep"
+                }
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+
+    assert!(asm.contains("_keep:"), "{asm}");
+    assert!(!asm.contains("_keep_extra:"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn omits_unreferenced_public_declarations_from_executables() {
     let source = r#"
             pub global exported_value: u8 = 0x6B
             pub embed exported_asset: bytes = bytes [0xC1, 0xC2]
@@ -115,9 +214,9 @@ fn preserves_public_static_and_function_roots() {
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
     let asm = emit_ez80_assembly(&program).unwrap();
 
-    assert!(asm.contains("ld a, 6Bh"), "{asm}");
-    assert!(asm.contains("ld a, C1h"), "{asm}");
-    assert!(asm.contains("_exported_function:"), "{asm}");
+    assert!(!asm.contains("ld a, 6Bh"), "{asm}");
+    assert!(!asm.contains("ld a, C1h"), "{asm}");
+    assert!(!asm.contains("_exported_function:"), "{asm}");
 }
 
 #[test]

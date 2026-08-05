@@ -346,9 +346,9 @@ pub fn emit_ez80_assembly_from_checked(
                 Declaration::Function(function)
                     if emitted_functions.contains(&function.name)
                         && (opaque_assembly
-                            || function.public
                             || has_attr(function, "naked")
-                            || has_attr(function, "interrupt")) =>
+                            || has_attr(function, "interrupt")
+                            || declaration_is_banked(declaration)) =>
                 {
                     Some(function_label(&function.name))
                 }
@@ -473,7 +473,7 @@ fn naf_constant_mul_digits(value: u32) -> Vec<i8> {
             value = if digit == 1 {
                 (value - 1) / 2
             } else {
-                (value + 1) / 2
+                value.div_ceil(2)
             };
         }
     }
@@ -2563,7 +2563,7 @@ impl Emitter {
             AssignOp::BitAnd if (!mask & width_mask).count_ones() == 1 => !mask & width_mask,
             _ => return Ok(false),
         };
-        let bit = changed_bit.trailing_zeros() as u32;
+        let bit = changed_bit.trailing_zeros();
         let address = variable.addr + bit / 8;
         self.line(&format!("    ld hl, {address:06X}h"));
         match op {
@@ -8350,7 +8350,6 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
                 calls.retain(|name| symbols.functions.contains_key(name));
                 graph.insert(function.name.clone(), calls);
                 if function.name == "main"
-                    || function.public
                     || has_attr(function, "naked")
                     || has_attr(function, "interrupt")
                     || declaration_is_banked(declaration)
@@ -8373,12 +8372,7 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
             stack.extend(calls.iter().cloned());
         }
     }
-    if has_extern_assembly
-        || reachable.iter().any(|name| {
-            function_declaration(program, name)
-                .is_some_and(|function| function_contains_inline_asm(&function.body))
-        })
-    {
+    if has_extern_assembly {
         return graph.keys().cloned().collect();
     }
     reachable
@@ -8435,13 +8429,13 @@ fn static_liveness(program: &Program, emitted_functions: &HashSet<String>) -> St
     for declaration in &program.declarations {
         let declaration_is_root = declaration_is_banked(declaration);
         match unwrapped_declaration(declaration) {
-            Declaration::Const(decl) if decl.public || declaration_is_root => {
+            Declaration::Const(decl) if declaration_is_root => {
                 liveness.constants.insert(decl.name.clone());
             }
-            Declaration::Global(decl) if decl.public || declaration_is_root => {
+            Declaration::Global(decl) if declaration_is_root => {
                 liveness.globals.insert(decl.name.clone());
             }
-            Declaration::Embed(decl) if decl.public || declaration_is_root => {
+            Declaration::Embed(decl) if declaration_is_root => {
                 liveness.embeds.insert(decl.name.clone());
             }
             _ => {}
@@ -8783,7 +8777,20 @@ fn collect_stmt_calls_with_symbols(
             Stmt::Loop { body } => collect_stmt_calls_with_symbols(body, calls, symbols),
             Stmt::Return(Some(expr)) | Stmt::Expr(expr) => collect_expr_calls(expr, calls),
             Stmt::Out { value, .. } => collect_expr_calls(value, calls),
-            Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => {}
+            Stmt::Asm { lines, .. } => {
+                if let Some(symbols) = symbols {
+                    for name in symbols.functions.keys() {
+                        let label = function_label(name);
+                        if lines
+                            .iter()
+                            .any(|line| inline_asm_references_label(line, &label))
+                        {
+                            calls.push(name.clone());
+                        }
+                    }
+                }
+            }
+            Stmt::Break | Stmt::Continue | Stmt::Return(None) => {}
         }
         if stmt_terminates_current_block(stmt) {
             break;
@@ -8901,6 +8908,11 @@ fn function_label(name: &str) -> String {
         }
     }
     label
+}
+
+fn inline_asm_references_label(line: &str, label: &str) -> bool {
+    line.split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.')))
+        .any(|token| token.eq_ignore_ascii_case(label))
 }
 
 fn reserved_function_label(label: &str) -> bool {

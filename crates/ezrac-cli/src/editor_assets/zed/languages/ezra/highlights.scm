@@ -36,6 +36,8 @@
 [
   "pub"
   "inline"
+  "comptime"
+  "no-comptime"
   "naked"
   "interrupt"
   "volatile"

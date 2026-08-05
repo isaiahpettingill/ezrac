@@ -17,14 +17,15 @@ pub fn text(program: &HirProgram) -> String {
         match declaration {
             HirDeclaration::Function(function) => {
                 out.push_str(&format!(
-                    "fn {} params={} return={} recursive={} tail_recursive={} loops={} tail_calls={:?}\n",
+                    "fn {} params={} return={} recursive={} tail_recursive={} loops={} tail_calls={:?} comptime_rejection={:?}\n",
                     function.sig.name,
                     function.sig.params.len(),
                     function.sig.return_type.is_some(),
                     function.analysis.recursive,
                     function.analysis.tail_recursive,
                     function.analysis.loop_candidates,
-                    function.analysis.tail_call_candidates
+                    function.analysis.tail_call_candidates,
+                    function.analysis.comptime_rejection
                 ));
             }
             HirDeclaration::ExternFunction(sig) => {

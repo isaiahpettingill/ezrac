@@ -168,6 +168,7 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
         Rule::decl => {
             let mut predicates = Vec::new();
             let mut bank = None;
+            let mut attrs = Vec::new();
             let mut declaration = None;
             for inner in pair.into_inner() {
                 let inner = if inner.as_rule() == Rule::decl_attr {
@@ -184,6 +185,8 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
                             ));
                         }
                     }
+                    Rule::comptime_attr => attrs.push("comptime".to_owned()),
+                    Rule::no_comptime_attr => attrs.push("no-comptime".to_owned()),
                     _ => declaration = Some(build_decl(file, inner)?),
                 }
             }
@@ -197,13 +200,14 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
                     declaration: Box::new(declaration),
                 }
             };
-            Ok(match bank {
+            let declaration = match bank {
                 Some(bank) => Declaration::Bank {
                     bank,
                     declaration: Box::new(declaration),
                 },
                 None => declaration,
-            })
+            };
+            apply_declaration_attrs(declaration, attrs)
         }
         Rule::import_decl => Ok(Declaration::Import(
             pair.into_inner().next().unwrap().as_str().to_owned(),
@@ -218,6 +222,44 @@ fn build_decl(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Declaration, Di
         Rule::extern_decl => build_extern(pair).map(Declaration::ExternAsmFunction),
         Rule::fn_decl => build_fn(file, pair).map(Declaration::Function),
         _ => unreachable!("unexpected decl rule {:?}", pair.as_rule()),
+    }
+}
+
+fn apply_declaration_attrs(
+    declaration: Declaration,
+    attrs: Vec<String>,
+) -> Result<Declaration, Diagnostic> {
+    if attrs.is_empty() {
+        return Ok(declaration);
+    }
+    match declaration {
+        Declaration::Cfg {
+            predicates,
+            declaration,
+        } => Ok(Declaration::Cfg {
+            predicates,
+            declaration: Box::new(apply_declaration_attrs(*declaration, attrs)?),
+        }),
+        Declaration::Bank { bank, declaration } => Ok(Declaration::Bank {
+            bank,
+            declaration: Box::new(apply_declaration_attrs(*declaration, attrs)?),
+        }),
+        Declaration::Const(mut declaration) => {
+            for attr in attrs {
+                if attr == "comptime" {
+                    return Err(Diagnostic::new("`@comptime` is only valid on functions"));
+                }
+                declaration.attrs.push(attr);
+            }
+            Ok(Declaration::Const(declaration))
+        }
+        Declaration::Function(mut function) => {
+            function.attrs.extend(attrs);
+            Ok(Declaration::Function(function))
+        }
+        _ => Err(Diagnostic::new(
+            "`@comptime` and `@no-comptime` are only valid on constants or functions",
+        )),
     }
 }
 
@@ -411,11 +453,13 @@ fn build_global(pair: Pair<'_, Rule>) -> Result<GlobalDecl, Diagnostic> {
             _ => {}
         }
     }
+    let ty = ty.unwrap();
+    let value = expand_zeroes_initializer(&ty, value.unwrap())?;
     Ok(GlobalDecl {
         public,
         name: name.unwrap(),
-        ty: ty.unwrap(),
-        value: value.unwrap(),
+        ty,
+        value,
     })
 }
 
@@ -433,12 +477,30 @@ fn build_const(pair: Pair<'_, Rule>) -> Result<ConstDecl, Diagnostic> {
             _ => {}
         }
     }
+    let ty = ty.unwrap();
+    let value = expand_zeroes_initializer(&ty, value.unwrap())?;
     Ok(ConstDecl {
         public,
+        attrs: Vec::new(),
         name: name.unwrap(),
-        ty: ty.unwrap(),
-        value: value.unwrap(),
+        ty,
+        value,
     })
+}
+
+fn expand_zeroes_initializer(ty: &Type, value: Expr) -> Result<Expr, Diagnostic> {
+    let Expr::Call { path, args } = &value else {
+        return Ok(value);
+    };
+    if path.as_slice() != ["zeroes"] || !args.is_empty() {
+        return Ok(value);
+    }
+    if !matches!(ty, Type::Array { .. }) {
+        return Err(Diagnostic::new(
+            "zeroes() can initialize only a fixed-size array",
+        ));
+    }
+    Ok(Expr::Array(Vec::new()))
 }
 
 fn build_alias(pair: Pair<'_, Rule>) -> Result<AliasDecl, Diagnostic> {
@@ -520,6 +582,8 @@ fn build_fn(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Function, Diagnos
         match inner.as_rule() {
             Rule::attr => attrs.push(inner.as_str().to_owned()),
             Rule::inline_attr => attrs.push("inline".to_owned()),
+            Rule::comptime_attr => attrs.push("comptime".to_owned()),
+            Rule::no_comptime_attr => attrs.push("no-comptime".to_owned()),
             Rule::visibility => {
                 if public {
                     return Err(Diagnostic::new("duplicate visibility `pub` on function"));
@@ -615,14 +679,10 @@ fn build_stmt(
         }
         Rule::let_stmt => {
             let mut inner = pair.into_inner();
-            (
-                Stmt::Let {
-                    name: inner.next().unwrap().as_str().to_owned(),
-                    ty: build_type(inner.next().unwrap())?,
-                    value: build_expr(inner.next().unwrap())?,
-                },
-                Vec::new(),
-            )
+            let name = inner.next().unwrap().as_str().to_owned();
+            let ty = build_type(inner.next().unwrap())?;
+            let value = expand_zeroes_initializer(&ty, build_expr(inner.next().unwrap())?)?;
+            (Stmt::Let { name, ty, value }, Vec::new())
         }
         Rule::assign_stmt => {
             let mut inner = pair.into_inner();

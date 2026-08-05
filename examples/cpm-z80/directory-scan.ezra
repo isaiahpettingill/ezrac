@@ -28,7 +28,7 @@ fn main() {
             let user: u8 = fcb.decode_directory_entry(&directory_record[0], result, &found_fcb[0], &search_fcb[0])
             let name_length: u8 = fcb.format_name(&found_fcb[0], &name_buffer[0], 13)
             if user != fcb.DIRECTORY_UNUSED && name_length != fcb.RESULT_ERROR {
-                console.write(fcb.drive_letter(fcb.directory_entry_drive(&search_fcb[0])))
+                console.write(fcb.drive_letter(bdos.current_disk() + fcb.DRIVE_A))
                 console.write(':')
                 let index: u8 = 0
                 while index < name_length {

@@ -263,6 +263,8 @@ fn tbir_reports_optimization_markers_and_dump() {
     assert!(dump.contains("TBIR"), "{dump}");
     assert!(dump.contains("target: ez80-adl"), "{dump}");
     assert!(dump.contains("optimizations:"), "{dump}");
+    assert!(dump.contains("comptime_evaluations="), "{dump}");
+    assert!(dump.contains("comptime_rejections="), "{dump}");
     assert!(dump.contains("strength_reductions="), "{dump}");
     assert!(dump.contains("copy_propagations="), "{dump}");
     assert!(dump.contains("common_subexpressions="), "{dump}");

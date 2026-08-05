@@ -15,8 +15,10 @@ pub fn text(program: &TbirProgram) -> String {
         program.target.has_cache
     ));
     out.push_str(&format!(
-        "optimizations: constant_folds={} algebraic_simplifications={} strength_reductions={} constant_propagations={} copy_propagations={} common_subexpressions={} loop_invariants_hoisted={} named_memory_reads_hoisted={} dead_removed={} decisions={}\n",
+        "optimizations: constant_folds={} comptime_evaluations={} comptime_rejections={} algebraic_simplifications={} strength_reductions={} constant_propagations={} copy_propagations={} common_subexpressions={} loop_invariants_hoisted={} named_memory_reads_hoisted={} dead_removed={} decisions={}\n",
         program.optimizations.constant_folds,
+        program.optimizations.comptime_evaluations,
+        program.optimizations.comptime_rejections,
         program.optimizations.algebraic_simplifications,
         program.optimizations.strength_reductions,
         program.optimizations.constant_propagations,

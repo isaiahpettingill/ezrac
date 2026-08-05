@@ -231,6 +231,42 @@ fn parses_array_literal_index_and_address_of_index() {
 }
 
 #[test]
+fn expands_zeroes_for_typed_array_initializers() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        "global bytes: [u8; 128] = zeroes()\nconst words: [u16; 4] = zeroes()\nfn main() { let local: [u8; 2] = zeroes() }",
+    )
+    .unwrap();
+
+    let Declaration::Global(global) = &program.declarations[0] else {
+        panic!("expected global declaration");
+    };
+    assert_eq!(global.value, Expr::Array(Vec::new()));
+    let Declaration::Const(constant) = &program.declarations[1] else {
+        panic!("expected constant declaration");
+    };
+    assert_eq!(constant.value, Expr::Array(Vec::new()));
+    let main = program.main_function().unwrap();
+    assert!(matches!(
+        &main.body[0],
+        Stmt::Let { value: Expr::Array(values), .. } if values.is_empty()
+    ));
+}
+
+#[test]
+fn rejects_zeroes_for_scalar_initializers() {
+    let error = parse_program(
+        Path::new("game.ezra"),
+        "global byte: u8 = zeroes()\nfn main() {}",
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.message,
+        "zeroes() can initialize only a fixed-size array"
+    );
+}
+
+#[test]
 fn parses_pointer_dereference_expression_and_assignment() {
     EzraParser::parse(Rule::assign_stmt, "*p = 7").unwrap();
     EzraParser::parse(Rule::assign_stmt, "*p += 7").unwrap();
@@ -730,6 +766,63 @@ fn normalizes_mixed_inline_spellings_as_duplicate_attributes() {
             Declaration::Function(function) if function.attrs == ["inline", "inline"]
         ));
     }
+}
+
+#[test]
+fn parses_comptime_attributes_and_the_exact_no_comptime_spelling() {
+    let program = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            @no-comptime const RUNTIME_VALUE: u8 = 1 + 2
+            pub @comptime fn add(a: u8, b: u8) -> u8 { return a + b }
+            @no-comptime pub fn runtime_add(a: u8, b: u8) -> u8 { return a + b }
+            fn main() {}
+            "#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &program.declarations[0],
+        Declaration::Const(constant)
+            if constant.attrs == ["no-comptime"] && constant.name == "RUNTIME_VALUE"
+    ));
+    assert!(matches!(
+        &program.declarations[1],
+        Declaration::Function(function)
+            if function.public
+                && function.attrs == ["comptime"]
+                && function.name == "add"
+    ));
+    assert!(matches!(
+        &program.declarations[2],
+        Declaration::Function(function)
+            if function.attrs == ["no-comptime"] && function.name == "runtime_add"
+    ));
+}
+
+#[test]
+fn rejects_comptime_on_non_function_declarations() {
+    let error = parse_program(
+        Path::new("game.ezra"),
+        "@comptime const VALUE: u8 = 1\nfn main() {}",
+    )
+    .unwrap_err();
+
+    assert_eq!(error.message, "`@comptime` is only valid on functions");
+}
+
+#[test]
+fn rejects_comptime_attributes_on_non_const_non_function_declarations() {
+    let error = parse_program(
+        Path::new("game.ezra"),
+        "@no-comptime global VALUE: u8 = 1\nfn main() {}",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "`@comptime` and `@no-comptime` are only valid on constants or functions"
+    );
 }
 
 #[test]

@@ -66,8 +66,8 @@ fn console_call_de_a(function: u8, value: u16) -> u8 {
     return result
 }
 
-pub fn write(ch: u8) {
-    console_call_e(CONSOLE_OUTPUT_FUNCTION, ch)
+pub fn write(console_char: u8) {
+    console_call_e(CONSOLE_OUTPUT_FUNCTION, console_char)
 }
 
 pub fn read() -> u8 {
@@ -132,8 +132,8 @@ pub fn copy_command_tail(destination: ptr<u8>, capacity: u8) -> u8 {
     return count
 }
 
-fn token_separator(ch: u8) -> bool {
-    return ch == ' ' || ch == 9
+fn token_separator(separator_char: u8) -> bool {
+    return separator_char == ' ' || separator_char == 9
 }
 
 pub fn command_tail_token_count(text: ptr<u8>, length: u8) -> u8 {

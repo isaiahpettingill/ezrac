@@ -21,6 +21,8 @@ if
 import
 in
 inline
+comptime
+no-comptime
 interrupt
 layout
 let

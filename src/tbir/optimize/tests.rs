@@ -31,6 +31,141 @@ fn folds_simplifies_and_removes_dead_statements() {
 }
 
 #[test]
+fn folds_constants_and_immutable_array_indexes_but_honors_no_comptime() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+            const BASE: u8 = 2 + 3
+            const TABLE: [u8; 3] = [4, 7, 9]
+            const ZEROES: [u8; 4] = zeroes()
+            @no-comptime const RUNTIME: u8 = 1 + 2
+            fn values() -> u8 {
+                let table_value: u8 = TABLE[1]
+                let zero_value: u8 = ZEROES[3]
+                return table_value + zero_value + BASE
+            }
+            fn runtime() -> u8 { return RUNTIME + 1 }
+        "#,
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+
+    let values = function_named(&program, "values");
+    let runtime = function_named(&program, "runtime");
+    assert!(matches!(
+        values.body.last(),
+        Some(Stmt::Return(Some(Expr::Int(12) | Expr::TypedInt(12, _))))
+    ));
+    assert!(matches!(
+        runtime.body.last(),
+        Some(Stmt::Return(Some(Expr::Binary { left, .. })))
+            if matches!(left.as_ref(), Expr::Ident(name) if name == "RUNTIME")
+    ));
+    assert!(matches!(
+        program
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Const(constant) if constant.name == "RUNTIME" => Some(&constant.value),
+                _ => None,
+            }),
+        Some(Expr::Binary { .. })
+    ));
+    assert!(report.comptime_evaluations >= 3);
+}
+
+#[test]
+fn evaluates_pure_comptime_calls_and_keeps_no_comptime_calls_as_calls() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+            @comptime fn add(left: u8, right: u8) -> u8 {
+                let result: u8 = left + right
+                return result
+            }
+            @no-comptime @inline fn runtime_value() -> u8 { return 7 }
+            fn computed() -> u8 { return add(2, 3) }
+            fn runtime() -> u8 { return runtime_value() }
+        "#,
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+
+    assert!(matches!(
+        function_named(&program, "computed").body.last(),
+        Some(Stmt::Return(Some(Expr::Int(5) | Expr::TypedInt(5, _))))
+    ));
+    assert!(matches!(
+        function_named(&program, "runtime").body.last(),
+        Some(Stmt::Return(Some(Expr::Call { path, .. }))) if path == &["runtime_value"]
+    ));
+    assert!(report.comptime_evaluations >= 1);
+    assert!(report.decisions.iter().any(|decision| {
+        decision.kind == TbirOptimizationKind::Inline
+            && decision.callee == "runtime_value"
+            && decision.outcome == TbirOptimizationOutcome::Rejected
+            && decision.reason == "no-comptime attribute"
+    }));
+}
+
+#[test]
+fn rejects_unsafe_comptime_bodies_with_deterministic_fallbacks() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+            global state: u8 = 0
+            volatile mmio STATUS: ptr<u8> = 0x080000
+            port OUTPUT: u8 = 1
+            @comptime fn side_effect() -> u8 { state = 1 return state }
+            @comptime fn loop_body() -> u8 { loop {} return 1 }
+            @comptime fn recursive() -> u8 { return recursive() }
+            @comptime fn pointer() -> ptr<u8> { return &state }
+            @comptime fn assembly() -> u8 { asm { "nop" } return 1 }
+            @comptime fn mmio() -> u8 { return *STATUS }
+            @comptime fn port_io() -> u8 { out OUTPUT, 1 return 1 }
+            @comptime fn limit() -> u8 { return HUGE[0] }
+            const HUGE: [u8; 4097] = zeroes()
+            fn side_call() -> u8 { return side_effect() }
+            fn loop_call() -> u8 { return loop_body() }
+            fn recursive_call() -> u8 { return recursive() }
+            fn pointer_call() -> ptr<u8> { return pointer() }
+            fn assembly_call() -> u8 { return assembly() }
+            fn mmio_call() -> u8 { return mmio() }
+            fn port_call() -> u8 { return port_io() }
+            fn limit_call() -> u8 { return limit() }
+        "#,
+    )
+    .unwrap();
+    let (program, report) = optimize_program(&program, CpuFamily::Ez80);
+
+    for (function, callee, reason) in [
+        ("side_call", "side_effect", "side effects are not supported"),
+        ("loop_call", "loop_body", "loops are not supported"),
+        ("recursive_call", "recursive", "recursion is not supported"),
+        ("pointer_call", "pointer", "pointers are not supported"),
+        ("assembly_call", "assembly", "inline asm is not supported"),
+        ("mmio_call", "mmio", "pointers are not supported"),
+        ("port_call", "port_io", "ports are not supported"),
+        ("limit_call", "limit", "evaluation limit exceeded"),
+    ] {
+        assert!(
+            matches!(function_named(&program, function).body.last(), Some(Stmt::Return(Some(Expr::Call { path, .. }))) if path.last().is_some_and(|name| name == callee)),
+            "{function}: {:?}",
+            function_named(&program, function).body
+        );
+        assert!(
+            report.decisions.iter().any(|decision| {
+                decision.kind == TbirOptimizationKind::Comptime
+                    && decision.callee == callee
+                    && decision.outcome == TbirOptimizationOutcome::Rejected
+                    && decision.reason == reason
+            }),
+            "missing comptime rejection for {callee}: {report:?}"
+        );
+    }
+}
+
+#[test]
 fn does_not_propagate_an_address_taken_local_past_a_call() {
     let program = parse_program(
         Path::new("test.ezra"),

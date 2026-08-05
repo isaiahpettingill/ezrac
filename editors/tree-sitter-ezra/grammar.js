@@ -26,12 +26,24 @@ module.exports = grammar({
 
   conflicts: $ => [
     [$._expression, $.struct_literal],
+    [$._declaration, $.function_item],
+    [$._declaration, $.const_declaration],
+    [$._declaration, $.alias_declaration],
+    [$._declaration, $.port_declaration],
+    [$._declaration, $.mmio_declaration],
+    [$._declaration, $.embed_declaration],
+    [$._declaration, $.global_declaration],
+    [$._declaration, $.struct_item],
+    [$._declaration, $.extern_declaration],
+    [$.declaration_attribute, $.function_item],
   ],
 
   rules: {
     source_file: $ => repeat($._declaration),
 
-    _declaration: $ => choice(
+    _declaration: $ => seq(
+      repeat(choice('pub', $.declaration_attribute)),
+      choice(
       $.import_declaration,
       $.const_declaration,
       $.alias_declaration,
@@ -43,7 +55,10 @@ module.exports = grammar({
       $.extern_declaration,
       $.function_item,
       $.layout_declaration,
+      ),
     ),
+
+    declaration_attribute: _ => choice('@comptime', '@no-comptime'),
 
     import_declaration: $ => seq('import', $.path, optional(';')),
     const_declaration: $ => seq(optional('pub'), 'const', $.identifier, ':', $.type, '=', $._expression, optional(';')),
@@ -54,7 +69,7 @@ module.exports = grammar({
     global_declaration: $ => seq(optional('pub'), 'global', $.identifier, ':', $.type, '=', $._expression, optional(';')),
     struct_item: $ => seq(optional('pub'), 'struct', field('name', $.identifier), '{', repeat($.field_declaration), '}'),
     extern_declaration: $ => seq(optional('pub'), 'extern', 'asm', 'fn', $.identifier, $.parameters, optional($.return_type), optional(';')),
-    function_item: $ => seq(repeat(choice('pub', 'inline', 'naked', 'interrupt')), 'fn', field('name', $.identifier), $.parameters, optional($.return_type), $.block),
+    function_item: $ => seq(repeat(choice('pub', 'inline', '@inline', '@comptime', '@no-comptime', 'naked', 'interrupt')), 'fn', field('name', $.identifier), $.parameters, optional($.return_type), $.block),
 
     layout_declaration: $ => seq('layout', $.identifier, '{', repeat($.layout_item), '}'),
     layout_item: $ => choice(

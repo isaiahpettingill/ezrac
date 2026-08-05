@@ -24,7 +24,11 @@ fn main() {
         console.exit()
         return
     }
-    bdos.close_at(&temporary_fcb[0])
+    if bdos.close_at(&temporary_fcb[0]) != bdos.BDOS_RESULT_OK {
+        bdos.delete_at(&temporary_fcb[0])
+        console.exit()
+        return
+    }
 
     if COMMIT_TEMPORARY_FILE != 0 {
         fcb.prepare_rename(&temporary_fcb[0], &final_fcb[0])

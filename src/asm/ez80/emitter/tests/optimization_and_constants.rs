@@ -1007,7 +1007,7 @@ fn emits_and_runs_recursive_function_with_stack_arguments() {
 }
 
 #[test]
-fn preserves_public_functions_and_omits_unused_private_functions() {
+fn omits_unreferenced_functions_regardless_of_visibility() {
     let source = r#"
             fn used(value: u8) -> u8 {
                 return value + 1
@@ -1037,8 +1037,8 @@ fn preserves_public_functions_and_omits_unused_private_functions() {
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
     assert!(asm.contains("_used:"));
-    assert!(asm.contains("_exported:"));
-    assert!(asm.contains("_exported_inline:"));
+    assert!(!asm.contains("_exported:"));
+    assert!(!asm.contains("_exported_inline:"));
     assert!(!asm.contains("_unused_private:"));
 }
 
@@ -1190,7 +1190,7 @@ fn omits_constant_true_while_condition_checks() {
     let asm = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
     let run = run_assembly_test(&asm, 4_000).unwrap();
     let while_body = asm
-        .split("; source: while KEEP_RUNNING")
+        .split("; source: while true")
         .nth(1)
         .and_then(|tail| tail.split("; source: test.assert_eq_u8").next())
         .unwrap();

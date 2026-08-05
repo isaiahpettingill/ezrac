@@ -17,6 +17,601 @@ use super::{
 #[path = "demand.rs"]
 mod demand;
 
+const COMPTIME_MAX_STEPS: usize = 4096;
+const COMPTIME_MAX_CALL_DEPTH: usize = 64;
+const COMPTIME_MAX_ARRAY_ELEMENTS: usize = 4096;
+
+#[derive(Clone)]
+struct ComptimeConstant {
+    value: Expr,
+    ty: Type,
+    disabled: bool,
+}
+
+#[derive(Clone, Default)]
+struct ComptimeContext {
+    constants: HashMap<String, ComptimeConstant>,
+    functions: HashMap<String, Function>,
+    mutable_globals: HashSet<String>,
+    ports: HashSet<String>,
+    mmio: HashSet<String>,
+}
+
+impl ComptimeContext {
+    fn from_program(program: &Program) -> Self {
+        fn collect(declarations: &[Declaration], context: &mut ComptimeContext) {
+            for declaration in declarations {
+                match declaration {
+                    Declaration::Cfg { declaration, .. }
+                    | Declaration::Bank { declaration, .. } => {
+                        collect(core::slice::from_ref(declaration), context);
+                    }
+                    Declaration::Const(constant) => {
+                        context.constants.insert(
+                            constant.name.clone(),
+                            ComptimeConstant {
+                                value: constant.value.clone(),
+                                ty: constant.ty.clone(),
+                                disabled: has_named_attr(&constant.attrs, "no-comptime"),
+                            },
+                        );
+                    }
+                    Declaration::Function(function) => {
+                        context
+                            .functions
+                            .insert(function.name.clone(), function.clone());
+                    }
+                    Declaration::Global(global) => {
+                        context.mutable_globals.insert(global.name.clone());
+                    }
+                    Declaration::Port(port) => {
+                        context.ports.insert(port.name.clone());
+                    }
+                    Declaration::Mmio(mmio) => {
+                        context.mmio.insert(mmio.name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut context = Self::default();
+        collect(&program.declarations, &mut context);
+        context
+    }
+
+    fn is_comptime_call(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call { path, .. } = expr else {
+            return None;
+        };
+        let name = path.last()?.as_str();
+        let function = self.functions.get(name)?;
+        (has_attr(function, "comptime") && !has_attr(function, "no-comptime"))
+            .then_some(name.to_owned())
+    }
+
+    fn references_enabled_constant(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(name) | Expr::Index { name, .. } => self
+                .constants
+                .get(name)
+                .is_some_and(|constant| !constant.disabled),
+            Expr::Access(path) => self
+                .constants
+                .get(&path.root)
+                .is_some_and(|constant| !constant.disabled),
+            Expr::Array(values) => values
+                .iter()
+                .any(|value| self.references_enabled_constant(value)),
+            Expr::Unary { expr, .. }
+            | Expr::Cast { expr, .. }
+            | Expr::Deref(expr)
+            | Expr::BankedPointer { pointer: expr, .. } => self.references_enabled_constant(expr),
+            Expr::Binary { left, right, .. } => {
+                self.references_enabled_constant(left) || self.references_enabled_constant(right)
+            }
+            Expr::Call { args, .. } => args.iter().any(|arg| self.references_enabled_constant(arg)),
+            Expr::StructInit { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| self.references_enabled_constant(value)),
+            Expr::AddressOfIndex { index, .. } => self.references_enabled_constant(index),
+            Expr::AddressOfAccess(path) => path.segments.iter().any(|segment| match segment {
+                AccessSegment::Index(index) => self.references_enabled_constant(index),
+                AccessSegment::Field(_) => false,
+            }),
+            Expr::Int(_)
+            | Expr::TypedInt(_, _)
+            | Expr::Bool(_)
+            | Expr::Char(_)
+            | Expr::String(_)
+            | Expr::In(_)
+            | Expr::Field { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOf(_) => false,
+        }
+    }
+
+    fn evaluate(&self, expr: &Expr) -> Result<Expr, ComptimeFailure> {
+        Evaluator {
+            context: self,
+            locals: HashMap::new(),
+            constant_stack: Vec::new(),
+            call_stack: Vec::new(),
+            steps: 0,
+        }
+        .eval_expr(expr)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComptimeFailure {
+    UnknownInput,
+    MutableGlobal,
+    Port,
+    Mmio,
+    SideEffect,
+    Loop,
+    Pointer,
+    InlineAsm,
+    Recursion,
+    EvaluationLimit,
+    UnsupportedCall,
+    UnsupportedBody,
+    Aggregate,
+    OutOfBounds,
+}
+
+impl ComptimeFailure {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::UnknownInput => "not all inputs are known",
+            Self::MutableGlobal => "mutable globals are not comptime",
+            Self::Port => "ports are not supported",
+            Self::Mmio => "MMIO is not supported",
+            Self::SideEffect => "side effects are not supported",
+            Self::Loop => "loops are not supported",
+            Self::Pointer => "pointers are not supported",
+            Self::InlineAsm => "inline asm is not supported",
+            Self::Recursion => "recursion is not supported",
+            Self::EvaluationLimit => "evaluation limit exceeded",
+            Self::UnsupportedCall => "called function is not @comptime",
+            Self::UnsupportedBody => "function body is not supported",
+            Self::Aggregate => "aggregate values are not supported",
+            Self::OutOfBounds => "constant array index is out of bounds",
+        }
+    }
+}
+
+#[derive(Clone)]
+enum EvalFlow {
+    Continue,
+    Return(Expr),
+}
+
+struct Evaluator<'a> {
+    context: &'a ComptimeContext,
+    locals: HashMap<String, Expr>,
+    constant_stack: Vec<String>,
+    call_stack: Vec<String>,
+    steps: usize,
+}
+
+impl Evaluator<'_> {
+    fn step(&mut self) -> Result<(), ComptimeFailure> {
+        self.steps = self.steps.saturating_add(1);
+        if self.steps > COMPTIME_MAX_STEPS {
+            Err(ComptimeFailure::EvaluationLimit)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn eval_expr(&mut self, expr: &Expr) -> Result<Expr, ComptimeFailure> {
+        self.step()?;
+        match expr {
+            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_) => Ok(expr.clone()),
+            Expr::Ident(name) => {
+                if let Some(value) = self.locals.get(name) {
+                    return Ok(value.clone());
+                }
+                if let Some(constant) = self.context.constants.get(name).cloned() {
+                    if constant.disabled {
+                        return Err(ComptimeFailure::UnknownInput);
+                    }
+                    if self.constant_stack.iter().any(|item| item == name) {
+                        return Err(ComptimeFailure::Recursion);
+                    }
+                    self.constant_stack.push(name.clone());
+                    let result = self.eval_expr(&constant.value);
+                    self.constant_stack.pop();
+                    let result = result?;
+                    return self.complete_constant_value(result, &constant.ty);
+                }
+                if self.context.mutable_globals.contains(name) {
+                    return Err(ComptimeFailure::MutableGlobal);
+                }
+                if self.context.ports.contains(name) {
+                    return Err(ComptimeFailure::Port);
+                }
+                if self.context.mmio.contains(name) {
+                    return Err(ComptimeFailure::Mmio);
+                }
+                Err(ComptimeFailure::UnknownInput)
+            }
+            Expr::Array(values) => {
+                if values.len() > COMPTIME_MAX_ARRAY_ELEMENTS {
+                    return Err(ComptimeFailure::EvaluationLimit);
+                }
+                Ok(Expr::Array(
+                    values
+                        .iter()
+                        .map(|value| self.eval_expr(value))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            }
+            Expr::Index { name, index } => {
+                let base = self.eval_expr(&Expr::Ident(name.clone()))?;
+                let index = self.eval_index(index)?;
+                self.index_value(base, index)
+            }
+            Expr::Access(path) => {
+                let mut value = self.eval_expr(&Expr::Ident(path.root.clone()))?;
+                for segment in &path.segments {
+                    match segment {
+                        AccessSegment::Index(index) => {
+                            let index = self.eval_index(index)?;
+                            value = self.index_value(value, index)?;
+                        }
+                        AccessSegment::Field(_) => return Err(ComptimeFailure::Aggregate),
+                    }
+                }
+                Ok(value)
+            }
+            Expr::Unary { op, expr } => {
+                let value = self.eval_expr(expr)?;
+                self.eval_unary(*op, value)
+            }
+            Expr::Binary { left, op, right } => {
+                let left = self.eval_expr(left)?;
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    let left_truth = literal_truth(&left).ok_or(ComptimeFailure::UnknownInput)?;
+                    if (*op == BinaryOp::And && !left_truth) || (*op == BinaryOp::Or && left_truth)
+                    {
+                        return Ok(Expr::Bool(left_truth));
+                    }
+                }
+                let right = self.eval_expr(right)?;
+                eval_binary_literals(&left, *op, &right)
+            }
+            Expr::Cast { ty, expr } => {
+                let value = self.eval_expr(expr)?;
+                self.eval_cast(ty, value)
+            }
+            Expr::Call { path, args } => self.eval_call(path, args),
+            Expr::String(_) => Err(ComptimeFailure::Pointer),
+            Expr::In(_) => Err(ComptimeFailure::Port),
+            Expr::AddressOf(_)
+            | Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_)
+            | Expr::Deref(_)
+            | Expr::BankedPointer { .. } => Err(ComptimeFailure::Pointer),
+            Expr::Field { .. } | Expr::StructInit { .. } => Err(ComptimeFailure::Aggregate),
+        }
+    }
+
+    fn eval_index(&mut self, expr: &Expr) -> Result<usize, ComptimeFailure> {
+        let value = self.eval_expr(expr)?;
+        let value = literal_int(&value).ok_or(ComptimeFailure::UnknownInput)?;
+        usize::try_from(value).map_err(|_| ComptimeFailure::OutOfBounds)
+    }
+
+    fn complete_constant_value(&mut self, value: Expr, ty: &Type) -> Result<Expr, ComptimeFailure> {
+        if type_contains_pointer(ty) {
+            return Err(ComptimeFailure::Pointer);
+        }
+        let Type::Array { element, len } = ty else {
+            return Ok(value);
+        };
+        let len = self.eval_index(len)?;
+        if len > COMPTIME_MAX_ARRAY_ELEMENTS {
+            return Err(ComptimeFailure::EvaluationLimit);
+        }
+        let Expr::Array(values) = value else {
+            return Err(ComptimeFailure::Aggregate);
+        };
+        if values.len() > len {
+            return Err(ComptimeFailure::OutOfBounds);
+        }
+        let mut completed = Vec::with_capacity(len);
+        for index in 0..len {
+            let value = values.get(index).cloned().unwrap_or(zero_value(element)?);
+            completed.push(self.complete_constant_value(value, element)?);
+        }
+        Ok(Expr::Array(completed))
+    }
+
+    fn index_value(&self, value: Expr, index: usize) -> Result<Expr, ComptimeFailure> {
+        let Expr::Array(values) = value else {
+            return Err(ComptimeFailure::Aggregate);
+        };
+        values
+            .get(index)
+            .cloned()
+            .ok_or(ComptimeFailure::OutOfBounds)
+    }
+
+    fn eval_unary(&self, op: UnaryOp, value: Expr) -> Result<Expr, ComptimeFailure> {
+        match (op, value) {
+            (UnaryOp::Not, Expr::Bool(value)) => Ok(Expr::Bool(!value)),
+            (UnaryOp::Neg, Expr::Int(value)) => Ok(Expr::Int(value.wrapping_neg())),
+            (UnaryOp::Neg, Expr::TypedInt(value, ty)) => {
+                Ok(typed_integer(value.wrapping_neg(), ty))
+            }
+            (UnaryOp::BitNot, Expr::Int(value)) => Ok(Expr::Int(!value)),
+            (UnaryOp::BitNot, Expr::TypedInt(value, ty)) => Ok(typed_integer(!value, ty)),
+            _ => Err(ComptimeFailure::UnsupportedBody),
+        }
+    }
+
+    fn eval_cast(&self, ty: &Type, value: Expr) -> Result<Expr, ComptimeFailure> {
+        if type_contains_pointer(ty) {
+            return Err(ComptimeFailure::Pointer);
+        }
+        if matches!(ty, Type::Named(name) if name == "bool") {
+            return Ok(Expr::Bool(
+                literal_truth(&value).ok_or(ComptimeFailure::UnknownInput)?,
+            ));
+        }
+        let value = literal_int(&value).ok_or(ComptimeFailure::UnsupportedBody)?;
+        Ok(typed_integer(value, ty.clone()))
+    }
+
+    fn eval_call(&mut self, path: &[String], args: &[Expr]) -> Result<Expr, ComptimeFailure> {
+        let name = path.last().ok_or(ComptimeFailure::UnsupportedCall)?;
+        let function = self
+            .context
+            .functions
+            .get(name)
+            .ok_or(ComptimeFailure::UnsupportedCall)?
+            .clone();
+        if !has_attr(&function, "comptime") || has_attr(&function, "no-comptime") {
+            return Err(ComptimeFailure::UnsupportedCall);
+        }
+        if function.return_type.is_none() {
+            return Err(ComptimeFailure::UnsupportedBody);
+        }
+        if function.params.len() != args.len()
+            || function
+                .params
+                .iter()
+                .any(|param| type_contains_pointer(&param.ty))
+            || function
+                .return_type
+                .as_ref()
+                .is_some_and(type_contains_pointer)
+        {
+            return Err(ComptimeFailure::Pointer);
+        }
+        if self.call_stack.len() >= COMPTIME_MAX_CALL_DEPTH
+            || self.call_stack.iter().any(|item| item == name)
+        {
+            return Err(if self.call_stack.len() >= COMPTIME_MAX_CALL_DEPTH {
+                ComptimeFailure::EvaluationLimit
+            } else {
+                ComptimeFailure::Recursion
+            });
+        }
+        let values = args
+            .iter()
+            .map(|arg| self.eval_expr(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        if values
+            .iter()
+            .any(|value| matches!(value, Expr::Array(_) | Expr::StructInit { .. }))
+        {
+            return Err(ComptimeFailure::Aggregate);
+        }
+        let caller_locals = core::mem::replace(
+            &mut self.locals,
+            function
+                .params
+                .iter()
+                .zip(values)
+                .map(|(param, value)| (param.name.clone(), value))
+                .collect(),
+        );
+        self.call_stack.push(name.clone());
+        let result = self.eval_stmts(&function.body);
+        self.call_stack.pop();
+        self.locals = caller_locals;
+        match result? {
+            EvalFlow::Return(value) => Ok(value),
+            EvalFlow::Continue => Err(ComptimeFailure::UnsupportedBody),
+        }
+    }
+
+    fn eval_stmts(&mut self, stmts: &[Stmt]) -> Result<EvalFlow, ComptimeFailure> {
+        for stmt in stmts {
+            self.step()?;
+            match stmt {
+                Stmt::Let { name, value, .. } => {
+                    let value = self.eval_expr(value)?;
+                    if matches!(value, Expr::Array(_) | Expr::StructInit { .. }) {
+                        return Err(ComptimeFailure::Aggregate);
+                    }
+                    self.locals.insert(name.clone(), value);
+                }
+                Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    let condition = self.eval_expr(condition)?;
+                    let truth = literal_truth(&condition).ok_or(ComptimeFailure::UnknownInput)?;
+                    let flow = if truth {
+                        self.eval_stmts(then_body)?
+                    } else {
+                        self.eval_stmts(else_body)?
+                    };
+                    if matches!(flow, EvalFlow::Return(_)) {
+                        return Ok(flow);
+                    }
+                }
+                Stmt::Return(Some(value)) => {
+                    let value = self.eval_expr(value)?;
+                    if matches!(value, Expr::Array(_) | Expr::StructInit { .. }) {
+                        return Err(ComptimeFailure::Aggregate);
+                    }
+                    return Ok(EvalFlow::Return(value));
+                }
+                Stmt::Return(None) => return Err(ComptimeFailure::UnsupportedBody),
+                Stmt::Expr(value) => {
+                    self.eval_expr(value)?;
+                }
+                Stmt::Assign { .. } => return Err(ComptimeFailure::SideEffect),
+                Stmt::While { .. } | Stmt::Loop { .. } | Stmt::Break | Stmt::Continue => {
+                    return Err(ComptimeFailure::Loop);
+                }
+                Stmt::Asm { .. } => return Err(ComptimeFailure::InlineAsm),
+                Stmt::Out { .. } => return Err(ComptimeFailure::Port),
+            }
+        }
+        Ok(EvalFlow::Continue)
+    }
+}
+
+fn has_named_attr(attrs: &[String], name: &str) -> bool {
+    attrs.iter().any(|attr| attr == name)
+}
+
+fn type_contains_pointer(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(_) | Type::Function { .. } => true,
+        Type::Array { element, .. } => type_contains_pointer(element),
+        Type::Named(name) if name == "ptr" => true,
+        Type::Named(_) => false,
+    }
+}
+
+fn zero_value(ty: &Type) -> Result<Expr, ComptimeFailure> {
+    match ty {
+        Type::Named(name) if name == "bool" => Ok(Expr::Bool(false)),
+        Type::Named(name) if name == "char" => Ok(Expr::Char(0)),
+        Type::Named(name)
+            if matches!(
+                name.as_str(),
+                "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "u32" | "i32"
+            ) =>
+        {
+            Ok(Expr::TypedInt(0, ty.clone()))
+        }
+        Type::Array { .. } => Ok(Expr::Array(Vec::new())),
+        Type::Ptr(_) | Type::Function { .. } => Err(ComptimeFailure::Pointer),
+        Type::Named(_) => Err(ComptimeFailure::Aggregate),
+    }
+}
+
+fn literal_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(value) | Expr::TypedInt(value, _) => Some(*value),
+        Expr::Bool(value) => Some(i64::from(*value)),
+        Expr::Char(value) => Some(i64::from(*value)),
+        _ => None,
+    }
+}
+
+fn literal_truth(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Bool(value) => Some(*value),
+        Expr::Int(value) | Expr::TypedInt(value, _) => Some(*value != 0),
+        Expr::Char(value) => Some(*value != 0),
+        _ => None,
+    }
+}
+
+fn typed_integer(value: i64, ty: Type) -> Expr {
+    let Some(bits) = integer_bits(&ty) else {
+        return Expr::Int(value);
+    };
+    let mask = (1_i64 << bits) - 1;
+    let raw = value & mask;
+    let value = if matches!(&ty, Type::Named(name) if name.starts_with('i'))
+        && raw & (1_i64 << (bits - 1)) != 0
+    {
+        raw - (mask + 1)
+    } else {
+        raw
+    };
+    Expr::TypedInt(value, ty)
+}
+
+fn integer_bits(ty: &Type) -> Option<u32> {
+    match ty {
+        Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => Some(8),
+        Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Some(16),
+        Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Some(24),
+        Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Some(32),
+        _ => None,
+    }
+}
+
+fn eval_binary_literals(left: &Expr, op: BinaryOp, right: &Expr) -> Result<Expr, ComptimeFailure> {
+    if let (Expr::Bool(left), Expr::Bool(right)) = (left, right) {
+        return match op {
+            BinaryOp::And => Ok(Expr::Bool(*left && *right)),
+            BinaryOp::Or => Ok(Expr::Bool(*left || *right)),
+            BinaryOp::Eq => Ok(Expr::Bool(left == right)),
+            BinaryOp::Ne => Ok(Expr::Bool(left != right)),
+            _ => Err(ComptimeFailure::UnsupportedBody),
+        };
+    }
+    let left_value = literal_int(left).ok_or(ComptimeFailure::UnsupportedBody)?;
+    let right_value = literal_int(right).ok_or(ComptimeFailure::UnsupportedBody)?;
+    let value = match op {
+        BinaryOp::Mul => left_value.wrapping_mul(right_value),
+        BinaryOp::Div => left_value.checked_div(right_value).unwrap_or(0),
+        BinaryOp::Mod => left_value.checked_rem(right_value).unwrap_or(0),
+        BinaryOp::Add => left_value.wrapping_add(right_value),
+        BinaryOp::Sub => left_value.wrapping_sub(right_value),
+        BinaryOp::Shl => left_value.checked_shl(right_value as u32).unwrap_or(0),
+        BinaryOp::Shr => {
+            let count = right_value as u32;
+            match left {
+                Expr::TypedInt(_, ty) if matches!(ty, Type::Named(name) if name.starts_with('i')) =>
+                {
+                    let bits = integer_bits(ty).ok_or(ComptimeFailure::UnsupportedBody)?;
+                    if count >= bits {
+                        if left_value < 0 { -1 } else { 0 }
+                    } else {
+                        left_value >> count
+                    }
+                }
+                _ => left_value.checked_shr(count).unwrap_or(0),
+            }
+        }
+        BinaryOp::Lt => return Ok(Expr::Bool(left_value < right_value)),
+        BinaryOp::Le => return Ok(Expr::Bool(left_value <= right_value)),
+        BinaryOp::Gt => return Ok(Expr::Bool(left_value > right_value)),
+        BinaryOp::Ge => return Ok(Expr::Bool(left_value >= right_value)),
+        BinaryOp::Eq => return Ok(Expr::Bool(left_value == right_value)),
+        BinaryOp::Ne => return Ok(Expr::Bool(left_value != right_value)),
+        BinaryOp::BitAnd => left_value & right_value,
+        BinaryOp::BitXor => left_value ^ right_value,
+        BinaryOp::BitOr => left_value | right_value,
+        BinaryOp::And => return Ok(Expr::Bool(left_value != 0 && right_value != 0)),
+        BinaryOp::Or => return Ok(Expr::Bool(left_value != 0 || right_value != 0)),
+    };
+    let ty = match left {
+        Expr::TypedInt(_, ty) => Some(ty.clone()),
+        _ => match right {
+            Expr::TypedInt(_, ty) => Some(ty.clone()),
+            _ => None,
+        },
+    };
+    Ok(ty.map_or(Expr::Int(value), |ty| typed_integer(value, ty)))
+}
+
 pub fn optimize_program(program: &Program, cpu: CpuFamily) -> (Program, TbirOptimizationReport) {
     optimize_program_with_context(program, cpu, &OptimizationContext::default())
 }
@@ -27,16 +622,17 @@ pub fn optimize_program_with_context(
     context: &OptimizationContext,
 ) -> (Program, TbirOptimizationReport) {
     let mut program = program.clone();
+    let comptime = ComptimeContext::from_program(&program);
     let mut report = TbirOptimizationReport::default();
     // Keep the stage order visible: later passes rely on the safety facts and
     // normalized expressions produced by earlier stages.
-    scalar_simplify_program(&mut program, &mut report, true);
+    scalar_simplify_program(&mut program, &mut report, true, &comptime);
     hoist_pure_loop_invariants_program(&mut program, &mut report);
     local_propagation_and_cse_program(&mut program, context, &mut report);
-    scalar_simplify_program(&mut program, &mut report, false);
+    scalar_simplify_program(&mut program, &mut report, false, &comptime);
     known_bits_program(&mut program);
     hoist_named_memory_reads_program(&mut program, context, &mut report);
-    expand_inline_functions(&mut program, context, &mut report);
+    expand_inline_functions(&mut program, context, &mut report, &comptime);
     demand::apply_program(&mut program);
     remove_unused_pure_lets_program(&mut program);
     run_tail_passes(&mut program, cpu, &mut report);
@@ -63,7 +659,7 @@ fn functions(program: &Program) -> Vec<&Function> {
 fn inline_function_names(program: &Program) -> HashSet<String> {
     functions(program)
         .into_iter()
-        .filter(|function| has_attr(function, "inline"))
+        .filter(|function| has_attr(function, "inline") && !has_attr(function, "no-comptime"))
         .map(|function| function.name.clone())
         .collect()
 }
@@ -72,6 +668,7 @@ fn expand_inline_functions(
     program: &mut Program,
     context: &OptimizationContext,
     report: &mut TbirOptimizationReport,
+    comptime: &ComptimeContext,
 ) {
     let all_functions = functions(program);
     let mut graph = HashMap::new();
@@ -133,9 +730,9 @@ fn expand_inline_functions(
 
     if expanded_any {
         let mut cleanup_report = TbirOptimizationReport::default();
-        scalar_simplify_program(program, &mut cleanup_report, false);
+        scalar_simplify_program(program, &mut cleanup_report, false, comptime);
         local_propagation_and_cse_program(program, context, &mut cleanup_report);
-        scalar_simplify_program(program, &mut cleanup_report, false);
+        scalar_simplify_program(program, &mut cleanup_report, false, comptime);
     }
 }
 
@@ -143,7 +740,9 @@ fn inline_rejection<'a>(
     function: &Function,
     graph: &HashMap<String, HashSet<String>>,
 ) -> Option<&'a str> {
-    if has_attr(function, "naked") {
+    if has_attr(function, "no-comptime") {
+        Some("no-comptime attribute")
+    } else if has_attr(function, "naked") {
         Some("naked function")
     } else if has_attr(function, "interrupt") {
         Some("interrupt function")
@@ -1745,18 +2344,19 @@ fn reuse_available_expr(
         other => other,
     };
 
-    if is_cse_candidate(&expr) && !expr_references_memory_object(&expr, context) {
-        if let Some((_, prior)) = available.iter().find(|(prior, _)| prior == &expr) {
-            report.common_subexpressions += 1;
-            decision(
-                report,
-                TbirOptimizationKind::CommonSubexpression,
-                None,
-                name,
-                None,
-            );
-            return Expr::Ident(prior.clone());
-        }
+    if is_cse_candidate(&expr)
+        && !expr_references_memory_object(&expr, context)
+        && let Some((_, prior)) = available.iter().find(|(prior, _)| prior == &expr)
+    {
+        report.common_subexpressions += 1;
+        decision(
+            report,
+            TbirOptimizationKind::CommonSubexpression,
+            None,
+            name,
+            None,
+        );
+        return Expr::Ident(prior.clone());
     }
     expr
 }
@@ -2921,6 +3521,7 @@ fn scalar_simplify_program(
     program: &mut Program,
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
+    comptime: &ComptimeContext,
 ) {
     let inline_functions = inline_function_names(program);
     for declaration in &mut program.declarations {
@@ -2929,6 +3530,7 @@ fn scalar_simplify_program(
             report,
             count_dead_statements,
             &inline_functions,
+            comptime,
         );
     }
 }
@@ -2938,21 +3540,35 @@ fn optimize_declaration(
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
     inline_functions: &HashSet<String>,
+    comptime: &ComptimeContext,
 ) {
     match declaration {
         Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
-            optimize_declaration(declaration, report, count_dead_statements, inline_functions)
-        }
-        Declaration::Function(function) => {
-            optimize_function(function, report, count_dead_statements, inline_functions)
-        }
-        Declaration::Const(decl) => {
-            decl.value = optimize_expr(
-                core::mem::replace(&mut decl.value, Expr::Int(0)),
-                &HashMap::new(),
+            optimize_declaration(
+                declaration,
                 report,
+                count_dead_statements,
                 inline_functions,
+                comptime,
             )
+        }
+        Declaration::Function(function) => optimize_function(
+            function,
+            report,
+            count_dead_statements,
+            inline_functions,
+            comptime,
+        ),
+        Declaration::Const(decl) => {
+            if !has_named_attr(&decl.attrs, "no-comptime") {
+                decl.value = optimize_expr(
+                    core::mem::replace(&mut decl.value, Expr::Int(0)),
+                    &HashMap::new(),
+                    report,
+                    inline_functions,
+                    comptime,
+                );
+            }
         }
         Declaration::Port(decl) => {
             decl.value = optimize_expr(
@@ -2960,6 +3576,7 @@ fn optimize_declaration(
                 &HashMap::new(),
                 report,
                 inline_functions,
+                comptime,
             )
         }
         Declaration::Mmio(decl) => {
@@ -2968,6 +3585,7 @@ fn optimize_declaration(
                 &HashMap::new(),
                 report,
                 inline_functions,
+                comptime,
             )
         }
         Declaration::Global(decl) => {
@@ -2976,6 +3594,7 @@ fn optimize_declaration(
                 &HashMap::new(),
                 report,
                 inline_functions,
+                comptime,
             )
         }
         Declaration::Embed(_)
@@ -2991,6 +3610,7 @@ fn optimize_function(
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
     inline_functions: &HashSet<String>,
+    comptime: &ComptimeContext,
 ) {
     let mut constants = HashMap::new();
     function.body = optimize_stmts(
@@ -2999,6 +3619,7 @@ fn optimize_function(
         report,
         count_dead_statements,
         inline_functions,
+        comptime,
     );
 }
 
@@ -3008,6 +3629,7 @@ fn optimize_stmts(
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
     inline_functions: &HashSet<String>,
+    comptime: &ComptimeContext,
 ) -> Vec<Stmt> {
     let mut output = Vec::with_capacity(stmts.len());
     let mut terminated = false;
@@ -3024,6 +3646,7 @@ fn optimize_stmts(
             report,
             count_dead_statements,
             inline_functions,
+            comptime,
         );
         terminated = terminates(&stmt);
         output.push(stmt);
@@ -3037,16 +3660,17 @@ fn optimize_stmt(
     report: &mut TbirOptimizationReport,
     count_dead_statements: bool,
     inline_functions: &HashSet<String>,
+    comptime: &ComptimeContext,
 ) -> Stmt {
     match stmt {
         Stmt::Let { name, ty, value } => {
             let value = type_unsigned_power_of_two_divisor(value, &ty);
-            let value = optimize_expr(value, constants, report, inline_functions);
+            let value = optimize_expr(value, constants, report, inline_functions, comptime);
             Stmt::Let { name, ty, value }
         }
         Stmt::Assign { target, op, value } => {
-            let target = optimize_place(target, constants, report, inline_functions);
-            let value = optimize_expr(value, constants, report, inline_functions);
+            let target = optimize_place(target, constants, report, inline_functions, comptime);
+            let value = optimize_expr(value, constants, report, inline_functions, comptime);
             Stmt::Assign { target, op, value }
         }
         Stmt::If {
@@ -3054,7 +3678,7 @@ fn optimize_stmt(
             then_body,
             else_body,
         } => {
-            let condition = optimize_expr(condition, constants, report, inline_functions);
+            let condition = optimize_expr(condition, constants, report, inline_functions, comptime);
             let mut then_constants = constants.clone();
             let mut else_constants = constants.clone();
             let then_body = optimize_stmts(
@@ -3063,6 +3687,7 @@ fn optimize_stmt(
                 report,
                 count_dead_statements,
                 inline_functions,
+                comptime,
             );
             let else_body = optimize_stmts(
                 else_body,
@@ -3070,6 +3695,7 @@ fn optimize_stmt(
                 report,
                 count_dead_statements,
                 inline_functions,
+                comptime,
             );
             Stmt::If {
                 condition,
@@ -3078,7 +3704,7 @@ fn optimize_stmt(
             }
         }
         Stmt::While { condition, body } => {
-            let condition = optimize_expr(condition, constants, report, inline_functions);
+            let condition = optimize_expr(condition, constants, report, inline_functions, comptime);
             let mut body_constants = constants.clone();
             let body = optimize_stmts(
                 body,
@@ -3086,6 +3712,7 @@ fn optimize_stmt(
                 report,
                 count_dead_statements,
                 inline_functions,
+                comptime,
             );
             Stmt::While { condition, body }
         }
@@ -3097,18 +3724,19 @@ fn optimize_stmt(
                 report,
                 count_dead_statements,
                 inline_functions,
+                comptime,
             );
             Stmt::Loop { body }
         }
         Stmt::Return(value) => Stmt::Return(
-            value.map(|value| optimize_expr(value, constants, report, inline_functions)),
+            value.map(|value| optimize_expr(value, constants, report, inline_functions, comptime)),
         ),
         Stmt::Out { port, value } => Stmt::Out {
             port,
-            value: optimize_expr(value, constants, report, inline_functions),
+            value: optimize_expr(value, constants, report, inline_functions, comptime),
         },
         Stmt::Expr(value) => {
-            let value = optimize_expr(value, constants, report, inline_functions);
+            let value = optimize_expr(value, constants, report, inline_functions, comptime);
             Stmt::Expr(value)
         }
         Stmt::Asm { .. } => stmt,
@@ -3121,20 +3749,32 @@ fn optimize_place(
     constants: &HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
     inline_functions: &HashSet<String>,
+    comptime: &ComptimeContext,
 ) -> Place {
     match place {
         Place::Index { name, index } => Place::Index {
             name,
-            index: Box::new(optimize_expr(*index, constants, report, inline_functions)),
+            index: Box::new(optimize_expr(
+                *index,
+                constants,
+                report,
+                inline_functions,
+                comptime,
+            )),
         },
-        Place::Access(path) => {
-            Place::Access(optimize_access(path, constants, report, inline_functions))
-        }
+        Place::Access(path) => Place::Access(optimize_access(
+            path,
+            constants,
+            report,
+            inline_functions,
+            comptime,
+        )),
         Place::Deref(expr) => Place::Deref(Box::new(optimize_expr(
             *expr,
             constants,
             report,
             inline_functions,
+            comptime,
         ))),
         Place::Ident(_) | Place::Field { .. } => place,
     }
@@ -3169,29 +3809,60 @@ fn optimize_expr(
     constants: &HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
     inline_functions: &HashSet<String>,
+    comptime: &ComptimeContext,
 ) -> Expr {
+    if comptime.is_comptime_call(&expr).is_none()
+        && comptime.references_enabled_constant(&expr)
+        && let Ok(value) = comptime.evaluate(&expr)
+        && value != expr
+        && is_comptime_inlineable(&value)
+    {
+        report.comptime_evaluations += 1;
+        return value;
+    }
+
     expr = match expr {
         Expr::Ident(name) => Expr::Ident(name),
         Expr::Array(values) => Expr::Array(
             values
                 .into_iter()
-                .map(|value| optimize_expr(value, constants, report, inline_functions))
+                .map(|value| optimize_expr(value, constants, report, inline_functions, comptime))
                 .collect(),
         ),
         Expr::Index { name, index } => Expr::Index {
             name,
-            index: Box::new(optimize_expr(*index, constants, report, inline_functions)),
+            index: Box::new(optimize_expr(
+                *index,
+                constants,
+                report,
+                inline_functions,
+                comptime,
+            )),
         },
         Expr::AddressOfIndex { name, index } => Expr::AddressOfIndex {
             name,
-            index: Box::new(optimize_expr(*index, constants, report, inline_functions)),
+            index: Box::new(optimize_expr(
+                *index,
+                constants,
+                report,
+                inline_functions,
+                comptime,
+            )),
         },
-        Expr::Access(path) => {
-            Expr::Access(optimize_access(path, constants, report, inline_functions))
-        }
-        Expr::AddressOfAccess(path) => {
-            Expr::AddressOfAccess(optimize_access(path, constants, report, inline_functions))
-        }
+        Expr::Access(path) => Expr::Access(optimize_access(
+            path,
+            constants,
+            report,
+            inline_functions,
+            comptime,
+        )),
+        Expr::AddressOfAccess(path) => Expr::AddressOfAccess(optimize_access(
+            path,
+            constants,
+            report,
+            inline_functions,
+            comptime,
+        )),
         Expr::StructInit { ty, fields } => Expr::StructInit {
             ty,
             fields: fields
@@ -3199,7 +3870,7 @@ fn optimize_expr(
                 .map(|(name, value)| {
                     (
                         name,
-                        optimize_expr(value, constants, report, inline_functions),
+                        optimize_expr(value, constants, report, inline_functions, comptime),
                     )
                 })
                 .collect(),
@@ -3209,20 +3880,27 @@ fn optimize_expr(
             constants,
             report,
             inline_functions,
+            comptime,
         ))),
         Expr::BankedPointer { pointer, bank } => Expr::BankedPointer {
-            pointer: Box::new(optimize_expr(*pointer, constants, report, inline_functions)),
+            pointer: Box::new(optimize_expr(
+                *pointer,
+                constants,
+                report,
+                inline_functions,
+                comptime,
+            )),
             bank,
         },
         Expr::Call { path, args } => Expr::Call {
             path,
             args: args
                 .into_iter()
-                .map(|arg| optimize_expr(arg, constants, report, inline_functions))
+                .map(|arg| optimize_expr(arg, constants, report, inline_functions, comptime))
                 .collect(),
         },
         Expr::Unary { op, expr } => {
-            let expr = optimize_expr(*expr, constants, report, inline_functions);
+            let expr = optimize_expr(*expr, constants, report, inline_functions, comptime);
             if op == UnaryOp::BitNot
                 && let Expr::Unary {
                     op: UnaryOp::BitNot,
@@ -3242,8 +3920,8 @@ fn optimize_expr(
             }
         }
         Expr::Binary { left, op, right } => {
-            let left = optimize_expr(*left, constants, report, inline_functions);
-            let right = optimize_expr(*right, constants, report, inline_functions);
+            let left = optimize_expr(*left, constants, report, inline_functions, comptime);
+            let right = optimize_expr(*right, constants, report, inline_functions, comptime);
             if let Some(value) = fold_binary(&left, op, &right) {
                 report.constant_folds += 1;
                 value
@@ -3272,7 +3950,7 @@ fn optimize_expr(
             }
         }
         Expr::Cast { ty, expr } => {
-            let expr = optimize_expr(*expr, constants, report, inline_functions);
+            let expr = optimize_expr(*expr, constants, report, inline_functions, comptime);
             let expr = remove_unsigned_narrowing_mask(&ty, expr).unwrap_or_else(|expr| expr);
             Expr::Cast {
                 ty,
@@ -3289,7 +3967,34 @@ fn optimize_expr(
         | Expr::AddressOfField { .. }
         | Expr::AddressOf(_) => expr,
     };
+    if let Some(callee) = comptime.is_comptime_call(&expr) {
+        match comptime.evaluate(&expr) {
+            Ok(value) if value != expr => {
+                report.comptime_evaluations += 1;
+                decision(report, TbirOptimizationKind::Comptime, None, &callee, None);
+                return value;
+            }
+            Ok(_) => {}
+            Err(failure) => {
+                report.comptime_rejections += 1;
+                decision(
+                    report,
+                    TbirOptimizationKind::Comptime,
+                    None,
+                    &callee,
+                    Some(failure.reason()),
+                );
+            }
+        }
+    }
     expr
+}
+
+fn is_comptime_inlineable(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Bool(_) | Expr::Char(_)
+    )
 }
 
 fn remove_unsigned_narrowing_mask(target: &Type, expr: Expr) -> Result<Expr, Expr> {
@@ -3336,6 +4041,7 @@ fn optimize_access(
     constants: &HashMap<String, Expr>,
     report: &mut TbirOptimizationReport,
     inline_functions: &HashSet<String>,
+    comptime: &ComptimeContext,
 ) -> AccessPath {
     path.segments = path
         .segments
@@ -3346,6 +4052,7 @@ fn optimize_access(
                 constants,
                 report,
                 inline_functions,
+                comptime,
             ))),
             AccessSegment::Field(field) => AccessSegment::Field(field),
         })

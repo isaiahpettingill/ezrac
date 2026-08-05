@@ -662,6 +662,11 @@
     "fields": {}
   },
   {
+    "type": "declaration_attribute",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "embed_declaration",
     "named": true,
     "fields": {},
@@ -2089,6 +2094,7 @@
   {
     "type": "source_file",
     "named": true,
+    "root": true,
     "fields": {},
     "children": {
       "multiple": true,
@@ -2100,6 +2106,10 @@
         },
         {
           "type": "const_declaration",
+          "named": true
+        },
+        {
+          "type": "declaration_attribute",
           "named": true
         },
         {
@@ -2496,6 +2506,18 @@
     "named": false
   },
   {
+    "type": "@comptime",
+    "named": false
+  },
+  {
+    "type": "@inline",
+    "named": false
+  },
+  {
+    "type": "@no-comptime",
+    "named": false
+  },
+  {
     "type": "[",
     "named": false
   },
@@ -2649,7 +2671,8 @@
   },
   {
     "type": "line_comment",
-    "named": true
+    "named": true,
+    "extra": true
   },
   {
     "type": "load",

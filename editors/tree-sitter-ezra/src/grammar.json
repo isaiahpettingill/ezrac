@@ -1,4 +1,5 @@
 {
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
   "name": "ezra",
   "word": "identifier",
   "rules": {
@@ -10,51 +11,85 @@
       }
     },
     "_declaration": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "pub"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "declaration_attribute"
+              }
+            ]
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "import_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "const_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "alias_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "port_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "mmio_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "embed_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "global_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "struct_item"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "extern_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "function_item"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "layout_declaration"
+            }
+          ]
+        }
+      ]
+    },
+    "declaration_attribute": {
       "type": "CHOICE",
       "members": [
         {
-          "type": "SYMBOL",
-          "name": "import_declaration"
+          "type": "STRING",
+          "value": "@comptime"
         },
         {
-          "type": "SYMBOL",
-          "name": "const_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "alias_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "port_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "mmio_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "embed_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "global_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "struct_item"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "extern_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "function_item"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "layout_declaration"
+          "type": "STRING",
+          "value": "@no-comptime"
         }
       ]
     },
@@ -537,6 +572,18 @@
               {
                 "type": "STRING",
                 "value": "inline"
+              },
+              {
+                "type": "STRING",
+                "value": "@inline"
+              },
+              {
+                "type": "STRING",
+                "value": "@comptime"
+              },
+              {
+                "type": "STRING",
+                "value": "@no-comptime"
               },
               {
                 "type": "STRING",
@@ -2838,10 +2885,51 @@
     [
       "_expression",
       "struct_literal"
+    ],
+    [
+      "_declaration",
+      "function_item"
+    ],
+    [
+      "_declaration",
+      "const_declaration"
+    ],
+    [
+      "_declaration",
+      "alias_declaration"
+    ],
+    [
+      "_declaration",
+      "port_declaration"
+    ],
+    [
+      "_declaration",
+      "mmio_declaration"
+    ],
+    [
+      "_declaration",
+      "embed_declaration"
+    ],
+    [
+      "_declaration",
+      "global_declaration"
+    ],
+    [
+      "_declaration",
+      "struct_item"
+    ],
+    [
+      "_declaration",
+      "extern_declaration"
+    ],
+    [
+      "declaration_attribute",
+      "function_item"
     ]
   ],
   "precedences": [],
   "externals": [],
   "inline": [],
-  "supertypes": []
+  "supertypes": [],
+  "reserved": {}
 }

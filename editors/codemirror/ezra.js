@@ -1,6 +1,6 @@
 import {StreamLanguage} from "@codemirror/language";
 
-const keywords = /^(?:alias|align|as|asm|break|bytes|cast|clobber|const|continue|cstr|else|embed|entry|execute|extern|file|fn|global|if|import|in|inline|interrupt|layout|let|load|loop|mmio|naked|out|port|ptr|pub|read|region|repeat|reserved|return|section|stack|struct|symbol|text|volatile|while|write)\b/;
+const keywords = /^(?:alias|align|as|asm|break|bytes|cast|clobber|comptime|const|continue|cstr|else|embed|entry|execute|extern|file|fn|global|if|import|in|inline|interrupt|layout|let|load|loop|mmio|naked|no-comptime|out|port|ptr|pub|read|region|repeat|reserved|return|section|stack|struct|symbol|text|volatile|while|write)\b/;
 const types = /^(?:u8|i8|u16|i16|u24|i24)\b/;
 const atoms = /^(?:true|false)\b/;
 const number = /^(?:0x[0-9A-Fa-f]+|0b[01]+|[0-9]+)(?:u8|i8|u16|i16|u24|i24)?\b/;

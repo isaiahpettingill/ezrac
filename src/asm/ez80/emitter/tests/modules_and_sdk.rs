@@ -628,3 +628,51 @@ fn emits_and_runs_audio_sdk_style_port_sequence() {
     assert_eq!(run.ports[0x14], 0x23, "{asm}");
     assert_eq!(run.ports[0x0A], 1, "{asm}");
 }
+
+#[test]
+fn omits_unreferenced_public_imported_sdk_declarations() {
+    let root = std::env::temp_dir().join(format!(
+        "ezra_module_dead_sdk_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    let main_path = root.join("game.ezra");
+    std::fs::write(
+        root.join("lib/sdk.ezra"),
+        r#"
+            pub global unused_value: u8 = 0xD7
+            pub embed unused_asset: bytes = bytes [0xE1, 0xE2]
+
+            pub fn unused_function() {
+                test.pass()
+            }
+            "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &main_path,
+        r#"
+            import lib.sdk
+
+            fn main() {
+                test.pass()
+            }
+            "#,
+    )
+    .unwrap();
+
+    let program = load_program(&main_path).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(!asm.contains("_sdk_unused_function:"), "{asm}");
+    assert!(!asm.contains("ld a, D7h"), "{asm}");
+    assert!(!asm.contains("ld a, E1h"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}

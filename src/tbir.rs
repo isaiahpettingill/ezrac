@@ -172,6 +172,7 @@ pub enum TbirEffect {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TbirOptimizationKind {
+    Comptime,
     StrengthReduction,
     CopyPropagation,
     CommonSubexpression,
@@ -200,6 +201,8 @@ pub struct TbirOptimizationDecision {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TbirOptimizationReport {
     pub constant_folds: usize,
+    pub comptime_evaluations: usize,
+    pub comptime_rejections: usize,
     pub algebraic_simplifications: usize,
     pub strength_reductions: usize,
     pub constant_propagations: usize,

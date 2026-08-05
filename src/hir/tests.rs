@@ -99,3 +99,45 @@ fn hir_dump_exposes_analysis_summary() {
     assert!(dump.contains("shared_library_candidate=true"), "{dump}");
     assert!(dump.contains("fn helper"), "{dump}");
 }
+
+#[test]
+fn hir_rejects_comptime_reads_from_mutable_indexed_objects() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        r#"
+            global values: [u8; 2] = [1, 2]
+            @comptime fn read() -> u8 { return values[0] }
+            @no-comptime fn runtime() -> u8 { return 1 + 2 }
+            fn main() {}
+        "#,
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+
+    let read = hir
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            HirDeclaration::Function(function) if function.sig.name == "read" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let runtime = hir
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            HirDeclaration::Function(function) if function.sig.name == "runtime" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read.analysis.comptime_rejection.as_deref(),
+        Some("mutable globals are not comptime")
+    );
+    assert_eq!(runtime.analysis.comptime_rejection, None);
+    assert!(
+        hir.dump_text()
+            .contains("comptime_rejection=Some(\"mutable globals are not comptime\")")
+    );
+}

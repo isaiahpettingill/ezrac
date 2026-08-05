@@ -29,8 +29,9 @@ fn main() {
     while token < token_count {
         let token_length: u8 = console.command_tail_token_length(&command_tail_copy[0], length, token)
         let token_index: u8 = 0
+        let token_start: u8 = console.command_tail_token_start(&command_tail_copy[0], length, token)
         while token_index < token_length {
-            console.write(console.command_tail_token_byte(&command_tail_copy[0], length, token, token_index))
+            console.write(command_tail_copy[token_start + token_index])
             token_index += 1
         }
         console.write(' ')

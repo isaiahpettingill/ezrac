@@ -214,6 +214,39 @@ Globals allocate mutable storage in the program data area.
 global score: u16 = 0
 ```
 
+### Compile-Time Evaluation
+
+Constant expressions are folded by default. This includes arithmetic, boolean and bitwise operations, casts, references to other enabled constants, and indexing an immutable constant array with a known index. Array initializers may be shorter than their declared length; missing elements are zero-filled for constant indexing. `zeroes()` is accepted for fixed-size array initializers and produces the same zero-filled storage.
+
+```ezra
+const OFFSET: u8 = 2 + 3
+const TABLE: [u8; 3] = [4, 7, 9]
+const ZEROES: [u8; 4] = zeroes()
+
+fn read_table() -> u8 {
+    return TABLE[1] + ZEROES[3] + OFFSET
+}
+```
+
+Mark a pure function `@comptime` to evaluate calls when every input is known:
+
+```ezra
+@comptime fn add(left: u8, right: u8) -> u8 {
+    return left + right
+}
+
+fn answer() -> u8 {
+    return add(2, 3)
+}
+```
+
+`@no-comptime` is exact and disables compile-time folding for a constant and comptime evaluation or inlining for a function. Mutable globals, ports, MMIO, pointers and strings are never evaluated at comptime. Functions with assignments, loops, recursion, inline assembly, or other effectful calls stay as runtime calls. If an input is unknown or an evaluation limit is reached, the compiler keeps the original expression and continues with normal code generation.
+
+```ezra
+@no-comptime const RUNTIME_VALUE: u8 = 1 + 2
+@no-comptime @inline fn runtime_value() -> u8 { return 7 }
+```
+
 Ports name an I/O port. Use `out PORT, value` to write and `in PORT` to read.
 
 ```ezra
@@ -328,7 +361,7 @@ interrupt fn timer_isr() {}
 
 `@inline` records the `inline` function attribute. The legacy `inline fn` spelling remains supported and normalizes to the same attribute, so the two spellings should not be combined on one function. The attribute requests inlining when the target backend can safely expand the function. Backends may also inline automatically when their target cost model determines that the function body is cheaper than the call, prologue, return, and associated state preservation. Recursive calls and unsupported body shapes fall back to ordinary calls.
 
-Supported modifiers and attributes are `pub`, `@inline` (or legacy `inline`), `naked`, and `interrupt`. Backend support for ABI-sensitive modifiers is target-dependent and still evolving.
+`@comptime` marks a pure function for compile-time evaluation when its inputs are known. `@no-comptime` takes precedence over both compile-time evaluation and inlining. Supported modifiers and attributes are `pub`, `@inline` (or legacy `inline`), `@comptime`, `@no-comptime`, `naked`, and `interrupt`. Backend support for ABI-sensitive modifiers is target-dependent and still evolving.
 
 External assembly functions declare routines implemented by emitted or linked assembly.
 

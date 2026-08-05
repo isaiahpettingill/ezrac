@@ -34,7 +34,7 @@ pub const BYTE_STREAM_SEEK_UNSUPPORTED: u8 = 1
 
 pub const NAME_LENGTH: u8 = 8
 pub const EXTENSION_LENGTH: u8 = 3
-pub const NAME_TEXT_MAX: u8 = 13
+pub const NAME_TEXT_MAX: u8 = 15
 
 pub fn clear(fcb: ptr<u8>) {
     let index: u8 = 0
@@ -132,15 +132,15 @@ pub fn wildcard_extension(fcb: ptr<u8>) {
     }
 }
 
-pub fn set_name_char(fcb: ptr<u8>, index: u8, ch: u8) {
+pub fn set_name_char(fcb: ptr<u8>, index: u8, name_char_value: u8) {
     if index < 8 {
-        *(fcb + NAME + index) = ch
+        *(fcb + NAME + index) = name_char_value
     }
 }
 
-pub fn set_extension_char(fcb: ptr<u8>, index: u8, ch: u8) {
+pub fn set_extension_char(fcb: ptr<u8>, index: u8, extension_char_value: u8) {
     if index < 3 {
-        *(fcb + EXTENSION + index) = ch
+        *(fcb + EXTENSION + index) = extension_char_value
     }
 }
 
@@ -233,26 +233,26 @@ pub fn is_valid_user_area(value: u8) -> bool {
     return value <= USER_MAX
 }
 
-fn uppercase(ch: u8) -> u8 {
-    if ch >= 'a' && ch <= 'z' {
-        return ch - 'a' + 'A'
+fn uppercase(character: u8) -> u8 {
+    if character >= 'a' && character <= 'z' {
+        return character - 'a' + 'A'
     }
-    return ch
+    return character
 }
 
-fn valid_name_char(ch: u8) -> bool {
-    if ch >= 'A' && ch <= 'Z' {
+fn valid_name_char(character: u8) -> bool {
+    if character >= 'A' && character <= 'Z' {
         return true
     }
-    if ch >= 'a' && ch <= 'z' {
+    if character >= 'a' && character <= 'z' {
         return true
     }
-    if ch >= '0' && ch <= '9' {
+    if character >= '0' && character <= '9' {
         return true
     }
-    return ch == '$' || ch == '%' || ch == '-' || ch == '_' || ch == '@'
-        || ch == '~' || ch == '!' || ch == '#' || ch == '&' || ch == '('
-        || ch == ')' || ch == '{' || ch == '}' || ch == '^' || ch == WILDCARD
+    return character == '$' || character == '%' || character == '-' || character == '_' || character == '@'
+        || character == '~' || character == '!' || character == '#' || character == '&' || character == '('
+        || character == ')' || character == '{' || character == '}' || character == '^' || character == WILDCARD
 }
 
 // Parse a bounded 8.3 name. A leading A: through P: selects a drive; the
@@ -276,27 +276,27 @@ pub fn parse_name_bounded(fcb: ptr<u8>, source: ptr<u8>, length: u8) -> u8 {
     let extension_count: u8 = 0
     let in_extension: bool = false
     while index < length {
-        let ch: u8 = *(source + index)
-        if ch == '.' {
+        let parsed_char: u8 = *(source + index)
+        if parsed_char == '.' {
             if in_extension || name_count == 0 {
                 return RESULT_ERROR
             }
             in_extension = true
         } else {
-            if !valid_name_char(ch) {
+            if !valid_name_char(parsed_char) {
                 return RESULT_ERROR
             }
             if in_extension {
                 if extension_count >= EXTENSION_LENGTH {
                     return RESULT_ERROR
                 }
-                set_extension_char(fcb, extension_count, uppercase(ch))
+                set_extension_char(fcb, extension_count, uppercase(parsed_char))
                 extension_count += 1
             } else {
                 if name_count >= NAME_LENGTH {
                     return RESULT_ERROR
                 }
-                set_name_char(fcb, name_count, uppercase(ch))
+                set_name_char(fcb, name_count, uppercase(parsed_char))
                 name_count += 1
             }
         }
@@ -334,16 +334,16 @@ pub fn validate(fcb: ptr<u8>) -> bool {
     }
     let index: u8 = 0
     while index < NAME_LENGTH {
-        let ch: u8 = name_char(fcb, index)
-        if ch != PAD && ch != WILDCARD && !valid_name_char(ch) {
+        let current_name_char: u8 = name_char(fcb, index)
+        if current_name_char != PAD && current_name_char != WILDCARD && !valid_name_char(current_name_char) {
             return false
         }
         index += 1
     }
     let extension_index: u8 = 0
     while extension_index < EXTENSION_LENGTH {
-        let ch: u8 = extension_char(fcb, extension_index)
-        if ch != PAD && ch != WILDCARD && !valid_name_char(ch) {
+        let current_extension_char: u8 = extension_char(fcb, extension_index)
+        if current_extension_char != PAD && current_extension_char != WILDCARD && !valid_name_char(current_extension_char) {
             return false
         }
         extension_index += 1
@@ -440,8 +440,8 @@ pub fn directory_entry_user(buffer: ptr<u8>, result: u8) -> u8 {
     return *entry
 }
 
-pub fn directory_entry_drive(search_fcb: ptr<u8>) -> u8 {
-    return get_drive(search_fcb)
+pub fn directory_entry_drive(directory_search_fcb: ptr<u8>) -> u8 {
+    return get_drive(directory_search_fcb)
 }
 
 pub fn directory_entry_name_char(buffer: ptr<u8>, result: u8, index: u8) -> u8 {
@@ -468,12 +468,12 @@ pub fn directory_entry_extension_char(buffer: ptr<u8>, result: u8, index: u8) ->
 
 // Decode a search result into a normal FCB. The returned byte is the user
 // area from the directory entry; the drive comes from the search FCB.
-pub fn decode_directory_entry(buffer: ptr<u8>, result: u8, destination: ptr<u8>, search_fcb: ptr<u8>) -> u8 {
+pub fn decode_directory_entry(buffer: ptr<u8>, result: u8, destination: ptr<u8>, directory_search_fcb: ptr<u8>) -> u8 {
     let entry: ptr<u8> = directory_entry(buffer, result)
     if entry == cast<ptr<u8>>(cast<u24>(0)) {
         return DIRECTORY_UNUSED
     }
-    init(destination, get_drive(search_fcb))
+    init(destination, get_drive(directory_search_fcb))
     let index: u8 = 0
     while index < NAME_LENGTH {
         set_name_char(destination, index, *(entry + NAME + index))
