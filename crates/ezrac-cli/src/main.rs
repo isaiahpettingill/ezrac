@@ -1677,7 +1677,9 @@ fn build_output_base_path(settings: &BuildSettings, source_path: &Path) -> Resul
     };
     validate_artifact_basename(source_stem)?;
     let mut output_directory = settings.output_root.join(&settings.target.triple.value);
-    if let Some(relative) = source_relative_directory(settings, source_path)? {
+    if settings.executable_name.is_none()
+        && let Some(relative) = source_relative_directory(settings, source_path)?
+    {
         output_directory.push(relative);
     }
     Ok(output_directory.join(source_stem))

@@ -69,7 +69,7 @@ fn build_uses_project_input_kind_for_assembly() {
     .unwrap();
 
     let outputs = build_source(source_path.to_str().unwrap()).unwrap();
-    let expected_base = root.join("target/cpm-2.2-z80/src/demo");
+    let expected_base = root.join("target/cpm-2.2-z80/demo");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
     assert_eq!(outputs.map, expected_base.with_extension("map"));
@@ -122,7 +122,7 @@ fn build_uses_project_input_when_path_is_omitted() {
         target: None,
     })
     .unwrap();
-    let expected_base = root.join("target/cpm-2.2-z80/src/demo");
+    let expected_base = root.join("target/cpm-2.2-z80/demo");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
     assert_eq!(outputs.map, expected_base.with_extension("map"));
@@ -163,10 +163,10 @@ fn build_builds_every_configured_project_target() {
     })
     .unwrap();
 
-    assert!(root.join("target/cpm-2.2-z80/src/demo.asm").exists());
-    assert!(root.join("target/cpm-2.2-z80/src/demo.com").exists());
-    assert!(root.join("target/zxspectrum-z80/src/demo.asm").exists());
-    assert!(root.join("target/zxspectrum-z80/src/demo.tap").exists());
+    assert!(root.join("target/cpm-2.2-z80/demo.asm").exists());
+    assert!(root.join("target/cpm-2.2-z80/demo.com").exists());
+    assert!(root.join("target/zxspectrum-z80/demo.asm").exists());
+    assert!(root.join("target/zxspectrum-z80/demo.tap").exists());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -199,7 +199,7 @@ fn explicit_build_target_overrides_project_target_array() {
     .unwrap();
 
     assert!(!root.join("target/cpm-2.2-z80").exists());
-    assert!(root.join("target/zxspectrum-z80/src/demo.tap").exists());
+    assert!(root.join("target/zxspectrum-z80/demo.tap").exists());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -234,7 +234,6 @@ fn ez80_harness_project_config_writes_target_artifacts() {
     let expected_base = root
         .join("target")
         .join("ezra-test-flat-ez80")
-        .join("src")
         .join("harness-game");
 
     assert_eq!(outputs.asm, expected_base.with_extension("asm"));
@@ -392,10 +391,7 @@ fn source_less_build_finds_the_nearest_ancestor_project() {
         target: None,
     })
     .unwrap();
-    assert_eq!(
-        outputs.executable,
-        root.join("target/cpm-2.2-z80/src/demo.com")
-    );
+    assert_eq!(outputs.executable, root.join("target/cpm-2.2-z80/demo.com"));
 
     drop(_cwd);
     let _ = std::fs::remove_dir_all(root);
