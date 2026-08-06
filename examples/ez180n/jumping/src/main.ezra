@@ -1,28 +1,18 @@
 import ez180n.console
 import helpers
 import player
-
+import hud
 // LEVEL
 // ==================================================
+
+fn interact_level_1(){
+    
+}
 
 fn draw_level_1(){
     helpers.write_line(0, console.HEIGHT - 3, "=====================")
 }
 
-
-// HUD
-// ==================================================
-
-global HUD_STATE: u8 = 0
-
-fn draw_hud() {
-    if HUD_STATE == 0 {
-        helpers.write_line(1, 1, "DPAD to move, A to jump")
-    }
-    if HUD_STATE == 1 {
-        helpers.write_line(1, 1, "Level 1")
-    }
-}
 
 // MAIN
 // ==================================================
@@ -33,7 +23,7 @@ fn main() {
         console.fill(console.CHAR_SPACE)
         player.draw()
         draw_level_1()
-        draw_hud()
+        hud.draw_hud()
         console.present()
         console.wait_tick()
     }

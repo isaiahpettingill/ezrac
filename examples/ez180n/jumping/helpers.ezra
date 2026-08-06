@@ -1,3 +1,22 @@
+import ezra.int
+
+global lives_string: [u8; 9] = ['L', 'i', 'v', 'e', 's', ':', ' ', '2', '0']
+
+const CHAR_ZERO : u8 = 48
+
+@inline pub fn get_lives_string() -> ptr<u8> {
+    return cast<ptr<u8>>(&lives_string)
+}
+
+pub fn set_lives_string(lives: u8) {
+    let the_lives: u8 = lives
+    if lives > 99 {
+        the_lives = 99
+    }
+    let high_byte: u8, low_byte: u8 = int.divmod(lives, 10)
+    lives_string[7] = high_byte + CHAR_ZERO
+    lives_string[8] = low_byte + CHAR_ZERO
+}
 
 pub fn write_line(x: u8, y: u8, text: ptr<u8>){
     let cursor: ptr<u8> = text

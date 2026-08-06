@@ -10,6 +10,25 @@ global OLD_PLAYER_X: u8 = STARTING_X
 global PLAYER_Y: u8 = STARTING_Y
 global OLD_PLAYER_Y: u8 = FLOOR_Y
 global PLAYER_VY: u8 = 0
+global PLAYER_LIVES: u8 = 20
+
+@inline pub fn get_lives() -> u8 {
+    return PLAYER_LIVES
+}
+
+pub fn deal_damage(damage: u8) {
+    if damage < PLAYER_LIVES {
+        PLAYER_LIVES -= damage
+    }
+    else {
+        PLAYER_LIVES = 0
+        die()
+    }
+}
+
+fn die() {
+    
+}
 
 fn set_player_x(x: u8){
     OLD_PLAYER_X = PLAYER_X
