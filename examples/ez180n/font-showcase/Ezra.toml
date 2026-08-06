@@ -2,5 +2,6 @@
 name = "ez180n-font-showcase"
 
 [build]
+input = "src/main.ezra"
 target = "ez180n-ez80"
 executable = "font-showcase"
