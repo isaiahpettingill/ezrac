@@ -583,6 +583,21 @@ impl Symbols {
 
         let result = (|| {
             self.ensure_const_dependencies_evaluated(&decl.value, program)?;
+            self.ensure_type_const_dependencies_evaluated(&decl.ty, program)?;
+            if matches!(self.resolved_type(&decl.ty)?, Type::Array { .. }) {
+                let variable = if self
+                    .static_liveness
+                    .as_ref()
+                    .is_some_and(|liveness| !liveness.constants.contains(&decl.name))
+                {
+                    self.storage_at(0, &decl.ty)?
+                } else {
+                    self.alloc_storage(&decl.ty)?
+                };
+                self.globals.insert(decl.name.clone(), variable);
+                self.global_types.insert(decl.name.clone(), decl.ty.clone());
+                return Ok(());
+            }
             let mut address_roots = Vec::new();
             collect_const_address_roots(&decl.value, &mut address_roots);
             for root in address_roots {

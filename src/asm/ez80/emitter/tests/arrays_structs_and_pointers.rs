@@ -37,6 +37,26 @@ fn emits_and_runs_static_arrays() {
 }
 
 #[test]
+fn emits_and_runs_array_constants() {
+    let source = r#"
+            const LEVELS: [u8; 2] = ['1', '2']
+            const UNUSED: [u8; 2] = ['x', 'y']
+
+            fn main() {
+                test.assert_eq_u8(LEVELS[0], '1', 1)
+                test.assert_eq_u8(LEVELS[1], '2', 2)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 6_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn emits_and_runs_array_length_constant_expressions() {
     let source = r#"
             const BASE: u8 = 2

@@ -1907,20 +1907,30 @@ impl Emitter {
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
         for declaration in &program.declarations {
-            let Declaration::Global(decl) = unwrapped_declaration(declaration) else {
-                continue;
-            };
-            if self
-                .static_liveness
-                .as_ref()
-                .is_some_and(|liveness| !liveness.globals.contains(&decl.name))
-            {
-                continue;
+            match unwrapped_declaration(declaration) {
+                Declaration::Global(decl)
+                    if self
+                        .static_liveness
+                        .as_ref()
+                        .is_none_or(|liveness| liveness.globals.contains(&decl.name)) =>
+                {
+                    if let Some(variable) = self.symbols.globals.get(&decl.name).copied() {
+                        self.emit_storage_initializer(variable, &decl.ty, &decl.value)?;
+                    }
+                }
+                Declaration::Const(decl)
+                    if matches!(decl.ty, Type::Array { .. })
+                        && self
+                            .static_liveness
+                            .as_ref()
+                            .is_none_or(|liveness| liveness.constants.contains(&decl.name)) =>
+                {
+                    if let Some(variable) = self.symbols.globals.get(&decl.name).copied() {
+                        self.emit_storage_initializer(variable, &decl.ty, &decl.value)?;
+                    }
+                }
+                _ => {}
             }
-            let Some(variable) = self.symbols.globals.get(&decl.name).copied() else {
-                continue;
-            };
-            self.emit_storage_initializer(variable, &decl.ty, &decl.value)?;
         }
         Ok(())
     }
