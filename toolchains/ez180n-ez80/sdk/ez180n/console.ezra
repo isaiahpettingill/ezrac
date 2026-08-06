@@ -2,6 +2,33 @@ pub const WIDTH: u8 = 80
 pub const HEIGHT: u8 = 56
 pub const DEFAULT_TEXT_COLOR: u8 = 254
 pub const DEFAULT_BACKGROUND_COLOR: u8 = 233
+
+pub const FONT_DEFAULT: u8 = 0
+pub const FONT_VGA_8X8: u8 = 0
+pub const FONT_BBC_MASTER: u8 = 1
+pub const FONT_BBC_MASTER_INTERNATIONAL: u8 = 2
+pub const FONT_BBC_MICRO: u8 = 3
+pub const FONT_SYSTEM_8X8: u8 = 4
+pub const FONT_MSX_ARABIC_AX500: u8 = 5
+pub const FONT_MSX_RUSSIAN: u8 = 6
+pub const FONT_MSX_KOREAN: u8 = 7
+pub const FONT_MSX_JAPANESE_F900A: u8 = 8
+pub const FONT_COLECOVISION_BOLD: u8 = 9
+pub const FONT_C64: u8 = 10
+pub const FONT_C16: u8 = 11
+pub const FONT_ATARI_CLASSIC: u8 = 12
+pub const FONT_ATARI_INTERNATIONAL: u8 = 13
+pub const FONT_ATASCII: u8 = 14
+pub const FONT_ATARI_NAJM_65XE_ARABIC: u8 = 15
+pub const FONT_APPLE_I: u8 = 16
+pub const FONT_AMSTRAD_CPC: u8 = 17
+pub const FONT_AMSTRAD_PCW: u8 = 18
+pub const FONT_ATARI_ST_8X8: u8 = 19
+pub const FONT_FUJITSU_FM7: u8 = 20
+pub const FONT_JUPITER_ACE: u8 = 21
+pub const FONT_TRS80_DVI_8X8: u8 = 22
+pub const FONT_RISCOS_3: u8 = 23
+pub const FONT_COUNT: u8 = 24
 @cfg(pointer_width(24))
 pub const FRAMEBUFFER_BASE: u24 = 0x080000u24
 
@@ -39,6 +66,7 @@ pub const CHAR_UPPER_HALF: u8 = 0xDF
 pub port PRESENT_PORT: u8 = 0x10
 pub port TEXT_COLOR_PORT: u8 = 0x11
 pub port BACKGROUND_COLOR_PORT: u8 = 0x12
+pub port FONT_PORT: u8 = 0x13
 pub port SOUND_PORT: u8 = 0x20
 pub port TICK_PORT: u8 = 0x40
 pub port P1_LOW: u8 = 0x30
@@ -113,6 +141,10 @@ pub fn set_text_color(color: u8) {
 
 pub fn set_background_color(color: u8) {
     out BACKGROUND_COLOR_PORT, color
+}
+
+pub fn set_font(font: u8) {
+    out FONT_PORT, font
 }
 
 pub fn play_sound(sound: u8) {

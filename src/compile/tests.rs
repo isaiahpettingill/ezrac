@@ -1961,6 +1961,7 @@ fn main() {
     ez180n.console.fill(65)
     ez180n.console.set_text_color(ez180n.console.DEFAULT_TEXT_COLOR)
     ez180n.console.set_background_color(ez180n.console.DEFAULT_BACKGROUND_COLOR)
+    ez180n.console.set_font(ez180n.console.FONT_BBC_MASTER)
     if ez180n.console.button_down(0, ez180n.console.BUTTON_A) {
         ez180n.console.put_char(0, 0, 65)
     }
