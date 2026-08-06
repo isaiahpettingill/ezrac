@@ -188,7 +188,8 @@ fn translate_8080_exact(text: &str) -> Result<Option<String>, Diagnostic> {
         "rla" => "ral".to_owned(),
         "rra" => "rar".to_owned(),
         "srl a" => "ora a
-rar".to_owned(),
+rar"
+        .to_owned(),
         "cpl" => "cma".to_owned(),
         "scf" => "stc".to_owned(),
         "ccf" => "cmc".to_owned(),

@@ -79,6 +79,18 @@ pub(crate) fn stmt_summary(stmt: &Stmt) -> String {
         Stmt::Let { name, ty, value } => {
             format!("let {name}: {} = {}", type_display(ty), expr_summary(value))
         }
+        Stmt::LetTwo {
+            first_name,
+            first_ty,
+            second_name,
+            second_ty,
+            value,
+        } => format!(
+            "let {first_name}: {}, {second_name}: {} = {}",
+            type_display(first_ty),
+            type_display(second_ty),
+            expr_summary(value)
+        ),
         Stmt::Assign { target, op, value } => {
             format!(
                 "{} {} {}",
@@ -94,6 +106,9 @@ pub(crate) fn stmt_summary(stmt: &Stmt) -> String {
         Stmt::Continue => "continue".to_owned(),
         Stmt::Return(Some(expr)) => format!("return {}", expr_summary(expr)),
         Stmt::Return(None) => "return".to_owned(),
+        Stmt::ReturnTwo { first, second } => {
+            format!("return {}, {}", expr_summary(first), expr_summary(second))
+        }
         Stmt::Asm { volatile, .. } => {
             if *volatile {
                 "asm volatile".to_owned()
@@ -416,6 +431,30 @@ mod tests {
         parser::parse_program,
     };
     use std::path::Path;
+
+    #[test]
+    fn summarizes_two_value_statements() {
+        let let_two = Stmt::LetTwo {
+            first_name: "first".to_owned(),
+            first_ty: Type::Named("u8".to_owned()),
+            second_name: "second".to_owned(),
+            second_ty: Type::Named("bool".to_owned()),
+            value: Expr::Call {
+                path: vec!["pair".to_owned()],
+                args: vec![Expr::Ident("value".to_owned())],
+            },
+        };
+        assert_eq!(
+            stmt_summary(&let_two),
+            "let first: u8, second: bool = pair(value)"
+        );
+
+        let return_two = Stmt::ReturnTwo {
+            first: Expr::Ident("first".to_owned()),
+            second: Expr::Ident("second".to_owned()),
+        };
+        assert_eq!(stmt_summary(&return_two), "return first, second");
+    }
 
     #[test]
     fn places_comments_and_hides_source_anchors_in_normal_output() {

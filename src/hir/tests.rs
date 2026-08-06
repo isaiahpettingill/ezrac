@@ -101,6 +101,31 @@ fn hir_dump_exposes_analysis_summary() {
 }
 
 #[test]
+fn hir_preserves_the_second_return_type_and_return_node() {
+    let program = parse_program(
+        Path::new("multi.ezra"),
+        "fn pair() -> u8, bool { return 1, true }",
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let function = hir
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            HirDeclaration::Function(function) => Some(function),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        function.sig.second_return_type,
+        Some(Type::Named("bool".to_owned()))
+    );
+    assert!(matches!(function.body[0], Stmt::ReturnTwo { .. }));
+    assert!(hir.dump_text().contains("second_return=true"));
+}
+
+#[test]
 fn hir_rejects_comptime_reads_from_mutable_indexed_objects() {
     let program = parse_program(
         Path::new("test.ezra"),

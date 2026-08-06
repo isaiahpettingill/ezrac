@@ -733,9 +733,10 @@ fn collect_declaration_string_literals(declaration: &Declaration, literals: &mut
 fn collect_stmt_string_literals(stmts: &[Stmt], literals: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { value, .. } | Stmt::Out { value, .. } | Stmt::Expr(value) => {
-                collect_expr_string_literals(value, literals)
-            }
+            Stmt::Let { value, .. }
+            | Stmt::LetTwo { value, .. }
+            | Stmt::Out { value, .. }
+            | Stmt::Expr(value) => collect_expr_string_literals(value, literals),
             Stmt::Assign { target, value, .. } => {
                 collect_place_string_literals(target, literals);
                 collect_expr_string_literals(value, literals);
@@ -755,6 +756,10 @@ fn collect_stmt_string_literals(stmts: &[Stmt], literals: &mut HashSet<String>) 
             }
             Stmt::Loop { body } => collect_stmt_string_literals(body, literals),
             Stmt::Return(Some(value)) => collect_expr_string_literals(value, literals),
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_string_literals(first, literals);
+                collect_expr_string_literals(second, literals);
+            }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
         }
     }

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{
     asm::AssemblyOptions,
@@ -261,6 +260,57 @@ fn allocated_arithmetic_and_control_flow_execute_on_dcpu() {
 }
 
 #[test]
+fn memory_fill_executes_with_destination_and_zero_count() {
+    let assembly = emit(
+        r#"
+            volatile mmio DEBUG_SEQUENCE: u16 = 0xfff0
+            volatile mmio DEBUG_VALUE: u8 = 0xfff1
+            volatile mmio RESULT: u8 = 0xfff2
+            volatile mmio HALT: u8 = 0xfff3
+            global words: [u8; 4] = [0x11u8, 0x22u8, 0x33u8, 0x44u8]
+
+            fn main() {
+                mem.fill(cast<ptr<u8>>(&words[0]), 0x5au8, 3u24)
+                DEBUG_VALUE = words[0]
+                DEBUG_SEQUENCE = 1
+                DEBUG_VALUE = words[1]
+                DEBUG_SEQUENCE = 2
+                DEBUG_VALUE = words[2]
+                DEBUG_SEQUENCE = 3
+
+                mem.fill(cast<ptr<u8>>(&words[3]), 0xa5u8, 0u24)
+                DEBUG_VALUE = words[3]
+                DEBUG_SEQUENCE = 4
+                RESULT = 0
+                HALT = 1
+            }
+            "#,
+    );
+    let bytes = assemble_subset_at(CpuFamily::Dcpu, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    let run = TestRunner::default()
+        .run(
+            &TestImage {
+                cpu_family: CpuFamily::Dcpu,
+                base_addr: 0,
+                bytes,
+            },
+            &TestRunOptions {
+                instruction_budget: 1_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x1_fffe,
+            },
+        )
+        .unwrap();
+
+    assert!(run.halted, "{run:?}\n{assembly}");
+    assert_eq!(run.debug_output, [0x5a, 0x5a, 0x5a, 0x44], "{assembly}");
+    assert_eq!(run.result_code, 0, "{assembly}");
+    assert_eq!(run.failure, None, "{assembly}");
+}
+
+#[test]
 fn sdk_style_inline_operands_assemble() {
     let assembly = emit(
         "inline fn command(value: u16) { asm volatile(in value: u16 as reg16, clobber memory) { \"set a, 0\" \"set b, {value}\" \"hwi 2\" } } fn main() { command(60) }",
@@ -300,4 +350,123 @@ fn ports_remain_rejected() {
     )
     .unwrap_err();
     assert!(error.message.contains("port"));
+}
+
+#[test]
+fn lowers_catalog_bit_and_integer_intrinsics() {
+    let assembly = emit(
+        r#"
+            fn main() {
+                let rotated: u16 = bits.rotate_left(0x1234u16, 4u8)
+                let set_bit: u8 = bits.set(1u8, 3u8)
+                let high: u16 = int.mul_high(0x1234u16, 2u16)
+            }
+        "#,
+    );
+    assert!(assembly.contains("    shl a, b"), "{assembly}");
+    assert!(assembly.contains("    shr a, b"), "{assembly}");
+    assert!(assembly.contains("    mul b, a"), "{assembly}");
+}
+
+#[test]
+fn lowers_catalog_paired_and_memory_intrinsics() {
+    let assembly = emit(
+        r#"
+            global words: [u8; 4] = [0x11u8, 0x22u8, 0x33u8, 0x44u8]
+            fn main() {
+                let low: u16, high: u16 = int.full_mul(0x1234u16, 2u16)
+                let value: u16 = mem.load_be16(cast<ptr<u8>>(&words[0]))
+                mem.fill(cast<ptr<u8>>(&words[0]), 0x55u8, 2u24)
+            }
+        "#,
+    );
+    assert!(assembly.contains("    mul b, a"), "{assembly}");
+    assert!(assembly.contains("    set a, ex"), "{assembly}");
+    assert!(assembly.contains("    set [b], a"), "{assembly}");
+    assert!(assembly.contains("__ezra_mem_fill_loop"), "{assembly}");
+}
+
+#[test]
+fn rejects_catalog_wide_results_and_volatile_block_access() {
+    let wide = parse_program(
+        Path::new("dcpu.ezra"),
+        "fn main() { let value: u24 = mem.load_le24(cast<ptr<u8>>(0x8000)) }",
+    )
+    .unwrap();
+    let error = emit_dcpu_assembly_with_options(
+        &wide,
+        AssemblyOptions {
+            cpu: CpuFamily::Dcpu,
+            ram_base: crate::target::Address24::new(0x8000),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.message,
+        "DCPU does not support type `u24`; values must fit in one word"
+    );
+
+    let volatile = parse_program(
+        Path::new("dcpu.ezra"),
+        "volatile mmio DEVICE: ptr<u8> = 0x9000 fn main() { let value: u16 = mem.load_le16(DEVICE) }",
+    )
+    .unwrap();
+    let error = emit_dcpu_assembly_with_options(
+        &volatile,
+        AssemblyOptions {
+            cpu: CpuFamily::Dcpu,
+            ram_base: crate::target::Address24::new(0x8000),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.message.contains("volatile"), "{}", error.message);
+}
+
+#[test]
+fn preserves_two_results_through_user_function_calls() {
+    let assembly = emit(
+        r#"
+            fn pair(seed: u16) -> u16, u8 {
+                return seed + 1, cast<u8>(seed + 3)
+            }
+            fn forward(seed: u16) -> u16, u8 {
+                return pair(seed)
+            }
+            fn main() -> u16 {
+                let first: u16, second: u8 = forward(40)
+                return first + cast<u16>(second)
+            }
+            "#,
+    );
+    assert!(assembly.contains("    set ex, a"), "{assembly}");
+    assert!(assembly.contains("    set a, ex"), "{assembly}");
+    assert!(assembly.contains("    set b, ex"), "{assembly}");
+
+    let assembly = assembly.replace(
+        "__ezra_exit:\n    set pc, __ezra_exit\n",
+        "__ezra_exit:\n    set [0xfff2], a\n    set [0xfff3], 1\n",
+    );
+    let bytes = assemble_subset_at(CpuFamily::Dcpu, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    let run = TestRunner::default()
+        .run(
+            &TestImage {
+                cpu_family: CpuFamily::Dcpu,
+                base_addr: 0,
+                bytes,
+            },
+            &TestRunOptions {
+                instruction_budget: 1_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x1_fffe,
+            },
+        )
+        .unwrap();
+
+    assert!(run.halted, "{run:?}\n{assembly}");
+    assert_eq!(run.result_code, 84, "{assembly}");
+    assert_eq!(run.failure, None, "{assembly}");
 }

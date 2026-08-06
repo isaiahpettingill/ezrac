@@ -56,6 +56,99 @@ fn reports_array_and_struct_function_returns_before_codegen() {
 }
 
 #[test]
+fn validates_two_result_call_contexts_and_scalar_types() {
+    let valid = parse_program(
+        Path::new("multi_return.ezra"),
+        r#"
+            fn pair() -> u8, bool { return 1, true }
+            fn bound() -> u8, bool {
+                let value: u8, flag: bool = pair()
+                return value, flag
+            }
+            fn direct() -> u8, bool { return pair() }
+            fn main() {}
+        "#,
+    )
+    .unwrap();
+    crate::tbir::diagnostics::validate_multi_value_returns(&valid).unwrap();
+
+    for source in [
+        "fn pair() -> u8, bool { return 1, true } fn bad() -> u8 { let value: u8 = pair() } fn main() {}",
+        "fn pair() -> u8, bool { return 1, true } fn bad() -> u8, bool { pair() return 1, true } fn main() {}",
+        "fn pair() -> u8 { return 1 } fn bad() -> u8, bool { let value: u8, flag: bool = pair() return value, flag } fn main() {}",
+    ] {
+        let program = parse_program(Path::new("invalid_multi_return.ezra"), source).unwrap();
+        let error = crate::tbir::diagnostics::validate_multi_value_returns(&program).unwrap_err();
+        assert!(
+            error.message.contains("two-result")
+                || error.message.contains("two-place")
+                || error.message.contains("does not return two"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn compile_diagnostics_validate_catalog_calls() {
+    let options = CompileOptions {
+        source: PathBuf::from("intrinsics.ezra"),
+        debug_comments: false,
+        default_sdk_symbols: true,
+    };
+    let valid = r#"
+        global bytes: [u8; 4] = [1, 2, 3, 4]
+        fn main() {
+            let tested: bool = ezra.bits.test(1u8, 0)
+            let quotient: u8, remainder: u8 = ezra.int.divmod(7u8, 3u8)
+            let found: ptr<u8>, present: bool = ezra.mem.find_byte(&bytes[0], 4u24, 2u8)
+            ezra.mem.poke8(&bytes[0], 0u8)
+        }
+    "#;
+    let valid_diagnostics = check_source_semantic_diagnostics_with_sdk_and_overrides(
+        valid,
+        &options,
+        &SdkResolver::default(),
+        &HashMap::new(),
+    );
+    assert!(valid_diagnostics.is_empty(), "{valid_diagnostics:#?}");
+
+    let invalid = "fn main() { let value: u8 = ezra.bits.set(1u8, 8) }";
+    let invalid_diagnostics = check_source_semantic_diagnostics_with_sdk_and_overrides(
+        invalid,
+        &options,
+        &SdkResolver::default(),
+        &HashMap::new(),
+    );
+    assert!(
+        invalid_diagnostics.iter().any(|diagnostic| diagnostic.message
+            == "intrinsic `ezra.bits.set` argument 2 has value 8; the bit index must be within the input width"),
+        "{invalid_diagnostics:#?}"
+    );
+}
+
+#[test]
+fn rejects_non_scalar_types_in_two_result_signatures() {
+    for (source, expected) in [
+        (
+            "fn bad() -> [u8; 2], bool { return [1, 2], true } fn main() {}",
+            "arrays are not supported",
+        ),
+        (
+            "struct Pair { value: u8 } fn bad() -> Pair, bool { return Pair { value: 1 }, true } fn main() {}",
+            "structs are not supported",
+        ),
+        (
+            "fn bad() -> bytes, bool { return 0, true } fn main() {}",
+            "byte buffers are not supported",
+        ),
+    ] {
+        let program = parse_program(Path::new("invalid_multi_type.ezra"), source).unwrap();
+        let error = crate::tbir::diagnostics::validate_multi_value_returns(&program).unwrap_err();
+        assert!(error.message.contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn skips_wide_integer_warnings_on_exempt_targets() {
     let program = parse_program(
         Path::new("wide.ezra"),
@@ -1777,6 +1870,45 @@ fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
         source,
         &CompileOptions {
             source: PathBuf::from("arduboy.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        },
+        &sdk,
+    )
+    .unwrap();
+}
+
+#[test]
+fn intrinsic_modules_resolve_for_every_target() {
+    for target in [
+        "generic-z80-baremetal",
+        "generic-m68k-baremetal",
+        "generic-dcpu-bare",
+    ] {
+        let sdk = SdkResolver {
+            target: Some(target.to_owned()),
+            sdk_roots: Vec::new(),
+        };
+        for module in ["ezra.bits", "ezra.int", "ezra.mem"] {
+            assert!(builtin_sdk_modules(Some(target)).contains(&module));
+            let (path, source) =
+                resolve_import_source(Path::new("main.ezra"), module, &sdk).unwrap();
+            assert_eq!(
+                path,
+                PathBuf::from(format!("builtin-sdk/{}.ezra", module.replace('.', "/")))
+            );
+            assert!(source.contains("Compiler intrinsic module"));
+        }
+    }
+
+    let sdk = SdkResolver {
+        target: Some("generic-z80-baremetal".to_owned()),
+        sdk_roots: Vec::new(),
+    };
+    check_source_with_sdk(
+        "import ezra.bits\nimport ezra.int\nimport ezra.mem\nfn main() {\n    let rotated: u8 = bits.rotate_left(1u8, 1u8)\n    let product: u16 = int.widening_mul(2u8, 3u8)\n}\n",
+        &CompileOptions {
+            source: PathBuf::from("main.ezra"),
             debug_comments: false,
             default_sdk_symbols: true,
         },

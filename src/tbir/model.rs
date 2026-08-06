@@ -38,6 +38,7 @@ pub struct StructLayout {
 pub struct FunctionSignature {
     pub params: Vec<Type>,
     pub return_type: Option<Type>,
+    pub second_return_type: Option<Type>,
     pub argument_slots: Vec<Storage>,
 }
 
@@ -570,13 +571,19 @@ impl SemanticModel {
         }
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
-            let (name, params, return_type) = match declaration {
-                Declaration::Function(function) => {
-                    (&function.name, &function.params, &function.return_type)
-                }
-                Declaration::ExternAsmFunction(function) => {
-                    (&function.name, &function.params, &function.return_type)
-                }
+            let (name, params, return_type, second_return_type) = match declaration {
+                Declaration::Function(function) => (
+                    &function.name,
+                    &function.params,
+                    &function.return_type,
+                    &function.second_return_type,
+                ),
+                Declaration::ExternAsmFunction(function) => (
+                    &function.name,
+                    &function.params,
+                    &function.return_type,
+                    &function.second_return_type,
+                ),
                 _ => continue,
             };
             let mut argument_slots = Vec::new();
@@ -588,6 +595,7 @@ impl SemanticModel {
                 FunctionSignature {
                     params: params.iter().map(|param| param.ty.clone()).collect(),
                     return_type: return_type.clone(),
+                    second_return_type: second_return_type.clone(),
                     argument_slots,
                 },
             );
@@ -773,10 +781,15 @@ fn collect_strings(program: &Program, model: &mut SemanticModel) -> Result<(), D
         for stmt in body {
             match stmt {
                 crate::ast::Stmt::Let { value, .. }
+                | crate::ast::Stmt::LetTwo { value, .. }
                 | crate::ast::Stmt::Assign { value, .. }
                 | crate::ast::Stmt::Return(Some(value))
                 | crate::ast::Stmt::Out { value, .. }
                 | crate::ast::Stmt::Expr(value) => collect_expr(value, output),
+                crate::ast::Stmt::ReturnTwo { first, second } => {
+                    collect_expr(first, output);
+                    collect_expr(second, output);
+                }
                 crate::ast::Stmt::If {
                     condition,
                     then_body,

@@ -12,6 +12,7 @@ use crate::{
     compat::prelude::*,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    intrinsics::{BitsIntrinsic, IntIntrinsic, IntrinsicOperation, MemIntrinsic},
     regalloc::{
         Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
         SpillClass, SpillClassId, Target,
@@ -27,8 +28,10 @@ use crate::{
 /// Emit code for the generic 68000 target.
 ///
 /// Values are evaluated in D0, with D1 as the binary-operation scratch
-/// register. Arguments live in target-owned static slots, which keeps the
-/// first ABI simple while allowing ordinary EZRA calls without a platform SDK.
+/// register. Scalar two-result functions return their first value in D0 and
+/// their second value in D1. Arguments live in target-owned static slots,
+/// which keeps the ABI simple while allowing ordinary EZRA calls without a
+/// platform SDK.
 pub fn emit_m68k_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
@@ -45,7 +48,7 @@ pub fn emit_m68k_assembly_with_options(
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
-    Emitter::new(model, options.clone())
+    Emitter::new(model, options.clone())?
         .emit(&tbir.lowered_program)
         .map(|asm| {
             let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M68k);
@@ -92,13 +95,16 @@ struct Emitter {
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
+    second_return_types: Vec<Option<Type>>,
     function_ram_bases: Vec<u32>,
     local_plans: Vec<HashMap<String, Binding>>,
+    intrinsic_scratch: Storage,
 }
 
 impl Emitter {
-    fn new(model: SemanticModel, options: AssemblyOptions) -> Self {
-        Self {
+    fn new(mut model: SemanticModel, options: AssemblyOptions) -> Result<Self, Diagnostic> {
+        let intrinsic_scratch = allocate_m68k_aligned(&mut model, 12)?;
+        Ok(Self {
             model,
             options,
             out: String::new(),
@@ -107,9 +113,11 @@ impl Emitter {
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
+            second_return_types: Vec::new(),
             function_ram_bases: Vec::new(),
             local_plans: Vec::new(),
-        }
+            intrinsic_scratch,
+        })
     }
 
     fn emit(mut self, program: &Program) -> Result<String, Diagnostic> {
@@ -122,7 +130,7 @@ impl Emitter {
             self.options.stack_top.get()
         ));
         self.emit_static_initializers(program)?;
-        self.line("    jsr _main");
+        self.line("    jsr (_main).l");
         self.line("__ezra_exit:");
         self.line("    bra __ezra_exit");
         for declaration in &program.declarations {
@@ -179,12 +187,40 @@ impl Emitter {
                 function.name
             )));
         }
-        if interrupt && (!function.params.is_empty() || function.return_type.is_some()) {
+        if interrupt
+            && (!function.params.is_empty()
+                || function.return_type.is_some()
+                || function.second_return_type.is_some())
+        {
             return Err(Diagnostic::new(format!(
                 "interrupt function `{}` cannot have parameters or a return value",
                 function.name
             )));
         }
+        if function.name == "main" && function.second_return_type.is_some() {
+            return Err(Diagnostic::new(
+                "main cannot return two values because its startup caller has no second-result destination",
+            ));
+        }
+        if function.second_return_type.is_some() && function.return_type.is_none() {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{}` must have a first return type",
+                function.name
+            )));
+        }
+        if let Some(return_type) = &function.return_type {
+            self.require_scalar(&self.model.resolved_type(return_type)?)?;
+        }
+        if let Some(second_return_type) = &function.second_return_type {
+            self.require_scalar(&self.model.resolved_type(second_return_type)?)?;
+            if !block_guarantees_two_result_return(&function.body) {
+                return Err(Diagnostic::new(format!(
+                    "missing two return values in function `{}`",
+                    function.name
+                )));
+            }
+        }
+        let _ = allocate_m68k_aligned(&mut self.model, 0)?;
         let function_ram_base = self.model.next_ram_address();
         let local_plan = plan_function_locals(function, &mut self.model)?;
         let return_label = self.next_label(&format!("{}_return", function.name));
@@ -200,6 +236,13 @@ impl Emitter {
                 .map(|ty| self.model.resolved_type(ty))
                 .transpose()?,
         );
+        self.second_return_types.push(
+            function
+                .second_return_type
+                .as_ref()
+                .map(|ty| self.model.resolved_type(ty))
+                .transpose()?,
+        );
         let signature = self.model.functions[&function.name].clone();
         if interrupt && !naked {
             for register in (0..8)
@@ -211,7 +254,8 @@ impl Emitter {
         }
         for (param, slot) in function.params.iter().zip(signature.argument_slots) {
             let ty = self.model.resolved_type(&param.ty)?;
-            let storage = self.model.allocate_type(&ty)?;
+            let size = self.model.type_size(&ty)?;
+            let storage = allocate_m68k_aligned(&mut self.model, size)?;
             self.bind_memory(param.name.clone(), storage, ty.clone())?;
             if self.model.type_width(&ty).is_ok() {
                 self.load_d0(slot, &ty)?;
@@ -221,6 +265,7 @@ impl Emitter {
             }
         }
         self.emit_block(&function.body)?;
+        self.line("    nop");
         self.line(&format!("{return_label}:"));
         if interrupt {
             if !naked {
@@ -236,6 +281,7 @@ impl Emitter {
         } else if !naked {
             self.line("    rts");
         }
+        self.second_return_types.pop();
         self.return_types.pop();
         self.return_labels.pop();
         self.function_ram_bases.pop();
@@ -284,7 +330,8 @@ impl Emitter {
                             "compound assignment requires a scalar value",
                         ));
                     }
-                    let storage = self.model.allocate_type(&ty)?;
+                    let size = self.model.type_size(&ty)?;
+                    let storage = allocate_m68k_aligned(&mut self.model, size)?;
                     self.emit_initializer(storage, &ty, value)?;
                     self.store_aggregate_place(target, storage, storage.size)?;
                     return Ok(());
@@ -366,6 +413,16 @@ impl Emitter {
             Stmt::Break => self.jump_loop(false)?,
             Stmt::Continue => self.jump_loop(true)?,
             Stmt::Return(value) => {
+                if self
+                    .second_return_types
+                    .last()
+                    .and_then(Clone::clone)
+                    .is_some()
+                {
+                    return Err(Diagnostic::new(
+                        "two-result function must use `return first, second`",
+                    ));
+                }
                 if let Some(value) = value {
                     let ty = self
                         .return_types
@@ -380,6 +437,41 @@ impl Emitter {
                     .expect("function return label")
                     .clone();
                 self.line(&format!("    bra {label}"));
+            }
+            Stmt::ReturnTwo { first, second } => self.emit_return_two(first, second)?,
+            Stmt::LetTwo {
+                first_name,
+                first_ty: _,
+                second_name,
+                second_ty: _,
+                value,
+            } => {
+                let first_binding = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(first_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing allocation for local `{first_name}`"))
+                    })?;
+                let second_binding = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(second_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing allocation for local `{second_name}`"))
+                    })?;
+                self.require_scalar(&first_binding.ty)?;
+                self.require_scalar(&second_binding.ty)?;
+                self.bind(first_name.clone(), first_binding.clone())?;
+                self.bind(second_name.clone(), second_binding.clone())?;
+                let Expr::Call { path, args } = value else {
+                    return Err(Diagnostic::new(
+                        "two-result bindings require a direct two-result call",
+                    ));
+                };
+                self.emit_two_result_call(path, args, &first_binding, &second_binding)?;
             }
             Stmt::Asm {
                 inputs,
@@ -828,7 +920,7 @@ impl Emitter {
                 count -= 8;
             }
             if count != 0 {
-                self.line(&format!("    {instruction}.{suffix} #{count},d0"));
+                self.emit_immediate_shift(instruction, suffix, count, "d0");
             }
         }
         self.convert_d0(&source_ty, &expected)?;
@@ -1248,6 +1340,891 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_intrinsic(
+        &mut self,
+        operation: IntrinsicOperation,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> Result<(), Diagnostic> {
+        let result = intrinsic_result_type(operation, args, |arg| self.expr_type(arg))?;
+        if !result.is_empty() {
+            if let Some(expected) = expected {
+                let expected = self.model.resolved_type(expected)?;
+                let actual = self.model.resolved_type(&result[0])?;
+                if expected != actual {
+                    return Err(Diagnostic::new(format!(
+                        "intrinsic result has type {actual:?}, expected {expected:?}"
+                    )));
+                }
+            }
+        }
+        match operation {
+            IntrinsicOperation::Bits(operation) => self.emit_bits_intrinsic(operation, args),
+            IntrinsicOperation::Int(operation) => self.emit_int_intrinsic(operation, args),
+            IntrinsicOperation::Mem(operation) => self.emit_mem_intrinsic(operation, args),
+        }
+    }
+
+    fn emit_bits_intrinsic(
+        &mut self,
+        operation: BitsIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            BitsIntrinsic::RotateLeft | BitsIntrinsic::RotateRight => {
+                self.require_arg_count(args, 2, "rotate")?;
+                let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+                let width = require_unsigned_bit_width(&ty)?;
+                self.emit_expr(&args[0], &ty)?;
+                self.line("    move.l d0,-(sp)");
+                self.emit_expr(&args[1], &Type::Named("u24".to_owned()))?;
+                self.line("    move.l d0,d2");
+                self.line("    move.l (sp)+,d0");
+                let bits = u32::from(width) * 8;
+                if width == 3 {
+                    self.line("    andi.l #$FFFFFF,d0");
+                    self.line(&format!("    andi.l #${:X},d2", bits - 1));
+                    let loop_label = self.next_label("intrinsic_rotate_loop");
+                    let done = self.next_label("intrinsic_rotate_done");
+                    self.line(&format!("{loop_label}:"));
+                    self.line(&format!("    tst.l d2"));
+                    self.line(&format!("    beq {done}"));
+                    if operation == BitsIntrinsic::RotateLeft {
+                        self.line("    move.l d0,d1");
+                        self.line("    andi.l #$800000,d1");
+                        self.line("    lsl.l #1,d0");
+                        self.line("    andi.l #$FFFFFF,d0");
+                        self.line("    tst.l d1");
+                        let no_wrap = self.next_label("intrinsic_rotate_no_wrap");
+                        self.line(&format!("    beq {no_wrap}"));
+                        self.line("    ori.l #1,d0");
+                        self.line(&format!("{no_wrap}:"));
+                    } else {
+                        self.line("    move.l d0,d1");
+                        self.line("    andi.l #1,d1");
+                        self.line("    lsr.l #1,d0");
+                        self.line("    tst.l d1");
+                        let no_wrap = self.next_label("intrinsic_rotate_no_wrap");
+                        self.line(&format!("    beq {no_wrap}"));
+                        self.line("    ori.l #$800000,d0");
+                        self.line(&format!("{no_wrap}:"));
+                    }
+                    self.line("    subq.l #1,d2");
+                    self.line(&format!("    bra {loop_label}"));
+                    self.line(&format!("{done}:"));
+                } else {
+                    self.line(&format!("    andi.w #${:X},d2", bits - 1));
+                    let suffix = if width == 1 { "b" } else { "w" };
+                    let instruction = if operation == BitsIntrinsic::RotateLeft {
+                        "rol"
+                    } else {
+                        "ror"
+                    };
+                    self.line(&format!("    {instruction}.{suffix} d2,d0"));
+                }
+                self.mask_d0(width);
+            }
+            BitsIntrinsic::Test
+            | BitsIntrinsic::Set
+            | BitsIntrinsic::Clear
+            | BitsIntrinsic::Toggle => {
+                self.require_arg_count(args, 2, "bit intrinsic")?;
+                let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+                let width = require_unsigned_bit_width(&ty)?;
+                let bit = self.intrinsic_constant(args, 1, "bit index")?;
+                let bit = u32::try_from(bit)
+                    .ok()
+                    .filter(|bit| *bit < u32::from(width) * 8)
+                    .ok_or_else(|| Diagnostic::new("bit index must be within the input width"))?;
+                self.emit_expr(&args[0], &ty)?;
+                match operation {
+                    BitsIntrinsic::Test => {
+                        self.line(&format!("    btst #{bit},d0"));
+                        self.boolean_from_branch("bne")?;
+                    }
+                    BitsIntrinsic::Set => self.line(&format!("    bset #{bit},d0")),
+                    BitsIntrinsic::Clear => self.line(&format!("    bclr #{bit},d0")),
+                    BitsIntrinsic::Toggle => self.line(&format!("    bchg #{bit},d0")),
+                    _ => unreachable!(),
+                }
+                self.mask_d0(width);
+            }
+            BitsIntrinsic::Extract => self.emit_extract_intrinsic(args)?,
+            BitsIntrinsic::Insert => self.emit_insert_intrinsic(args)?,
+            BitsIntrinsic::ByteSwap => self.emit_byte_swap_intrinsic(args)?,
+            BitsIntrinsic::Reverse => self.emit_reverse_intrinsic(args)?,
+            BitsIntrinsic::CountOnes
+            | BitsIntrinsic::LeadingZeros
+            | BitsIntrinsic::TrailingZeros => self.emit_bit_count_intrinsic(operation, args)?,
+        }
+        Ok(())
+    }
+
+    fn emit_extract_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "bits.extract")?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let width = require_unsigned_bit_width(&ty)?;
+        let offset = self.intrinsic_constant(args, 1, "bit-range offset")?;
+        let field_width = self.intrinsic_constant(args, 2, "bit-range width")?;
+        let (offset, field_width) = self.validate_bit_range(offset, field_width, width)?;
+        self.emit_expr(&args[0], &ty)?;
+        self.mask_d0(width);
+        let suffix = if width == 1 { "b" } else { "l" };
+        if offset != 0 {
+            self.emit_immediate_shift("lsr", suffix, offset, "d0");
+        }
+        self.line(&format!("    andi.l #${:X},d0", (1_u32 << field_width) - 1));
+        self.mask_d0(width);
+        Ok(())
+    }
+
+    fn emit_insert_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 4, "bits.insert")?;
+        let base_ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let value_ty = self.model.resolved_type(&self.expr_type(&args[1])?)?;
+        if base_ty != value_ty {
+            return Err(Diagnostic::new(
+                "bits.insert operands must have the same type",
+            ));
+        }
+        let width = require_unsigned_bit_width(&base_ty)?;
+        let offset = self.intrinsic_constant(args, 2, "bit-range offset")?;
+        let field_width = self.intrinsic_constant(args, 3, "bit-range width")?;
+        let (offset, field_width) = self.validate_bit_range(offset, field_width, width)?;
+        self.emit_expr(&args[0], &base_ty)?;
+        self.line("    move.l d0,-(sp)");
+        self.emit_expr(&args[1], &value_ty)?;
+        self.mask_d0(width);
+        self.line(&format!("    andi.l #${:X},d0", (1_u32 << field_width) - 1));
+        if offset != 0 {
+            self.emit_immediate_shift("lsl", "l", offset, "d0");
+        }
+        self.line("    move.l d0,d1");
+        self.line("    move.l (sp)+,d0");
+        let field_mask = ((1_u32 << field_width) - 1) << offset;
+        self.line(&format!(
+            "    andi.l #${:X},d0",
+            (!field_mask) & width_mask(width)
+        ));
+        self.line("    or.l d1,d0");
+        self.mask_d0(width);
+        Ok(())
+    }
+
+    fn emit_byte_swap_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 1, "bits.byte_swap")?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let width = scalar_width(&ty)?;
+        if !matches!(width, 2 | 3)
+            || !matches!(ty, Type::Named(ref name) if name == "u16" || name == "u24")
+        {
+            return Err(Diagnostic::new("bits.byte_swap requires u16 or u24"));
+        }
+        self.emit_expr(&args[0], &ty)?;
+        if width == 2 {
+            self.line("    ror.w #8,d0");
+        } else {
+            self.line("    move.l d0,d1");
+            self.line("    move.l d0,d2");
+            self.line("    andi.l #$FF,d0");
+            self.emit_immediate_shift("lsl", "l", 16, "d0");
+            self.line("    andi.l #$FF0000,d1");
+            self.emit_immediate_shift("lsr", "l", 16, "d1");
+            self.line("    andi.l #$FF00,d2");
+            self.line("    or.l d1,d0");
+            self.line("    or.l d2,d0");
+        }
+        self.mask_d0(width);
+        Ok(())
+    }
+
+    fn emit_reverse_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 1, "bits.reverse")?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let width = require_unsigned_bit_width(&ty)?;
+        self.emit_expr(&args[0], &ty)?;
+        self.mask_d0(width);
+        self.line("    move.l d0,d1");
+        self.line("    moveq #0,d2");
+        self.line(&format!("    moveq #{},d3", u32::from(width) * 8));
+        let loop_label = self.next_label("intrinsic_reverse_loop");
+        let done = self.next_label("intrinsic_reverse_done");
+        self.line(&format!("{loop_label}:"));
+        self.line("    lsr.l #1,d1");
+        self.line("    roxl.l #1,d2");
+        self.line("    subq.l #1,d3");
+        self.line(&format!("    bne {loop_label}"));
+        self.line(&format!("{done}:"));
+        self.line("    move.l d2,d0");
+        self.mask_d0(width);
+        Ok(())
+    }
+
+    fn emit_bit_count_intrinsic(
+        &mut self,
+        operation: BitsIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 1, "bit count")?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let width = require_unsigned_bit_width(&ty)?;
+        self.emit_expr(&args[0], &ty)?;
+        self.mask_d0(width);
+        let bits = u32::from(width) * 8;
+        self.line("    moveq #0,d1");
+        match operation {
+            BitsIntrinsic::CountOnes => {
+                self.line(&format!("    moveq #{bits},d2"));
+                let loop_label = self.next_label("intrinsic_ones_loop");
+                let skip = self.next_label("intrinsic_ones_skip");
+                self.line(&format!("{loop_label}:"));
+                self.line("    lsr.l #1,d0");
+                self.line(&format!("    bcc {skip}"));
+                self.line("    addq.l #1,d1");
+                self.line(&format!("{skip}:"));
+                self.line("    subq.l #1,d2");
+                self.line(&format!("    bne {loop_label}"));
+            }
+            BitsIntrinsic::LeadingZeros => {
+                self.line(&format!("    moveq #{bits},d2"));
+                let loop_label = self.next_label("intrinsic_lz_loop");
+                let found = self.next_label("intrinsic_lz_found");
+                let done = self.next_label("intrinsic_lz_done");
+                self.line(&format!("{loop_label}:"));
+                self.line("    lsl.l #1,d0");
+                self.line(&format!("    bcs {found}"));
+                self.line("    addq.l #1,d1");
+                self.line("    subq.l #1,d2");
+                self.line(&format!("    bne {loop_label}"));
+                self.line(&format!("    bra {done}"));
+                self.line(&format!("{found}:"));
+                self.line(&format!("{done}:"));
+            }
+            BitsIntrinsic::TrailingZeros => {
+                self.line(&format!("    moveq #{bits},d2"));
+                let loop_label = self.next_label("intrinsic_tz_loop");
+                let found = self.next_label("intrinsic_tz_found");
+                self.line(&format!("{loop_label}:"));
+                self.line("    lsr.l #1,d0");
+                self.line(&format!("    bcs {found}"));
+                self.line("    addq.l #1,d1");
+                self.line("    subq.l #1,d2");
+                self.line(&format!("    bne {loop_label}"));
+                self.line(&format!("{found}:"));
+            }
+            _ => unreachable!(),
+        }
+        self.line("    move.l d1,d0");
+        self.mask_d0(1);
+        Ok(())
+    }
+
+    fn emit_int_intrinsic(
+        &mut self,
+        operation: IntIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            IntIntrinsic::WideningMul => self.emit_widening_mul_intrinsic(args),
+            IntIntrinsic::MulHigh => {
+                self.emit_full_mul_intrinsic(args)?;
+                let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+                self.line("    move.l d1,d0");
+                self.mask_d0(scalar_width(&ty)?);
+                Ok(())
+            }
+            IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => {
+                self.emit_saturating_intrinsic(operation, args)
+            }
+            IntIntrinsic::Divmod
+            | IntIntrinsic::AddCarry
+            | IntIntrinsic::SubBorrow
+            | IntIntrinsic::FullMul => Err(Diagnostic::new(
+                "two-result integer intrinsic requires a two-result binding",
+            )),
+        }
+    }
+
+    fn emit_widening_mul_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "int.widening_mul")?;
+        let left_ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let right_ty = self.model.resolved_type(&self.expr_type(&args[1])?)?;
+        let result_ty = intrinsic_result_type(
+            IntrinsicOperation::Int(IntIntrinsic::WideningMul),
+            args,
+            |arg| self.expr_type(arg),
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Diagnostic::new("missing widening multiply result type"))?;
+        self.emit_expr(&args[0], &left_ty)?;
+        self.line("    move.l d0,-(sp)");
+        self.emit_expr(&args[1], &right_ty)?;
+        self.line("    move.l d0,d2");
+        self.line("    move.l (sp)+,d0");
+        let left_width = scalar_width(&left_ty)?;
+        let right_width = scalar_width(&right_ty)?;
+        if left_width <= 2 && right_width <= 2 {
+            if type_is_signed(&left_ty) {
+                self.line("    ext.w d0");
+                self.line("    ext.w d2");
+                self.line("    muls.w d2,d0");
+            } else {
+                self.mask_register("d0", left_width);
+                self.mask_register("d2", right_width);
+                self.line("    mulu.w d2,d0");
+            }
+            self.mask_d0(scalar_width(&result_ty)?);
+        } else {
+            if type_is_signed(&left_ty) {
+                self.extend_signed_to_long(&left_ty)?;
+                self.extend_register_signed("d2", &right_ty)?;
+            } else {
+                self.mask_register("d0", left_width);
+                self.mask_register("d2", right_width);
+            }
+            self.emit_wide_multiply(&result_ty)?;
+        }
+        Ok(())
+    }
+
+    fn emit_full_mul_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "int.full_mul")?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let other = self.model.resolved_type(&self.expr_type(&args[1])?)?;
+        if ty != other {
+            return Err(Diagnostic::new(
+                "int.full_mul operands must have the same type",
+            ));
+        }
+        let width = scalar_width(&ty)?;
+        self.emit_expr(&args[0], &ty)?;
+        self.line("    move.l d0,-(sp)");
+        self.emit_expr(&args[1], &ty)?;
+        self.line("    move.l d0,d2");
+        self.line("    move.l (sp)+,d0");
+        if width == 3 {
+            self.emit_full_mul_24(&ty)?;
+            return Ok(());
+        }
+        if width > 2 {
+            return Err(Diagnostic::new(
+                "M68k full_mul and mul_high support at most 24-bit operands",
+            ));
+        }
+        if type_is_signed(&ty) {
+            self.line("    ext.w d0");
+            self.line("    ext.w d2");
+            self.line("    muls.w d2,d0");
+        } else {
+            self.mask_d0(width);
+            self.mask_register("d2", width);
+            self.line("    mulu.w d2,d0");
+        }
+        let shift = u32::from(width) * 8;
+        self.line(&format!("    move.l d0,d1"));
+        if type_is_signed(&ty) {
+            self.emit_immediate_shift("asr", "l", shift, "d1");
+        } else {
+            self.emit_immediate_shift("lsr", "l", shift, "d1");
+        }
+        self.mask_d0(width);
+        self.mask_register("d1", width);
+        Ok(())
+    }
+
+    fn emit_full_mul_24(&mut self, ty: &Type) -> Result<(), Diagnostic> {
+        let scratch = self.intrinsic_scratch.address;
+        self.mask_d0(3);
+        self.mask_register("d2", 3);
+        self.line(&format!("    move.b d0,${:06X}", scratch + 2));
+        self.line("    move.l d0,d4");
+        self.line("    lsr.l #8,d4");
+        self.line(&format!("    move.b d4,${:06X}", scratch + 1));
+        self.line("    lsr.l #8,d4");
+        self.line(&format!("    move.b d4,${:06X}", scratch));
+        self.line(&format!("    move.b d2,${:06X}", scratch + 5));
+        self.line("    move.l d2,d4");
+        self.line("    lsr.l #8,d4");
+        self.line(&format!("    move.b d4,${:06X}", scratch + 4));
+        self.line("    lsr.l #8,d4");
+        self.line(&format!("    move.b d4,${:06X}", scratch + 3));
+        for offset in 0..6 {
+            self.line(&format!("    clr.b ${:06X}", scratch + 6 + offset));
+        }
+        self.line("    moveq #0,d6");
+        let sign = self.next_label("intrinsic_mul24_positive");
+        if type_is_signed(ty) {
+            self.line("    moveq #0,d5");
+            self.line("    tst.l d0");
+            self.line(&format!("    bpl {sign}"));
+            self.line("    neg.l d0");
+            self.line("    andi.l #$FFFFFF,d0");
+            self.line("    moveq #1,d5");
+            self.line(&format!("{sign}:"));
+            let right_positive = self.next_label("intrinsic_mul24_right_positive");
+            self.line("    tst.l d2");
+            self.line(&format!("    bpl {right_positive}"));
+            self.line("    neg.l d2");
+            self.line("    andi.l #$FFFFFF,d2");
+            self.line("    eori.b #1,d5");
+            self.line(&format!("{right_positive}:"));
+            self.line(&format!("    move.b d0,${:06X}", scratch + 2));
+            self.line("    move.l d0,d4");
+            self.line("    lsr.l #8,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch + 1));
+            self.line("    lsr.l #8,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch));
+            self.line(&format!("    move.b d2,${:06X}", scratch + 5));
+            self.line("    move.l d2,d4");
+            self.line("    lsr.l #8,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch + 4));
+            self.line("    lsr.l #8,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch + 3));
+        }
+        self.line(&format!("    moveq #24,d3"));
+        let loop_label = self.next_label("intrinsic_mul24_loop");
+        let skip = self.next_label("intrinsic_mul24_skip");
+        let done = self.next_label("intrinsic_mul24_done");
+        self.line(&format!("{loop_label}:"));
+        self.line(&format!("    btst #0,${:06X}", scratch + 3));
+        self.line(&format!("    beq {skip}"));
+        self.line(&format!("    move.b ${:06X},d4", scratch + 6));
+        self.line(&format!("    add.b ${:06X},d4", scratch));
+        self.line(&format!("    move.b d4,${:06X}", scratch + 6));
+        for offset in 1..3 {
+            self.line(&format!("    move.b ${:06X},d4", scratch + 6 + offset));
+            self.line(&format!("    addx.b ${:06X},d4", scratch + offset));
+            self.line(&format!("    move.b d4,${:06X}", scratch + 6 + offset));
+        }
+        for offset in 3..6 {
+            self.line(&format!("    move.b ${:06X},d4", scratch + 6 + offset));
+            self.line("    addx.b d6,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch + 6 + offset));
+        }
+        self.line(&format!("{skip}:"));
+        self.line(&format!("    move.b ${:06X},d4", scratch));
+        self.line("    lsl.b #1,d4");
+        self.line(&format!("    move.b d4,${:06X}", scratch));
+        for offset in 1..3 {
+            self.line(&format!("    move.b ${:06X},d4", scratch + offset));
+            self.line("    roxl.b #1,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch + offset));
+        }
+        self.line(&format!("    move.b ${:06X},d4", scratch + 5));
+        self.line("    lsr.b #1,d4");
+        self.line(&format!("    move.b d4,${:06X}", scratch + 5));
+        for offset in (3..5).rev() {
+            self.line(&format!("    move.b ${:06X},d4", scratch + offset));
+            self.line("    roxr.b #1,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch + offset));
+        }
+        self.line("    subq.l #1,d3");
+        self.line(&format!("    bne {loop_label}"));
+        self.line(&format!("{done}:"));
+        if type_is_signed(ty) {
+            let positive = self.next_label("intrinsic_mul24_result_positive");
+            self.line(&format!("    tst.b d5"));
+            self.line(&format!("    beq {positive}"));
+            for offset in 0..6 {
+                self.line(&format!("    not.b ${:06X}", scratch + 6 + offset));
+            }
+            self.line(&format!("    move.b ${:06X},d4", scratch + 6));
+            self.line("    addq.b #1,d4");
+            self.line(&format!("    move.b d4,${:06X}", scratch + 6));
+            self.line("    moveq #0,d6");
+            for offset in 1..6 {
+                self.line(&format!("    move.b ${:06X},d4", scratch + 6 + offset));
+                self.line("    addx.b d6,d4");
+                self.line(&format!("    move.b d4,${:06X}", scratch + 6 + offset));
+            }
+            self.line(&format!("{positive}:"));
+        }
+        self.load_little_24(scratch + 6, "d0");
+        self.load_little_24(scratch + 9, "d1");
+        Ok(())
+    }
+
+    fn emit_saturating_intrinsic(
+        &mut self,
+        operation: IntIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "saturating arithmetic")?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let other = self.model.resolved_type(&self.expr_type(&args[1])?)?;
+        if ty != other
+            || !matches!(ty, Type::Named(ref name) if name.starts_with('u') || name.starts_with('i'))
+        {
+            return Err(Diagnostic::new(
+                "saturating operands must have the same integer type",
+            ));
+        }
+        let width = scalar_width(&ty)?;
+        let suffix = size_suffix(&ty)?;
+        self.emit_expr(&args[0], &ty)?;
+        self.line("    move.l d0,d3");
+        self.line("    move.l d0,-(sp)");
+        self.emit_expr(&args[1], &ty)?;
+        self.line("    move.l d0,d2");
+        self.line("    move.l (sp)+,d0");
+        if width == 3 {
+            return self.emit_saturating_24(operation, &ty);
+        }
+        if operation == IntIntrinsic::SaturatingAdd {
+            self.line(&format!("    add.{suffix} d2,d0"));
+        } else {
+            self.line(&format!("    sub.{suffix} d2,d0"));
+        }
+        let done = self.next_label("intrinsic_sat_done");
+        if type_is_signed(&ty) {
+            let negative = self.next_label("intrinsic_sat_negative");
+            self.line(&format!("    bvc {done}"));
+            self.line(&format!("    tst.{suffix} d3"));
+            self.line(&format!("    bmi {negative}"));
+            self.load_constant((1_i64 << (u32::from(width) * 8 - 1)) - 1, &ty)?;
+            self.line(&format!("    bra {done}"));
+            self.line(&format!("{negative}:"));
+            self.load_constant(1_i64 << (u32::from(width) * 8 - 1), &ty)?;
+        } else if operation == IntIntrinsic::SaturatingAdd {
+            let overflow = self.next_label("intrinsic_sat_overflow");
+            self.line(&format!("    bcs {overflow}"));
+            self.line(&format!("    bra {done}"));
+            self.line(&format!("{overflow}:"));
+            self.load_constant(i64::from(width_mask(width)), &ty)?;
+        } else {
+            let underflow = self.next_label("intrinsic_sat_underflow");
+            self.line(&format!("    bcc {done}"));
+            self.line(&format!("{underflow}:"));
+            self.line("    moveq #0,d0");
+        }
+        self.line(&format!("{done}:"));
+        self.mask_d0(width);
+        Ok(())
+    }
+
+    fn emit_saturating_24(&mut self, operation: IntIntrinsic, ty: &Type) -> Result<(), Diagnostic> {
+        let done = self.next_label("intrinsic_sat24_done");
+        let clamp_min = self.next_label("intrinsic_sat24_min");
+        let clamp_max = self.next_label("intrinsic_sat24_max");
+        if operation == IntIntrinsic::SaturatingAdd {
+            self.line("    add.l d2,d0");
+        } else {
+            self.line("    sub.l d2,d0");
+        }
+        if !type_is_signed(ty) {
+            self.line("    move.l d0,d4");
+            self.line("    andi.l #$FF000000,d4");
+            if operation == IntIntrinsic::SaturatingAdd {
+                self.line(&format!("    beq {done}"));
+                self.load_constant(0xFF_FFFF, ty)?;
+            } else {
+                self.line(&format!("    beq {done}"));
+                self.moveq_zero();
+            }
+            self.line(&format!("    bra {done}"));
+            self.line(&format!("{done}:"));
+            self.mask_d0(3);
+            return Ok(());
+        }
+        self.line("    andi.l #$FFFFFF,d0");
+        if operation == IntIntrinsic::SaturatingAdd {
+            let left_negative = self.next_label("intrinsic_sat24_left_negative");
+            self.line("    btst #23,d3");
+            self.line(&format!("    bne {left_negative}"));
+            self.line("    btst #23,d2");
+            self.line(&format!("    bne {done}"));
+            self.line("    btst #23,d0");
+            self.line(&format!("    beq {done}"));
+            self.line(&format!("    bra {clamp_max}"));
+            self.line(&format!("{left_negative}:"));
+            self.line("    btst #23,d2");
+            self.line(&format!("    beq {done}"));
+            self.line("    btst #23,d0");
+            self.line(&format!("    bne {done}"));
+            self.line(&format!("    bra {clamp_min}"));
+        } else {
+            let left_negative = self.next_label("intrinsic_sat24_left_negative");
+            self.line("    btst #23,d3");
+            self.line(&format!("    bne {left_negative}"));
+            self.line("    btst #23,d2");
+            self.line(&format!("    beq {done}"));
+            self.line("    btst #23,d0");
+            self.line(&format!("    beq {done}"));
+            self.line(&format!("    bra {clamp_max}"));
+            self.line(&format!("{left_negative}:"));
+            self.line("    btst #23,d2");
+            self.line(&format!("    bne {done}"));
+            self.line("    btst #23,d0");
+            self.line(&format!("    bne {done}"));
+            self.line(&format!("    bra {clamp_min}"));
+        }
+        self.line(&format!("{clamp_max}:"));
+        self.load_constant(0x7F_FFFF, ty)?;
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{clamp_min}:"));
+        self.load_constant(0x80_0000, ty)?;
+        self.line(&format!("{done}:"));
+        self.mask_d0(3);
+        Ok(())
+    }
+
+    fn moveq_zero(&mut self) {
+        self.line("    moveq #0,d0");
+    }
+
+    fn emit_mem_intrinsic(
+        &mut self,
+        operation: MemIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            MemIntrinsic::Peek8 => self.emit_peek8(args),
+            MemIntrinsic::Poke8 => self.emit_poke8(args),
+            MemIntrinsic::CopyNonoverlapping => self.emit_copy_intrinsic(args, false),
+            MemIntrinsic::Move => self.emit_copy_intrinsic(args, true),
+            MemIntrinsic::Fill => self.emit_fill_intrinsic(args),
+            MemIntrinsic::FindByte => self.emit_find_byte_intrinsic(args),
+            MemIntrinsic::Compare => self.emit_compare_intrinsic(args),
+            MemIntrinsic::LoadLe16 => self.emit_endian_load(args, false, 2),
+            MemIntrinsic::LoadLe24 => self.emit_endian_load(args, false, 3),
+            MemIntrinsic::LoadBe16 => self.emit_endian_load(args, true, 2),
+            MemIntrinsic::LoadBe24 => self.emit_endian_load(args, true, 3),
+            MemIntrinsic::StoreLe16 => self.emit_endian_store(args, false, 2),
+            MemIntrinsic::StoreLe24 => self.emit_endian_store(args, false, 3),
+            MemIntrinsic::StoreBe16 => self.emit_endian_store(args, true, 2),
+            MemIntrinsic::StoreBe24 => self.emit_endian_store(args, true, 3),
+        }
+    }
+
+    fn emit_peek8(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 1, "mem.peek8")?;
+        self.require_u8_pointer(&args[0])?;
+        self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
+        self.line("    move.l d0,a0");
+        self.line("    move.b (a0),d0");
+        Ok(())
+    }
+
+    fn emit_poke8(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "mem.poke8")?;
+        self.require_u8_pointer(&args[0])?;
+        self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
+        self.line("    move.l d0,a0");
+        self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
+        self.line("    move.b d0,(a0)");
+        self.line("    moveq #0,d0");
+        Ok(())
+    }
+
+    fn emit_copy_intrinsic(&mut self, args: &[Expr], overlap_safe: bool) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "memory copy")?;
+        self.reject_known_volatile_memory(args, &[0, 1])?;
+        self.require_u8_pointer(&args[0])?;
+        self.require_u8_pointer(&args[1])?;
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        self.line("    move.l d0,a0");
+        self.emit_expr(&args[1], &pointer)?;
+        self.line("    move.l d0,a1");
+        self.emit_expr(&args[2], &Type::Named("u24".to_owned()))?;
+        self.line("    move.l d0,d2");
+        let forward = self.next_label("intrinsic_copy_forward");
+        let backward = self.next_label("intrinsic_copy_backward");
+        let loop_label = self.next_label("intrinsic_copy_loop");
+        let done = self.next_label("intrinsic_copy_done");
+        if overlap_safe {
+            self.line("    move.l a0,d3");
+            self.line("    cmp.l a1,d3");
+            self.line(&format!("    bls {forward}"));
+            self.line(&format!("    bra {backward}"));
+        }
+        self.line(&format!("{forward}:"));
+        self.line(&format!("{loop_label}:"));
+        self.line("    tst.l d2");
+        self.line(&format!("    beq {done}"));
+        self.line("    move.b (a1)+,d0");
+        self.line("    move.b d0,(a0)+");
+        self.line("    subq.l #1,d2");
+        self.line(&format!("    bra {loop_label}"));
+        if overlap_safe {
+            self.line(&format!("{backward}:"));
+            self.line("    adda.l d2,a0");
+            self.line("    adda.l d2,a1");
+            self.line(&format!("{loop_label}_back:"));
+            self.line("    tst.l d2");
+            self.line(&format!("    beq {done}"));
+            self.line("    move.b -(a1),d0");
+            self.line("    move.b d0,-(a0)");
+            self.line("    subq.l #1,d2");
+            self.line(&format!("    bra {loop_label}_back"));
+        }
+        self.line(&format!("{done}:"));
+        self.line("    moveq #0,d0");
+        Ok(())
+    }
+
+    fn emit_fill_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "mem.fill")?;
+        self.reject_known_volatile_memory(args, &[0])?;
+        self.require_u8_pointer(&args[0])?;
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        self.line("    move.l d0,a0");
+        self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
+        self.line("    move.b d0,d1");
+        self.emit_expr(&args[2], &Type::Named("u24".to_owned()))?;
+        self.line("    move.l d0,d2");
+        let loop_label = self.next_label("intrinsic_fill_loop");
+        let done = self.next_label("intrinsic_fill_done");
+        self.line(&format!("{loop_label}:"));
+        self.line("    tst.l d2");
+        self.line(&format!("    beq {done}"));
+        self.line("    move.b d1,(a0)+");
+        self.line("    subq.l #1,d2");
+        self.line(&format!("    bra {loop_label}"));
+        self.line(&format!("{done}:"));
+        self.line("    moveq #0,d0");
+        Ok(())
+    }
+
+    fn emit_find_byte_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "mem.find_byte")?;
+        self.reject_known_volatile_memory(args, &[0])?;
+        self.require_u8_pointer(&args[0])?;
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        self.line("    move.l d0,a0");
+        self.emit_expr(&args[1], &Type::Named("u24".to_owned()))?;
+        self.line("    move.l d0,d2");
+        self.emit_expr(&args[2], &Type::Named("u8".to_owned()))?;
+        self.line("    move.b d0,d1");
+        let loop_label = self.next_label("intrinsic_find_loop");
+        let found = self.next_label("intrinsic_find_found");
+        let not_found = self.next_label("intrinsic_find_not_found");
+        self.line(&format!("{loop_label}:"));
+        self.line("    tst.l d2");
+        self.line(&format!("    beq {not_found}"));
+        self.line("    cmp.b (a0),d1");
+        self.line(&format!("    beq {found}"));
+        self.line("    addq.l #1,a0");
+        self.line("    subq.l #1,d2");
+        self.line(&format!("    bra {loop_label}"));
+        self.line(&format!("{found}:"));
+        self.line("    move.l a0,d0");
+        self.line("    moveq #1,d1");
+        let done = self.next_label("intrinsic_find_done");
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{not_found}:"));
+        self.line("    adda.l d2,a0");
+        self.line("    move.l a0,d0");
+        self.line("    moveq #0,d1");
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_compare_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "mem.compare")?;
+        self.reject_known_volatile_memory(args, &[0, 1])?;
+        self.require_u8_pointer(&args[0])?;
+        self.require_u8_pointer(&args[1])?;
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        self.line("    move.l d0,a0");
+        self.emit_expr(&args[1], &pointer)?;
+        self.line("    move.l d0,a1");
+        self.emit_expr(&args[2], &Type::Named("u24".to_owned()))?;
+        self.line("    move.l d0,d2");
+        let loop_label = self.next_label("intrinsic_compare_loop");
+        let less = self.next_label("intrinsic_compare_less");
+        let greater = self.next_label("intrinsic_compare_greater");
+        let equal = self.next_label("intrinsic_compare_equal");
+        let done = self.next_label("intrinsic_compare_done");
+        self.line(&format!("{loop_label}:"));
+        self.line("    tst.l d2");
+        self.line(&format!("    beq {equal}"));
+        self.line("    move.b (a0)+,d0");
+        self.line("    move.b (a1)+,d1");
+        self.line("    cmp.b d1,d0");
+        self.line(&format!("    bcs {less}"));
+        self.line(&format!("    bhi {greater}"));
+        self.line("    subq.l #1,d2");
+        self.line(&format!("    bra {loop_label}"));
+        self.line(&format!("{less}:"));
+        self.line("    moveq #-1,d0");
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{greater}:"));
+        self.line("    moveq #1,d0");
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{equal}:"));
+        self.line("    moveq #0,d0");
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_endian_load(
+        &mut self,
+        args: &[Expr],
+        big_endian: bool,
+        width: u8,
+    ) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 1, "endian load")?;
+        self.reject_known_volatile_memory(args, &[0])?;
+        self.require_u8_pointer(&args[0])?;
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        self.line("    move.l d0,a0");
+        self.line("    moveq #0,d0");
+        if big_endian {
+            for offset in 0..width {
+                self.line("    lsl.l #8,d0");
+                self.line(&format!("    move.b {offset}(a0),d0"));
+            }
+        } else {
+            self.line(&format!("    move.b {}(a0),d0", width - 1));
+            for offset in (0..width - 1).rev() {
+                self.line("    lsl.l #8,d0");
+                self.line(&format!("    move.b {offset}(a0),d0"));
+            }
+        }
+        self.mask_d0(width);
+        Ok(())
+    }
+
+    fn emit_endian_store(
+        &mut self,
+        args: &[Expr],
+        big_endian: bool,
+        width: u8,
+    ) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "endian store")?;
+        self.reject_known_volatile_memory(args, &[0])?;
+        self.require_u8_pointer(&args[0])?;
+        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        self.emit_expr(&args[0], &pointer)?;
+        self.line("    move.l d0,a0");
+        self.emit_expr(&args[1], &Type::Named(format!("u{}", width * 8)))?;
+        self.mask_d0(width);
+        self.line("    move.l d0,d1");
+        if big_endian {
+            for offset in 0..width {
+                if offset != 0 {
+                    self.line("    lsr.l #8,d1");
+                }
+                self.line(&format!("    move.b d1,{}(a0)", width - 1 - offset));
+            }
+        } else {
+            for offset in 0..width {
+                if offset != 0 {
+                    self.line("    lsr.l #8,d1");
+                }
+                self.line(&format!("    move.b d1,{offset}(a0)"));
+            }
+        }
+        self.line("    moveq #0,d0");
+        Ok(())
+    }
+
     fn emit_call(
         &mut self,
         path: &[String],
@@ -1255,29 +2232,8 @@ impl Emitter {
         expected: Option<&Type>,
     ) -> Result<(), Diagnostic> {
         let name = path.join(".");
-        match name.as_str() {
-            "mem.peek8" | "ezra.mem.peek8" => {
-                self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
-                self.line("    move.l d0,a0");
-                self.line("    move.b (a0),d0");
-                return Ok(());
-            }
-            "mem.poke8" | "ezra.mem.poke8" => {
-                self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
-                self.line("    move.l d0,a0");
-                self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
-                self.line("    move.b d0,(a0)");
-                return Ok(());
-            }
-            "mem.memcpy" | "ezra.mem.memcpy" => {
-                self.emit_memcpy(args)?;
-                return Ok(());
-            }
-            "mem.memset" | "ezra.mem.memset" => {
-                self.emit_memset(args)?;
-                return Ok(());
-            }
-            _ => {}
+        if let Some(operation) = intrinsic_operation(path) {
+            return self.emit_intrinsic(operation, args, expected);
         }
         let signature = self
             .model
@@ -1289,6 +2245,11 @@ impl Emitter {
             })
             .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if signature.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{name}` requires a two-result binding"
+            )));
+        }
         if signature.params.len() != args.len() {
             return Err(Diagnostic::new(format!(
                 "function `{name}` expects {} arguments, got {}",
@@ -1317,18 +2278,18 @@ impl Emitter {
         for storage in &saved {
             for offset in 0..storage.size {
                 self.line(&format!(
-                    "    move.b ${:06X},-(sp)",
+                    "    move.b ${:06X}.l,-(sp)",
                     storage.address + offset
                 ));
             }
         }
-        self.line(&format!("    jsr {}", function_label(&name)));
+        self.line(&format!("    jsr ({}).l", function_label(&name)));
         if !saved.is_empty() {
             self.line("    move.l d0,d6");
             for storage in saved.iter().rev() {
                 for offset in (0..storage.size).rev() {
                     self.line(&format!(
-                        "    move.b (sp)+,${:06X}",
+                        "    move.b (sp)+,${:06X}.l",
                         storage.address + offset
                     ));
                 }
@@ -1345,52 +2306,390 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_memcpy(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
-        if args.len() != 3 {
-            return Err(Diagnostic::new("mem.memcpy requires three arguments"));
-        }
-        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
-        self.emit_expr(&args[0], &pointer)?;
-        self.line("    move.l d0,a0");
-        self.emit_expr(&args[1], &pointer)?;
-        self.line("    move.l d0,a1");
-        self.emit_expr(&args[2], &Type::Named("u24".to_owned()))?;
-        self.line("    move.l d0,d2");
-        let loop_label = self.next_label("memcpy_loop");
-        let done = self.next_label("memcpy_done");
-        self.line(&format!("{loop_label}:"));
-        self.line("    tst.l d2");
-        self.line(&format!("    beq {done}"));
-        self.line("    move.b (a1)+,d0");
-        self.line("    move.b d0,(a0)+");
-        self.line("    subq.l #1,d2");
-        self.line(&format!("    bra {loop_label}"));
-        self.line(&format!("{done}:"));
-        self.line("    moveq #0,d0");
+    fn emit_return_two(&mut self, first: &Expr, second: &Expr) -> Result<(), Diagnostic> {
+        let first_ty = self
+            .return_types
+            .last()
+            .and_then(Clone::clone)
+            .ok_or_else(|| {
+                Diagnostic::new("function cannot return two values without a first return type")
+            })?;
+        let second_ty = self
+            .second_return_types
+            .last()
+            .and_then(Clone::clone)
+            .ok_or_else(|| Diagnostic::new("function cannot return two values"))?;
+        self.require_scalar(&first_ty)?;
+        self.require_scalar(&second_ty)?;
+        let first_storage =
+            allocate_m68k_aligned(&mut self.model, u32::from(scalar_width(&first_ty)?))?;
+        let second_storage =
+            allocate_m68k_aligned(&mut self.model, u32::from(scalar_width(&second_ty)?))?;
+        self.emit_expr(first, &first_ty)?;
+        self.store_d0(first_storage, &first_ty)?;
+        self.emit_expr(second, &second_ty)?;
+        self.store_d0(second_storage, &second_ty)?;
+        self.load_d0(first_storage, &first_ty)?;
+        self.load_d1(second_storage, &second_ty)?;
+        let label = self
+            .return_labels
+            .last()
+            .expect("function return label")
+            .clone();
+        self.line(&format!("    bra {label}"));
         Ok(())
     }
 
-    fn emit_memset(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
-        if args.len() != 3 {
-            return Err(Diagnostic::new("mem.memset requires three arguments"));
+    fn emit_two_result_call(
+        &mut self,
+        path: &[String],
+        args: &[Expr],
+        first: &Binding,
+        second: &Binding,
+    ) -> Result<(), Diagnostic> {
+        if let Some(operation) = intrinsic_operation(path) {
+            self.emit_intrinsic_pair(operation, args, first, second)?;
+            return Ok(());
         }
-        let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
-        self.emit_expr(&args[0], &pointer)?;
-        self.line("    move.l d0,a0");
-        self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
-        self.line("    move.b d0,d1");
-        self.emit_expr(&args[2], &Type::Named("u24".to_owned()))?;
+        let name = path.join(".");
+        let signature = self
+            .model
+            .functions
+            .get(&name)
+            .or_else(|| {
+                path.last()
+                    .and_then(|short| self.model.functions.get(short))
+            })
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        let first_return_type = signature.return_type.clone().ok_or_else(|| {
+            Diagnostic::new(format!("function `{name}` does not return two values"))
+        })?;
+        let second_return_type = signature.second_return_type.clone().ok_or_else(|| {
+            Diagnostic::new(format!("function `{name}` does not return two values"))
+        })?;
+        self.require_scalar(&first_return_type)?;
+        self.require_scalar(&second_return_type)?;
+        self.require_scalar(&first.ty)?;
+        self.require_scalar(&second.ty)?;
+        if signature.params.len() != args.len() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` expects {} arguments, got {}",
+                signature.params.len(),
+                args.len()
+            )));
+        }
+        for ((arg, ty), slot) in args
+            .iter()
+            .zip(&signature.params)
+            .zip(signature.argument_slots)
+        {
+            let ty = self.model.resolved_type(ty)?;
+            self.emit_expr(arg, &ty)?;
+            self.store_d0(slot, &ty)?;
+        }
+        let saved = self
+            .function_ram_bases
+            .last()
+            .map(|base| Storage {
+                address: *base,
+                size: self.model.next_ram_address() - *base,
+            })
+            .map(|live| self.live_storage_segments(live, args))
+            .unwrap_or_default();
+        for storage in &saved {
+            for offset in 0..storage.size {
+                self.line(&format!(
+                    "    move.b ${:06X}.l,-(sp)",
+                    storage.address + offset
+                ));
+            }
+        }
+        self.line(&format!("    jsr ({}).l", function_label(&name)));
+        if !saved.is_empty() {
+            self.line("    move.l d0,d6");
+            for storage in saved.iter().rev() {
+                for offset in (0..storage.size).rev() {
+                    self.line(&format!(
+                        "    move.b (sp)+,${:06X}.l",
+                        storage.address + offset
+                    ));
+                }
+            }
+            self.line("    move.l d6,d0");
+        }
+        self.store_binding_d1(second)?;
+        self.store_binding_d0(first)?;
+        Ok(())
+    }
+
+    fn emit_intrinsic_pair(
+        &mut self,
+        operation: IntrinsicOperation,
+        args: &[Expr],
+        first: &Binding,
+        second: &Binding,
+    ) -> Result<(), Diagnostic> {
+        let result = intrinsic_result_type(operation, args, |arg| self.expr_type(arg))?;
+        if result.len() != 2 {
+            return Err(Diagnostic::new("intrinsic does not produce two results"));
+        }
+        let first_ty = self.model.resolved_type(&first.ty)?;
+        let second_ty = self.model.resolved_type(&second.ty)?;
+        if self.model.resolved_type(&result[0])? != first_ty
+            || self.model.resolved_type(&result[1])? != second_ty
+        {
+            return Err(Diagnostic::new(
+                "intrinsic result types do not match the two-result binding",
+            ));
+        }
+        match operation {
+            IntrinsicOperation::Int(IntIntrinsic::Divmod) => self.emit_divmod_intrinsic(args)?,
+            IntrinsicOperation::Int(IntIntrinsic::AddCarry) => {
+                self.emit_add_sub_carry_intrinsic(args, false)?
+            }
+            IntrinsicOperation::Int(IntIntrinsic::SubBorrow) => {
+                self.emit_add_sub_carry_intrinsic(args, true)?
+            }
+            IntrinsicOperation::Int(IntIntrinsic::FullMul) => self.emit_full_mul_intrinsic(args)?,
+            IntrinsicOperation::Mem(MemIntrinsic::FindByte) => {
+                self.emit_find_byte_intrinsic(args)?
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "intrinsic is not a supported paired operation",
+                ));
+            }
+        }
+        self.store_binding_d1(second)?;
+        self.store_binding_d0(first)?;
+        Ok(())
+    }
+
+    fn emit_divmod_intrinsic(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "int.divmod")?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let other = self.model.resolved_type(&self.expr_type(&args[1])?)?;
+        if ty != other
+            || !matches!(ty, Type::Named(ref name) if name.starts_with('u') || name.starts_with('i'))
+        {
+            return Err(Diagnostic::new(
+                "int.divmod operands must have the same integer type",
+            ));
+        }
+        let width = scalar_width(&ty)?;
+        self.emit_expr(&args[0], &ty)?;
+        self.line("    move.l d0,-(sp)");
+        self.emit_expr(&args[1], &ty)?;
         self.line("    move.l d0,d2");
-        let loop_label = self.next_label("memset_loop");
-        let done = self.next_label("memset_done");
-        self.line(&format!("{loop_label}:"));
+        self.line("    move.l (sp)+,d0");
+        if width <= 2 {
+            let zero = self.next_label("intrinsic_div_zero");
+            let done = self.next_label("intrinsic_div_done");
+            self.line("    tst.w d2");
+            self.line(&format!("    beq {zero}"));
+            if type_is_signed(&ty) {
+                self.extend_signed_to_long(&ty)?;
+                self.extend_register_signed("d2", &ty)?;
+                self.line("    divs.w d2,d0");
+            } else {
+                self.mask_d0(width);
+                self.mask_register("d2", width);
+                self.line("    divu.w d2,d0");
+            }
+            self.line("    move.l d0,d1");
+            self.line("    swap d1");
+            self.mask_d0(width);
+            self.mask_register("d1", width);
+            self.line(&format!("    bra {done}"));
+            self.line(&format!("{zero}:"));
+            self.line("    moveq #0,d0");
+            self.line("    moveq #0,d1");
+            self.line(&format!("{done}:"));
+            return Ok(());
+        }
+        self.mask_d0(width);
+        self.mask_register("d2", width);
+        self.emit_wide_divmod(&ty)
+    }
+
+    fn emit_wide_divmod(&mut self, ty: &Type) -> Result<(), Diagnostic> {
+        let signed = type_is_signed(ty);
+        let width = u32::from(scalar_width(ty)?) * 8;
+        let divisor_zero = self.next_label("intrinsic_div_wide_zero");
+        let loop_label = self.next_label("intrinsic_div_wide_loop");
+        let result_ready = self.next_label("intrinsic_div_wide_ready");
+        let positive_quotient = self.next_label("intrinsic_div_wide_q_positive");
+        let positive_remainder = self.next_label("intrinsic_div_wide_r_positive");
+        self.line("    moveq #0,d5");
+        if signed {
+            let left_positive = self.next_label("intrinsic_div_wide_left_positive");
+            let right_positive = self.next_label("intrinsic_div_wide_right_positive");
+            self.line("    tst.l d0");
+            self.line(&format!("    bpl {left_positive}"));
+            self.line("    neg.l d0");
+            self.line("    moveq #3,d5");
+            self.line(&format!("{left_positive}:"));
+            self.line("    tst.l d2");
+            self.line(&format!("    bpl {right_positive}"));
+            self.line("    neg.l d2");
+            self.line("    eori.b #1,d5");
+            self.line(&format!("{right_positive}:"));
+        }
         self.line("    tst.l d2");
-        self.line(&format!("    beq {done}"));
-        self.line("    move.b d1,(a0)+");
-        self.line("    subq.l #1,d2");
-        self.line(&format!("    bra {loop_label}"));
-        self.line(&format!("{done}:"));
+        self.line(&format!("    beq {divisor_zero}"));
+        self.line("    moveq #0,d1");
+        self.line(&format!("    moveq #{width},d4"));
+        self.line(&format!("{loop_label}:"));
+        self.line("    move.l d0,d6");
+        self.line("    rol.l #1,d6");
+        self.line("    andi.l #1,d6");
+        self.line("    move.l d1,d3");
+        self.line("    rol.l #1,d3");
+        self.line("    andi.l #1,d3");
+        self.line("    add.l d0,d0");
+        self.line("    add.l d1,d1");
+        self.line("    add.l d6,d1");
+        self.line("    move.l d1,d6");
+        self.line("    eori.l #$80000000,d6");
+        self.line("    move.l d2,d7");
+        self.line("    eori.l #$80000000,d7");
+        self.line("    cmp.l d7,d6");
+        self.line("    sge d6");
+        self.line("    andi.l #1,d6");
+        self.line("    or.l d3,d6");
+        self.line("    neg.l d6");
+        self.line("    move.l d2,d3");
+        self.line("    and.l d6,d3");
+        self.line("    sub.l d3,d1");
+        self.line("    andi.l #1,d6");
+        self.line("    add.l d6,d0");
+        self.line("    subq.w #1,d4");
+        self.line(&format!("    bne {loop_label}"));
+        self.line(&format!("    bra {result_ready}"));
+        self.line(&format!("{divisor_zero}:"));
         self.line("    moveq #0,d0");
+        self.line("    moveq #0,d1");
+        self.line(&format!("    bra {positive_quotient}"));
+        self.line(&format!("{result_ready}:"));
+        if signed {
+            self.line("    btst #0,d5");
+            self.line(&format!("    beq {positive_quotient}"));
+            self.line("    neg.l d0");
+            self.line(&format!("{positive_quotient}:"));
+            self.line("    btst #1,d5");
+            self.line(&format!("    beq {positive_remainder}"));
+            self.line("    neg.l d1");
+            self.line(&format!("{positive_remainder}:"));
+        } else {
+            self.line(&format!("{positive_quotient}:"));
+        }
+        self.mask_d0(scalar_width(ty)?);
+        self.mask_register("d1", scalar_width(ty)?);
+        Ok(())
+    }
+
+    fn emit_add_sub_carry_intrinsic(
+        &mut self,
+        args: &[Expr],
+        subtract: bool,
+    ) -> Result<(), Diagnostic> {
+        self.require_arg_count(
+            args,
+            3,
+            if subtract {
+                "int.sub_borrow"
+            } else {
+                "int.add_carry"
+            },
+        )?;
+        let ty = self.model.resolved_type(&self.expr_type(&args[0])?)?;
+        let other = self.model.resolved_type(&self.expr_type(&args[1])?)?;
+        if ty != other
+            || !matches!(ty, Type::Named(ref name) if name.starts_with('u') || name.starts_with('i'))
+        {
+            return Err(Diagnostic::new(
+                "carry/borrow operands must have the same integer type",
+            ));
+        }
+        let width = scalar_width(&ty)?;
+        let suffix = size_suffix(&ty)?;
+        self.emit_expr(&args[0], &ty)?;
+        self.line("    move.l d0,-(sp)");
+        self.emit_expr(&args[1], &ty)?;
+        self.line("    move.l d0,d2");
+        self.line("    move.l (sp)+,d0");
+        self.line("    move.l d0,-(sp)");
+        self.emit_expr(&args[2], &Type::Named("bool".to_owned()))?;
+        self.line("    move.l d0,d3");
+        self.line("    move.l (sp)+,d0");
+        if width == 3 {
+            self.mask_d0(width);
+            self.mask_register("d2", width);
+        }
+        return self.emit_add_sub_carry_core(suffix, width, subtract);
+    }
+
+    fn emit_add_sub_carry_core(
+        &mut self,
+        suffix: &str,
+        width: u8,
+        subtract: bool,
+    ) -> Result<(), Diagnostic> {
+        // d0 is the left operand, d2 the right operand, and d3 the carry/borrow input.
+        let set = self.next_label("intrinsic_carry_set");
+        let done = self.next_label("intrinsic_carry_done");
+        let no_initial = self.next_label("intrinsic_carry_no_initial");
+        self.line("    moveq #0,d1");
+        if width == 3 {
+            if subtract {
+                self.line("    sub.l d2,d0");
+            } else {
+                self.line("    add.l d2,d0");
+            }
+            self.line("    move.l d0,d4");
+            self.line("    andi.l #$FF000000,d4");
+            self.line(&format!("    beq {no_initial}"));
+            self.line("    moveq #1,d1");
+            self.line(&format!("{no_initial}:"));
+            self.line("    andi.l #$FFFFFF,d0");
+            self.line("    tst.b d3");
+            self.line(&format!("    beq {done}"));
+            if subtract {
+                self.line("    subq.l #1,d0");
+            } else {
+                self.line("    addq.l #1,d0");
+            }
+            self.line("    move.l d0,d4");
+            self.line("    andi.l #$FF000000,d4");
+            self.line(&format!("    beq {done}"));
+            self.line(&format!("    bra {set}"));
+            self.line(&format!("{set}:"));
+            self.line("    moveq #1,d1");
+            self.line(&format!("{done}:"));
+            self.mask_d0(width);
+            return Ok(());
+        }
+        if subtract {
+            self.line(&format!("    sub.{suffix} d2,d0"));
+        } else {
+            self.line(&format!("    add.{suffix} d2,d0"));
+        }
+        self.line(&format!("    bcc {no_initial}"));
+        self.line("    moveq #1,d1");
+        self.line(&format!("{no_initial}:"));
+        self.line("    tst.b d3");
+        self.line(&format!("    beq {done}"));
+        if subtract {
+            self.line(&format!("    subq.{suffix} #1,d0"));
+        } else {
+            self.line(&format!("    addq.{suffix} #1,d0"));
+        }
+        self.line(&format!("    bcc {done}"));
+        self.line(&format!("{set}:"));
+        self.line("    moveq #1,d1");
+        self.line(&format!("{done}:"));
+        self.mask_d0(width);
         Ok(())
     }
 
@@ -1752,13 +3051,20 @@ impl Emitter {
             Expr::AddressOfAccess(path) => Ok(Type::Ptr(Box::new(self.access_type(path)?))),
             Expr::AddressOf(name) => Ok(Type::Ptr(Box::new(self.binding(name)?.ty))),
             Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
-            Expr::Call { path, .. } => self
-                .model
-                .functions
-                .get(&path.join("."))
-                .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
-                .and_then(|signature| signature.return_type.clone())
-                .ok_or_else(|| Diagnostic::new("void function has no value")),
+            Expr::Call { path, args } => {
+                if let Some(operation) = intrinsic_operation(path) {
+                    return intrinsic_result_type(operation, args, |arg| self.expr_type(arg))?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| Diagnostic::new("intrinsic has no scalar result"));
+                }
+                self.model
+                    .functions
+                    .get(&path.join("."))
+                    .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
+                    .and_then(|signature| signature.return_type.clone())
+                    .ok_or_else(|| Diagnostic::new("void function has no value"))
+            }
             Expr::Unary {
                 op: UnaryOp::Not, ..
             } => Ok(Type::Named("bool".to_owned())),
@@ -1855,21 +3161,19 @@ impl Emitter {
     }
 
     fn load_d0(&mut self, storage: Storage, ty: &Type) -> Result<(), Diagnostic> {
+        self.line(&format!("    move.l #${:06X},d1", storage.address));
+        self.line("    move.l d1,a0");
         if scalar_width(ty)? == 3 {
             self.line("    moveq #0,d0");
-            self.line(&format!("    move.b ${:06X}.l,d0", storage.address));
+            self.line("    move.b (a0),d0");
             self.line("    lsl.l #8,d0");
-            self.line(&format!("    move.b ${:06X}.l,d0", storage.address + 1));
+            self.line("    move.b 1(a0),d0");
             self.line("    lsl.l #8,d0");
-            self.line(&format!("    move.b ${:06X}.l,d0", storage.address + 2));
+            self.line("    move.b 2(a0),d0");
             self.normalize_d0(ty)?;
             return Ok(());
         }
-        self.line(&format!(
-            "    move.{} ${:06X}.l,d0",
-            size_suffix(ty)?,
-            storage.address
-        ));
+        self.line(&format!("    move.{} (a0),d0", size_suffix(ty)?));
         Ok(())
     }
 
@@ -1921,6 +3225,215 @@ impl Emitter {
             storage.address
         ));
         Ok(())
+    }
+
+    fn load_d1(&mut self, storage: Storage, ty: &Type) -> Result<(), Diagnostic> {
+        self.line(&format!("    move.l #${:06X},d2", storage.address));
+        self.line("    move.l d2,a0");
+        if scalar_width(ty)? == 3 {
+            self.line("    moveq #0,d1");
+            self.line("    move.b (a0),d1");
+            self.line("    lsl.l #8,d1");
+            self.line("    move.b 1(a0),d1");
+            self.line("    lsl.l #8,d1");
+            self.line("    move.b 2(a0),d1");
+            if type_is_signed(ty) {
+                self.line("    andi.l #$FFFFFF,d1");
+                let positive = self.next_label("i24_second_positive");
+                self.line("    btst #23,d1");
+                self.line(&format!("    beq {positive}"));
+                self.line("    ori.l #$FF000000,d1");
+                self.line(&format!("{positive}:"));
+            }
+            return Ok(());
+        }
+        self.line(&format!("    move.{} (a0),d1", size_suffix(ty)?));
+        Ok(())
+    }
+
+    fn store_binding_d1(&mut self, binding: &Binding) -> Result<(), Diagnostic> {
+        match binding.location {
+            BindingLocation::Memory(storage) => self.store_d1(storage, &binding.ty),
+            BindingLocation::AddressRegister(register) => {
+                if !matches!(binding.ty, Type::Ptr(_)) {
+                    return Err(Diagnostic::new(format!(
+                        "non-pointer local was allocated to address register a{register}"
+                    )));
+                }
+                self.line(&format!("    move.l d1,a{register}"));
+                Ok(())
+            }
+        }
+    }
+
+    fn store_d1(&mut self, storage: Storage, ty: &Type) -> Result<(), Diagnostic> {
+        if scalar_width(ty)? == 3 {
+            self.line(&format!("    move.b d1,${:06X}.l", storage.address + 2));
+            self.line("    lsr.l #8,d1");
+            self.line(&format!("    move.b d1,${:06X}.l", storage.address + 1));
+            self.line("    lsr.l #8,d1");
+            self.line(&format!("    move.b d1,${:06X}.l", storage.address));
+            return Ok(());
+        }
+        self.line(&format!(
+            "    move.{} d1,${:06X}.l",
+            size_suffix(ty)?,
+            storage.address
+        ));
+        Ok(())
+    }
+
+    fn require_arg_count(
+        &self,
+        args: &[Expr],
+        expected: usize,
+        name: &str,
+    ) -> Result<(), Diagnostic> {
+        if args.len() == expected {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(format!(
+                "{name} requires {expected} arguments, got {}",
+                args.len()
+            )))
+        }
+    }
+
+    fn intrinsic_constant(
+        &self,
+        args: &[Expr],
+        index: usize,
+        requirement: &str,
+    ) -> Result<i64, Diagnostic> {
+        self.model.const_value(&args[index]).map_err(|_| {
+            Diagnostic::new(format!(
+                "intrinsic argument {index} requires a constant {requirement}"
+            ))
+        })
+    }
+
+    fn validate_bit_range(
+        &self,
+        offset: i64,
+        width: i64,
+        value_width: u8,
+    ) -> Result<(u32, u32), Diagnostic> {
+        let bits = i64::from(value_width) * 8;
+        if offset < 0 || width <= 0 || offset.checked_add(width).map_or(true, |end| end > bits) {
+            return Err(Diagnostic::new("bit range is outside the input width"));
+        }
+        Ok((offset as u32, width as u32))
+    }
+
+    fn mask_d0(&mut self, width: u8) {
+        let mask = width_mask(width);
+        if mask != u32::MAX {
+            self.line(&format!("    andi.l #${mask:X},d0"));
+        }
+    }
+
+    fn mask_register(&mut self, register: &str, width: u8) {
+        let mask = width_mask(width);
+        if mask != u32::MAX {
+            self.line(&format!("    andi.l #${mask:X},{register}"));
+        }
+    }
+
+    fn emit_immediate_shift(
+        &mut self,
+        instruction: &str,
+        suffix: &str,
+        mut count: u32,
+        register: &str,
+    ) {
+        while count > 8 {
+            self.line(&format!("    {instruction}.{suffix} #8,{register}"));
+            count -= 8;
+        }
+        if count != 0 {
+            self.line(&format!("    {instruction}.{suffix} #{count},{register}"));
+        }
+    }
+
+    fn extend_register_signed(&mut self, register: &str, ty: &Type) -> Result<(), Diagnostic> {
+        match scalar_width(ty)? {
+            1 => {
+                self.line(&format!("    ext.w {register}"));
+                self.line(&format!("    ext.l {register}"));
+            }
+            2 => self.line(&format!("    ext.l {register}")),
+            3 => self.normalize_register_24(register, true),
+            4 => {}
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn normalize_register_24(&mut self, register: &str, signed: bool) {
+        self.line(&format!("    andi.l #$FFFFFF,{register}"));
+        if signed {
+            let positive = self.next_label("intrinsic_i24_positive");
+            self.line(&format!("    btst #23,{register}"));
+            self.line(&format!("    beq {positive}"));
+            self.line(&format!("    ori.l #$FF000000,{register}"));
+            self.line(&format!("{positive}:"));
+        }
+    }
+
+    fn load_little_24(&mut self, address: u32, register: &str) {
+        self.line(&format!("    moveq #0,{register}"));
+        self.line(&format!("    move.b ${:06X},{register}", address + 2));
+        self.line(&format!("    lsl.l #8,{register}"));
+        self.line(&format!("    move.b ${:06X},{register}", address + 1));
+        self.line(&format!("    lsl.l #8,{register}"));
+        self.line(&format!("    move.b ${:06X},{register}", address));
+    }
+
+    fn require_u8_pointer(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        let ty = self.model.resolved_type(&self.expr_type(expr)?)?;
+        match ty {
+            Type::Ptr(inner) if *inner == Type::Named("u8".to_owned()) => Ok(()),
+            _ => Err(Diagnostic::new("memory intrinsic requires ptr<u8>")),
+        }
+    }
+
+    fn reject_known_volatile_memory(
+        &self,
+        args: &[Expr],
+        indexes: &[usize],
+    ) -> Result<(), Diagnostic> {
+        for index in indexes {
+            if self.is_known_volatile_address(&args[*index]) {
+                return Err(Diagnostic::new(
+                    "this intrinsic requires ordinary nonvolatile memory",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn is_known_volatile_address(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::AddressOf(name) => self
+                .model
+                .mmio
+                .get(name)
+                .is_some_and(|(_, _, volatile)| *volatile),
+            Expr::AddressOfField { base, .. } => self
+                .model
+                .mmio
+                .get(base)
+                .is_some_and(|(_, _, volatile)| *volatile),
+            Expr::AddressOfIndex { name, .. } => self
+                .model
+                .mmio
+                .get(name)
+                .is_some_and(|(_, _, volatile)| *volatile),
+            Expr::Cast { expr, .. } | Expr::BankedPointer { pointer: expr, .. } => {
+                self.is_known_volatile_address(expr)
+            }
+            _ => false,
+        }
     }
 
     fn require_scalar(&self, ty: &Type) -> Result<(), Diagnostic> {
@@ -2053,6 +3566,13 @@ fn m68k_local_target() -> Target {
     }
 }
 
+fn allocate_m68k_aligned(model: &mut SemanticModel, size: u32) -> Result<Storage, Diagnostic> {
+    if model.next_ram_address() & 1 != 0 {
+        model.allocate(1)?;
+    }
+    model.allocate(size)
+}
+
 fn plan_function_locals(
     function: &Function,
     model: &mut SemanticModel,
@@ -2077,7 +3597,7 @@ fn plan_function_locals(
         .map(|slot| slot.offset.saturating_add(slot.size))
         .max()
         .unwrap_or(0);
-    let spill_region = model.allocate(spill_bytes)?;
+    let spill_region = allocate_m68k_aligned(model, spill_bytes)?;
     let mut bindings = HashMap::new();
     for (name, ty) in local_types {
         let vreg = planned
@@ -2151,6 +3671,31 @@ fn collect_source_locals(
                         .with_force_memory(!pointer),
                 );
             }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                ..
+            } => {
+                for (name, source_ty) in [(first_name, first_ty), (second_name, second_ty)] {
+                    let ty = model.resolved_type(source_ty)?;
+                    let pointer = matches!(ty, Type::Ptr(_));
+                    let class = if pointer {
+                        M68K_POINTER_CLASS
+                    } else {
+                        M68K_MEMORY_CLASS
+                    };
+                    if local_types.insert(name.clone(), ty.clone()).is_some() {
+                        return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                    }
+                    locals.push(
+                        SourceLocal::new(name.clone(), model.type_size(&ty)?, 1, class)
+                            .with_spill_classes(vec![M68K_STATIC_SPILL_CLASS])
+                            .with_force_memory(!pointer),
+                    );
+                }
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -2178,10 +3723,136 @@ fn regalloc_diagnostic(diagnostics: Vec<crate::regalloc::Diagnostic>) -> Diagnos
     )
 }
 
+fn block_guarantees_two_result_return(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_guarantees_two_result_return)
+}
+
+fn stmt_guarantees_two_result_return(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::ReturnTwo { .. } => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } if !else_body.is_empty() => {
+            block_guarantees_two_result_return(then_body)
+                && block_guarantees_two_result_return(else_body)
+        }
+        _ => false,
+    }
+}
+
 fn expr_call_args(expr: &Expr) -> Result<&[Expr], Diagnostic> {
     match expr {
         Expr::Call { args, .. } => Ok(args),
         _ => Err(Diagnostic::new("expected function call")),
+    }
+}
+
+fn intrinsic_operation(path: &[String]) -> Option<IntrinsicOperation> {
+    crate::intrinsics::lookup(&path.join(".")).map(|descriptor| descriptor.operation)
+}
+
+fn intrinsic_result_type<F>(
+    operation: IntrinsicOperation,
+    args: &[Expr],
+    mut arg_type: F,
+) -> Result<Vec<Type>, Diagnostic>
+where
+    F: FnMut(&Expr) -> Result<Type, Diagnostic>,
+{
+    let get = |index: usize, args: &[Expr], arg_type: &mut F| {
+        args.get(index)
+            .ok_or_else(|| Diagnostic::new("missing intrinsic argument"))
+            .and_then(arg_type)
+    };
+    let named = |name: &str| Type::Named(name.to_owned());
+    match operation {
+        IntrinsicOperation::Bits(operation) => match operation {
+            BitsIntrinsic::Test => Ok(vec![named("bool")]),
+            BitsIntrinsic::RotateLeft
+            | BitsIntrinsic::RotateRight
+            | BitsIntrinsic::Set
+            | BitsIntrinsic::Clear
+            | BitsIntrinsic::Toggle
+            | BitsIntrinsic::Extract
+            | BitsIntrinsic::Insert
+            | BitsIntrinsic::ByteSwap
+            | BitsIntrinsic::Reverse => Ok(vec![get(0, args, &mut arg_type)?]),
+            BitsIntrinsic::CountOnes
+            | BitsIntrinsic::LeadingZeros
+            | BitsIntrinsic::TrailingZeros => Ok(vec![named("u8")]),
+        },
+        IntrinsicOperation::Int(operation) => match operation {
+            IntIntrinsic::WideningMul => {
+                let left = get(0, args, &mut arg_type)?;
+                let right = get(1, args, &mut arg_type)?;
+                let left_info = crate::intrinsics::integer_info(&left).ok_or_else(|| {
+                    Diagnostic::new("widening multiply requires integer operands")
+                })?;
+                let right_info = crate::intrinsics::integer_info(&right).ok_or_else(|| {
+                    Diagnostic::new("widening multiply requires integer operands")
+                })?;
+                if left_info.signed != right_info.signed {
+                    return Err(Diagnostic::new(
+                        "widening multiply requires matching signedness",
+                    ));
+                }
+                Ok(vec![integer_type_for_bits(
+                    left_info.bits + right_info.bits,
+                    left_info.signed,
+                )?])
+            }
+            IntIntrinsic::MulHigh | IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => {
+                Ok(vec![get(0, args, &mut arg_type)?])
+            }
+            IntIntrinsic::Divmod | IntIntrinsic::FullMul => {
+                let ty = get(0, args, &mut arg_type)?;
+                Ok(vec![ty.clone(), ty])
+            }
+            IntIntrinsic::AddCarry | IntIntrinsic::SubBorrow => {
+                Ok(vec![get(0, args, &mut arg_type)?, named("bool")])
+            }
+        },
+        IntrinsicOperation::Mem(operation) => match operation {
+            MemIntrinsic::CopyNonoverlapping | MemIntrinsic::Move | MemIntrinsic::Fill => {
+                Ok(Vec::new())
+            }
+            MemIntrinsic::FindByte => Ok(vec![Type::Ptr(Box::new(named("u8"))), named("bool")]),
+            MemIntrinsic::Compare => Ok(vec![named("i8")]),
+            MemIntrinsic::LoadLe16 | MemIntrinsic::LoadBe16 => Ok(vec![named("u16")]),
+            MemIntrinsic::LoadLe24 | MemIntrinsic::LoadBe24 => Ok(vec![named("u24")]),
+            MemIntrinsic::StoreLe16
+            | MemIntrinsic::StoreLe24
+            | MemIntrinsic::StoreBe16
+            | MemIntrinsic::StoreBe24
+            | MemIntrinsic::Poke8 => Ok(Vec::new()),
+            MemIntrinsic::Peek8 => Ok(vec![named("u8")]),
+        },
+    }
+}
+
+fn integer_type_for_bits(bits: u16, signed: bool) -> Result<Type, Diagnostic> {
+    let name = match (bits, signed) {
+        (8, false) => "u8",
+        (8, true) => "i8",
+        (16, false) => "u16",
+        (16, true) => "i16",
+        (24, false) => "u24",
+        (24, true) => "i24",
+        (32, false) => "u32",
+        (32, true) => "i32",
+        _ => return Err(Diagnostic::new("unsupported intrinsic result width")),
+    };
+    Ok(Type::Named(name.to_owned()))
+}
+
+fn require_unsigned_bit_width(ty: &Type) -> Result<u8, Diagnostic> {
+    match ty {
+        Type::Named(name) if name == "u8" => Ok(1),
+        Type::Named(name) if name == "u16" => Ok(2),
+        Type::Named(name) if name == "u24" => Ok(3),
+        _ => Err(Diagnostic::new("bit intrinsic requires u8, u16, or u24")),
     }
 }
 

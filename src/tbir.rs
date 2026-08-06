@@ -90,6 +90,7 @@ pub enum TbirDeclaration {
         attrs: Vec<String>,
         params: Vec<TbirParam>,
         return_type: Option<Type>,
+        second_return_type: Option<Type>,
         body: Vec<TbirStmt>,
         effects: Vec<TbirEffect>,
         recursive: bool,
@@ -115,6 +116,13 @@ pub enum TbirStmt {
         ty: Type,
         value: Expr,
     },
+    LetTwo {
+        first_name: String,
+        first_ty: Type,
+        second_name: String,
+        second_ty: Type,
+        value: Expr,
+    },
     Assign {
         target: Place,
         op: AssignOp,
@@ -135,6 +143,10 @@ pub enum TbirStmt {
     Break,
     Continue,
     Return(Option<Expr>),
+    ReturnTwo {
+        first: Expr,
+        second: Expr,
+    },
     Asm {
         volatile: bool,
         inputs: Vec<AsmInput>,

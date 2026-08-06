@@ -15,6 +15,10 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    intrinsics::{
+        BitsIntrinsic, CATALOG, IntIntrinsic, IntrinsicError, IntrinsicOperation,
+        IntrinsicResolution, MemIntrinsic, ResultCount, VolatilePolicy,
+    },
     regalloc::{
         Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
         SpillClass, SpillClassId, Target,
@@ -1211,7 +1215,9 @@ struct Emitter {
     emitted_string_literals: HashSet<String>,
     loop_stack: Vec<LoopLabels>,
     return_type_stack: Vec<Option<Type>>,
+    second_return_type_stack: Vec<Option<Type>>,
     return_value_stack: Vec<bool>,
+    second_return_pointer_stack: Vec<Option<Variable>>,
     function_name_stack: Vec<String>,
     function_frame_stack: Vec<bool>,
     function_interrupt_stack: Vec<bool>,
@@ -1261,7 +1267,9 @@ impl Emitter {
             emitted_string_literals: HashSet::new(),
             loop_stack: Vec::new(),
             return_type_stack: Vec::new(),
+            second_return_type_stack: Vec::new(),
             return_value_stack: Vec::new(),
+            second_return_pointer_stack: Vec::new(),
             function_name_stack: Vec::new(),
             function_frame_stack: Vec::new(),
             function_interrupt_stack: Vec::new(),
@@ -1928,12 +1936,24 @@ impl Emitter {
                     function.name
                 )));
             }
-            if function.return_type.is_some() {
+            if function.return_type.is_some() || function.second_return_type.is_some() {
                 return Err(Diagnostic::new(format!(
                     "interrupt function `{}` cannot return a value",
                     function.name
                 )));
             }
+        }
+        if function.second_return_type.is_some() && function.return_type.is_none() {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{}` must have a first return type",
+                function.name
+            )));
+        }
+        if naked && function.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "naked two-result function `{}` is not supported",
+                function.name
+            )));
         }
         if naked {
             for stmt in &function.body {
@@ -1954,7 +1974,14 @@ impl Emitter {
                 }
             }
         }
-        if !naked
+        if !naked && function.second_return_type.is_some() {
+            if !block_guarantees_two_value_return(&function.body, &self.symbols) {
+                return Err(Diagnostic::new(format!(
+                    "missing two return values in function `{}`",
+                    function.name
+                )));
+            }
+        } else if !naked
             && function.return_type.is_some()
             && !block_guarantees_value_return(&function.body, &self.symbols)
         {
@@ -1975,13 +2002,19 @@ impl Emitter {
         if let Some(return_type) = &function.return_type {
             self.symbols.type_width(return_type)?;
         }
+        if let Some(second_return_type) = &function.second_return_type {
+            self.symbols.type_width(second_return_type)?;
+        }
         let uses_stack_frame = self
             .symbols
             .functions
             .get(&function.name)
             .is_some_and(|sig| sig.stack_arg_bytes > 0);
         self.return_type_stack.push(function.return_type.clone());
+        self.second_return_type_stack
+            .push(function.second_return_type.clone());
         self.return_value_stack.push(function.return_type.is_some());
+        self.second_return_pointer_stack.push(None);
         self.function_name_stack.push(function.name.clone());
         self.function_frame_stack.push(uses_stack_frame);
         self.function_interrupt_stack.push(interrupt);
@@ -2006,6 +2039,8 @@ impl Emitter {
         self.function_name_stack.pop();
         self.function_storage_stack.pop();
         self.return_value_stack.pop();
+        self.second_return_pointer_stack.pop();
+        self.second_return_type_stack.pop();
         self.return_type_stack.pop();
         self.storage_required_names_stack.pop();
         self.assigned_names_stack.pop();
@@ -2183,6 +2218,40 @@ impl Emitter {
                     self.record_local_constant(name, ty, value);
                     self.record_readonly_pointer_alias(name, value);
                 }
+                Stmt::LetTwo {
+                    first_name,
+                    first_ty,
+                    second_name,
+                    second_ty,
+                    value,
+                } => {
+                    if self.name_in_current_function(first_name) {
+                        return Err(Diagnostic::new(format!(
+                            "local `{first_name}` shadows an existing name"
+                        )));
+                    }
+                    self.current_scope_types_mut()
+                        .insert(first_name.clone(), first_ty.clone());
+                    if self.name_in_current_function(second_name) {
+                        return Err(Diagnostic::new(format!(
+                            "local `{second_name}` shadows an existing name"
+                        )));
+                    }
+                    self.current_scope_types_mut()
+                        .insert(second_name.clone(), second_ty.clone());
+                    self.validate_two_result_value(value, first_ty, second_ty)?;
+                    for (name, ty) in [(first_name, first_ty), (second_name, second_ty)] {
+                        let size = self.symbols.type_size(ty)?;
+                        locals.push(
+                            SourceLocal::new(name.clone(), size, 1, EZ80_MEMORY_LOCAL_CLASS)
+                                .with_spill_classes(vec![EZ80_STATIC_SPILL_CLASS])
+                                .with_force_memory(true),
+                        );
+                        local_types.insert(name.clone(), ty.clone());
+                        let placeholder = self.symbols.storage_at(0, ty)?;
+                        self.current_scope_mut().insert(name.clone(), placeholder);
+                    }
+                }
                 Stmt::If {
                     then_body,
                     else_body,
@@ -2321,6 +2390,14 @@ impl Emitter {
                 }
             }
         }
+        if let Some(offset) = sig.hidden_return_arg_offset {
+            let pointer_width = self.symbols.type_width(&Type::Named("ptr".to_owned()))?;
+            let pointer = self.alloc_var(pointer_width.bytes());
+            self.emit_load_ix_offset_width_into(offset, pointer)?;
+            if let Some(return_pointer) = self.second_return_pointer_stack.last_mut() {
+                *return_pointer = Some(pointer);
+            }
+        }
         Ok(())
     }
 
@@ -2341,7 +2418,7 @@ impl Emitter {
 
     fn stmt_terminates_current_block(&self, stmt: &Stmt) -> bool {
         match stmt {
-            Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+            Stmt::Return(_) | Stmt::ReturnTwo { .. } | Stmt::Break | Stmt::Continue => true,
             Stmt::If {
                 condition,
                 then_body,
@@ -2398,6 +2475,53 @@ impl Emitter {
                 self.emit_storage_initializer(variable, ty, value)?;
                 self.record_local_constant(name, ty, value);
                 self.record_readonly_pointer_alias(name, value);
+            }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                value,
+            } => {
+                if self.name_in_current_function(first_name) {
+                    return Err(Diagnostic::new(format!(
+                        "local `{first_name}` shadows an existing name"
+                    )));
+                }
+                self.current_scope_types_mut()
+                    .insert(first_name.clone(), first_ty.clone());
+                if self.name_in_current_function(second_name) {
+                    return Err(Diagnostic::new(format!(
+                        "local `{second_name}` shadows an existing name"
+                    )));
+                }
+                self.current_scope_types_mut()
+                    .insert(second_name.clone(), second_ty.clone());
+                self.validate_two_result_value(value, first_ty, second_ty)?;
+                let first = self
+                    .function_local_plans
+                    .last()
+                    .and_then(|locals| locals.get(first_name))
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "missing storage allocation for local `{first_name}`"
+                        ))
+                    })?;
+                let second = self
+                    .function_local_plans
+                    .last()
+                    .and_then(|locals| locals.get(second_name))
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "missing storage allocation for local `{second_name}`"
+                        ))
+                    })?;
+                self.emit_two_result_value(value, second)?;
+                self.current_scope_mut().insert(first_name.clone(), first);
+                self.current_scope_mut().insert(second_name.clone(), second);
+                self.emit_store_width(first);
             }
             Stmt::Assign { target, op, value } => {
                 self.emit_assignment(target, *op, value)?;
@@ -2498,6 +2622,12 @@ impl Emitter {
                 self.line(&format!("    jp {}", labels.continue_label));
             }
             Stmt::Return(None) => {
+                if self.current_function_returns_two_values() {
+                    return Err(Diagnostic::new(format!(
+                        "two-result function `{}` must return two values",
+                        self.current_function_name()
+                    )));
+                }
                 if self.current_function_requires_return_value() {
                     return Err(Diagnostic::new(format!(
                         "missing return value in function `{}`",
@@ -2514,6 +2644,19 @@ impl Emitter {
                 }
             }
             Stmt::Return(Some(expr)) => {
+                if self.current_function_returns_two_values() {
+                    if let Expr::Call { path, args } = expr {
+                        let name = path_text(path);
+                        if self.call_returns_two_values(&name, args)? {
+                            self.emit_forward_two_result_call(&name, args)?;
+                            return Ok(());
+                        }
+                    }
+                    return Err(Diagnostic::new(format!(
+                        "two-result function `{}` must use `return first, second`",
+                        self.current_function_name()
+                    )));
+                }
                 if let Expr::Call { path, args } = expr
                     && self.emit_approved_tail_call(&path_text(path), args)?
                 {
@@ -2535,6 +2678,9 @@ impl Emitter {
                 } else {
                     self.line("    ret");
                 }
+            }
+            Stmt::ReturnTwo { first, second } => {
+                self.emit_return_two(first, second)?;
             }
             Stmt::Asm {
                 volatile,
@@ -3524,7 +3670,11 @@ impl Emitter {
     }
 
     fn emit_call(&mut self, path: &[String], args: &[Expr]) -> Result<(), Diagnostic> {
-        match path_text(path).as_str() {
+        let name = path_text(path);
+        if CATALOG.lookup(&name).is_some() {
+            return self.emit_intrinsic_call(&name, args);
+        }
+        match name.as_str() {
             "test.pass" | "ezra.test.pass" => {
                 self.line("    call __ezra_pass");
             }
@@ -3738,7 +3888,12 @@ impl Emitter {
             .get(name)
             .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
-        if sig.arity != args.len() || sig.uses_arg_slots || sig.stack_arg_bytes != 0 {
+        if sig.arity != args.len()
+            || sig.uses_arg_slots
+            || sig.stack_arg_bytes != 0
+            || sig.second_return_type.is_some()
+            || self.current_function_returns_two_values()
+        {
             return Ok(false);
         }
 
@@ -3779,13 +3934,359 @@ impl Emitter {
         Ok(true)
     }
 
-    fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+    fn validate_two_result_value(
+        &self,
+        value: &Expr,
+        first_ty: &Type,
+        second_ty: &Type,
+    ) -> Result<(), Diagnostic> {
+        let Expr::Call { path, args } = value else {
+            return Err(Diagnostic::new(
+                "two-result bindings require a direct two-result call",
+            ));
+        };
+        let name = path_text(path);
+        if CATALOG.lookup(&name).is_some() {
+            let resolution = self.resolve_intrinsic_call(&name, args)?;
+            if resolution.result_count() != ResultCount::Two {
+                return Err(Diagnostic::new(format!(
+                    "intrinsic `{name}` does not return two values"
+                )));
+            }
+            self.validate_type_assignable_to_type(&resolution.result_types[0], first_ty)?;
+            self.validate_type_assignable_to_type(&resolution.result_types[1], second_ty)?;
+            return Ok(());
+        }
+        let sig = self
+            .symbols
+            .functions
+            .get(&name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if sig.second_return_type.is_none() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` does not return two values"
+            )));
+        }
+        if sig.arity != args.len() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` expects {} arguments but got {}",
+                sig.arity,
+                args.len()
+            )));
+        }
+        self.validate_type_assignable_to_type(
+            sig.return_type
+                .as_ref()
+                .expect("two-result signature has a first return type"),
+            first_ty,
+        )?;
+        self.validate_type_assignable_to_type(
+            sig.second_return_type
+                .as_ref()
+                .expect("two-result signature has a second return type"),
+            second_ty,
+        )?;
+        Ok(())
+    }
+
+    fn emit_two_result_value(
+        &mut self,
+        value: &Expr,
+        second_destination: Variable,
+    ) -> Result<(), Diagnostic> {
+        let Expr::Call { path, args } = value else {
+            return Err(Diagnostic::new(
+                "two-result bindings require a direct two-result call",
+            ));
+        };
+        self.emit_two_result_call(&path_text(path), args, second_destination)
+    }
+
+    fn emit_two_result_intrinsic_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        second_destination: Variable,
+    ) -> Result<(), Diagnostic> {
+        let resolution = self.resolve_intrinsic_call(name, args)?;
+        if resolution.result_count() != ResultCount::Two {
+            return Err(Diagnostic::new(format!(
+                "intrinsic `{}` does not return two values",
+                resolution.canonical_name()
+            )));
+        }
+        match resolution.descriptor.operation {
+            IntrinsicOperation::Int(IntIntrinsic::Divmod) => {
+                self.emit_divmod_intrinsic(name, args, second_destination)
+            }
+            IntrinsicOperation::Int(IntIntrinsic::AddCarry) => {
+                self.emit_carry_intrinsic(name, args, second_destination, false)
+            }
+            IntrinsicOperation::Int(IntIntrinsic::SubBorrow) => {
+                self.emit_carry_intrinsic(name, args, second_destination, true)
+            }
+            IntrinsicOperation::Int(IntIntrinsic::FullMul) => {
+                self.emit_full_mul_intrinsic(name, args, second_destination)
+            }
+            IntrinsicOperation::Mem(MemIntrinsic::FindByte) => {
+                self.emit_find_byte_intrinsic(name, args, second_destination)
+            }
+            _ => Err(Diagnostic::new(format!(
+                "intrinsic `{}` has an unsupported two-result operation",
+                resolution.canonical_name()
+            ))),
+        }
+    }
+
+    fn emit_divmod_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        second_destination: Variable,
+    ) -> Result<(), Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let ty = self.symbols.resolved_type(&types[0])?;
+        let signed = type_is_signed(&ty);
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let dividend = self.alloc_var(temps[0].size);
+        let divisor = self.alloc_var(temps[1].size);
+        let quotient = self.alloc_var(temps[0].size);
+        let remainder = self.alloc_var(temps[0].size);
+        self.emit_copy_bytes(temps[0], 0, dividend, 0, dividend.size);
+        self.emit_copy_bytes(temps[1], 0, divisor, 0, divisor.size);
+        self.emit_divmod_variables(dividend, divisor, quotient, remainder, signed);
+        self.emit_load_width(remainder);
+        self.emit_store_width(second_destination);
+        self.emit_load_width(quotient);
+        Ok(())
+    }
+
+    fn emit_carry_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        second_destination: Variable,
+        subtract: bool,
+    ) -> Result<(), Diagnostic> {
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let result = self.alloc_var(temps[0].size);
+        self.emit_carry_memory_op(
+            result,
+            temps[0],
+            temps[1],
+            temps[2],
+            second_destination,
+            subtract,
+        );
+        self.emit_load_width(result);
+        Ok(())
+    }
+
+    fn emit_carry_memory_op(
+        &mut self,
+        result: Variable,
+        left: Variable,
+        right: Variable,
+        carry_in: Variable,
+        carry_out: Variable,
+        subtract: bool,
+    ) {
+        let clear_carry = self.next_label("intrinsic_carry_clear");
+        let start = self.next_label("intrinsic_carry_start");
+        let carry_true = self.next_label("intrinsic_carry_true");
+        let done = self.next_label("intrinsic_carry_done");
+        self.emit_load_a(carry_in);
+        self.line("    or a");
+        self.line(&format!("    jp z, {clear_carry}"));
+        self.line("    scf");
+        self.line(&format!("    jp {start}"));
+        self.line(&format!("{clear_carry}:"));
+        self.line("    or a");
+        self.line(&format!("{start}:"));
+        for offset in 0..result.size {
+            if subtract {
+                self.line(&format!("    ld a, ({:06X}h)", right.addr + offset));
+                self.line("    ld b, a");
+                self.line(&format!("    ld a, ({:06X}h)", left.addr + offset));
+            } else {
+                self.line(&format!("    ld a, ({:06X}h)", left.addr + offset));
+                self.line("    ld b, a");
+                self.line(&format!("    ld a, ({:06X}h)", right.addr + offset));
+            }
+            self.line(if subtract {
+                "    sbc a, b"
+            } else {
+                "    adc a, b"
+            });
+            self.line(&format!("    ld ({:06X}h), a", result.addr + offset));
+        }
+        self.line(&format!("    jp c, {carry_true}"));
+        self.line("    xor a");
+        self.line(&format!("    ld ({:06X}h), a", carry_out.addr));
+        self.line(&format!("    jp {done}"));
+        self.line(&format!("{carry_true}:"));
+        self.line("    ld a, 01h");
+        self.line(&format!("    ld ({:06X}h), a", carry_out.addr));
+        self.line(&format!("{done}:"));
+    }
+
+    fn emit_full_mul_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        second_destination: Variable,
+    ) -> Result<(), Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let ty = self.symbols.resolved_type(&types[0])?;
+        let signed = type_is_signed(&ty);
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let product = self.alloc_var(temps[0].size * 2);
+        self.emit_full_product(temps[0], temps[1], product, signed);
+        let low = self.alloc_var(temps[0].size);
+        let high = self.alloc_var(temps[0].size);
+        self.emit_copy_bytes(product, 0, low, 0, low.size);
+        self.emit_copy_bytes(product, high.size, high, 0, high.size);
+        self.emit_load_width(high);
+        self.emit_store_width(second_destination);
+        self.emit_load_width(low);
+        Ok(())
+    }
+
+    fn emit_find_byte_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        second_destination: Variable,
+    ) -> Result<(), Diagnostic> {
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let found = self.next_label("intrinsic_find_found");
+        let not_found = self.next_label("intrinsic_find_not_found");
+        let done = self.next_label("intrinsic_find_done");
+        let loop_label = self.next_label("intrinsic_find_loop");
+        self.line(&format!("{loop_label}:"));
+        self.emit_jump_if_memory_zero(temps[1], &not_found);
+        self.emit_load_a(temps[2]);
+        self.line("    ld c, a");
+        self.emit_load_width(temps[0]);
+        self.line("    ld a, (hl)");
+        self.line("    cp c");
+        self.line(&format!("    jp z, {found}"));
+        self.emit_increment_memory(temps[0]);
+        self.emit_decrement_memory(temps[1]);
+        self.line(&format!("    jp {loop_label}"));
+        self.line(&format!("{found}:"));
+        self.line("    ld a, 01h");
+        self.line(&format!("    ld ({:06X}h), a", second_destination.addr));
+        self.line(&format!("    jp {done}"));
+        self.line(&format!("{not_found}:"));
+        self.line("    xor a");
+        self.line(&format!("    ld ({:06X}h), a", second_destination.addr));
+        self.line(&format!("{done}:"));
+        self.emit_load_width(temps[0]);
+        Ok(())
+    }
+
+    fn emit_divmod_variables(
+        &mut self,
+        dividend: Variable,
+        divisor: Variable,
+        quotient: Variable,
+        remainder: Variable,
+        signed: bool,
+    ) {
+        let zero = self.next_label("intrinsic_div_zero");
+        let done = self.next_label("intrinsic_div_done");
+        let finished = self.next_label("intrinsic_div_finished");
+        let loop_label = self.next_label("intrinsic_div_loop");
+        self.emit_zero_bytes(quotient);
+        self.emit_zero_bytes(remainder);
+        self.emit_jump_if_memory_zero(divisor, &zero);
+
+        if signed {
+            let not_overflow = self.next_label("intrinsic_div_not_overflow");
+            let quotient_positive = self.next_label("intrinsic_div_q_positive");
+            let remainder_positive = self.next_label("intrinsic_div_r_positive");
+            let quotient_negative = self.alloc_var(1u32);
+            let remainder_negative = self.alloc_var(1u32);
+            self.emit_zero_bytes(quotient_negative);
+            self.emit_zero_bytes(remainder_negative);
+            self.emit_jump_if_memory_not_equals(
+                dividend,
+                signed_min_bytes_for_size(dividend.size),
+                &not_overflow,
+            );
+            self.emit_jump_if_memory_not_equals(
+                divisor,
+                signed_negative_one_bytes_for_size(divisor.size),
+                &not_overflow,
+            );
+            self.emit_copy_bytes(dividend, 0, quotient, 0, quotient.size);
+            self.emit_zero_bytes(dividend);
+            self.line(&format!("    jp {done}"));
+            self.line(&format!("{not_overflow}:"));
+            self.emit_abs_signed_variable(
+                dividend,
+                Some(quotient_negative),
+                Some(remainder_negative),
+            );
+            self.emit_abs_signed_variable(divisor, Some(quotient_negative), None);
+            self.line(&format!("{loop_label}:"));
+            self.emit_compare_memory(dividend, divisor);
+            self.line(&format!("    jp c, {done}"));
+            self.emit_sub_memory(dividend, divisor);
+            self.emit_increment_memory(quotient);
+            self.line(&format!("    jp {loop_label}"));
+            self.line(&format!("{done}:"));
+            self.emit_copy_bytes(dividend, 0, remainder, 0, remainder.size);
+            self.emit_load_a(quotient_negative);
+            self.line("    or a");
+            self.line(&format!("    jp z, {quotient_positive}"));
+            self.emit_negate_memory(quotient);
+            self.line(&format!("{quotient_positive}:"));
+            self.emit_load_a(remainder_negative);
+            self.line("    or a");
+            self.line(&format!("    jp z, {remainder_positive}"));
+            self.emit_negate_memory(remainder);
+            self.line(&format!("{remainder_positive}:"));
+            self.line(&format!("    jp {finished}"));
+        } else {
+            self.emit_copy_bytes(dividend, 0, remainder, 0, remainder.size);
+            self.line(&format!("{loop_label}:"));
+            self.emit_compare_memory(dividend, divisor);
+            self.line(&format!("    jp c, {done}"));
+            self.emit_sub_memory(dividend, divisor);
+            self.emit_increment_memory(quotient);
+            self.line(&format!("    jp {loop_label}"));
+            self.line(&format!("{done}:"));
+            self.emit_copy_bytes(dividend, 0, remainder, 0, remainder.size);
+            self.line(&format!("    jp {finished}"));
+        }
+        self.line(&format!("{zero}:"));
+        self.emit_zero_bytes(quotient);
+        self.emit_zero_bytes(remainder);
+        self.line(&format!("{finished}:"));
+    }
+
+    fn emit_two_result_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        second_destination: Variable,
+    ) -> Result<(), Diagnostic> {
+        if builtin_function_arity(name).is_some() {
+            return self.emit_two_result_intrinsic_call(name, args, second_destination);
+        }
         let sig = self
             .symbols
             .functions
             .get(name)
             .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if sig.second_return_type.is_none() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` does not return two values"
+            )));
+        }
         if self.current_function_is_interrupt() && !sig.is_interrupt {
             return Err(Diagnostic::new(format!(
                 "interrupt function `{}` cannot call non-interrupt function `{name}`",
@@ -3810,7 +4311,111 @@ impl Emitter {
             temps.push(temp);
         }
 
-        let saved_variables = self.recursive_call_saved_variables(name, args);
+        let pointer_width = self.symbols.type_width(&Type::Named("ptr".to_owned()))?;
+        let second_pointer = self.alloc_var(pointer_width.bytes());
+        self.line(&format!("    ld hl, {:06X}h", second_destination.addr));
+        self.emit_store_width(second_pointer);
+
+        let saved_variables =
+            self.recursive_call_saved_variables(name, args, &[second_destination]);
+        let return_temp = if saved_variables.is_empty() {
+            None
+        } else {
+            Some(self.alloc_var(sig.return_width.bytes()))
+        };
+        let hidden_return_arg = second_pointer;
+
+        if sig.uses_arg_slots {
+            for (temp, slot) in temps.iter().copied().zip(sig.arg_slots.iter().copied()) {
+                self.emit_load_width(temp);
+                self.emit_store_width(slot);
+            }
+            self.emit_save_recursive_call_variables(&saved_variables);
+            self.emit_push_stack_arg_variable(hidden_return_arg);
+            self.line(&format!("    call {}", function_label(name)));
+            self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
+            self.emit_store_recursive_call_return(return_temp);
+            self.emit_restore_recursive_call_variables(&saved_variables);
+            self.emit_load_recursive_call_return(return_temp);
+            return Ok(());
+        }
+
+        self.emit_save_recursive_call_variables(&saved_variables);
+        self.emit_push_stack_arg_variable(hidden_return_arg);
+        for temp in temps.iter().copied().skip(3).rev() {
+            self.emit_push_stack_arg_variable(temp);
+        }
+        if let Some(temp) = temps.get(2).copied() {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld c, a");
+            } else if sig.params.get(1).is_some_and(|width| width.bytes() != 1) {
+                self.emit_load_width(temp);
+                self.line("    push hl");
+                self.line("    pop bc");
+            } else {
+                return Err(Diagnostic::new(
+                    "current codegen supports a wide third argument only when the second argument is also wide",
+                ));
+            }
+        }
+        if let Some(temp) = temps.get(1).copied() {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld b, a");
+            } else {
+                self.emit_load_width(temp);
+                self.line("    ex de, hl");
+            }
+        }
+        if let Some(temp) = temps.first().copied() {
+            self.emit_load_width(temp);
+        }
+        self.line(&format!("    call {}", function_label(name)));
+        self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
+        self.emit_store_recursive_call_return(return_temp);
+        self.emit_restore_recursive_call_variables(&saved_variables);
+        self.emit_load_recursive_call_return(return_temp);
+        Ok(())
+    }
+
+    fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        let sig = self
+            .symbols
+            .functions
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if self.current_function_is_interrupt() && !sig.is_interrupt {
+            return Err(Diagnostic::new(format!(
+                "interrupt function `{}` cannot call non-interrupt function `{name}`",
+                self.current_function_name()
+            )));
+        }
+        if sig.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{name}` requires a two-destination call"
+            )));
+        }
+        if sig.arity != args.len() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` expects {} arguments but got {}",
+                sig.arity,
+                args.len()
+            )));
+        }
+
+        let mut temps = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let width = sig.params[index];
+            let ty = &sig.param_types[index];
+            let temp = self.alloc_var(width.bytes());
+            self.emit_expr_to_type(arg, ty)?;
+            self.emit_store_width(temp);
+            temps.push(temp);
+        }
+
+        let saved_variables = self.recursive_call_saved_variables(name, args, &[]);
         let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
             None
         } else {
@@ -3872,7 +4477,12 @@ impl Emitter {
         Ok(())
     }
 
-    fn recursive_call_saved_variables(&self, callee: &str, args: &[Expr]) -> Vec<Variable> {
+    fn recursive_call_saved_variables(
+        &self,
+        callee: &str,
+        args: &[Expr],
+        extra_excluded: &[Variable],
+    ) -> Vec<Variable> {
         let caller = self.current_function_name();
         if !self
             .recursive_call_edges
@@ -3884,7 +4494,7 @@ impl Emitter {
         let Some(storage) = self.function_storage_stack.last() else {
             return Vec::new();
         };
-        let excluded = args
+        let mut excluded = args
             .iter()
             .filter_map(|arg| match arg {
                 // The callee can mutate this local through its pointer parameter.
@@ -3893,6 +4503,7 @@ impl Emitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        excluded.extend_from_slice(extra_excluded);
         let mut addresses = storage
             .iter()
             .flat_map(|variable| variable.addr..variable.addr.saturating_add(variable.size))
@@ -3952,6 +4563,122 @@ impl Emitter {
         if let Some(return_temp) = return_temp {
             self.emit_load_width(return_temp);
         }
+    }
+
+    fn call_returns_two_values(&self, name: &str, args: &[Expr]) -> Result<bool, Diagnostic> {
+        if CATALOG.lookup(name).is_some() {
+            return Ok(self.resolve_intrinsic_call(name, args)?.result_count() == ResultCount::Two);
+        }
+        let sig = self
+            .symbols
+            .functions
+            .get(name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        Ok(sig.second_return_type.is_some())
+    }
+
+    fn emit_forward_two_result_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        let Some(first_type) = self
+            .return_type_stack
+            .last()
+            .and_then(|return_type| return_type.as_ref())
+            .cloned()
+        else {
+            return Err(Diagnostic::new(format!(
+                "function `{}` cannot forward two values without a first return type",
+                self.current_function_name()
+            )));
+        };
+        let Some(second_type) = self
+            .second_return_type_stack
+            .last()
+            .and_then(|return_type| return_type.as_ref())
+            .cloned()
+        else {
+            return Err(Diagnostic::new(format!(
+                "function `{}` cannot forward two values",
+                self.current_function_name()
+            )));
+        };
+        let Some(second_pointer) = self.second_return_pointer_stack.last().copied().flatten()
+        else {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{}` has no caller-provided return slot",
+                self.current_function_name()
+            )));
+        };
+
+        let first_value = self.alloc_var(self.symbols.type_width(&first_type)?.bytes());
+        let second_value = self.alloc_var(self.symbols.type_width(&second_type)?.bytes());
+        self.emit_two_result_call(name, args, second_value)?;
+        self.emit_store_width(first_value);
+        self.emit_load_width(second_pointer);
+        self.emit_store_var_to_pointed_width(second_value);
+        self.emit_load_width(first_value);
+        if self.current_function_uses_frame() {
+            self.emit_frame_epilogue();
+        }
+        if self.current_function_is_interrupt() {
+            self.emit_interrupt_epilogue();
+        } else {
+            self.line("    ret");
+        }
+        Ok(())
+    }
+
+    fn emit_return_two(&mut self, first: &Expr, second: &Expr) -> Result<(), Diagnostic> {
+        let Some(first_type) = self
+            .return_type_stack
+            .last()
+            .and_then(|return_type| return_type.as_ref())
+            .cloned()
+        else {
+            return Err(Diagnostic::new(format!(
+                "function `{}` cannot return two values without a first return type",
+                self.current_function_name()
+            )));
+        };
+        let Some(second_type) = self
+            .second_return_type_stack
+            .last()
+            .and_then(|return_type| return_type.as_ref())
+            .cloned()
+        else {
+            return Err(Diagnostic::new(format!(
+                "function `{}` cannot return two values",
+                self.current_function_name()
+            )));
+        };
+        let Some(second_pointer) = self.second_return_pointer_stack.last().copied().flatten()
+        else {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{}` has no caller-provided return slot",
+                self.current_function_name()
+            )));
+        };
+
+        let first_value = self.alloc_var(self.symbols.type_width(&first_type)?.bytes());
+        let second_value = self.alloc_var(self.symbols.type_width(&second_type)?.bytes());
+        self.emit_expr_to_type(first, &first_type)?;
+        self.emit_store_width(first_value);
+        self.emit_expr_to_type(second, &second_type)?;
+        self.emit_store_width(second_value);
+        self.emit_load_width(second_pointer);
+        self.emit_store_var_to_pointed_width(second_value);
+        self.emit_load_width(first_value);
+        if self.current_function_uses_frame() {
+            self.emit_frame_epilogue();
+        }
+        if self.current_function_is_interrupt() {
+            self.emit_interrupt_epilogue();
+        } else {
+            self.line("    ret");
+        }
+        Ok(())
     }
 
     fn emit_expr_to_width(&mut self, expr: &Expr, width: ValueWidth) -> Result<(), Diagnostic> {
@@ -4280,6 +5007,9 @@ impl Emitter {
                     )));
                 }
             },
+            Expr::Call { path, args } if CATALOG.lookup(&path_text(path)).is_some() => {
+                self.emit_intrinsic_value(&path_text(path), args)?;
+            }
             Expr::Call { path, args } => {
                 self.emit_user_call(&path_text(path), args)?;
             }
@@ -4572,10 +5302,8 @@ impl Emitter {
                 self.emit_unary_to_a(*op, expr)?
             }
             Expr::Binary { left, op, right } => self.emit_binary_expr(left, *op, right)?,
-            Expr::Call { path, args }
-                if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
-            {
-                self.emit_mem_peek8(args)?;
+            Expr::Call { path, args } if CATALOG.lookup(&path_text(path)).is_some() => {
+                self.emit_intrinsic_value(&path_text(path), args)?;
             }
             Expr::Call { path, args } => {
                 self.emit_user_call(&path_text(path), args)?;
@@ -6018,7 +6746,7 @@ impl Emitter {
         for offset in 1..variable.size {
             let addr = variable.addr + offset;
             self.line(&format!("    ld a, ({addr:06X}h)"));
-            self.line("    rl a");
+            self.line("    rla");
             self.line(&format!("    ld ({addr:06X}h), a"));
         }
     }
@@ -6034,7 +6762,7 @@ impl Emitter {
                     self.line("    srl a");
                 }
             } else {
-                self.line("    rr a");
+                self.line("    rra");
             }
             self.line(&format!("    ld ({addr:06X}h), a"));
         }
@@ -7378,12 +8106,14 @@ impl Emitter {
             Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
             Expr::Cast { ty, .. } => Ok(ty.clone()),
             Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
-            Expr::Call { path, .. }
-                if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
-            {
-                Ok(Type::Named("u8".to_owned()))
+            Expr::Call { path, args } => {
+                let name = path_text(path);
+                if CATALOG.lookup(&name).is_some() {
+                    self.intrinsic_result_type(&name, args)
+                } else {
+                    self.call_return_type(path)
+                }
             }
-            Expr::Call { path, .. } => self.call_return_type(path),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => {
                     self.ensure_expr_is_bool(expr, "logical operand")?;
@@ -7483,12 +8213,15 @@ impl Emitter {
             },
             Expr::Cast { ty, .. } => self.symbols.type_width(ty),
             Expr::BankedPointer { pointer, .. } => self.expr_width(pointer),
-            Expr::Call { path, .. }
-                if matches!(path_text(path).as_str(), "mem.peek8" | "ezra.mem.peek8") =>
-            {
-                Ok(ValueWidth::U8)
+            Expr::Call { path, args } => {
+                let name = path_text(path);
+                if CATALOG.lookup(&name).is_some() {
+                    self.symbols
+                        .type_width(&self.intrinsic_result_type(&name, args)?)
+                } else {
+                    self.call_return_width(path)
+                }
             }
-            Expr::Call { path, .. } => self.call_return_width(path),
             Expr::Unary { expr, op } => match op {
                 UnaryOp::Not => Ok(ValueWidth::U8),
                 UnaryOp::Neg | UnaryOp::BitNot => self.expr_width(expr),
@@ -7501,6 +8234,1028 @@ impl Emitter {
                 }
             }
         }
+    }
+
+    fn intrinsic_argument_types(&self, name: &str, args: &[Expr]) -> Result<Vec<Type>, Diagnostic> {
+        let descriptor = CATALOG
+            .lookup(name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown intrinsic `{name}`")))?;
+        let mut types = args
+            .iter()
+            .map(|arg| {
+                self.expr_type(arg)
+                    .and_then(|ty| self.symbols.resolved_type(&ty))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (index, ty) in types.iter_mut().enumerate() {
+            if !expr_is_untyped_literal(&args[index]) {
+                continue;
+            }
+            let expected = match descriptor.operation {
+                IntrinsicOperation::Mem(operation) => match (operation, index) {
+                    (MemIntrinsic::CopyNonoverlapping | MemIntrinsic::Move, 2)
+                    | (MemIntrinsic::Fill, 2)
+                    | (MemIntrinsic::FindByte, 1)
+                    | (MemIntrinsic::Compare, 2) => Some("u24"),
+                    (MemIntrinsic::Fill, 1)
+                    | (MemIntrinsic::FindByte, 2)
+                    | (MemIntrinsic::Poke8, 1) => Some("u8"),
+                    (MemIntrinsic::StoreLe16 | MemIntrinsic::StoreBe16, 1) => Some("u16"),
+                    (MemIntrinsic::StoreLe24 | MemIntrinsic::StoreBe24, 1) => Some("u24"),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                *ty = Type::Named(expected.to_owned());
+            }
+        }
+        Ok(types)
+    }
+
+    fn resolve_intrinsic_call(
+        &self,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<IntrinsicResolution, Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let constants = args
+            .iter()
+            .map(|arg| self.eval_i64_with_local_constants(arg).ok())
+            .collect::<Vec<_>>();
+        let resolution = CATALOG
+            .validate_types_with_constants(name, &types, &constants)
+            .map_err(|error| {
+                if is_legacy_memory_intrinsic(name)
+                    && matches!(
+                        error,
+                        IntrinsicError::ArgumentType { .. }
+                            | IntrinsicError::MismatchedArguments { .. }
+                    )
+                {
+                    Diagnostic::new("type mismatch")
+                } else {
+                    Diagnostic::new(error.to_string())
+                }
+            })?;
+
+        for result_type in &resolution.result_types {
+            if let Err(error) = self.symbols.type_width(result_type) {
+                return Err(Diagnostic::new(format!(
+                    "intrinsic `{}` result type `{result_type:?}` is unsupported by the eZ80 emitter: {}",
+                    resolution.canonical_name(),
+                    error.message
+                )));
+            }
+        }
+        self.validate_intrinsic_volatile_access(&resolution, args)?;
+        Ok(resolution)
+    }
+
+    fn intrinsic_result_type(&self, name: &str, args: &[Expr]) -> Result<Type, Diagnostic> {
+        let resolution = self.resolve_intrinsic_call(name, args)?;
+        match resolution.result_types.as_slice() {
+            [result] => Ok(result.clone()),
+            [] => Err(Diagnostic::new(format!(
+                "intrinsic `{}` does not return a value",
+                resolution.canonical_name()
+            ))),
+            _ => Err(Diagnostic::new(format!(
+                "intrinsic `{}` returns two values; use a two-destination binding",
+                resolution.canonical_name()
+            ))),
+        }
+    }
+
+    fn emit_intrinsic_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        let resolution = self.resolve_intrinsic_call(name, args)?;
+        match resolution.result_count() {
+            ResultCount::Zero => self.emit_zero_result_intrinsic(
+                resolution.canonical_name(),
+                resolution.descriptor.operation,
+                args,
+            ),
+            ResultCount::One => self.emit_intrinsic_value(name, args),
+            ResultCount::Two => Err(Diagnostic::new(format!(
+                "intrinsic `{}` returns two values; use a two-destination binding",
+                resolution.canonical_name()
+            ))),
+        }
+    }
+
+    fn emit_intrinsic_value(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        let resolution = self.resolve_intrinsic_call(name, args)?;
+        if resolution.result_count() != ResultCount::One {
+            return Err(Diagnostic::new(format!(
+                "intrinsic `{}` does not return one scalar value",
+                resolution.canonical_name()
+            )));
+        }
+        match resolution.descriptor.operation {
+            IntrinsicOperation::Bits(operation) => self.emit_bits_intrinsic(name, operation, args),
+            IntrinsicOperation::Int(operation) => self.emit_int_intrinsic(name, operation, args),
+            IntrinsicOperation::Mem(operation) => {
+                self.emit_memory_intrinsic_value(name, operation, args)
+            }
+        }
+    }
+
+    fn intrinsic_argument_temps(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Vec<Variable>, Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let mut temps = Vec::with_capacity(args.len());
+        for (arg, ty) in args.iter().zip(types) {
+            let width = self.symbols.type_width(&ty)?;
+            let temp = self.alloc_var(width.bytes());
+            self.emit_expr_to_type(arg, &ty)?;
+            self.emit_store_width(temp);
+            temps.push(temp);
+        }
+        Ok(temps)
+    }
+
+    fn validate_intrinsic_volatile_access(
+        &self,
+        resolution: &IntrinsicResolution,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        if resolution.descriptor.effects.volatile != VolatilePolicy::NonVolatileOnly {
+            return Ok(());
+        }
+        let pointer_indices = match resolution.descriptor.operation {
+            IntrinsicOperation::Mem(
+                MemIntrinsic::CopyNonoverlapping
+                | MemIntrinsic::Move
+                | MemIntrinsic::Fill
+                | MemIntrinsic::FindByte
+                | MemIntrinsic::Compare,
+            ) => &[0, 1][..],
+            IntrinsicOperation::Mem(
+                MemIntrinsic::LoadLe16
+                | MemIntrinsic::LoadLe24
+                | MemIntrinsic::LoadBe16
+                | MemIntrinsic::LoadBe24
+                | MemIntrinsic::StoreLe16
+                | MemIntrinsic::StoreLe24
+                | MemIntrinsic::StoreBe16
+                | MemIntrinsic::StoreBe24,
+            ) => &[0][..],
+            _ => &[][..],
+        };
+        for index in pointer_indices.iter().copied() {
+            let Some(arg) = args.get(index) else {
+                continue;
+            };
+            let ty = self.symbols.resolved_type(&self.expr_type(arg)?)?;
+            if !matches!(ty, Type::Ptr(_)) {
+                continue;
+            }
+            let Ok(address) = self.eval_i64_with_local_constants(arg) else {
+                continue;
+            };
+            let address = u32::try_from(address).ok();
+            if address.is_some_and(|address| {
+                self.symbols
+                    .volatile_ranges
+                    .iter()
+                    .any(|(start, end)| address < *end && address.saturating_add(1) > *start)
+            }) {
+                return Err(Diagnostic::new(format!(
+                    "intrinsic `{}` cannot access volatile memory",
+                    resolution.canonical_name()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_zero_result_intrinsic(
+        &mut self,
+        name: &str,
+        operation: IntrinsicOperation,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            IntrinsicOperation::Mem(operation) => {
+                self.emit_memory_intrinsic_zero(name, operation, args)
+            }
+            _ => Err(Diagnostic::new(
+                "intrinsic does not produce a zero-result operation",
+            )),
+        }
+    }
+
+    fn emit_bits_intrinsic(
+        &mut self,
+        name: &str,
+        operation: BitsIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let value_type = self.symbols.resolved_type(&types[0])?;
+        let value_width = self.symbols.type_width(&value_type)?;
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        match operation {
+            BitsIntrinsic::RotateLeft | BitsIntrinsic::RotateRight => {
+                let count = temps[1];
+                self.emit_reduce_memory_mod_const(count, u32::from(value_width.bytes()) * 8);
+                let done = self.next_label("intrinsic_rotate_done");
+                self.line(&format!("{done}_loop:"));
+                self.emit_jump_if_memory_zero(count, &done);
+                self.emit_rotate_memory_once(temps[0], operation == BitsIntrinsic::RotateLeft);
+                self.emit_decrement_memory(count);
+                self.line(&format!("    jp {done}_loop"));
+                self.line(&format!("{done}:"));
+                self.emit_load_width(temps[0]);
+            }
+            BitsIntrinsic::Test => {
+                let bit = self.eval_i64_with_local_constants(&args[1])? as u32;
+                let byte_offset = bit / 8;
+                let bit_offset = bit % 8;
+                self.line(&format!("    ld a, ({:06X}h)", temps[0].addr + byte_offset));
+                let true_label = self.next_label("intrinsic_bit_true");
+                let end_label = self.next_label("intrinsic_bit_end");
+                if supports_z80_bit_instructions(self.cpu) {
+                    self.line(&format!("    bit {bit_offset}, a"));
+                    self.line(&format!("    jp nz, {true_label}"));
+                } else {
+                    self.line(&format!("    and {:02X}h", 1_u8 << bit_offset));
+                    self.line(&format!("    jp nz, {true_label}"));
+                }
+                self.line("    ld a, 00h");
+                self.line(&format!("    jp {end_label}"));
+                self.line(&format!("{true_label}:"));
+                self.line("    ld a, 01h");
+                self.line(&format!("{end_label}:"));
+            }
+            BitsIntrinsic::Set | BitsIntrinsic::Clear | BitsIntrinsic::Toggle => {
+                let bit = self.eval_i64_with_local_constants(&args[1])? as u32;
+                let byte_offset = bit / 8;
+                let bit_offset = bit % 8;
+                self.line(&format!("    ld a, ({:06X}h)", temps[0].addr + byte_offset));
+                match operation {
+                    BitsIntrinsic::Set if supports_z80_bit_instructions(self.cpu) => {
+                        self.line(&format!("    set {bit_offset}, a"));
+                    }
+                    BitsIntrinsic::Clear if supports_z80_bit_instructions(self.cpu) => {
+                        self.line(&format!("    res {bit_offset}, a"));
+                    }
+                    BitsIntrinsic::Set => self.line(&format!("    or {:02X}h", 1_u8 << bit_offset)),
+                    BitsIntrinsic::Clear => {
+                        self.line(&format!("    and {:02X}h", !(1_u8 << bit_offset)))
+                    }
+                    BitsIntrinsic::Toggle => {
+                        self.line(&format!("    xor {:02X}h", 1_u8 << bit_offset))
+                    }
+                    _ => unreachable!("bit operation handled above"),
+                }
+                self.line(&format!("    ld ({:06X}h), a", temps[0].addr + byte_offset));
+                self.emit_load_width(temps[0]);
+            }
+            BitsIntrinsic::Extract => {
+                let offset = self.eval_i64_with_local_constants(&args[1])? as u8;
+                let width = self.eval_i64_with_local_constants(&args[2])? as u8;
+                self.emit_shift_memory(temps[0], BinaryOp::Shr, offset, false)?;
+                let mask = (1_u32 << width) - 1;
+                self.emit_mask_variable(temps[0], mask);
+                self.emit_load_width(temps[0]);
+            }
+            BitsIntrinsic::Insert => {
+                let offset = self.eval_i64_with_local_constants(&args[2])? as u8;
+                let width = self.eval_i64_with_local_constants(&args[3])? as u8;
+                self.emit_shift_memory(temps[1], BinaryOp::Shl, offset, false)?;
+                let field_mask = ((1_u32 << width) - 1) << offset;
+                self.emit_mask_variable(temps[1], field_mask);
+                self.emit_mask_variable(temps[0], !field_mask);
+                self.emit_or_memory(temps[0], temps[1]);
+                self.emit_load_width(temps[0]);
+            }
+            BitsIntrinsic::ByteSwap => {
+                let result = self.alloc_var(value_width.bytes());
+                for offset in 0..value_width.bytes() {
+                    let source = temps[0].addr + u32::from(value_width.bytes() - 1 - offset);
+                    self.line(&format!("    ld a, ({source:06X}h)"));
+                    self.line(&format!(
+                        "    ld ({:06X}h), a",
+                        result.addr + u32::from(offset)
+                    ));
+                }
+                self.emit_load_width(result);
+            }
+            BitsIntrinsic::Reverse => {
+                let result = self.alloc_var(value_width.bytes());
+                for offset in 0..value_width.bytes() {
+                    let source = temps[0].addr + u32::from(offset);
+                    let destination = result.addr + u32::from(value_width.bytes() - 1 - offset);
+                    let byte = self.alloc_var(1u32);
+                    let reversed = self.alloc_var(1u32);
+                    self.line(&format!("    ld a, ({source:06X}h)"));
+                    self.emit_store_a(byte);
+                    self.emit_zero_bytes(reversed);
+                    for _ in 0..8 {
+                        self.emit_load_a(byte);
+                        self.line("    srl a");
+                        self.emit_store_a(byte);
+                        self.emit_load_a(reversed);
+                        self.line("    rla");
+                        self.emit_store_a(reversed);
+                    }
+                    self.emit_load_a(reversed);
+                    self.line(&format!("    ld ({destination:06X}h), a"));
+                }
+                self.emit_load_width(result);
+            }
+            BitsIntrinsic::CountOnes => {
+                self.emit_count_ones(temps[0], value_width.bytes());
+            }
+            BitsIntrinsic::LeadingZeros => {
+                self.emit_count_leading_zeros(temps[0], value_width.bytes());
+            }
+            BitsIntrinsic::TrailingZeros => {
+                self.emit_count_trailing_zeros(temps[0], value_width.bytes());
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_reduce_memory_mod_const(&mut self, variable: Variable, modulus: u32) {
+        let done = self.next_label("intrinsic_mod_done");
+        let loop_label = self.next_label("intrinsic_mod_loop");
+        self.line(&format!("{loop_label}:"));
+        if variable.size == 1 {
+            self.emit_load_a(variable);
+            self.line(&format!("    cp {modulus:02X}h"));
+            self.line(&format!("    jp c, {done}"));
+        } else {
+            self.emit_load_width(variable);
+            self.line("    push hl");
+            self.line(&format!("    ld de, {modulus:06X}h"));
+            self.line("    pop hl");
+            self.emit_compare_hl_de();
+            self.line(&format!("    jp c, {done}"));
+        }
+        for _ in 0..modulus {
+            self.emit_decrement_memory(variable);
+        }
+        self.line(&format!("    jp {loop_label}"));
+        self.line(&format!("{done}:"));
+    }
+
+    fn emit_rotate_memory_once(&mut self, variable: Variable, left: bool) {
+        if variable.size == 1 {
+            self.emit_load_a(variable);
+            self.line(if left { "    rlca" } else { "    rrca" });
+            self.emit_store_a(variable);
+            return;
+        }
+        if left {
+            self.emit_load_a(variable);
+            self.line("    add a, a");
+            self.emit_store_a(variable);
+            for offset in 1..variable.size {
+                let address = variable.addr + offset;
+                self.line(&format!("    ld a, ({address:06X}h)"));
+                self.line("    rla");
+                self.line(&format!("    ld ({address:06X}h), a"));
+            }
+            self.emit_load_a(variable);
+            self.line("    rla");
+            self.emit_store_a(variable);
+        } else {
+            let high = variable.addr + variable.size - 1;
+            self.line(&format!("    ld a, ({high:06X}h)"));
+            self.line("    srl a");
+            self.line(&format!("    ld ({high:06X}h), a"));
+            for offset in (0..variable.size - 1).rev() {
+                let address = variable.addr + offset;
+                self.line(&format!("    ld a, ({address:06X}h)"));
+                self.line("    rra");
+                self.line(&format!("    ld ({address:06X}h), a"));
+            }
+            let wrapped = self.next_label("intrinsic_rotate_right_wrapped");
+            let done = self.next_label("intrinsic_rotate_right_done");
+            self.line(&format!("    jp c, {wrapped}"));
+            self.line(&format!("    jp {done}"));
+            self.line(&format!("{wrapped}:"));
+            self.line(&format!("    ld a, ({high:06X}h)"));
+            self.line("    or 80h");
+            self.line(&format!("    ld ({high:06X}h), a"));
+            self.line(&format!("{done}:"));
+        }
+    }
+
+    fn emit_mask_variable(&mut self, variable: Variable, mask: u32) {
+        for offset in 0..variable.size {
+            let byte_mask = ((mask >> (offset * 8)) & 0xFF) as u8;
+            if byte_mask == 0xFF {
+                continue;
+            }
+            if byte_mask == 0 {
+                self.line("    xor a");
+            } else {
+                self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
+                self.line(&format!("    and {byte_mask:02X}h"));
+            }
+            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+        }
+    }
+
+    fn emit_or_memory(&mut self, destination: Variable, source: Variable) {
+        for offset in 0..destination.size {
+            self.line(&format!("    ld a, ({:06X}h)", destination.addr + offset));
+            self.line("    ld b, a");
+            if offset < source.size {
+                self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
+                self.line("    or b");
+            } else {
+                self.line("    ld a, b");
+            }
+            self.line(&format!("    ld ({:06X}h), a", destination.addr + offset));
+        }
+    }
+
+    fn emit_count_ones(&mut self, source: Variable, byte_count: u8) {
+        let count = self.alloc_var(1u32);
+        let byte = self.alloc_var(1u32);
+        self.emit_zero_bytes(count);
+        for offset in 0..byte_count {
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                source.addr + u32::from(offset)
+            ));
+            self.emit_store_a(byte);
+            for _ in 0..8 {
+                self.emit_load_a(byte);
+                self.line("    srl a");
+                self.emit_store_a(byte);
+                let skip = self.next_label("intrinsic_count_skip");
+                self.line(&format!("    jp nc, {skip}"));
+                self.emit_increment_memory(count);
+                self.line(&format!("{skip}:"));
+            }
+        }
+        self.emit_load_a(count);
+    }
+
+    fn emit_count_leading_zeros(&mut self, source: Variable, byte_count: u8) {
+        let count = self.alloc_var(1u32);
+        let byte = self.alloc_var(1u32);
+        self.emit_zero_bytes(count);
+        let done = self.next_label("intrinsic_leading_done");
+        for offset in (0..byte_count).rev() {
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                source.addr + u32::from(offset)
+            ));
+            self.emit_store_a(byte);
+            for _ in 0..8 {
+                self.emit_load_a(byte);
+                self.line("    add a, a");
+                self.emit_store_a(byte);
+                self.line(&format!("    jp c, {done}"));
+                self.emit_increment_memory(count);
+            }
+        }
+        self.line(&format!("{done}:"));
+        self.emit_load_a(count);
+    }
+
+    fn emit_count_trailing_zeros(&mut self, source: Variable, byte_count: u8) {
+        let count = self.alloc_var(1u32);
+        let byte = self.alloc_var(1u32);
+        self.emit_zero_bytes(count);
+        let done = self.next_label("intrinsic_trailing_done");
+        for offset in 0..byte_count {
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                source.addr + u32::from(offset)
+            ));
+            self.emit_store_a(byte);
+            for _ in 0..8 {
+                self.emit_load_a(byte);
+                self.line("    srl a");
+                self.emit_store_a(byte);
+                self.line(&format!("    jp c, {done}"));
+                self.emit_increment_memory(count);
+            }
+        }
+        self.line(&format!("{done}:"));
+        self.emit_load_a(count);
+    }
+
+    fn emit_int_intrinsic(
+        &mut self,
+        name: &str,
+        operation: IntIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let first_type = self.symbols.resolved_type(&types[0])?;
+        let first_info = crate::intrinsics::integer_info(&first_type)
+            .expect("catalog accepted an integer intrinsic operand");
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        match operation {
+            IntIntrinsic::WideningMul => {
+                let result_type = self.intrinsic_result_type(name, args)?;
+                let result_width = self.symbols.type_width(&result_type)?;
+                let product = self.alloc_var(temps[0].size + temps[1].size);
+                self.emit_full_product(temps[0], temps[1], product, first_info.signed);
+                let result = self.alloc_var(result_width.bytes());
+                self.emit_copy_bytes(product, 0, result, 0, result.size);
+                self.emit_load_width(result);
+            }
+            IntIntrinsic::MulHigh => {
+                let product = self.alloc_var(temps[0].size * 2);
+                self.emit_full_product(temps[0], temps[1], product, first_info.signed);
+                let result = self.alloc_var(temps[0].size);
+                self.emit_copy_bytes(product, temps[0].size, result, 0, result.size);
+                self.emit_load_width(result);
+            }
+            IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => {
+                let result = self.alloc_var(temps[0].size);
+                self.emit_copy_bytes(temps[0], 0, result, 0, result.size);
+                self.emit_saturating_memory_op(
+                    result,
+                    temps[0],
+                    temps[1],
+                    first_info.signed,
+                    operation == IntIntrinsic::SaturatingSub,
+                );
+                self.emit_load_width(result);
+            }
+            IntIntrinsic::Divmod
+            | IntIntrinsic::AddCarry
+            | IntIntrinsic::SubBorrow
+            | IntIntrinsic::FullMul => {
+                return Err(Diagnostic::new(format!(
+                    "intrinsic `{}` requires a two-destination binding",
+                    CATALOG
+                        .lookup(name)
+                        .map(|descriptor| descriptor.canonical_name)
+                        .unwrap_or(name)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_copy_bytes(
+        &mut self,
+        source: Variable,
+        source_offset: u32,
+        destination: Variable,
+        destination_offset: u32,
+        count: u32,
+    ) {
+        for offset in 0..count {
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                source.addr + source_offset + offset
+            ));
+            self.line(&format!(
+                "    ld ({:06X}h), a",
+                destination.addr + destination_offset + offset
+            ));
+        }
+    }
+
+    fn emit_zero_bytes(&mut self, variable: Variable) {
+        self.line("    xor a");
+        for offset in 0..variable.size {
+            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+        }
+    }
+
+    fn emit_add_memory(&mut self, destination: Variable, source: Variable) {
+        for offset in 0..destination.size {
+            self.line(&format!("    ld a, ({:06X}h)", destination.addr + offset));
+            self.line("    ld b, a");
+            if offset < source.size {
+                self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
+            } else {
+                self.line("    xor a");
+            }
+            if offset == 0 {
+                self.line("    add a, b");
+            } else {
+                self.line("    adc a, b");
+            }
+            self.line(&format!("    ld ({:06X}h), a", destination.addr + offset));
+        }
+    }
+
+    fn emit_sub_memory(&mut self, destination: Variable, source: Variable) {
+        for offset in 0..destination.size {
+            self.line(&format!("    ld a, ({:06X}h)", destination.addr + offset));
+            self.line("    ld b, a");
+            if offset < source.size {
+                self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
+            } else {
+                self.line("    xor a");
+            }
+            if offset == 0 {
+                self.line("    ld c, a");
+                self.line("    ld a, b");
+                self.line("    sub c");
+            } else {
+                self.line("    ld c, a");
+                self.line("    ld a, b");
+                self.line("    sbc a, c");
+            }
+            self.line(&format!("    ld ({:06X}h), a", destination.addr + offset));
+        }
+    }
+
+    fn emit_full_product(
+        &mut self,
+        first: Variable,
+        second: Variable,
+        product: Variable,
+        signed: bool,
+    ) {
+        let negative = self.alloc_var(1u32);
+        if signed {
+            self.emit_zero_bytes(negative);
+            self.emit_abs_signed_variable(first, Some(negative), None);
+            self.emit_abs_signed_variable(second, Some(negative), None);
+        }
+        let multiplicand = self.alloc_var(product.size);
+        let multiplier = self.alloc_var(second.size);
+        self.emit_zero_bytes(multiplicand);
+        self.emit_copy_bytes(first, 0, multiplicand, 0, first.size);
+        self.emit_copy_bytes(second, 0, multiplier, 0, second.size);
+        self.emit_zero_bytes(product);
+
+        for _ in 0..u32::from(second.size) * 8 {
+            let skip = self.next_label("intrinsic_mul_skip");
+            self.line(&format!("    ld a, ({:06X}h)", multiplier.addr));
+            self.line("    and 01h");
+            self.line(&format!("    jp z, {skip}"));
+            self.emit_add_memory(product, multiplicand);
+            self.line(&format!("{skip}:"));
+            self.emit_shift_memory_left_once(multiplicand);
+            self.emit_shift_memory_right_once(multiplier, false);
+        }
+        if signed {
+            let done = self.next_label("intrinsic_mul_signed_done");
+            self.emit_load_a(negative);
+            self.line("    or a");
+            self.line(&format!("    jp z, {done}"));
+            self.emit_negate_memory(product);
+            self.line(&format!("{done}:"));
+        }
+    }
+
+    fn emit_saturating_memory_op(
+        &mut self,
+        result: Variable,
+        left: Variable,
+        right: Variable,
+        signed: bool,
+        subtract: bool,
+    ) {
+        let saturated = self.next_label("intrinsic_saturated");
+        let done = self.next_label("intrinsic_saturating_done");
+        if subtract {
+            self.emit_sub_memory(result, right);
+        } else {
+            self.emit_add_memory(result, right);
+        }
+        if !signed {
+            self.line(&format!("    jp c, {saturated}"));
+            self.line(&format!("    jp {done}"));
+            self.line(&format!("{saturated}:"));
+            if subtract {
+                self.emit_zero_bytes(result);
+            } else {
+                self.emit_fill_bytes(result, 0xFF);
+            }
+            self.line(&format!("{done}:"));
+            return;
+        }
+
+        let left_negative = self.next_label("intrinsic_left_negative");
+        let right_negative = self.next_label("intrinsic_right_negative");
+        let positive_overflow = self.next_label("intrinsic_positive_overflow");
+        let negative_overflow = self.next_label("intrinsic_negative_overflow");
+        let no_overflow = self.next_label("intrinsic_no_overflow");
+
+        if subtract {
+            self.emit_jump_if_memory_sign(left, &left_negative);
+            self.emit_jump_if_memory_sign(right, &right_negative);
+            self.line(&format!("    jp {no_overflow}"));
+            self.line(&format!("{right_negative}:"));
+            self.emit_jump_if_memory_sign(result, &positive_overflow);
+            self.line(&format!("    jp {no_overflow}"));
+            self.line(&format!("{left_negative}:"));
+            self.emit_jump_if_memory_sign(right, &no_overflow);
+            self.emit_jump_if_memory_sign(result, &no_overflow);
+            self.line(&format!("    jp {negative_overflow}"));
+        } else {
+            self.emit_jump_if_memory_sign(left, &left_negative);
+            self.emit_jump_if_memory_sign(right, &no_overflow);
+            self.emit_jump_if_memory_sign(result, &positive_overflow);
+            self.line(&format!("    jp {no_overflow}"));
+            self.line(&format!("{left_negative}:"));
+            self.emit_jump_if_memory_sign(right, &no_overflow);
+            self.emit_jump_if_memory_sign(result, &no_overflow);
+            self.line(&format!("    jp {negative_overflow}"));
+        }
+        self.line(&format!("{no_overflow}:"));
+        self.line(&format!("    jp {done}"));
+        self.line(&format!("{positive_overflow}:"));
+        self.emit_signed_max_bytes(result);
+        self.line(&format!("    jp {done}"));
+        self.line(&format!("{negative_overflow}:"));
+        self.emit_signed_min_bytes(result);
+        self.line(&format!("{done}:"));
+    }
+
+    fn emit_fill_bytes(&mut self, variable: Variable, value: u8) {
+        self.line(&format!("    ld a, {value:02X}h"));
+        for offset in 0..variable.size {
+            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+        }
+    }
+
+    fn emit_jump_if_memory_sign(&mut self, variable: Variable, negative_label: &str) {
+        let address = variable.addr + variable.size - 1;
+        self.line(&format!("    ld a, ({address:06X}h)"));
+        self.line("    add a, a");
+        self.line(&format!("    jp c, {negative_label}"));
+    }
+
+    fn emit_signed_max_bytes(&mut self, variable: Variable) {
+        self.emit_fill_bytes(variable, 0xFF);
+        self.line("    ld a, 7Fh");
+        self.line(&format!(
+            "    ld ({:06X}h), a",
+            variable.addr + variable.size - 1
+        ));
+    }
+
+    fn emit_signed_min_bytes(&mut self, variable: Variable) {
+        self.emit_zero_bytes(variable);
+        self.line("    ld a, 80h");
+        self.line(&format!(
+            "    ld ({:06X}h), a",
+            variable.addr + variable.size - 1
+        ));
+    }
+
+    fn emit_memory_intrinsic_value(
+        &mut self,
+        name: &str,
+        operation: MemIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            MemIntrinsic::Peek8 => self.emit_mem_peek8(args),
+            MemIntrinsic::Compare => self.emit_memory_compare(name, args),
+            MemIntrinsic::LoadLe16
+            | MemIntrinsic::LoadLe24
+            | MemIntrinsic::LoadBe16
+            | MemIntrinsic::LoadBe24 => self.emit_memory_load(name, operation, args),
+            MemIntrinsic::CopyNonoverlapping
+            | MemIntrinsic::Move
+            | MemIntrinsic::Fill
+            | MemIntrinsic::FindByte
+            | MemIntrinsic::StoreLe16
+            | MemIntrinsic::StoreLe24
+            | MemIntrinsic::StoreBe16
+            | MemIntrinsic::StoreBe24
+            | MemIntrinsic::Poke8 => Err(Diagnostic::new(format!(
+                "intrinsic `{}` does not return one scalar value",
+                CATALOG
+                    .lookup(name)
+                    .map(|descriptor| descriptor.canonical_name)
+                    .unwrap_or(name)
+            ))),
+        }
+    }
+
+    fn emit_memory_intrinsic_zero(
+        &mut self,
+        name: &str,
+        operation: MemIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            MemIntrinsic::CopyNonoverlapping => {
+                self.reject_known_copy_overlap(args)?;
+                self.emit_memcpy(args)
+            }
+            MemIntrinsic::Move => self.emit_memory_move(name, args),
+            MemIntrinsic::Fill => self.emit_memset(args),
+            MemIntrinsic::StoreLe16
+            | MemIntrinsic::StoreLe24
+            | MemIntrinsic::StoreBe16
+            | MemIntrinsic::StoreBe24 => self.emit_memory_store(name, operation, args),
+            MemIntrinsic::Poke8 => self.emit_mem_poke8(args),
+            MemIntrinsic::Peek8
+            | MemIntrinsic::FindByte
+            | MemIntrinsic::Compare
+            | MemIntrinsic::LoadLe16
+            | MemIntrinsic::LoadLe24
+            | MemIntrinsic::LoadBe16
+            | MemIntrinsic::LoadBe24 => Err(Diagnostic::new(format!(
+                "intrinsic `{}` does not produce a zero-result operation",
+                CATALOG
+                    .lookup(name)
+                    .map(|descriptor| descriptor.canonical_name)
+                    .unwrap_or(name)
+            ))),
+        }
+    }
+
+    fn reject_known_copy_overlap(&self, args: &[Expr]) -> Result<(), Diagnostic> {
+        let Some(destination) = args.first().and_then(|arg| self.symbols.eval_i64(arg).ok()) else {
+            return Ok(());
+        };
+        let Some(source) = args.get(1).and_then(|arg| self.symbols.eval_i64(arg).ok()) else {
+            return Ok(());
+        };
+        let Some(length) = args
+            .get(2)
+            .and_then(|arg| self.eval_i64_with_local_constants(arg).ok())
+        else {
+            return Ok(());
+        };
+        if destination < 0 || source < 0 || length < 0 {
+            return Ok(());
+        }
+        let destination_end = destination.saturating_add(length);
+        let source_end = source.saturating_add(length);
+        if destination < source_end && source < destination_end {
+            return Err(Diagnostic::new(
+                "intrinsic `ezra.mem.copy_nonoverlapping` source and destination ranges overlap",
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_memory_load(
+        &mut self,
+        name: &str,
+        operation: MemIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let result_type = self.intrinsic_result_type(name, args)?;
+        let result_width = self.symbols.type_width(&result_type)?;
+        let pointer_width = self.symbols.type_width(&types[0])?;
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let result = self.alloc_var(result_width.bytes());
+        let little_endian = matches!(operation, MemIntrinsic::LoadLe16 | MemIntrinsic::LoadLe24);
+        for offset in 0..result.size {
+            self.emit_load_width(temps[0]);
+            self.line("    ld a, (hl)");
+            let result_offset = if little_endian {
+                offset
+            } else {
+                result.size - 1 - offset
+            };
+            self.line(&format!("    ld ({:06X}h), a", result.addr + result_offset));
+            self.emit_increment_memory(temps[0]);
+        }
+        debug_assert_eq!(pointer_width, self.symbols.type_width(&types[0]).unwrap());
+        self.emit_load_width(result);
+        Ok(())
+    }
+
+    fn emit_memory_store(
+        &mut self,
+        name: &str,
+        operation: MemIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        let types = self.intrinsic_argument_types(name, args)?;
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let little_endian = matches!(operation, MemIntrinsic::StoreLe16 | MemIntrinsic::StoreLe24);
+        let value_size = temps[1].size;
+        for offset in 0..value_size {
+            self.emit_load_width(temps[0]);
+            let value_offset = if little_endian {
+                offset
+            } else {
+                value_size - 1 - offset
+            };
+            self.line(&format!(
+                "    ld a, ({:06X}h)",
+                temps[1].addr + value_offset
+            ));
+            self.line("    ld (hl), a");
+            self.emit_increment_memory(temps[0]);
+        }
+        debug_assert_eq!(value_size, self.symbols.type_size(&types[1]).unwrap());
+        Ok(())
+    }
+
+    fn emit_memory_compare(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let byte = self.alloc_var(1u32);
+        let loop_label = self.next_label("intrinsic_compare_loop");
+        let equal = self.next_label("intrinsic_compare_equal");
+        let less = self.next_label("intrinsic_compare_less");
+        let done = self.next_label("intrinsic_compare_done");
+        self.line(&format!("{loop_label}:"));
+        self.emit_jump_if_memory_zero(temps[2], &equal);
+        self.emit_load_width(temps[0]);
+        self.line("    ld a, (hl)");
+        self.emit_store_a(byte);
+        self.emit_load_width(temps[1]);
+        self.line("    ld a, (hl)");
+        self.line("    ld b, a");
+        self.emit_load_a(byte);
+        self.line("    cp b");
+        self.line(&format!("    jp z, {equal}"));
+        self.line(&format!("    jp c, {less}"));
+        self.line("    ld a, 01h");
+        self.line(&format!("    jp {done}"));
+        self.line(&format!("{less}:"));
+        self.line("    ld a, FFh");
+        self.line(&format!("    jp {done}"));
+        self.line(&format!("{equal}:"));
+        self.emit_jump_if_memory_zero(temps[2], &done);
+        self.emit_increment_memory(temps[0]);
+        self.emit_increment_memory(temps[1]);
+        self.emit_decrement_memory(temps[2]);
+        self.line(&format!("    jp {loop_label}"));
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_memory_move(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        let temps = self.intrinsic_argument_temps(name, args)?;
+        let empty = self.next_label("intrinsic_move_empty");
+        let forward = self.next_label("intrinsic_move_forward");
+        let backward = self.next_label("intrinsic_move_backward");
+        let done = self.next_label("intrinsic_move_done");
+        self.emit_jump_if_memory_zero(temps[2], &empty);
+        self.emit_compare_memory(temps[0], temps[1]);
+        self.line(&format!("    jp c, {forward}"));
+        self.line(&format!("    jp z, {forward}"));
+        self.line(&format!("    jp {backward}"));
+        self.line(&format!("{forward}:"));
+        self.emit_memory_copy_loop(temps[1], temps[0], temps[2], false, &done);
+        self.line(&format!("{backward}:"));
+        self.emit_add_memory(temps[1], temps[2]);
+        self.emit_add_memory(temps[0], temps[2]);
+        self.emit_decrement_memory(temps[1]);
+        self.emit_decrement_memory(temps[0]);
+        self.emit_memory_copy_loop(temps[1], temps[0], temps[2], true, &done);
+        self.line(&format!("{empty}:"));
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_compare_memory(&mut self, left: Variable, right: Variable) {
+        if left.size == 1 {
+            self.emit_load_a(right);
+            self.line("    ld b, a");
+            self.emit_load_a(left);
+            self.line("    cp b");
+        } else {
+            self.emit_load_width(left);
+            self.line("    push hl");
+            self.emit_load_width(right);
+            self.line("    ex de, hl");
+            self.line("    pop hl");
+            self.emit_compare_hl_de();
+        }
+    }
+
+    fn emit_memory_copy_loop(
+        &mut self,
+        source: Variable,
+        destination: Variable,
+        length: Variable,
+        backward: bool,
+        done: &str,
+    ) {
+        let byte = self.alloc_var(1u32);
+        let loop_label = self.next_label("intrinsic_move_loop");
+        self.line(&format!("{loop_label}:"));
+        self.emit_jump_if_memory_zero(length, done);
+        self.emit_load_width(source);
+        self.line("    ld a, (hl)");
+        self.emit_store_a(byte);
+        self.emit_load_width(destination);
+        self.emit_load_a(byte);
+        self.line("    ld (hl), a");
+        if backward {
+            self.emit_decrement_memory(source);
+            self.emit_decrement_memory(destination);
+        } else {
+            self.emit_increment_memory(source);
+            self.emit_increment_memory(destination);
+        }
+        self.emit_decrement_memory(length);
+        self.line(&format!("    jp {loop_label}"));
     }
 
     fn call_return_type(&self, path: &[String]) -> Result<Type, Diagnostic> {
@@ -7999,6 +9754,12 @@ impl Emitter {
             .expect("function return kind exists during emission")
     }
 
+    fn current_function_returns_two_values(&self) -> bool {
+        self.second_return_type_stack
+            .last()
+            .is_some_and(Option::is_some)
+    }
+
     fn current_function_name(&self) -> &str {
         self.function_name_stack
             .last()
@@ -8490,7 +10251,9 @@ fn validate_stmt_calls(
 ) -> Result<(), Diagnostic> {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { value, .. } => validate_expr_calls(value, functions)?,
+            Stmt::Let { value, .. } | Stmt::LetTwo { value, .. } => {
+                validate_expr_calls(value, functions)?
+            }
             Stmt::Assign { target, value, .. } => {
                 validate_place_calls(target, functions)?;
                 validate_expr_calls(value, functions)?;
@@ -8510,6 +10273,10 @@ fn validate_stmt_calls(
             }
             Stmt::Loop { body } => validate_stmt_calls(body, functions)?,
             Stmt::Return(Some(expr)) | Stmt::Expr(expr) => validate_expr_calls(expr, functions)?,
+            Stmt::ReturnTwo { first, second } => {
+                validate_expr_calls(first, functions)?;
+                validate_expr_calls(second, functions)?;
+            }
             Stmt::Out { value, .. } => validate_expr_calls(value, functions)?,
             Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => {}
         }
@@ -8525,7 +10292,9 @@ fn collect_stmt_call_diagnostics(
 ) {
     for (index, stmt) in stmts.iter().enumerate() {
         let result = match stmt {
-            Stmt::Let { value, .. } => validate_expr_calls(value, functions),
+            Stmt::Let { value, .. } | Stmt::LetTwo { value, .. } => {
+                validate_expr_calls(value, functions)
+            }
             Stmt::Assign { target, value, .. } => validate_place_calls(target, functions)
                 .and_then(|_| validate_expr_calls(value, functions)),
             Stmt::If {
@@ -8567,6 +10336,8 @@ fn collect_stmt_call_diagnostics(
                 Ok(())
             }
             Stmt::Return(Some(expr)) | Stmt::Expr(expr) => validate_expr_calls(expr, functions),
+            Stmt::ReturnTwo { first, second } => validate_expr_calls(first, functions)
+                .and_then(|_| validate_expr_calls(second, functions)),
             Stmt::Out { value, .. } => validate_expr_calls(value, functions),
             Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::Asm { .. } => Ok(()),
         };
@@ -8689,7 +10460,7 @@ fn validate_call_signature(
 ) -> Result<(), Diagnostic> {
     if let Some(expected) = builtin_function_arity(name) {
         if expected != arity {
-            return Err(Diagnostic::new(builtin_arity_error(name)));
+            return Err(Diagnostic::new(builtin_arity_error(name, arity)));
         }
         return Ok(());
     }
@@ -8705,7 +10476,24 @@ fn validate_call_signature(
     Ok(())
 }
 
+fn is_legacy_memory_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "mem.peek8"
+            | "ezra.mem.peek8"
+            | "mem.poke8"
+            | "ezra.mem.poke8"
+            | "mem.memcpy"
+            | "ezra.mem.memcpy"
+            | "mem.memset"
+            | "ezra.mem.memset"
+    )
+}
+
 fn builtin_function_arity(name: &str) -> Option<usize> {
+    if let Some(descriptor) = CATALOG.lookup(name) {
+        return Some(descriptor.argument_count);
+    }
     match name {
         "test.pass" | "ezra.test.pass" => Some(0),
         "test.fail" | "ezra.test.fail" => Some(1),
@@ -8725,7 +10513,13 @@ fn builtin_function_arity(name: &str) -> Option<usize> {
     }
 }
 
-fn builtin_arity_error(name: &str) -> String {
+fn builtin_arity_error(name: &str, actual: usize) -> String {
+    if let Some(descriptor) = CATALOG.lookup(name) {
+        return format!(
+            "intrinsic `{}` expects {} arguments, got {actual}",
+            descriptor.canonical_name, descriptor.argument_count
+        );
+    }
     match name.strip_prefix("ezra.").unwrap_or(name) {
         "test.pass" => "test.pass requires no arguments".to_owned(),
         "test.fail" => "test.fail requires one argument".to_owned(),
@@ -8990,7 +10784,7 @@ fn apply_static_references(
 fn collect_stmt_static_references(stmts: &[Stmt], references: &mut StaticReferences) {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { value, .. } | Stmt::Expr(value) => {
+            Stmt::Let { value, .. } | Stmt::LetTwo { value, .. } | Stmt::Expr(value) => {
                 collect_expr_static_references(value, references)
             }
             Stmt::Assign { target, value, .. } => {
@@ -9013,6 +10807,10 @@ fn collect_stmt_static_references(stmts: &[Stmt], references: &mut StaticReferen
             Stmt::Loop { body } => collect_stmt_static_references(body, references),
             Stmt::Return(Some(value)) | Stmt::Out { value, .. } => {
                 collect_expr_static_references(value, references)
+            }
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_static_references(first, references);
+                collect_expr_static_references(second, references);
             }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
         }
@@ -9143,7 +10941,9 @@ fn collect_stmt_calls_with_symbols(
 ) {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { value, .. } => collect_expr_calls(value, calls),
+            Stmt::Let { value, .. } | Stmt::LetTwo { value, .. } => {
+                collect_expr_calls(value, calls)
+            }
             Stmt::Assign { target, value, .. } => {
                 collect_place_calls(target, calls);
                 collect_expr_calls(value, calls);
@@ -9184,6 +10984,10 @@ fn collect_stmt_calls_with_symbols(
             }
             Stmt::Loop { body } => collect_stmt_calls_with_symbols(body, calls, symbols),
             Stmt::Return(Some(expr)) | Stmt::Expr(expr) => collect_expr_calls(expr, calls),
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_calls(first, calls);
+                collect_expr_calls(second, calls);
+            }
             Stmt::Out { value, .. } => collect_expr_calls(value, calls),
             Stmt::Asm { lines, .. } => {
                 if let Some(symbols) = symbols {
@@ -9553,7 +11357,7 @@ fn block_guarantees_value_return(stmts: &[Stmt], symbols: &Symbols) -> bool {
 
 fn stmt_guarantees_value_return(stmt: &Stmt, symbols: &Symbols) -> bool {
     match stmt {
-        Stmt::Return(Some(_)) => true,
+        Stmt::Return(Some(_)) | Stmt::ReturnTwo { .. } => true,
         Stmt::If {
             then_body,
             else_body,
@@ -9570,6 +11374,46 @@ fn stmt_guarantees_value_return(stmt: &Stmt, symbols: &Symbols) -> bool {
     }
 }
 
+fn block_guarantees_two_value_return(stmts: &[Stmt], symbols: &Symbols) -> bool {
+    stmts
+        .iter()
+        .any(|stmt| stmt_guarantees_two_value_return(stmt, symbols))
+}
+
+fn stmt_guarantees_two_value_return(stmt: &Stmt, symbols: &Symbols) -> bool {
+    match stmt {
+        Stmt::ReturnTwo { .. } => true,
+        Stmt::Return(Some(Expr::Call { path, .. }))
+            if call_is_two_result(&path_text(path), symbols) =>
+        {
+            true
+        }
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } if !else_body.is_empty() => {
+            block_guarantees_two_value_return(then_body, symbols)
+                && block_guarantees_two_value_return(else_body, symbols)
+        }
+        Stmt::Loop { body } => !block_can_break_current_loop(body),
+        Stmt::While { condition, body } if condition_is_const_true(condition, symbols) => {
+            !block_can_break_current_loop(body)
+        }
+        _ => false,
+    }
+}
+
+fn call_is_two_result(name: &str, symbols: &Symbols) -> bool {
+    CATALOG
+        .lookup(name)
+        .is_some_and(|descriptor| descriptor.result_count == ResultCount::Two)
+        || symbols
+            .functions
+            .get(name)
+            .is_some_and(|sig| sig.second_return_type.is_some())
+}
+
 fn condition_is_const_true(condition: &Expr, symbols: &Symbols) -> bool {
     matches!(condition, Expr::Bool(true))
         || symbols.eval_i64(condition).is_ok_and(|value| value != 0)
@@ -9581,7 +11425,7 @@ fn block_terminates_current_block(stmts: &[Stmt]) -> bool {
 
 fn stmt_terminates_current_block(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Return(_) | Stmt::ReturnTwo { .. } | Stmt::Break | Stmt::Continue => true,
         Stmt::If {
             then_body,
             else_body,
@@ -9644,7 +11488,7 @@ fn storage_required_names_in_block(stmts: &[Stmt]) -> HashSet<String> {
 fn collect_storage_required_names(stmts: &[Stmt], names: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { value, .. } | Stmt::Expr(value) => {
+            Stmt::Let { value, .. } | Stmt::LetTwo { value, .. } | Stmt::Expr(value) => {
                 collect_expr_storage_required_names(value, names)
             }
             Stmt::Assign { target, value, .. } => {
@@ -9667,6 +11511,10 @@ fn collect_storage_required_names(stmts: &[Stmt], names: &mut HashSet<String>) {
             Stmt::Loop { body } => collect_storage_required_names(body, names),
             Stmt::Out { value, .. } => collect_expr_storage_required_names(value, names),
             Stmt::Return(Some(value)) => collect_expr_storage_required_names(value, names),
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_storage_required_names(first, names);
+                collect_expr_storage_required_names(second, names);
+            }
             Stmt::Asm {
                 inputs, outputs, ..
             } => {
@@ -9841,6 +11689,24 @@ fn struct_scalar_type<'a>(
     match ty {
         Type::Named(name) if structs.contains_key(name) => Some(name.as_str()),
         _ => None,
+    }
+}
+
+fn signed_min_bytes_for_size(size: u32) -> &'static [u8] {
+    match size {
+        1 => &[0x80],
+        2 => &[0x00, 0x80],
+        3 => &[0x00, 0x00, 0x80],
+        _ => &[],
+    }
+}
+
+fn signed_negative_one_bytes_for_size(size: u32) -> &'static [u8] {
+    match size {
+        1 => &[0xFF],
+        2 => &[0xFF, 0xFF],
+        3 => &[0xFF, 0xFF, 0xFF],
+        _ => &[],
     }
 }
 

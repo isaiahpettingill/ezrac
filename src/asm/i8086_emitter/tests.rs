@@ -30,7 +30,10 @@ fn emit(source: &str) -> String {
 }
 
 fn emit_error(source: &str) -> String {
-    emit_result(source).unwrap_err().message
+    match emit_result(source) {
+        Err(error) => error.message,
+        Ok(_) => panic!("expected emission to fail for `{source}`"),
+    }
 }
 
 fn emit_and_assemble(source: &str) -> String {
@@ -221,6 +224,36 @@ fn emits_typed_function_pointer_calls_through_a_trampoline() {
     assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
     assert!(assembly.contains("call bx"), "{assembly}");
     assert!(assembly.contains("call near _add"), "{assembly}");
+}
+
+#[test]
+fn lowers_two_result_calls_with_a_hidden_pointer_and_preserves_both_values() {
+    let assembly = emit_and_assemble(
+        r#"
+                global sink: u32 = 0
+                fn pair(value: u16) -> u16, u32 {
+                    return value, cast<u32>(value) + 1u32
+                }
+                fn main() {
+                    let first: u16, second: u32 = pair(7)
+                    sink = cast<u32>(first) + second
+                }
+            "#,
+    );
+
+    assert!(assembly.contains("call near _pair"), "{assembly}");
+    assert!(assembly.contains("mov [bx],al"), "{assembly}");
+    assert!(assembly.contains("mov bx,"), "{assembly}");
+}
+
+#[test]
+fn rejects_one_destination_8086_calls_to_two_result_functions() {
+    let error =
+        emit_error("fn pair() -> u8, bool { return 1, true } fn main() { let value: u8 = pair() }");
+    assert!(
+        error.contains("may only be used in a two-place binding or returned directly"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -639,7 +672,11 @@ fn assembles_aggregates_pointers_access_and_memory_helpers() {
         "#,
     );
     assert!(assembly.contains("mov al,[bx]"));
-    assert!(assembly.contains("jcxz short"));
+    assert!(assembly.contains("    rep movsb\n"), "{assembly}");
+    assert!(assembly.contains("    rep stosb\n"), "{assembly}");
+    assert!(assembly.contains("copy_manual"), "{assembly}");
+    assert!(assembly.contains("fill_manual"), "{assembly}");
+    assert!(!assembly.contains("jcxz short"), "{assembly}");
 }
 
 #[test]
@@ -980,7 +1017,7 @@ fn rejects_invalid_returns_ports_and_aggregate_call_signatures() {
     for (source, expected) in [
         (
             "fn value() -> u8 { return } fn main() {}",
-            "return without a value",
+            "must return 1 value",
         ),
         (
             "fn value(flag: bool) -> u8 { if flag { return 1 } } fn main() {}",
@@ -1097,4 +1134,77 @@ fn scratch_allocation_failure_is_a_diagnostic_not_a_panic() {
             .message
             .contains("storage exceeds target address space")
     );
+}
+
+#[test]
+fn lowers_catalog_scalar_bit_and_integer_families() {
+    let assembly = emit_and_assemble(
+        r#"
+            global sink: u32 = 0
+            fn main() {
+                let value: u16 = 0x1234u16
+                let tested: bool = ezra.bits.test(value, 3)
+                let set: u16 = ezra.bits.set(value, 4)
+                let clear: u16 = ezra.bits.clear(value, 5)
+                let toggled: u16 = ezra.bits.toggle(value, 6)
+                let extracted: u16 = ezra.bits.extract(value, 4, 4)
+                let inserted: u16 = ezra.bits.insert(value, 3u16, 4, 4)
+                let swapped: u16 = ezra.bits.byte_swap(value)
+                let reversed: u16 = ezra.bits.reverse(value)
+                let ones: u8 = ezra.bits.count_ones(value)
+                let leading: u8 = ezra.bits.leading_zeros(value)
+                let trailing: u8 = ezra.bits.trailing_zeros(value)
+                let rotated: u16 = ezra.bits.rotate_left(value, 3)
+                let product: u16 = ezra.int.widening_mul(7u8, 9u8)
+                let high: u16 = ezra.int.mul_high(value, value)
+                let added: u16 = ezra.int.saturating_add(value, value)
+                let subtracted: u16 = ezra.int.saturating_sub(value, value)
+                sink = cast<u32>(cast<u16>(tested) + set + clear + toggled + extracted + inserted + swapped + reversed + cast<u16>(ones) + cast<u16>(leading) + cast<u16>(trailing) + rotated + product + high + added + subtracted)
+            }
+        "#,
+    );
+    assert!(assembly.contains("    mul bl\n"), "{assembly}");
+    assert!(
+        assembly.contains("    imul") || assembly.contains("    mul bx"),
+        "{assembly}"
+    );
+}
+
+#[test]
+fn lowers_catalog_paired_and_memory_families() {
+    let assembly = emit_and_assemble(
+        r#"
+            global bytes: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8]
+            global sink: u32 = 0
+            fn main() {
+                let left: u16 = 100
+                let right: u16 = 7
+                let quotient: u16, remainder: u16 = ezra.int.divmod(left, right)
+                let sum: u16, carry: bool = ezra.int.add_carry(left, right, false)
+                let difference: u16, borrow: bool = ezra.int.sub_borrow(left, right, true)
+                let low: u16, high: u16 = ezra.int.full_mul(left, right)
+                let p: ptr<u8> = &bytes[0]
+                let q: ptr<u8> = &bytes[2]
+                ezra.mem.copy_nonoverlapping(p, q, 2u24)
+                ezra.mem.move(p, q, 4u24)
+                ezra.mem.fill(p, 9, 4u24)
+                let found_ptr: ptr<u8>, found: bool = ezra.mem.find_byte(p, 4u24, 9)
+                let ordering: i8 = ezra.mem.compare(p, q, 4u24)
+                let le16: u16 = ezra.mem.load_le16(p)
+                let le24: u24 = ezra.mem.load_le24(p)
+                let be16: u16 = ezra.mem.load_be16(p)
+                let be24: u24 = ezra.mem.load_be24(p)
+                ezra.mem.store_le16(p, le16)
+                ezra.mem.store_le24(p, le24)
+                ezra.mem.store_be16(p, be16)
+                ezra.mem.store_be24(p, be24)
+                let byte: u8 = ezra.mem.peek8(p)
+                ezra.mem.poke8(p, byte)
+                sink = cast<u32>(quotient + remainder + sum + difference + low + high + cast<u16>(carry) + cast<u16>(borrow) + cast<u16>(found) + cast<u16>(ordering) + le16 + cast<u16>(le24) + be16 + cast<u16>(be24) + cast<u16>(found_ptr) + cast<u16>(byte))
+            }
+        "#,
+    );
+    assert!(assembly.contains("    rep movsb\n"), "{assembly}");
+    assert!(assembly.contains("    rep stosb\n"), "{assembly}");
+    assert!(assembly.contains("copy_backward"), "{assembly}");
 }

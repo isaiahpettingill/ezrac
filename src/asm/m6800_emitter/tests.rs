@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use super::emit_m6800_assembly_with_options;
@@ -316,4 +315,244 @@ fn rejects_wide_scalar_storage() {
     .unwrap();
     let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();
     assert!(error.message.contains("8-bit integer and bool"));
+}
+
+#[test]
+fn executes_two_result_calls_with_a_and_b_abi() {
+    assert_eq!(
+        run_main_result(
+            r#"
+                global first_seen: u8 = 0
+                global second_seen: bool = false
+
+                fn main() -> u8 {
+                    let first: u8, second: bool = pair(41)
+                    first_seen = first
+                    second_seen = second
+                    return first_seen * 2 + cast<u8>(second_seen)
+                }
+
+                fn pair(value: u8) -> u8, bool {
+                    return value + 1, value == 41
+                }
+            "#,
+        ),
+        85
+    );
+}
+
+#[test]
+fn rejects_two_result_calls_in_single_result_context() {
+    let program = parse_program(
+        Path::new("m6800-two-result.ezra"),
+        "fn pair() -> u8, bool { return 1, true } fn main() { let value: u8 = pair() }",
+    )
+    .unwrap();
+    let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("two-result call `pair` may only be used"),
+        "{error}"
+    );
+}
+
+#[test]
+fn lowers_m6800_catalog_bit_integer_and_memory_intrinsics() {
+    let program = parse_program(
+        Path::new("m6800_intrinsics.ezra"),
+        r#"
+            global source: u8 = 1
+            global destination: u8 = 0
+            fn main() {
+                let rotated: u8 = bits.rotate_left(0x81u8, 1u8)
+                let tested: bool = bits.test(0x20u8, 5u8)
+                let set: u8 = bits.set(1u8, 3u8)
+                let clear: u8 = bits.clear(0xFFu8, 3u8)
+                let toggled: u8 = bits.toggle(0u8, 2u8)
+                let extracted: u8 = bits.extract(0xD8u8, 3u8, 3u8)
+                let inserted: u8 = bits.insert(0u8, 7u8, 2u8, 3u8)
+                let reversed: u8 = bits.reverse(0x12u8)
+                let ones: u8 = bits.count_ones(0xF0u8)
+                let leading: u8 = bits.leading_zeros(0x10u8)
+                let trailing: u8 = bits.trailing_zeros(0x10u8)
+                let high: u8 = int.mul_high(0x12u8, 0x10u8)
+                let quotient: u8, remainder: u8 = int.divmod(100u8, 7u8)
+                let sum: u8, carry: bool = int.add_carry(0xFFu8, 1u8, false)
+                let low: u8, product_high: u8 = int.full_mul(0x12u8, 0x10u8)
+                let saturated: u8 = int.saturating_add(250u8, 20u8)
+                let compared: i8 = mem.compare(&source, &destination, 1u24)
+                mem.poke8(&destination, 0x2Au8)
+                let loaded: u8 = mem.peek8(&destination)
+                mem.copy_nonoverlapping(&destination, &source, 1u24)
+                mem.move(&destination, &destination, 1u24)
+                mem.fill(&destination, 0xAAu8, 1u24)
+            }
+        "#,
+    )
+    .unwrap();
+    let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+    for instruction in [
+        "    asla",
+        "    bita #20h",
+        "    oraa #08h",
+        "    anda #F7h",
+        "    eora #04h",
+        "__ezra_intrinsic_copy_forward_loop",
+        "__ezra_intrinsic_copy_backward",
+        "__ezra_intrinsic_fill_loop",
+    ] {
+        assert!(
+            assembly.contains(instruction),
+            "missing {instruction}:\n{assembly}"
+        );
+    }
+    assert!(
+        !assembly.contains("    mul\n"),
+        "M6800 must use the software multiply helper"
+    );
+    assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+}
+
+#[cfg(feature = "m6809")]
+#[test]
+fn lowers_m6809_native_full_multiply_and_shared_intrinsics() {
+    let program = parse_program(
+        Path::new("m6809_intrinsics.ezra"),
+        r#"
+            global source: u8 = 3
+            fn main() {
+                let low: u8, high: u8 = int.full_mul(0x12u8, 0x10u8)
+                let high_only: u8 = int.mul_high(0x12u8, 0x10u8)
+                let quotient: u8, remainder: u8 = int.divmod(100u8, 7u8)
+                let sum: u8, carry: bool = int.add_carry(0xFFu8, 1u8, false)
+                mem.fill(&source, 0u8, 1u24)
+            }
+        "#,
+    )
+    .unwrap();
+    let assembly = emit_m6809_assembly_with_options(&program, m6809_options()).unwrap();
+    assert!(assembly.contains("    mul\n"), "{assembly}");
+    assert!(assembly.contains("__ezra_intrinsic_div_loop"), "{assembly}");
+    assert!(
+        assembly.contains("__ezra_intrinsic_fill_loop"),
+        "{assembly}"
+    );
+    assemble_subset_with_symbols_at(AssemblerCpu::M6809, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+}
+
+#[test]
+fn rejects_m6800_bit_indices_outside_u8() {
+    let program = parse_program(
+        Path::new("m6800_bad_intrinsic.ezra"),
+        "fn main() { let value: u8 = bits.test(1u8, 8u8) }",
+    )
+    .unwrap();
+    let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();
+    assert!(error.message.contains("within the input width"), "{error}");
+}
+
+#[test]
+fn rejects_two_result_functions_that_can_fall_through() {
+    let program = parse_program(
+        Path::new("m6800-two-result-fallthrough.ezra"),
+        "fn pair(value: bool) -> u8, bool { if value { return 1, true } } fn main() { let first: u8, second: bool = pair(true) }",
+    )
+    .unwrap();
+    let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("missing two return values in function `pair`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_mixed_signedness_and_mismatched_intrinsic_integer_types() {
+    let cases = [
+        (
+            "let value: u8 = int.saturating_add(1u8, 1i8)",
+            "same exact integer type",
+        ),
+        (
+            "let value: u8 = int.saturating_sub(1u8, 1i8)",
+            "same exact integer type",
+        ),
+        (
+            "let value: u8 = int.saturating_add(1u8, 1u16)",
+            "same exact integer type",
+        ),
+        (
+            "let value: u8 = int.mul_high(1u8, 1i8)",
+            "same exact integer type",
+        ),
+        (
+            "let first: u8, second: u8 = int.full_mul(1u8, 1i8)",
+            "same exact integer type",
+        ),
+        (
+            "let first: u8, second: u8 = int.divmod(1u8, 1i8)",
+            "same exact integer type",
+        ),
+        (
+            "let first: u8, second: bool = int.add_carry(1u8, 1i8, false)",
+            "same exact integer type",
+        ),
+        (
+            "let first: u8, second: bool = int.sub_borrow(1u8, 1i8, false)",
+            "same exact integer type",
+        ),
+        (
+            "let value: u8 = int.widening_mul(1u8, 1i8)",
+            "matching signedness",
+        ),
+    ];
+
+    for (statement, expected) in cases {
+        let program = parse_program(
+            Path::new("m6800_intrinsic_type_mismatch.ezra"),
+            &format!("fn main() {{ {statement} }}"),
+        )
+        .unwrap();
+        let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}` in `{error}` for `{statement}`"
+        );
+    }
+}
+
+#[test]
+fn rejects_intrinsic_constant_indices_and_ranges_outside_u8_bounds() {
+    let cases = [
+        (
+            "fn main() { let value: u8 = bits.test(1u8, 8u8) }",
+            "within the input width",
+        ),
+        (
+            "fn main() { let value: u8 = bits.test(1u8, -1) }",
+            "within the input width",
+        ),
+        (
+            "fn main() { let value: u8 = bits.extract(1u8, 7u8, 2u8) }",
+            "inside the input width",
+        ),
+        (
+            "const WIDTH: u8 = 0u8\nfn main() { let value: u8 = bits.extract(1u8, 0u8, WIDTH) }",
+            "inside the input width",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let program =
+            parse_program(Path::new("m6800_intrinsic_constant_bounds.ezra"), source).unwrap();
+        let error = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap_err();
+        assert!(
+            error.message.contains(expected),
+            "expected `{expected}` in `{error}` for `{source}`"
+        );
+    }
 }

@@ -76,6 +76,16 @@ For `import foo.bar`, `ezrac` searches for `foo/bar.ezra` relative to the import
 
 Imports are resolved recursively. Cyclic imports are rejected. Duplicate imports are de-duplicated.
 
+The compiler provides three built-in intrinsic catalogs. Import them like ordinary modules:
+
+```ezra
+import ezra.bits
+import ezra.int
+import ezra.mem
+```
+
+The full names (`ezra.bits.rotate_left`) and imported short names (`bits.rotate_left`) resolve to the same catalog entry. These are compiler intrinsics, not user-editable SDK source files. Their source type and constant checks run before target lowering; a target can still diagnose an operation or width it cannot represent.
+
 ## Conditional Compilation
 
 Add `@cfg(...)` before any top-level declaration to include it only for matching targets or compiler mode.
@@ -141,6 +151,7 @@ Primitive integer types are explicit:
 u8   i8
 u16  i16
 u24  i24
+u32  i32 (target-dependent)
 ```
 
 Other built-in names used by the compiler and SDK include `bool` and `bytes`. Paths may also name structs or aliases.
@@ -165,7 +176,7 @@ fn main() {
 }
 ```
 
-The target controls pointer width. eZ80, WDC 65C816, and the generic M68k target use 24-bit pointers. Z80-family, 8080/8085, LR35902, MOS 6502, TMS9900, and AVR targets use 16-bit pointers.
+The target controls pointer width. eZ80, WDC 65C816, and the generic M68k target use 24-bit pointers. Z80-family, 8080/8085, LR35902, MOS 6502, TMS9900, and AVR targets use 16-bit pointers. Integer widths and pointer widths are separate: a target may accept a source type but reject an intrinsic combination that its ABI or emitter cannot lower.
 
 ## Literals
 
@@ -350,6 +361,21 @@ fn clear() {
 }
 ```
 
+A function has zero, one, or two ordered scalar results. Two results use a comma-separated return type and a matching two-place `let`:
+
+```ezra
+import ezra.int
+
+fn divide(value: u16, divisor: u16) -> u16, u16 {
+    let quotient: u16, remainder: u16 = int.divmod(value, divisor)
+    return quotient, remainder
+}
+```
+
+`return a, b` is the two-value return form. A two-result call is not a tuple or a general expression: consume it with a matching two-place binding or return it directly from a matching two-result function. Every return path must provide the declared number and types of results. Arrays, `bytes`, strings, structs, tuples, and other aggregate or large values are not multi-value results; pass them through pointers instead.
+
+Result locations belong to the selected target ABI. Current backends use different layouts, including a normal first result with caller-provided storage for a second result, paired registers, or target-specific secondary-result registers. Do not rely on a layout across targets. Unsupported result types, result combinations, extern declarations, or ABI forms produce diagnostics.
+
 Function modifiers and attributes may appear in either order before `fn`:
 
 ```ezra
@@ -370,6 +396,81 @@ External assembly functions declare routines implemented by emitted or linked as
 extern asm fn read_status() -> u8
 pub extern asm fn put_char(ch: u8)
 ```
+
+## Intrinsic Catalog
+
+The following catalog entries are implemented. `T` means one exact integer type; `U` and `V` may differ in width but must follow the rule shown. `same` means the result keeps the value's exact type.
+
+### `ezra.bits`
+
+These operations accept unsigned `u8`, `u16`, or `u24` values. Index, offset, width, and rotate-count arguments are unsigned integer values where noted.
+
+```text
+bits.rotate_left(value, count) -> same
+bits.rotate_right(value, count) -> same
+bits.test(value, index) -> bool
+bits.set(value, index) -> same
+bits.clear(value, index) -> same
+bits.toggle(value, index) -> same
+bits.extract(value, offset, width) -> same
+bits.insert(base, value, offset, width) -> same
+bits.byte_swap(u16 | u24) -> same
+bits.reverse(value) -> same
+bits.count_ones(value) -> u8
+bits.leading_zeros(value) -> u8
+bits.trailing_zeros(value) -> u8
+```
+
+`rotate_left` and `rotate_right` reduce the count modulo the value width. Bit indexes must be compile-time constants in `0..width`; `extract` and `insert` require compile-time `offset` and positive `width` with `offset + width <= value width`. `insert` requires `base` and `value` to have the same exact type. Signed values and unsupported widths diagnose.
+
+### `ezra.int`
+
+```text
+int.widening_mul(U, V) -> wider exact integer
+int.mul_high(T, T) -> T
+int.saturating_add(T, T) -> T
+int.saturating_sub(T, T) -> T
+int.divmod(T, T) -> T, T
+int.add_carry(T, T, bool) -> T, bool
+int.sub_borrow(T, T, bool) -> T, bool
+int.full_mul(T, T) -> T, T
+```
+
+`widening_mul` requires matching signedness and a product width of 16, 24, or 32 bits; for example, `u8 * u8 -> u16` and `u16 * u8 -> u24`. The other integer operations require the same exact integer type for both operands. `mul_high` returns the high half, `full_mul` returns low then high halves, and `divmod` returns quotient then remainder. `add_carry` and `sub_borrow` return the width-limited result and a mathematical carry or borrow flag.
+
+Width-limited integer results use EZRA's defined arithmetic: unsigned and signed values wrap at their declared width, signed division truncates toward zero, remainder has the dividend's sign, and division or remainder by zero produces zero. `widening_mul` returns its full wider product, `full_mul` exposes that product as low then high halves, and saturating operations clamp to the signed or unsigned representable bound. A target may reject a legal catalog type or combination when its scalar width or lowering does not support it.
+
+### `ezra.mem`
+
+All pointer arguments below are `ptr<u8>` and all lengths are `u24`.
+
+```text
+mem.copy_nonoverlapping(destination, source, length)
+mem.move(destination, source, length)
+mem.fill(destination, value: u8, length)
+mem.find_byte(data, length, value: u8) -> ptr<u8>, bool
+mem.compare(left, right, length) -> i8
+
+mem.load_le16(address) -> u16
+mem.load_le24(address) -> u24
+mem.load_be16(address) -> u16
+mem.load_be24(address) -> u24
+mem.store_le16(address, value: u16)
+mem.store_le24(address, value: u24)
+mem.store_be16(address, value: u16)
+mem.store_be24(address, value: u24)
+
+mem.peek8(address) -> u8
+mem.poke8(address, value: u8)
+```
+
+`copy_nonoverlapping` requires source and destination ranges not to overlap; a statically known overlap is an error. `move` permits overlap and copies as if the source were preserved, choosing forward or backward order. `fill` writes one byte repeatedly. `find_byte` returns the matching address and `true`, or `data + length` and `false`; `compare` returns exactly `-1`, `0`, or `1` from an unsigned bytewise comparison. The endian loads and stores access exactly 2 or 3 bytes in the named order, independent of target endianness, and define unaligned ordinary-memory behavior where the selected target supports the operation.
+
+The compatibility spellings `mem.memcpy` and `ezra.mem.memcpy` name `copy_nonoverlapping`; `mem.memset` and `ezra.mem.memset` name `fill`.
+
+Block memory, search, comparison, and endian load/store intrinsics require ordinary nonvolatile memory. They do not turn MMIO into safe RAM or combine device accesses. `mem.peek8` and `mem.poke8` preserve one explicit byte access and may be used for volatile/MMIO byte locations when the device semantics permit it; use a target SDK operation for device-specific read-modify-write behavior.
+
+Two-result intrinsic calls (`divmod`, `add_carry`, `sub_borrow`, `full_mul`, and `find_byte`) use the same two-place binding rules as user functions. Zero-result calls are statements, not values.
 
 ## Statements
 
@@ -415,7 +516,7 @@ loop {
 }
 ```
 
-`break` and `continue` are valid in loops. `return` may return an expression only from functions with a return type.
+`break` and `continue` are valid in loops. `return` may be empty, return one expression, or return two comma-separated expressions when the function signature matches.
 
 ## Expressions
 

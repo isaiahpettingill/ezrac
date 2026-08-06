@@ -74,6 +74,7 @@ pub fn text(program: &TbirProgram) -> String {
                 name,
                 params,
                 return_type,
+                second_return_type,
                 body,
                 effects,
                 recursive,
@@ -81,7 +82,7 @@ pub fn text(program: &TbirProgram) -> String {
                 loop_candidates,
                 ..
             } => out.push_str(&format!(
-                "fn {name} params={params:?} return={return_type:?} body={} effects={effects:?} recursive={recursive} tail_recursive={tail_recursive} loops={loop_candidates}\n",
+                "fn {name} params={params:?} return={return_type:?} second_return={second_return_type:?} body={} effects={effects:?} recursive={recursive} tail_recursive={tail_recursive} loops={loop_candidates}\n",
                 body.len()
             )),
             TbirDeclaration::Object { name, kind } => {

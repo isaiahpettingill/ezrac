@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{
     asm::AssemblyOptions,
@@ -285,6 +284,52 @@ fn scalars_operators_control_flow_calls_and_recursion_assemble() {
 }
 
 #[test]
+fn lowers_two_result_calls_with_a_hidden_pointer_and_preserves_both_values() {
+    let assembly = emit(
+        r#"
+            global sink: u16 = 0
+            fn pair(value: u8) -> u8, u8 { return value, value + 1 }
+            fn main() {
+                let first: u8, second: u8 = pair(7)
+                sink = cast<u16>(first) + cast<u16>(second)
+            }
+        "#,
+    );
+
+    assert!(assembly.contains("call _pair"), "{assembly}");
+    assert!(assembly.contains("ldi r26,"), "{assembly}");
+    assert!(assembly.contains("st z, r16"), "{assembly}");
+}
+
+#[test]
+fn rejects_one_destination_avr_calls_to_two_result_functions() {
+    let program = parse_program(
+        Path::new("avr-two-result-error.ezra"),
+        "fn pair() -> u8, bool { return 1, true } fn main() { let value: u8 = pair() }",
+    )
+    .unwrap();
+    let error = emit_avr_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Avr,
+            stack_top: Address24::new(0x0AFF),
+            ram_base: Address24::new(0x0104),
+            rodata_base: Address24::new(0x0800),
+            asset_base: Address24::new(0x0900),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("may only be used in a two-place binding or returned directly"),
+        "{error}"
+    );
+}
+
+#[test]
 fn i32_operations_use_non_overlapping_four_byte_register_groups() {
     let assembly = emit(
         r#"
@@ -548,4 +593,77 @@ fn interrupt_and_naked_functions_assemble() {
     );
     assert!(assembly.contains("reti"));
     assert!(assembly.contains("_reset:"));
+}
+
+#[test]
+fn lowers_catalog_scalar_bit_and_integer_families() {
+    let assembly = emit(
+        r#"
+            global sink: u32 = 0
+            fn main() {
+                let value: u16 = 0x1234u16
+                let tested: bool = ezra.bits.test(value, 3)
+                let set: u16 = ezra.bits.set(value, 4)
+                let clear: u16 = ezra.bits.clear(value, 5)
+                let toggled: u16 = ezra.bits.toggle(value, 6)
+                let extracted: u16 = ezra.bits.extract(value, 4, 4)
+                let inserted: u16 = ezra.bits.insert(value, 3u16, 4, 4)
+                let swapped: u16 = ezra.bits.byte_swap(value)
+                let reversed: u16 = ezra.bits.reverse(value)
+                let ones: u8 = ezra.bits.count_ones(value)
+                let leading: u8 = ezra.bits.leading_zeros(value)
+                let trailing: u8 = ezra.bits.trailing_zeros(value)
+                let rotated: u16 = ezra.bits.rotate_left(value, 3)
+                let product: u16 = ezra.int.widening_mul(7u8, 9u8)
+                let high: u16 = ezra.int.mul_high(value, value)
+                let added: u16 = ezra.int.saturating_add(value, value)
+                let subtracted: u16 = ezra.int.saturating_sub(value, value)
+                sink = cast<u32>(cast<u16>(tested) + set + clear + toggled + extracted + inserted + swapped + reversed + cast<u16>(ones) + cast<u16>(leading) + cast<u16>(trailing) + rotated + product + high + added + subtracted)
+            }
+        "#,
+    );
+    assert!(
+        assembly.contains("    mul r16, r18") || assembly.contains("    mul r18, r19"),
+        "{assembly}"
+    );
+    assert!(assembly.contains("adc"), "{assembly}");
+}
+
+#[test]
+fn lowers_catalog_paired_and_memory_families() {
+    let assembly = emit(
+        r#"
+            global bytes: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8]
+            global sink: u32 = 0
+            fn main() {
+                let left: u16 = 100
+                let right: u16 = 7
+                let quotient: u16, remainder: u16 = ezra.int.divmod(left, right)
+                let sum: u16, carry: bool = ezra.int.add_carry(left, right, false)
+                let difference: u16, borrow: bool = ezra.int.sub_borrow(left, right, true)
+                let low: u16, high: u16 = ezra.int.full_mul(left, right)
+                let p: ptr<u8> = &bytes[0]
+                let q: ptr<u8> = &bytes[2]
+                ezra.mem.copy_nonoverlapping(p, q, 2u24)
+                ezra.mem.move(p, q, 4u24)
+                ezra.mem.fill(p, 9, 4u24)
+                let found_ptr: ptr<u8>, found: bool = ezra.mem.find_byte(p, 4u24, 9)
+                let ordering: i8 = ezra.mem.compare(p, q, 4u24)
+                let le16: u16 = ezra.mem.load_le16(p)
+                let le24: u24 = ezra.mem.load_le24(p)
+                let be16: u16 = ezra.mem.load_be16(p)
+                let be24: u24 = ezra.mem.load_be24(p)
+                ezra.mem.store_le16(p, le16)
+                ezra.mem.store_le24(p, le24)
+                ezra.mem.store_be16(p, be16)
+                ezra.mem.store_be24(p, be24)
+                let byte: u8 = ezra.mem.peek8(p)
+                ezra.mem.poke8(p, byte)
+                sink = cast<u32>(quotient + remainder + sum + difference + low + high + cast<u16>(carry) + cast<u16>(borrow) + cast<u16>(found) + cast<u16>(ordering) + le16 + cast<u16>(le24) + be16 + cast<u16>(be24) + cast<u16>(found_ptr) + cast<u16>(byte))
+            }
+        "#,
+    );
+    assert!(assembly.contains("ld r18, z+"), "{assembly}");
+    assert!(assembly.contains("st x+, r18"), "{assembly}");
+    assert!(assembly.contains("sbc"), "{assembly}");
 }

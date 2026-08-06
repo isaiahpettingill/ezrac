@@ -209,6 +209,17 @@ fn validate_constant_array_indices(
                     validate_expr(model, value, &locals)?;
                     locals.insert(name.clone(), ty.clone());
                 }
+                Stmt::LetTwo {
+                    first_name,
+                    first_ty,
+                    second_name,
+                    second_ty,
+                    value,
+                } => {
+                    validate_expr(model, value, &locals)?;
+                    locals.insert(first_name.clone(), first_ty.clone());
+                    locals.insert(second_name.clone(), second_ty.clone());
+                }
                 Stmt::Assign { target, value, .. } => {
                     validate_place(model, target, &locals)?;
                     validate_expr(model, value, &locals)?;
@@ -229,6 +240,10 @@ fn validate_constant_array_indices(
                 Stmt::Loop { body } => validate_stmts(model, body, &locals)?,
                 Stmt::Return(Some(value)) | Stmt::Expr(value) => {
                     validate_expr(model, value, &locals)?;
+                }
+                Stmt::ReturnTwo { first, second } => {
+                    validate_expr(model, first, &locals)?;
+                    validate_expr(model, second, &locals)?;
                 }
                 Stmt::Out { value, .. } => validate_expr(model, value, &locals)?,
                 Stmt::Asm { .. } | Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
@@ -437,6 +452,7 @@ fn lower_declaration(declaration: &HirDeclaration, program: &Program) -> TbirDec
                     })
                     .collect(),
                 return_type: function.sig.return_type.clone(),
+                second_return_type: function.sig.second_return_type.clone(),
                 body: source
                     .map(|source| lower_stmts(&source.body))
                     .unwrap_or_default(),
@@ -649,6 +665,19 @@ fn lower_stmts(stmts: &[Stmt]) -> Vec<TbirStmt> {
                 ty: ty.clone(),
                 value: value.clone(),
             },
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                value,
+            } => TbirStmt::LetTwo {
+                first_name: first_name.clone(),
+                first_ty: first_ty.clone(),
+                second_name: second_name.clone(),
+                second_ty: second_ty.clone(),
+                value: value.clone(),
+            },
             Stmt::Assign { target, op, value } => TbirStmt::Assign {
                 target: target.clone(),
                 op: *op,
@@ -673,6 +702,10 @@ fn lower_stmts(stmts: &[Stmt]) -> Vec<TbirStmt> {
             Stmt::Break => TbirStmt::Break,
             Stmt::Continue => TbirStmt::Continue,
             Stmt::Return(value) => TbirStmt::Return(value.clone()),
+            Stmt::ReturnTwo { first, second } => TbirStmt::ReturnTwo {
+                first: first.clone(),
+                second: second.clone(),
+            },
             Stmt::Asm {
                 volatile,
                 inputs,
@@ -723,10 +756,15 @@ fn collect_effects(stmts: &[Stmt], effects: &mut Vec<TbirEffect>) {
         }
         match stmt {
             Stmt::Let { value, .. }
+            | Stmt::LetTwo { value, .. }
             | Stmt::Assign { value, .. }
             | Stmt::Return(Some(value))
             | Stmt::Out { value, .. }
             | Stmt::Expr(value) => collect_expr_effects(value, effects),
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_effects(first, effects);
+                collect_expr_effects(second, effects);
+            }
             Stmt::If { condition, .. } | Stmt::While { condition, .. } => {
                 collect_expr_effects(condition, effects)
             }

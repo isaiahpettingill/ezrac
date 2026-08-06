@@ -17,6 +17,7 @@ mod expression_validation;
 mod functions_and_control_flow;
 mod inline_asm;
 mod inline_asm_and_abi;
+mod intrinsics;
 mod modules_and_sdk;
 mod optimization_and_constants;
 mod type_validation;

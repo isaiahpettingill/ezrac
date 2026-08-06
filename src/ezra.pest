@@ -56,7 +56,7 @@ extern_decl = { visibility? ~ "extern" ~ "asm" ~ "fn" ~ ident ~ "(" ~ params? ~ 
 fn_decl = { fn_modifier* ~ "fn" ~ ident ~ "(" ~ params? ~ ")" ~ ret_ty? ~ block }
 params = { param ~ ("," ~ param)* ~ ","? }
 param = { ident ~ ":" ~ ty }
-ret_ty = { "->" ~ ty }
+ret_ty = { "->" ~ ty ~ ("," ~ ty)* }
 
 block = { "{" ~ stmt* ~ "}" }
 stmt = _{
@@ -74,7 +74,7 @@ stmt = _{
   | expr_stmt
 }
 
-let_stmt = { "let" ~ ident ~ ":" ~ ty ~ "=" ~ expr ~ semi? }
+let_stmt = { "let" ~ ident ~ ":" ~ ty ~ ("," ~ ident ~ ":" ~ ty)? ~ "=" ~ expr ~ semi? }
 untyped_let_stmt = { "let" ~ ident ~ "=" ~ expr ~ semi? }
 assign_stmt = { place ~ assign_op ~ expr ~ semi? }
 place = { deref_place | access_place | index_place | field_place | ident }
@@ -90,7 +90,8 @@ while_stmt = { "while" ~ expr ~ block }
 loop_stmt = { "loop" ~ block }
 break_stmt = { "break" ~ semi? }
 continue_stmt = { "continue" ~ semi? }
-return_stmt = { "return" ~ expr? ~ semi? }
+return_stmt = { "return" ~ return_values? ~ semi? }
+return_values = { expr ~ ("," ~ expr)? }
 asm_stmt = { "asm" ~ volatile_kw? ~ asm_operands? ~ "{" ~ asm_line* ~ "}" }
 asm_operands = { "(" ~ asm_operand_list? ~ ")" }
 asm_operand_list = { asm_operand ~ ("," ~ asm_operand)* ~ ","? }

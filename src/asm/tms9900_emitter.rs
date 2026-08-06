@@ -12,6 +12,7 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    intrinsics::{self, BitsIntrinsic, IntIntrinsic, IntrinsicOperation, MemIntrinsic},
     regalloc::{
         Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
         SpillClass, SpillClassId, Target,
@@ -27,10 +28,11 @@ use crate::{
 /// Emit the initial TMS9900 source backend.
 ///
 /// Scalar values are evaluated in `R0`; `R1` through `R5` are arithmetic
-/// scratch registers. `R6` through `R8` hold allocated scalar locals but remain
-/// volatile across calls and inline assembly. `R9` addresses word-aligned
-/// function frames and `R10` is the descending stack pointer, so spills, nested
-/// arguments, and recursive calls have independent storage.
+/// scratch registers. A two-result function returns its values in `R0` and `R1`.
+/// `R6` through `R8` hold allocated scalar locals but remain volatile across calls
+/// and inline assembly. `R9` addresses word-aligned function frames and `R10` is
+/// the descending stack pointer, so spills, nested arguments, and recursive calls
+/// have independent storage.
 pub fn emit_tms9900_assembly_with_options(
     program: &Program,
     options: AssemblyOptions,
@@ -87,6 +89,7 @@ struct Emitter {
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
+    second_return_types: Vec<Option<Type>>,
     local_plans: Vec<HashMap<String, Binding>>,
     runtime_strings: HashMap<String, Storage>,
     functions: HashMap<String, Function>,
@@ -105,6 +108,7 @@ impl Emitter {
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
+            second_return_types: Vec::new(),
             local_plans: Vec::new(),
             runtime_strings: HashMap::new(),
             functions: HashMap::new(),
@@ -114,6 +118,7 @@ impl Emitter {
     }
 
     fn emit(mut self, program: &Program) -> Result<String, Diagnostic> {
+        self.validate_two_result_abi(program)?;
         self.functions = program
             .declarations
             .iter()
@@ -173,6 +178,40 @@ impl Emitter {
         }
         self.line("section .scratch");
         Ok(self.out)
+    }
+
+    fn validate_two_result_abi(&self, program: &Program) -> Result<(), Diagnostic> {
+        for declaration in &program.declarations {
+            match unwrapped_declaration(declaration) {
+                Declaration::Function(function) if function.second_return_type.is_some() => {
+                    let Some(first) = function.return_type.as_ref() else {
+                        return Err(Diagnostic::new(format!(
+                            "TMS9900 two-result function `{}` must have a first return type",
+                            function.name
+                        )));
+                    };
+                    if scalar_width(&self.model, first).is_err()
+                        || scalar_width(&self.model, function.second_return_type.as_ref().unwrap())
+                            .is_err()
+                    {
+                        return Err(Diagnostic::new(format!(
+                            "TMS9900 two-result function `{}` must return scalar values that fit in 16 bits",
+                            function.name
+                        )));
+                    }
+                }
+                Declaration::ExternAsmFunction(function)
+                    if function.second_return_type.is_some() =>
+                {
+                    return Err(Diagnostic::new(format!(
+                        "TMS9900 external two-result function `{}` is unsupported; define a source function with the R0/R1 ABI",
+                        function.name
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn is_ti_cartridge(&self) -> bool {
@@ -315,6 +354,13 @@ impl Emitter {
                 .map(|ty| self.model.resolved_type(ty))
                 .transpose()?,
         );
+        self.second_return_types.push(
+            function
+                .second_return_type
+                .as_ref()
+                .map(|ty| self.model.resolved_type(ty))
+                .transpose()?,
+        );
 
         self.line("    dect r10");
         self.line("    mov r11, *r10");
@@ -344,6 +390,7 @@ impl Emitter {
         self.line("    mov *r10+, r9");
         self.line("    mov *r10+, r11");
         self.line("    b *r11");
+        self.second_return_types.pop();
         self.return_types.pop();
         self.return_labels.pop();
         self.local_plans.pop();
@@ -372,6 +419,40 @@ impl Emitter {
                 self.bind(name.clone(), binding.clone())?;
                 self.emit_expr(value, &ty)?;
                 self.store_binding_r0(&binding)?;
+            }
+            Stmt::LetTwo {
+                first_name,
+                second_name,
+                value,
+                ..
+            } => {
+                let first_binding = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(first_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing frame slot for `{first_name}`"))
+                    })?;
+                let second_binding = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(second_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing frame slot for `{second_name}`"))
+                    })?;
+                self.bind(first_name.clone(), first_binding.clone())?;
+                self.bind(second_name.clone(), second_binding.clone())?;
+                let Expr::Call { path, args } = value else {
+                    return Err(Diagnostic::new(
+                        "TMS9900 two-place binding requires a direct two-result call",
+                    ));
+                };
+                self.emit_call(path, args, true)?;
+                self.store_binding_r0(&first_binding)?;
+                self.line("    mov r2, r0");
+                self.store_binding_r0(&second_binding)?;
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
@@ -441,7 +522,20 @@ impl Emitter {
             Stmt::Break => self.jump_loop(false)?,
             Stmt::Continue => self.jump_loop(true)?,
             Stmt::Return(value) => {
-                if let Some(value) = value {
+                if self
+                    .second_return_types
+                    .last()
+                    .and_then(Clone::clone)
+                    .is_some()
+                {
+                    let Some(Expr::Call { path, args }) = value else {
+                        return Err(Diagnostic::new(
+                            "TMS9900 two-result function must return a direct two-result call or `return first, second`",
+                        ));
+                    };
+                    self.emit_call(path, args, true)?;
+                    self.line("    mov r2, r1");
+                } else if let Some(value) = value {
                     let ty = self
                         .return_types
                         .last()
@@ -449,6 +543,35 @@ impl Emitter {
                         .ok_or_else(|| Diagnostic::new("value return in void function"))?;
                     self.emit_expr(value, &ty)?;
                 }
+                let label = self
+                    .return_labels
+                    .last()
+                    .expect("function return label")
+                    .clone();
+                self.line(&format!("    b @{label}"));
+            }
+            Stmt::ReturnTwo { first, second } => {
+                let first_ty =
+                    self.return_types
+                        .last()
+                        .and_then(Clone::clone)
+                        .ok_or_else(|| {
+                            Diagnostic::new("TMS9900 two-value return without two result types")
+                        })?;
+                let second_ty = self
+                    .second_return_types
+                    .last()
+                    .and_then(Clone::clone)
+                    .ok_or_else(|| {
+                        Diagnostic::new("TMS9900 two-value return without two result types")
+                    })?;
+                self.emit_expr(first, &first_ty)?;
+                self.line("    dect r10");
+                self.line("    mov r0, *r10");
+                self.emit_expr(second, &second_ty)?;
+                self.line("    mov r0, r2");
+                self.line("    mov *r10+, r0");
+                self.line("    mov r2, r1");
                 let label = self
                     .return_labels
                     .last()
@@ -526,7 +649,7 @@ impl Emitter {
                 self.load_indirect_r0(ty)?;
             }
             Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, ty)?,
-            Expr::Call { path, args } => self.emit_call(path, args)?,
+            Expr::Call { path, args } => self.emit_call(path, args, false)?,
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, ty)?;
                 match op {
@@ -611,21 +734,1024 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_call(&mut self, path: &[String], args: &[Expr]) -> Result<(), Diagnostic> {
+    fn resolve_intrinsic(
+        &self,
+        path: &[String],
+        args: &[Expr],
+    ) -> Result<Option<intrinsics::IntrinsicResolution>, Diagnostic> {
+        let name = path.join(".");
+        if intrinsics::lookup(&name).is_none() {
+            return Ok(None);
+        }
+        let types = args
+            .iter()
+            .map(|arg| self.expr_type(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let constants = args
+            .iter()
+            .map(|arg| self.model.const_value(arg).ok())
+            .collect::<Vec<_>>();
+        let resolution = intrinsics::CATALOG
+            .validate_types_with_constants(&name, &types, &constants)
+            .map_err(|error| Diagnostic::new(error.to_string()))?;
+        self.validate_tms_intrinsic(&resolution, args)?;
+        Ok(Some(resolution))
+    }
+
+    fn validate_tms_intrinsic(
+        &self,
+        resolution: &intrinsics::IntrinsicResolution,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        let length_argument = match resolution.descriptor.operation {
+            IntrinsicOperation::Mem(MemIntrinsic::CopyNonoverlapping)
+            | IntrinsicOperation::Mem(MemIntrinsic::Move)
+            | IntrinsicOperation::Mem(MemIntrinsic::Fill) => Some(2),
+            IntrinsicOperation::Mem(MemIntrinsic::FindByte)
+            | IntrinsicOperation::Mem(MemIntrinsic::Compare) => Some(1),
+            _ => None,
+        };
+        for (index, ty) in resolution.argument_types.iter().enumerate() {
+            if Some(index) == length_argument {
+                continue;
+            }
+            if let Some(info) = intrinsics::integer_info(ty)
+                && info.bits > 16
+            {
+                return Err(Diagnostic::new(format!(
+                    "TMS9900 intrinsic `{}` does not support `{ty:?}`; scalar values are at most 16 bits",
+                    resolution.canonical_name()
+                )));
+            }
+        }
+        for ty in &resolution.result_types {
+            if let Some(info) = intrinsics::integer_info(ty)
+                && info.bits > 16
+            {
+                return Err(Diagnostic::new(format!(
+                    "TMS9900 intrinsic `{}` does not support `{ty:?}` results",
+                    resolution.canonical_name()
+                )));
+            }
+        }
+        if let Some(index) = length_argument {
+            let length = self.model.const_value(&args[index]).map_err(|_| {
+                Diagnostic::new(format!(
+                    "TMS9900 intrinsic `{}` requires a constant length that fits in 16 bits",
+                    resolution.canonical_name()
+                ))
+            })?;
+            if !(0..=u16::MAX as i64).contains(&length) {
+                return Err(Diagnostic::new(format!(
+                    "TMS9900 intrinsic `{}` length {length} is outside the 16-bit address space",
+                    resolution.canonical_name()
+                )));
+            }
+        }
+        if !matches!(
+            resolution.descriptor.effects.volatile,
+            intrinsics::VolatilePolicy::PreservesAccess
+        ) && self.intrinsic_accesses_volatile_memory(resolution.descriptor.operation, args)
+        {
+            return Err(Diagnostic::new(format!(
+                "TMS9900 intrinsic `{}` cannot access volatile memory",
+                resolution.canonical_name()
+            )));
+        }
+        Ok(())
+    }
+
+    fn intrinsic_accesses_volatile_memory(
+        &self,
+        operation: IntrinsicOperation,
+        args: &[Expr],
+    ) -> bool {
+        let indexes: &[usize] = match operation {
+            IntrinsicOperation::Mem(MemIntrinsic::CopyNonoverlapping)
+            | IntrinsicOperation::Mem(MemIntrinsic::Move) => &[0, 1],
+            IntrinsicOperation::Mem(MemIntrinsic::Fill)
+            | IntrinsicOperation::Mem(MemIntrinsic::FindByte)
+            | IntrinsicOperation::Mem(MemIntrinsic::LoadLe16)
+            | IntrinsicOperation::Mem(MemIntrinsic::LoadLe24)
+            | IntrinsicOperation::Mem(MemIntrinsic::LoadBe16)
+            | IntrinsicOperation::Mem(MemIntrinsic::LoadBe24)
+            | IntrinsicOperation::Mem(MemIntrinsic::StoreLe16)
+            | IntrinsicOperation::Mem(MemIntrinsic::StoreLe24)
+            | IntrinsicOperation::Mem(MemIntrinsic::StoreBe16)
+            | IntrinsicOperation::Mem(MemIntrinsic::StoreBe24) => &[0],
+            IntrinsicOperation::Mem(MemIntrinsic::Compare) => &[0, 1],
+            _ => &[],
+        };
+        indexes
+            .iter()
+            .copied()
+            .any(|index| self.is_volatile_tms_expr(&args[index]))
+    }
+
+    fn is_volatile_tms_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(name) => self
+                .model
+                .mmio
+                .get(name)
+                .is_some_and(|(_, _, volatile)| *volatile),
+            Expr::Cast { expr, .. } | Expr::BankedPointer { pointer: expr, .. } => {
+                self.is_volatile_tms_expr(expr)
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_intrinsic(
+        &mut self,
+        _path: &[String],
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        match resolution.descriptor.operation {
+            IntrinsicOperation::Bits(operation) => self.emit_tms_bits(operation, args, resolution),
+            IntrinsicOperation::Int(operation) => self.emit_tms_int(operation, args, resolution),
+            IntrinsicOperation::Mem(operation) => self.emit_tms_mem(operation, args, resolution),
+        }
+        .map_err(|error| {
+            Diagnostic::new(format!(
+                "TMS9900 intrinsic `{}`: {}",
+                resolution.canonical_name(),
+                error.message
+            ))
+        })
+    }
+
+    fn emit_tms_argument(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+        if matches!(intrinsics::integer_info(ty), Some(info) if info.bits > 16) {
+            return self.load_immediate(self.model.const_value(expr)?);
+        }
+        self.emit_expr(expr, ty)
+    }
+
+    fn emit_tms_push_argument(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+        self.emit_tms_argument(expr, ty)?;
+        self.line("    dect r10");
+        self.line("    mov r0, *r10");
+        Ok(())
+    }
+
+    fn emit_tms_two_arguments(
+        &mut self,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_tms_argument(&args[1], &resolution.argument_types[1])?;
+        self.line("    mov r0, r1");
+        self.line("    mov *r10+, r0");
+        Ok(())
+    }
+
+    fn emit_tms_three_arguments(
+        &mut self,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        for (arg, ty) in args.iter().zip(&resolution.argument_types) {
+            self.emit_tms_push_argument(arg, ty)?;
+        }
+        self.line("    mov *r10+, r2");
+        self.line("    mov *r10+, r1");
+        self.line("    mov *r10+, r0");
+        Ok(())
+    }
+
+    fn emit_tms_bits(
+        &mut self,
+        operation: BitsIntrinsic,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        let ty = &resolution.argument_types[0];
+        let bits = tms_intrinsic_integer_bits(ty)?;
+        let mask = tms_intrinsic_integer_mask(bits);
+        match operation {
+            BitsIntrinsic::RotateLeft | BitsIntrinsic::RotateRight => {
+                self.emit_tms_two_arguments(args, resolution)?;
+                self.line(&format!("    andi r1, >{:04X}", bits - 1));
+                self.line("    mov r1, r2");
+                self.line(&format!("    li r3, >{bits:04X}"));
+                let loop_label = self.next_label("intrinsic_rotate_loop");
+                let done = self.next_label("intrinsic_rotate_done");
+                self.line(&format!("{loop_label}:"));
+                self.line("    ci r2, 0");
+                self.line(&format!("    jeq {done}"));
+                if operation == BitsIntrinsic::RotateLeft {
+                    self.line("    mov r0, r5");
+                    self.line(&format!("    andi r5, >{:04X}", 1u16 << (bits - 1)));
+                    self.line("    sla r0, 1");
+                    self.line(&format!("    andi r0, >{mask:04X}"));
+                    self.line("    ci r5, 0");
+                    let no_bit = self.next_label("intrinsic_rotate_no_bit");
+                    self.line(&format!("    jeq {no_bit}"));
+                    self.line("    ori r0, >0001");
+                    self.line(&format!("{no_bit}:"));
+                } else {
+                    self.line("    mov r0, r5");
+                    self.line("    andi r5, >0001");
+                    self.line("    srl r0, 1");
+                    self.line("    ci r5, 0");
+                    let no_bit = self.next_label("intrinsic_rotate_no_bit");
+                    self.line(&format!("    jeq {no_bit}"));
+                    self.line(&format!("    ori r0, >{:04X}", 1u16 << (bits - 1)));
+                    self.line(&format!("{no_bit}:"));
+                }
+                self.line("    dec r2");
+                self.line(&format!("    b @{loop_label}"));
+                self.line(&format!("{done}:"));
+            }
+            BitsIntrinsic::Test
+            | BitsIntrinsic::Set
+            | BitsIntrinsic::Clear
+            | BitsIntrinsic::Toggle => {
+                self.emit_tms_argument(&args[0], ty)?;
+                let bit = 1u16 << self.model.const_value(&args[1])? as u16;
+                match operation {
+                    BitsIntrinsic::Test => {
+                        self.line(&format!("    andi r0, >{bit:04X}"));
+                        self.emit_tms_boolean_from_r0();
+                    }
+                    BitsIntrinsic::Set => self.line(&format!("    ori r0, >{bit:04X}")),
+                    BitsIntrinsic::Clear => self.line(&format!("    andi r0, >{:04X}", !bit)),
+                    BitsIntrinsic::Toggle => {
+                        self.line(&format!("    li r1, >{bit:04X}"));
+                        self.line("    xor r1, r0");
+                    }
+                    _ => unreachable!(),
+                }
+                if operation == BitsIntrinsic::Toggle {
+                    self.line(&format!("    andi r0, >{mask:04X}"));
+                } else {
+                    self.line(&format!("    andi r0, >{mask:04X}"));
+                }
+            }
+            BitsIntrinsic::Extract => {
+                self.emit_tms_argument(&args[0], ty)?;
+                let offset = self.model.const_value(&args[1])? as u16;
+                let width = self.model.const_value(&args[2])? as u16;
+                self.line(&format!("    srl r0, {offset}"));
+                self.line(&format!(
+                    "    andi r0, >{:04X}",
+                    tms_intrinsic_integer_mask(width)
+                ));
+            }
+            BitsIntrinsic::Insert => {
+                self.emit_tms_two_arguments(args, resolution)?;
+                let offset = self.model.const_value(&args[2])? as u16;
+                let width = self.model.const_value(&args[3])? as u16;
+                let field = tms_intrinsic_integer_mask(width);
+                let shifted = field << offset;
+                self.line(&format!("    andi r1, >{field:04X}"));
+                self.line(&format!("    sla r1, {offset}"));
+                self.line(&format!("    andi r0, >{:04X}", !shifted));
+                self.line("    soc r1, r0");
+                self.line(&format!("    andi r0, >{mask:04X}"));
+            }
+            BitsIntrinsic::ByteSwap => {
+                self.emit_tms_argument(&args[0], ty)?;
+                self.line("    swpb r0");
+            }
+            BitsIntrinsic::Reverse => self.emit_tms_bit_loop(&args[0], ty, false)?,
+            BitsIntrinsic::CountOnes => self.emit_tms_bit_loop(&args[0], ty, true)?,
+            BitsIntrinsic::LeadingZeros => self.emit_tms_zero_count(&args[0], ty, true)?,
+            BitsIntrinsic::TrailingZeros => self.emit_tms_zero_count(&args[0], ty, false)?,
+        }
+        Ok(())
+    }
+
+    fn emit_tms_bit_loop(
+        &mut self,
+        expr: &Expr,
+        ty: &Type,
+        count_ones: bool,
+    ) -> Result<(), Diagnostic> {
+        let bits = tms_intrinsic_integer_bits(ty)?;
+        self.emit_tms_argument(expr, ty)?;
+        self.line("    mov r0, r1");
+        self.line("    clr r2");
+        self.line(&format!("    li r3, >{bits:04X}"));
+        let loop_label = self.next_label("intrinsic_bit_loop");
+        let done = self.next_label("intrinsic_bit_done");
+        let no_bit = self.next_label("intrinsic_bit_no_bit");
+        self.line(&format!("{loop_label}:"));
+        self.line("    ci r3, 0");
+        self.line(&format!("    jeq {done}"));
+        if !count_ones {
+            self.line("    sla r2, 1");
+        }
+        self.line("    mov r1, r4");
+        self.line("    andi r4, >0001");
+        self.line("    ci r4, 0");
+        self.line(&format!("    jeq {no_bit}"));
+        self.line("    inc r2");
+        self.line(&format!("{no_bit}:"));
+        self.line("    srl r1, 1");
+        self.line("    dec r3");
+        self.line(&format!("    b @{loop_label}"));
+        self.line(&format!("{done}:"));
+        self.line("    mov r2, r0");
+        if count_ones {
+            self.line(&format!(
+                "    andi r0, >{:04X}",
+                tms_intrinsic_integer_mask(bits)
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_tms_zero_count(
+        &mut self,
+        expr: &Expr,
+        ty: &Type,
+        leading: bool,
+    ) -> Result<(), Diagnostic> {
+        let bits = tms_intrinsic_integer_bits(ty)?;
+        self.emit_tms_argument(expr, ty)?;
+        self.line("    mov r0, r1");
+        self.line("    clr r2");
+        self.line(&format!("    li r3, >{bits:04X}"));
+        let loop_label = self.next_label("intrinsic_zero_loop");
+        let done = self.next_label("intrinsic_zero_done");
+        self.line(&format!("{loop_label}:"));
+        self.line("    ci r3, 0");
+        self.line(&format!("    jeq {done}"));
+        self.line("    mov r1, r4");
+        self.line(&format!(
+            "    andi r4, >{:04X}",
+            if leading { 1u16 << (bits - 1) } else { 1 }
+        ));
+        self.line("    ci r4, 0");
+        self.line(&format!("    jne {done}"));
+        if leading {
+            self.line("    sla r1, 1");
+        } else {
+            self.line("    srl r1, 1");
+        }
+        self.line("    inc r2");
+        self.line("    dec r3");
+        self.line(&format!("    b @{loop_label}"));
+        self.line(&format!("{done}:"));
+        self.line("    mov r2, r0");
+        Ok(())
+    }
+
+    fn emit_tms_int(
+        &mut self,
+        operation: IntIntrinsic,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        let ty = &resolution.argument_types[0];
+        match operation {
+            IntIntrinsic::WideningMul | IntIntrinsic::MulHigh | IntIntrinsic::FullMul => {
+                self.emit_tms_product(operation, ty, args, resolution)?
+            }
+            IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => self.emit_tms_saturating(
+                operation == IntIntrinsic::SaturatingSub,
+                ty,
+                args,
+                resolution,
+            )?,
+            IntIntrinsic::Divmod => self.emit_tms_divmod(ty, args, resolution)?,
+            IntIntrinsic::AddCarry | IntIntrinsic::SubBorrow => {
+                self.emit_tms_carry(operation == IntIntrinsic::SubBorrow, ty, args, resolution)?
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_tms_product(
+        &mut self,
+        operation: IntIntrinsic,
+        ty: &Type,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        let bits = tms_intrinsic_integer_bits(ty)?;
+        let signed = tms_intrinsic_integer_signed(ty);
+        self.emit_tms_two_arguments(args, resolution)?;
+        if bits == 8 {
+            if signed {
+                self.line("    sla r0, 8");
+                self.line("    sra r0, 8");
+                self.line("    sla r1, 8");
+                self.line("    sra r1, 8");
+            } else {
+                self.line("    andi r0, >00FF");
+                self.line("    andi r1, >00FF");
+            }
+        }
+        if signed {
+            self.line("    clr r3");
+            self.line("    ci r0, 0");
+            let left_done = self.next_label("intrinsic_mul_left_done");
+            self.line(&format!("    jgt {left_done}"));
+            self.line(&format!("    jeq {left_done}"));
+            self.line("    neg r0");
+            self.line("    inc r3");
+            self.line(&format!("{left_done}:"));
+            self.line("    ci r1, 0");
+            let right_done = self.next_label("intrinsic_mul_right_done");
+            self.line(&format!("    jgt {right_done}"));
+            self.line(&format!("    jeq {right_done}"));
+            self.line("    neg r1");
+            self.line("    inc r3");
+            self.line(&format!("{right_done}:"));
+        }
+        self.line("    mpy r1, r0");
+        if signed {
+            let positive = self.next_label("intrinsic_mul_positive");
+            let no_carry = self.next_label("intrinsic_mul_no_carry");
+            self.line("    andi r3, >0001");
+            self.line("    ci r3, 0");
+            self.line(&format!("    jeq {positive}"));
+            self.line("    inv r0");
+            self.line("    inv r1");
+            self.line("    ai r1, 1");
+            self.line(&format!("    jne {no_carry}"));
+            self.line("    ai r0, 1");
+            self.line(&format!("{no_carry}:"));
+            self.line(&format!("{positive}:"));
+        }
+        if operation == IntIntrinsic::WideningMul {
+            self.line("    mov r1, r0");
+        } else if operation == IntIntrinsic::MulHigh {
+            if bits == 8 {
+                self.line("    srl r1, 8");
+                self.line("    mov r1, r0");
+            }
+            // For 16-bit values MPY already leaves the high half in R0.
+        } else if bits == 8 {
+            self.line("    mov r1, r3");
+            self.line("    srl r3, 8");
+            self.line("    andi r3, >00FF");
+            self.line("    mov r3, r2");
+            self.line("    andi r1, >00FF");
+            self.line("    mov r1, r0");
+        } else {
+            self.line("    mov r0, r2");
+            self.line("    mov r1, r0");
+        }
+        if bits == 8 && operation == IntIntrinsic::FullMul {
+            self.line("    andi r0, >00FF");
+            self.line("    andi r2, >00FF");
+        }
+        Ok(())
+    }
+
+    fn emit_tms_saturating(
+        &mut self,
+        subtract: bool,
+        ty: &Type,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        let bits = tms_intrinsic_integer_bits(ty)?;
+        let mask = tms_intrinsic_integer_mask(bits);
+        self.emit_tms_two_arguments(args, resolution)?;
+        if !tms_intrinsic_integer_signed(ty) {
+            if subtract {
+                let zero = self.next_label("intrinsic_sat_zero");
+                let done = self.next_label("intrinsic_sat_done");
+                self.line("    c r0, r1");
+                self.line(&format!("    jl {zero}"));
+                self.line("    s r1, r0");
+                self.line(&format!("    b @{done}"));
+                self.line(&format!("{zero}:"));
+                self.line("    clr r0");
+                self.line(&format!("{done}:"));
+            } else {
+                let clamp = self.next_label("intrinsic_sat_clamp");
+                let done = self.next_label("intrinsic_sat_done");
+                self.line("    a r1, r0");
+                if bits == 8 {
+                    self.line("    ci r0, >00FF");
+                    self.line(&format!("    jh {clamp}"));
+                } else {
+                    self.line(&format!("    joc {clamp}"));
+                }
+                self.line(&format!("    b @{done}"));
+                self.line(&format!("{clamp}:"));
+                self.line(&format!("    li r0, >{mask:04X}"));
+                self.line(&format!("{done}:"));
+            }
+            self.line(&format!("    andi r0, >{mask:04X}"));
+            return Ok(());
+        }
+        if bits == 8 {
+            self.line("    sla r0, 8");
+            self.line("    sra r0, 8");
+            self.line("    sla r1, 8");
+            self.line("    sra r1, 8");
+        }
+        self.line("    mov r0, r3");
+        self.line("    mov r1, r4");
+        if subtract {
+            self.line("    s r1, r0");
+        } else {
+            self.line("    a r1, r0");
+        }
+        let left_positive = self.next_label("intrinsic_sat_left_positive");
+        let left_negative = self.next_label("intrinsic_sat_left_negative");
+        let clamp_max = self.next_label("intrinsic_sat_max");
+        let clamp_min = self.next_label("intrinsic_sat_min");
+        let done = self.next_label("intrinsic_sat_done");
+        self.line("    ci r3, 0");
+        self.line(&format!("    jgt {left_positive}"));
+        self.line(&format!("    jlt {left_negative}"));
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{left_positive}:"));
+        if subtract {
+            self.line("    ci r4, 0");
+            self.line(&format!("    jlt {clamp_max}"));
+        } else {
+            self.line("    ci r4, 0");
+            self.line(&format!("    jle {done}"));
+            self.line("    ci r0, 0");
+            self.line(&format!("    jlt {clamp_max}"));
+        }
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{left_negative}:"));
+        if subtract {
+            self.line("    ci r4, 0");
+            self.line(&format!("    jgt {done}"));
+            self.line("    ci r0, 0");
+            self.line(&format!("    jhe {clamp_min}"));
+        } else {
+            self.line("    ci r4, 0");
+            self.line(&format!("    jhe {done}"));
+            self.line("    ci r0, 0");
+            self.line(&format!("    jhe {clamp_min}"));
+        }
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{clamp_max}:"));
+        self.line(&format!(
+            "    li r0, >{:04X}",
+            tms_intrinsic_integer_mask(bits - 1)
+        ));
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{clamp_min}:"));
+        self.line(&format!("    li r0, >{:04X}", 1u16 << (bits - 1)));
+        self.line(&format!("{done}:"));
+        self.line(&format!("    andi r0, >{mask:04X}"));
+        Ok(())
+    }
+
+    fn emit_tms_divmod(
+        &mut self,
+        ty: &Type,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        let bits = tms_intrinsic_integer_bits(ty)?;
+        let signed = tms_intrinsic_integer_signed(ty);
+        self.emit_tms_two_arguments(args, resolution)?;
+        if bits == 8 {
+            if signed {
+                self.line("    sla r0, 8");
+                self.line("    sra r0, 8");
+                self.line("    sla r1, 8");
+                self.line("    sra r1, 8");
+            } else {
+                self.line("    andi r0, >00FF");
+                self.line("    andi r1, >00FF");
+            }
+        }
+        let zero = self.next_label("intrinsic_div_zero");
+        let done = self.next_label("intrinsic_div_done");
+        self.line("    ci r1, 0");
+        self.line(&format!("    jeq {zero}"));
+        if signed {
+            self.line("    clr r4");
+            self.line("    clr r5");
+            let dividend_done = self.next_label("intrinsic_dividend_done");
+            self.line("    ci r0, 0");
+            self.line(&format!("    jgt {dividend_done}"));
+            self.line(&format!("    jeq {dividend_done}"));
+            self.line("    neg r0");
+            self.line("    li r5, 1");
+            self.line("    ai r4, 1");
+            self.line(&format!("{dividend_done}:"));
+            let divisor_done = self.next_label("intrinsic_divisor_done");
+            self.line("    ci r1, 0");
+            self.line(&format!("    jgt {divisor_done}"));
+            self.line(&format!("    jeq {divisor_done}"));
+            self.line("    neg r1");
+            self.line("    ai r4, 1");
+            self.line(&format!("{divisor_done}:"));
+        }
+        self.line("    mov r0, r3");
+        self.line("    clr r2");
+        self.line("    div r1, r2");
+        self.line("    mov r2, r0");
+        if signed {
+            self.line("    andi r4, >0001");
+            let quotient_done = self.next_label("intrinsic_div_quotient_done");
+            self.line(&format!("    jeq {quotient_done}"));
+            self.line("    neg r0");
+            self.line(&format!("{quotient_done}:"));
+            self.line("    ci r5, 0");
+            let remainder_done = self.next_label("intrinsic_div_remainder_done");
+            self.line(&format!("    jeq {remainder_done}"));
+            self.line("    neg r3");
+            self.line(&format!("{remainder_done}:"));
+        }
+        self.line("    mov r3, r2");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{zero}:"));
+        self.line("    clr r0");
+        self.line("    clr r2");
+        self.line(&format!("{done}:"));
+        if bits == 8 {
+            self.line("    andi r0, >00FF");
+            self.line("    andi r2, >00FF");
+        }
+        Ok(())
+    }
+
+    fn emit_tms_carry(
+        &mut self,
+        subtract: bool,
+        ty: &Type,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        let bits = tms_intrinsic_integer_bits(ty)?;
+        let mask = tms_intrinsic_integer_mask(bits);
+        self.emit_tms_three_arguments(args, resolution)?;
+        self.line("    andi r2, >0001");
+        let set = self.next_label("intrinsic_carry_set");
+        let done = self.next_label("intrinsic_carry_done");
+        if subtract {
+            self.line("    mov r1, r3");
+            self.line("    a r2, r3");
+            self.line(&format!("    joc {set}"));
+            self.line("    c r0, r3");
+            self.line(&format!("    jl {set}"));
+            self.line("    s r3, r0");
+            self.line("    clr r2");
+            self.line(&format!("    b @{done}"));
+            self.line(&format!("{set}:"));
+            self.line("    s r3, r0");
+            self.line("    li r2, 1");
+        } else {
+            self.line("    a r1, r0");
+            self.line(&format!("    joc {set}"));
+            self.line("    a r2, r0");
+            self.line(&format!("    joc {set}"));
+            self.line("    clr r3");
+            self.line(&format!("    b @{done}"));
+            self.line(&format!("{set}:"));
+            self.line("    li r3, 1");
+            self.line("    a r2, r0");
+        }
+        self.line(&format!("{done}:"));
+        if subtract {
+            self.line(&format!("    andi r0, >{mask:04X}"));
+            self.line("    mov r2, r3");
+        } else {
+            self.line(&format!("    andi r0, >{mask:04X}"));
+            self.line("    mov r3, r2");
+        }
+        if bits == 8 {
+            self.line("    andi r0, >00FF");
+        }
+        Ok(())
+    }
+
+    fn emit_tms_mem(
+        &mut self,
+        operation: MemIntrinsic,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            MemIntrinsic::CopyNonoverlapping | MemIntrinsic::Move => {
+                self.emit_tms_copy_or_move(operation == MemIntrinsic::Move, args, resolution)
+            }
+            MemIntrinsic::Fill => self.emit_tms_fill(args, resolution),
+            MemIntrinsic::FindByte => self.emit_tms_find_byte(args, resolution),
+            MemIntrinsic::Compare => self.emit_tms_compare(args, resolution),
+            MemIntrinsic::LoadLe16
+            | MemIntrinsic::LoadBe16
+            | MemIntrinsic::LoadLe24
+            | MemIntrinsic::LoadBe24 => {
+                if matches!(operation, MemIntrinsic::LoadLe24 | MemIntrinsic::LoadBe24) {
+                    return Err(Diagnostic::new(
+                        "24-bit memory loads need a 24-bit target value",
+                    ));
+                }
+                self.emit_tms_load16(operation == MemIntrinsic::LoadBe16, args, resolution)
+            }
+            MemIntrinsic::StoreLe16
+            | MemIntrinsic::StoreBe16
+            | MemIntrinsic::StoreLe24
+            | MemIntrinsic::StoreBe24 => {
+                if matches!(operation, MemIntrinsic::StoreLe24 | MemIntrinsic::StoreBe24) {
+                    return Err(Diagnostic::new(
+                        "24-bit memory stores need a 24-bit target value",
+                    ));
+                }
+                self.emit_tms_store16(operation == MemIntrinsic::StoreBe16, args, resolution)
+            }
+            MemIntrinsic::Peek8 => self.emit_tms_peek8(args, resolution),
+            MemIntrinsic::Poke8 => self.emit_tms_poke8(args, resolution),
+        }
+    }
+
+    fn emit_tms_copy_or_move(
+        &mut self,
+        move_semantics: bool,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_tms_push_argument(&args[2], &resolution.argument_types[2])?;
+        self.line("    mov *r10+, r2");
+        self.line("    mov *r10+, r4");
+        self.line("    mov *r10+, r3");
+        let done = self.next_label("intrinsic_copy_done");
+        self.line("    ci r2, 0");
+        self.line(&format!("    jeq {done}"));
+        if move_semantics {
+            let backward = self.next_label("intrinsic_move_backward");
+            let forward = self.next_label("intrinsic_move_forward");
+            self.line("    c r3, r4");
+            self.line(&format!("    jh {backward}"));
+            self.line(&format!("    b @{forward}"));
+            self.line(&format!("{backward}:"));
+            self.line("    mov r2, r0");
+            self.line("    dec r0");
+            self.line("    a r0, r3");
+            self.line("    a r0, r4");
+            self.emit_tms_copy_loop(true, &done);
+            self.line(&format!("{forward}:"));
+        }
+        self.emit_tms_copy_loop(false, &done);
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_tms_copy_loop(&mut self, backward: bool, done: &str) {
+        let loop_label = self.next_label("intrinsic_copy_loop");
+        self.line(&format!("{loop_label}:"));
+        self.line("    clr r1");
+        self.line("    movb *r4, r1");
+        self.line("    swpb r1");
+        self.line("    movb r1, *r3");
+        if backward {
+            self.line("    dec r3");
+            self.line("    dec r4");
+        } else {
+            self.line("    inc r3");
+            self.line("    inc r4");
+        }
+        self.line("    dec r2");
+        self.line(&format!("    jne {loop_label}"));
+        self.line(&format!("    b @{done}"));
+    }
+
+    fn emit_tms_fill(
+        &mut self,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_tms_push_argument(&args[2], &resolution.argument_types[2])?;
+        self.line("    mov *r10+, r2");
+        self.line("    mov *r10+, r4");
+        self.line("    mov *r10+, r3");
+        let done = self.next_label("intrinsic_fill_done");
+        let loop_label = self.next_label("intrinsic_fill_loop");
+        self.line("    ci r2, 0");
+        self.line(&format!("    jeq {done}"));
+        self.line(&format!("{loop_label}:"));
+        self.line("    mov r4, r1");
+        self.line("    swpb r1");
+        self.line("    movb r1, *r3");
+        self.line("    inc r3");
+        self.line("    dec r2");
+        self.line(&format!("    jne {loop_label}"));
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_tms_find_byte(
+        &mut self,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_tms_argument(&args[2], &resolution.argument_types[2])?;
+        self.line("    mov r0, r5");
+        self.line("    mov *r10+, r4");
+        self.line("    mov *r10+, r3");
+        self.line("    andi r5, >00FF");
+        let loop_label = self.next_label("intrinsic_find_loop");
+        let found = self.next_label("intrinsic_find_found");
+        let not_found = self.next_label("intrinsic_find_not_found");
+        self.line(&format!("{loop_label}:"));
+        self.line("    ci r4, 0");
+        self.line(&format!("    jeq {not_found}"));
+        self.line("    clr r1");
+        self.line("    movb *r3, r1");
+        self.line("    swpb r1");
+        self.line("    c r1, r5");
+        self.line(&format!("    jeq {found}"));
+        self.line("    inc r3");
+        self.line("    dec r4");
+        self.line(&format!("    b @{loop_label}"));
+        self.line(&format!("{found}:"));
+        self.line("    mov r3, r0");
+        self.line("    li r2, 1");
+        let done = self.next_label("intrinsic_find_done");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{not_found}:"));
+        self.line("    mov r3, r0");
+        self.line("    clr r2");
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_tms_compare(
+        &mut self,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_tms_push_argument(&args[2], &resolution.argument_types[2])?;
+        self.line("    mov *r10+, r2");
+        self.line("    mov *r10+, r4");
+        self.line("    mov *r10+, r3");
+        let loop_label = self.next_label("intrinsic_compare_loop");
+        let less = self.next_label("intrinsic_compare_less");
+        let greater = self.next_label("intrinsic_compare_greater");
+        let done = self.next_label("intrinsic_compare_done");
+        self.line(&format!("{loop_label}:"));
+        self.line("    ci r2, 0");
+        self.line(&format!("    jeq {done}"));
+        self.line("    clr r0");
+        self.line("    movb *r3, r0");
+        self.line("    swpb r0");
+        self.line("    clr r1");
+        self.line("    movb *r4, r1");
+        self.line("    swpb r1");
+        self.line("    c r0, r1");
+        self.line(&format!("    jl {less}"));
+        self.line(&format!("    jh {greater}"));
+        self.line("    inc r3");
+        self.line("    inc r4");
+        self.line("    dec r2");
+        self.line(&format!("    b @{loop_label}"));
+        self.line(&format!("{less}:"));
+        self.line("    li r0, >FFFF");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{greater}:"));
+        self.line("    li r0, 1");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_tms_load16(
+        &mut self,
+        big_endian: bool,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_argument(&args[0], &resolution.argument_types[0])?;
+        self.line("    mov r0, r3");
+        self.line("    clr r0");
+        self.line("    movb *r3, r0");
+        self.line("    swpb r0");
+        self.line("    mov r0, r4");
+        self.line("    inc r3");
+        self.line("    clr r0");
+        self.line("    movb *r3, r0");
+        self.line("    swpb r0");
+        if big_endian {
+            self.line("    sla r4, 8");
+            self.line("    soc r0, r4");
+            self.line("    mov r4, r0");
+        } else {
+            self.line("    sla r0, 8");
+            self.line("    soc r4, r0");
+        }
+        Ok(())
+    }
+
+    fn emit_tms_store16(
+        &mut self,
+        big_endian: bool,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_tms_argument(&args[1], &resolution.argument_types[1])?;
+        self.line("    mov *r10+, r3");
+        self.line("    mov r0, r4");
+        if !big_endian {
+            self.line("    swpb r4");
+        }
+        self.line("    movb r4, *r3");
+        self.line("    inc r3");
+        self.line("    mov r0, r4");
+        if big_endian {
+            self.line("    swpb r4");
+        }
+        self.line("    movb r4, *r3");
+        Ok(())
+    }
+
+    fn emit_tms_peek8(
+        &mut self,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_argument(&args[0], &resolution.argument_types[0])?;
+        self.load_indirect_r0(&Type::Named("u8".to_owned()))
+    }
+
+    fn emit_tms_poke8(
+        &mut self,
+        args: &[Expr],
+        resolution: &intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_tms_argument(&args[1], &resolution.argument_types[1])?;
+        self.line("    mov *r10+, r1");
+        self.line("    swpb r0");
+        self.line("    movb r0, *r1");
+        Ok(())
+    }
+
+    fn emit_tms_boolean_from_r0(&mut self) {
+        let yes = self.next_label("intrinsic_true");
+        let done = self.next_label("intrinsic_bool_done");
+        self.line("    ci r0, 0");
+        self.line(&format!("    jne {yes}"));
+        self.line("    clr r0");
+        self.line(&format!("    b @{done}"));
+        self.line(&format!("{yes}:"));
+        self.line("    li r0, 1");
+        self.line(&format!("{done}:"));
+    }
+
+    fn emit_call(
+        &mut self,
+        path: &[String],
+        args: &[Expr],
+        two_results: bool,
+    ) -> Result<(), Diagnostic> {
         let name = path
             .last()
             .ok_or_else(|| Diagnostic::new("empty function call path"))?;
-        if args.is_empty() && self.try_emit_inline_call(name)? {
+        if let Some(resolution) = self.resolve_intrinsic(path, args)? {
+            if resolution.result_count().as_usize() == 2 && !two_results {
+                return Err(Diagnostic::new(format!(
+                    "TMS9900 two-result intrinsic `{}` requires a two-result binding",
+                    resolution.canonical_name()
+                )));
+            }
+            if resolution.result_count().as_usize() != 2 && two_results {
+                return Err(Diagnostic::new(format!(
+                    "TMS9900 intrinsic `{}` does not return two values",
+                    resolution.canonical_name()
+                )));
+            }
+            return self.emit_intrinsic(path, args, &resolution);
+        }
+        if !two_results && args.is_empty() && self.try_emit_inline_call(name)? {
             return Ok(());
         }
         let signature = self
             .model
             .functions
             .get(name)
+            .or_else(|| self.model.functions.get(&path.join(".")))
             .ok_or_else(|| {
                 Diagnostic::new(format!("unknown TMS9900 function `{}`", path.join(".")))
             })?
             .clone();
+        if signature.second_return_type.is_some() != two_results {
+            return Err(Diagnostic::new(if signature.second_return_type.is_some() {
+                format!(
+                    "TMS9900 two-result call `{name}` cannot be used where one result is expected"
+                )
+            } else {
+                format!("TMS9900 call `{name}` does not return two values")
+            }));
+        }
         if args.len() != signature.params.len() {
             return Err(Diagnostic::new(format!(
                 "function `{name}` expects {} arguments, got {}",
@@ -658,6 +1784,11 @@ impl Emitter {
             self.line(&format!("    mov @>{offset:04X}(r10), r{index}"));
         }
         self.line(&format!("    bl @{}", function_label(name)));
+        if two_results {
+            // The caller restores its saved R1 after the call, so preserve the
+            // second result in the caller-saved scratch register R2 first.
+            self.line("    mov r1, r2");
+        }
         self.adjust_stack(argument_bytes);
         self.line("    mov *r10+, r1");
         Ok(())
@@ -1107,13 +2238,22 @@ impl Emitter {
                 .get(&format!("{base}.{field}"))
                 .cloned()
                 .ok_or_else(|| Diagnostic::new(format!("unknown field `{field}`"))),
-            Expr::Call { path, .. } => self
-                .model
-                .functions
-                .get(&path.join("."))
-                .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
-                .and_then(|signature| signature.return_type.clone())
-                .ok_or_else(|| Diagnostic::new("void function has no value")),
+            Expr::Call { path, args } => {
+                if let Some(resolution) = self.resolve_intrinsic(path, args)? {
+                    return resolution.result_types.first().cloned().ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "TMS9900 intrinsic `{}` does not return a value",
+                            resolution.canonical_name()
+                        ))
+                    });
+                }
+                self.model
+                    .functions
+                    .get(&path.join("."))
+                    .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
+                    .and_then(|signature| signature.return_type.clone())
+                    .ok_or_else(|| Diagnostic::new("void function has no value"))
+            }
             Expr::Unary { expr, .. } | Expr::Binary { left: expr, .. } => self.expr_type(expr),
             Expr::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
                 Type::Ptr(inner) => Ok(*inner),
@@ -1445,6 +2585,38 @@ fn collect_frame_locals(
                         .with_force_memory(aggregate),
                 );
             }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                ..
+            } => {
+                for (name, ty) in [(first_name, first_ty), (second_name, second_ty)] {
+                    let ty = model.resolved_type(ty)?;
+                    let aggregate = matches!(&ty, Type::Array { .. })
+                        || matches!(&ty, Type::Named(name) if model.structs.contains_key(name));
+                    let size = if aggregate {
+                        model
+                            .type_size(&ty)?
+                            .checked_add(1)
+                            .map(|size| size & !1)
+                            .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?
+                            .max(2)
+                    } else {
+                        scalar_width(model, &ty)?;
+                        2
+                    };
+                    if local_types.insert(name.clone(), ty).is_some() {
+                        return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                    }
+                    locals.push(
+                        SourceLocal::new(name.clone(), size, 2, TMS_SCALAR_WORD_CLASS)
+                            .with_spill_classes(vec![TMS_STACK_SPILL_CLASS])
+                            .with_force_memory(aggregate),
+                    );
+                }
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -1558,8 +2730,15 @@ fn resolve_called_function(path: &[String], model: &SemanticModel) -> Option<Str
 fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<Vec<String>>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+            Stmt::Let { value, .. } | Stmt::Expr(value) => {
                 collect_expr_calls(value, calls);
+            }
+            Stmt::LetTwo { value, .. } | Stmt::Return(Some(value)) => {
+                collect_expr_calls(value, calls);
+            }
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_calls(first, calls);
+                collect_expr_calls(second, calls);
             }
             Stmt::Assign { target, value, .. } => {
                 collect_place_calls(target, calls);
@@ -1670,8 +2849,15 @@ fn collect_program_strings(
 fn collect_stmt_strings(body: &[Stmt], values: &mut HashSet<String>) {
     for stmt in body {
         match stmt {
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+            Stmt::Let { value, .. } | Stmt::Expr(value) => {
                 collect_expr_strings(value, values);
+            }
+            Stmt::LetTwo { value, .. } | Stmt::Return(Some(value)) => {
+                collect_expr_strings(value, values);
+            }
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_strings(first, values);
+                collect_expr_strings(second, values);
             }
             Stmt::Assign { target, value, .. } => {
                 match target {
@@ -1759,6 +2945,33 @@ fn collect_access_path_strings(path: &AccessPath, values: &mut HashSet<String>) 
     }
 }
 
+fn tms_intrinsic_integer_bits(ty: &Type) -> Result<u16, Diagnostic> {
+    match ty {
+        Type::Named(name) => match name.as_str() {
+            "u8" | "i8" => Ok(8),
+            "u16" | "i16" => Ok(16),
+            _ => Err(Diagnostic::new(format!(
+                "intrinsic integer operation does not support type `{name}`"
+            ))),
+        },
+        _ => Err(Diagnostic::new(
+            "intrinsic integer operation requires an exact-width integer",
+        )),
+    }
+}
+
+fn tms_intrinsic_integer_signed(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name) if name == "i8" || name == "i16")
+}
+
+fn tms_intrinsic_integer_mask(bits: u16) -> u16 {
+    if bits == 16 {
+        u16::MAX
+    } else {
+        (1u16 << bits) - 1
+    }
+}
+
 fn scalar_width(model: &SemanticModel, ty: &Type) -> Result<u8, Diagnostic> {
     match model.type_width(ty)? {
         1 | 2 => model.type_width(ty),
@@ -1801,6 +3014,7 @@ fn assign_binary(op: AssignOp) -> BinaryOp {
 fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
     if !function.params.is_empty()
         || function.return_type.is_some()
+        || function.second_return_type.is_some()
         || function
             .attrs
             .iter()

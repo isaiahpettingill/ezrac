@@ -92,6 +92,7 @@ pub(super) struct Symbols {
     pub(super) globals: HashMap<String, Variable>,
     pub(super) global_types: HashMap<String, Type>,
     pub(super) readonly_global_pointer_aliases: HashMap<String, u32>,
+    pub(super) volatile_ranges: Vec<(u32, u32)>,
     pub(super) functions: HashMap<String, FunctionSig>,
     static_liveness: Option<StaticLiveness>,
     function_pointer_width: ValueWidth,
@@ -131,6 +132,9 @@ pub(super) struct FunctionSig {
     pub(super) stack_arg_bytes: u8,
     pub(super) return_width: ValueWidth,
     pub(super) return_type: Option<Type>,
+    pub(super) second_return_width: ValueWidth,
+    pub(super) second_return_type: Option<Type>,
+    pub(super) hidden_return_arg_offset: Option<u8>,
     pub(super) is_interrupt: bool,
 }
 
@@ -152,6 +156,7 @@ impl Symbols {
             globals: HashMap::new(),
             global_types: HashMap::new(),
             readonly_global_pointer_aliases: HashMap::new(),
+            volatile_ranges: Vec::new(),
             functions: HashMap::new(),
             static_liveness: static_liveness.cloned(),
             function_pointer_width: match memory_model_for_cpu(options.cpu)
@@ -222,23 +227,26 @@ impl Symbols {
 
         for declaration in &program.declarations {
             let declaration = unwrapped_declaration(declaration);
-            let (name, params, return_type, extern_asm, is_interrupt) = match declaration {
-                Declaration::Function(function) => (
-                    &function.name,
-                    &function.params,
-                    &function.return_type,
-                    false,
-                    has_attr(function, "interrupt"),
-                ),
-                Declaration::ExternAsmFunction(function) => (
-                    &function.name,
-                    &function.params,
-                    &function.return_type,
-                    true,
-                    false,
-                ),
-                _ => continue,
-            };
+            let (name, params, return_type, second_return_type, extern_asm, is_interrupt) =
+                match declaration {
+                    Declaration::Function(function) => (
+                        &function.name,
+                        &function.params,
+                        &function.return_type,
+                        &function.second_return_type,
+                        false,
+                        has_attr(function, "interrupt"),
+                    ),
+                    Declaration::ExternAsmFunction(function) => (
+                        &function.name,
+                        &function.params,
+                        &function.return_type,
+                        &function.second_return_type,
+                        true,
+                        false,
+                    ),
+                    _ => continue,
+                };
             let mut param_names = HashSet::new();
             for param in params {
                 if !param_names.insert(param.name.as_str()) {
@@ -258,6 +266,14 @@ impl Symbols {
             if let Some(return_type) = return_type {
                 symbols.validate_signature_value_type(name, return_type, "return type", None)?;
             }
+            if let Some(second_return_type) = second_return_type {
+                symbols.validate_signature_value_type(
+                    name,
+                    second_return_type,
+                    "second return type",
+                    None,
+                )?;
+            }
             let param_widths = params
                 .iter()
                 .map(|param| symbols.type_width(&param.ty))
@@ -273,20 +289,33 @@ impl Symbols {
             }
             let mut stack_arg_offsets = vec![None; params.len()];
             let mut stack_arg_bytes = 0u8;
-            if params.len() > 3 {
-                let mut offset = symbols.function_pointer_width.bytes().saturating_mul(2);
+            let mut stack_offset = symbols.function_pointer_width.bytes().saturating_mul(2);
+            if !uses_arg_slots && params.len() > 3 {
                 for (index, width) in param_widths.iter().enumerate().skip(3) {
                     let bytes = width.bytes();
-                    if offset as u16 + bytes as u16 > 0x80 {
+                    if stack_offset as u16 + bytes as u16 > 0x80 {
                         return Err(Diagnostic::new(format!(
                             "function `{name}` stack arguments exceed IX displacement range"
                         )));
                     }
-                    stack_arg_offsets[index] = Some(offset);
-                    offset += bytes;
+                    stack_arg_offsets[index] = Some(stack_offset);
+                    stack_offset += bytes;
                     stack_arg_bytes += bytes;
                 }
             }
+            let hidden_return_arg_offset = second_return_type.as_ref().map(|_| {
+                let pointer_bytes = symbols.function_pointer_width.bytes();
+                if stack_offset as u16 + pointer_bytes as u16 > 0x80 {
+                    return Err(Diagnostic::new(format!(
+                        "function `{name}` two-result return pointer exceeds IX displacement range"
+                    )));
+                }
+                let offset = stack_offset;
+                stack_offset += pointer_bytes;
+                stack_arg_bytes += pointer_bytes;
+                Ok(offset)
+            });
+            let hidden_return_arg_offset = hidden_return_arg_offset.transpose()?;
             let arg_slots = if uses_arg_slots {
                 param_widths
                     .iter()
@@ -311,6 +340,13 @@ impl Symbols {
                         .transpose()?
                         .unwrap_or(ValueWidth::U8),
                     return_type: return_type.clone(),
+                    second_return_width: second_return_type
+                        .as_ref()
+                        .map(|ty| symbols.type_width(ty))
+                        .transpose()?
+                        .unwrap_or(ValueWidth::U8),
+                    second_return_type: second_return_type.clone(),
+                    hidden_return_arg_offset,
                     is_interrupt,
                 },
             );
@@ -383,6 +419,14 @@ impl Symbols {
                     symbols
                         .constant_types
                         .insert(decl.name.clone(), decl.ty.clone());
+                    let size = match resolved {
+                        Type::Ptr(inner) => symbols.type_size(&inner).unwrap_or(1),
+                        Type::Named(name) if name == "ptr" => 1,
+                        _ => 1,
+                    };
+                    symbols
+                        .volatile_ranges
+                        .push((value as u32, (value as u32).saturating_add(size)));
                 }
                 Declaration::Embed(decl) => {
                     if !symbols.embeds.contains_key(&decl.name) {

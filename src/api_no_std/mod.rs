@@ -237,7 +237,7 @@ fn compile_workspace_to_assembly_with_resolved_request(
     if !main.params.is_empty() {
         return Err(Diagnostic::new("main function cannot take parameters"));
     }
-    if main.return_type.is_some() {
+    if main.return_type.is_some() || main.second_return_type.is_some() {
         return Err(Diagnostic::new("main function cannot return a value"));
     }
 

@@ -442,6 +442,9 @@ impl Evaluator<'_> {
                     }
                     self.locals.insert(name.clone(), value);
                 }
+                Stmt::LetTwo { .. } | Stmt::ReturnTwo { .. } => {
+                    return Err(ComptimeFailure::UnsupportedBody);
+                }
                 Stmt::If {
                     condition,
                     then_body,
@@ -1677,6 +1680,14 @@ fn collect_local_names(stmts: &[Stmt], names: &mut HashSet<String>) {
             Stmt::Let { name, .. } => {
                 names.insert(name.clone());
             }
+            Stmt::LetTwo {
+                first_name,
+                second_name,
+                ..
+            } => {
+                names.insert(first_name.clone());
+                names.insert(second_name.clone());
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -1803,6 +1814,14 @@ fn collect_assigned_names(stmts: &[Stmt], assigned: &mut HashSet<String>) {
             } => {
                 assigned.insert(name.clone());
             }
+            Stmt::LetTwo {
+                first_name,
+                second_name,
+                ..
+            } => {
+                assigned.insert(first_name.clone());
+                assigned.insert(second_name.clone());
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -1823,9 +1842,14 @@ fn collect_address_taken_names(stmts: &[Stmt], names: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
             Stmt::Let { value, .. }
+            | Stmt::LetTwo { value, .. }
             | Stmt::Return(Some(value))
             | Stmt::Out { value, .. }
             | Stmt::Expr(value) => collect_address_taken_names_in_expr(value, names),
+            Stmt::ReturnTwo { first, second } => {
+                collect_address_taken_names_in_expr(first, names);
+                collect_address_taken_names_in_expr(second, names);
+            }
             Stmt::Assign { target, value, .. } => {
                 collect_address_taken_names_in_place(target, names);
                 collect_address_taken_names_in_expr(value, names);
@@ -1935,9 +1959,14 @@ fn collect_name_uses_stmts(stmts: &[Stmt], uses: &mut HashMap<String, usize>) {
     for stmt in stmts {
         match stmt {
             Stmt::Let { value, .. }
+            | Stmt::LetTwo { value, .. }
             | Stmt::Return(Some(value))
             | Stmt::Out { value, .. }
             | Stmt::Expr(value) => collect_name_uses_expr(value, uses),
+            Stmt::ReturnTwo { first, second } => {
+                collect_name_uses_expr(first, uses);
+                collect_name_uses_expr(second, uses);
+            }
             Stmt::Assign { target, value, .. } => {
                 collect_name_uses_place(target, uses);
                 collect_name_uses_expr(value, uses);
@@ -2089,6 +2118,24 @@ fn propagate_block(
                 }
                 Stmt::Let { name, ty, value }
             }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                value,
+            } => {
+                values.remove(&first_name);
+                values.remove(&second_name);
+                available.clear();
+                Stmt::LetTwo {
+                    first_name,
+                    first_ty,
+                    second_name,
+                    second_ty,
+                    value: substitute_expr(value, values, report),
+                }
+            }
             Stmt::Assign { target, op, value } => {
                 let target = substitute_place(target, values, report);
                 let value = substitute_expr(value, values, report);
@@ -2158,6 +2205,13 @@ fn propagate_block(
                 Stmt::Loop { body }
             }
             Stmt::Return(value) => Stmt::Return(value.map(|v| substitute_expr(v, values, report))),
+            Stmt::ReturnTwo { first, second } => {
+                available.clear();
+                Stmt::ReturnTwo {
+                    first: substitute_expr(first, values, report),
+                    second: substitute_expr(second, values, report),
+                }
+            }
             Stmt::Out { port, value } => {
                 available.clear();
                 Stmt::Out {
@@ -3234,6 +3288,14 @@ fn known_bits_block(
                     facts.remove(name);
                 }
             }
+            Stmt::LetTwo {
+                first_name,
+                second_name,
+                ..
+            } => {
+                facts.remove(first_name);
+                facts.remove(second_name);
+            }
             Stmt::Assign { target, .. } => match target {
                 Place::Ident(name) => {
                     facts.remove(name);
@@ -3273,7 +3335,8 @@ fn known_bits_block(
                     *value = simplified;
                 }
             }
-            Stmt::Expr(_)
+            Stmt::ReturnTwo { .. }
+            | Stmt::Expr(_)
             | Stmt::Out { .. }
             | Stmt::Return(None)
             | Stmt::Break
@@ -3668,6 +3731,19 @@ fn optimize_stmt(
             let value = optimize_expr(value, constants, report, inline_functions, comptime);
             Stmt::Let { name, ty, value }
         }
+        Stmt::LetTwo {
+            first_name,
+            first_ty,
+            second_name,
+            second_ty,
+            value,
+        } => Stmt::LetTwo {
+            first_name,
+            first_ty,
+            second_name,
+            second_ty,
+            value: optimize_expr(value, constants, report, inline_functions, comptime),
+        },
         Stmt::Assign { target, op, value } => {
             let target = optimize_place(target, constants, report, inline_functions, comptime);
             let value = optimize_expr(value, constants, report, inline_functions, comptime);
@@ -3731,6 +3807,10 @@ fn optimize_stmt(
         Stmt::Return(value) => Stmt::Return(
             value.map(|value| optimize_expr(value, constants, report, inline_functions, comptime)),
         ),
+        Stmt::ReturnTwo { first, second } => Stmt::ReturnTwo {
+            first: optimize_expr(first, constants, report, inline_functions, comptime),
+            second: optimize_expr(second, constants, report, inline_functions, comptime),
+        },
         Stmt::Out { port, value } => Stmt::Out {
             port,
             value: optimize_expr(value, constants, report, inline_functions, comptime),

@@ -4,10 +4,16 @@ use crate::{
         comments::{stmt_summary, with_readability_comments},
         reachability::{RoutineProfile, strip_unreachable_generated_routines},
     },
-    ast::{AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program, Stmt, Type, UnaryOp},
+    ast::{
+        AccessPath, AccessSegment, AssignOp, BinaryOp, Declaration, Expr, Function, Place, Program,
+        Stmt, Type, UnaryOp,
+    },
     compat::prelude::*,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    intrinsics::{
+        BitsIntrinsic, IntIntrinsic, IntrinsicOperation, IntrinsicResolution, MemIntrinsic,
+    },
     regalloc::{
         Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
         SpillClass, SpillClassId, Target,
@@ -23,7 +29,8 @@ use crate::{
 /// Emits the deliberately small, RAM-backed M6800 source ABI.
 ///
 /// Values are one byte wide. Function arguments live in the semantic model's
-/// argument slots and scalar returns use accumulator A. The backend rejects
+/// argument slots. Scalar returns use accumulator A; scalar two-result
+/// functions return their second value in accumulator B. The backend rejects
 /// constructs for which this ABI has no faithful lowering.
 pub fn emit_m6800_assembly_with_options(
     program: &Program,
@@ -109,10 +116,12 @@ struct Emitter {
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
+    second_return_types: Vec<Option<Type>>,
     local_plans: Vec<HashMap<String, Binding>>,
     r1: Storage,
     multiply_addend: Storage,
     multiply_result: Storage,
+    intrinsic_scratch: Storage,
 }
 
 impl Emitter {
@@ -128,6 +137,7 @@ impl Emitter {
         } else {
             r1
         };
+        let intrinsic_scratch = model.allocate(32)?;
         Ok(Self {
             model,
             cpu,
@@ -137,10 +147,12 @@ impl Emitter {
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
+            second_return_types: Vec::new(),
             local_plans: Vec::new(),
             r1,
             multiply_addend,
             multiply_result,
+            intrinsic_scratch,
         })
     }
 
@@ -210,12 +222,34 @@ impl Emitter {
         if let Some(ty) = &function.return_type {
             self.require_scalar(ty, "function return")?;
         }
+        if function.name == "main" && function.second_return_type.is_some() {
+            return Err(Diagnostic::new(
+                "main cannot return two values because its startup caller has no second-result destination",
+            ));
+        }
+        if function.second_return_type.is_some() && function.return_type.is_none() {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{}` must have a first return type",
+                function.name
+            )));
+        }
+        if let Some(ty) = &function.second_return_type {
+            self.require_scalar(ty, "second function return")?;
+            if !block_guarantees_two_result_return(&function.body) {
+                return Err(Diagnostic::new(format!(
+                    "missing two return values in function `{}`",
+                    function.name
+                )));
+            }
+        }
         let local_plan = plan_function_locals(function, &mut self.model, self.cpu)?;
         let return_label = self.next_label(&format!("{}_return", function.name));
         self.line(&format!("_{}:", function.name));
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
         self.return_types.push(function.return_type.clone());
+        self.second_return_types
+            .push(function.second_return_type.clone());
         self.local_plans.push(local_plan);
         let signature = self.model.functions[&function.name].clone();
         for (param, slot) in function.params.iter().zip(signature.argument_slots) {
@@ -224,6 +258,7 @@ impl Emitter {
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
         self.line("    rts");
+        self.second_return_types.pop();
         self.return_types.pop();
         self.return_labels.pop();
         self.local_plans.pop();
@@ -254,6 +289,40 @@ impl Emitter {
                 self.bind(name.clone(), storage, ty.clone())?;
                 self.emit_expr(value, ty)?;
                 self.staa(storage.address);
+            }
+            Stmt::LetTwo {
+                first_name,
+                first_ty: _,
+                second_name,
+                second_ty: _,
+                value,
+            } => {
+                let first = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(first_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing allocation for local `{first_name}`"))
+                    })?;
+                let second = self
+                    .local_plans
+                    .last()
+                    .and_then(|locals| locals.get(second_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing allocation for local `{second_name}`"))
+                    })?;
+                self.require_scalar(&first.ty, "local")?;
+                self.require_scalar(&second.ty, "local")?;
+                self.bind(first_name.clone(), first.storage, first.ty.clone())?;
+                self.bind(second_name.clone(), second.storage, second.ty.clone())?;
+                let Expr::Call { path, args } = value else {
+                    return Err(Diagnostic::new(
+                        "two-result bindings require a direct two-result call",
+                    ));
+                };
+                self.emit_two_result_call(path, args, &first, &second)?;
             }
             Stmt::Assign { target, op, value } => {
                 let Place::Ident(name) = target else {
@@ -343,6 +412,16 @@ impl Emitter {
                 self.line(&format!("    jmp {label}"));
             }
             Stmt::Return(value) => {
+                if self
+                    .second_return_types
+                    .last()
+                    .and_then(Clone::clone)
+                    .is_some()
+                {
+                    return Err(Diagnostic::new(
+                        "two-result function must use `return first, second`",
+                    ));
+                }
                 let expected = self.return_types.last().cloned().flatten();
                 match (value, expected) {
                     (Some(value), Some(ty)) => self.emit_expr(value, &ty)?,
@@ -361,6 +440,7 @@ impl Emitter {
                     .clone();
                 self.line(&format!("    jmp {label}"));
             }
+            Stmt::ReturnTwo { first, second } => self.emit_return_two(first, second)?,
             Stmt::Expr(expr) => {
                 // A void call is meaningful as a statement even though it has no expression type.
                 if matches!(expr, Expr::Call { .. }) {
@@ -384,6 +464,11 @@ impl Emitter {
     }
 
     fn emit_expr(&mut self, expr: &Expr, expected: &Type) -> Result<(), Diagnostic> {
+        if let Expr::Call { path, args } = expr {
+            if let Some(resolution) = self.resolve_intrinsic_call(path, args)? {
+                return self.emit_intrinsic(resolution, args, expected);
+            }
+        }
         self.require_scalar(expected, "expression")?;
         match expr {
             Expr::Int(value) | Expr::TypedInt(value, _) => self.ldaa_imm(*value as u8),
@@ -460,6 +545,9 @@ impl Emitter {
         args: &[Expr],
         expected: &Type,
     ) -> Result<(), Diagnostic> {
+        if let Some(resolution) = self.resolve_intrinsic_call(path, args)? {
+            return self.emit_intrinsic(resolution, args, expected);
+        }
         let name = path.join(".");
         let signature = self
             .model
@@ -468,6 +556,11 @@ impl Emitter {
             .or_else(|| path.last().and_then(|n| self.model.functions.get(n)))
             .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if signature.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{name}` requires a two-result binding"
+            )));
+        }
         if signature.params.len() != args.len() {
             return Err(Diagnostic::new(format!(
                 "function `{name}` expects {} arguments, got {}",
@@ -493,6 +586,988 @@ impl Emitter {
         } else if expected != &bool_type() && expected != &u8_type() {
             return Err(Diagnostic::new("void M6800 function used as a value"));
         }
+        Ok(())
+    }
+
+    fn emit_intrinsic(
+        &mut self,
+        resolution: IntrinsicResolution,
+        args: &[Expr],
+        expected: &Type,
+    ) -> Result<(), Diagnostic> {
+        if let Some(result_ty) = resolution.result_types.first() {
+            let expected = self.model.resolved_type(expected)?;
+            let result_ty = self.model.resolved_type(result_ty)?;
+            if expected != result_ty {
+                return Err(Diagnostic::new(format!(
+                    "intrinsic result has type {result_ty:?}, expected {expected:?}"
+                )));
+            }
+        }
+        match resolution.descriptor.operation {
+            IntrinsicOperation::Bits(operation) => self.emit_bits_intrinsic(operation, args),
+            IntrinsicOperation::Int(operation) => self.emit_int_intrinsic(operation, args),
+            IntrinsicOperation::Mem(operation) => self.emit_mem_intrinsic(operation, args),
+        }
+    }
+
+    fn resolve_intrinsic_call(
+        &self,
+        path: &[String],
+        args: &[Expr],
+    ) -> Result<Option<IntrinsicResolution>, Diagnostic> {
+        let name = path.join(".");
+        if crate::intrinsics::CATALOG.lookup(&name).is_none() {
+            return Ok(None);
+        }
+        let mut argument_types = Vec::with_capacity(args.len());
+        let mut constants = Vec::with_capacity(args.len());
+        for arg in args {
+            argument_types.push(self.model.resolved_type(&self.expr_type(arg)?)?);
+            constants.push(self.model.const_value(arg).ok());
+        }
+        crate::intrinsics::CATALOG
+            .validate_types_with_constants(&name, &argument_types, &constants)
+            .map(Some)
+            .map_err(|error| Diagnostic::new(error.to_string()))
+    }
+
+    fn emit_bits_intrinsic(
+        &mut self,
+        operation: BitsIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            BitsIntrinsic::RotateLeft | BitsIntrinsic::RotateRight => {
+                self.require_arg_count(args, 2, "rotate")?;
+                self.require_u8_bit_value(&args[0])?;
+                self.emit_expr(&args[0], &u8_type())?;
+                self.staa(self.scratch(12));
+                self.emit_expr(&args[1], &u8_type())?;
+                self.line("    anda #07h");
+                self.staa(self.scratch(13));
+                let loop_label = self.next_label("intrinsic_rotate_loop");
+                let done = self.next_label("intrinsic_rotate_done");
+                self.line(&format!("{loop_label}:"));
+                self.ldaa(self.scratch(13));
+                self.line(&format!("    beq {done}"));
+                self.ldaa(self.scratch(12));
+                if operation == BitsIntrinsic::RotateLeft {
+                    self.line("    asla");
+                    let no_carry = self.next_label("intrinsic_rotate_no_carry");
+                    self.line(&format!("    bcc {no_carry}"));
+                    self.line("    oraa #01h");
+                    self.line(&format!("{no_carry}:"));
+                } else {
+                    self.line("    lsra");
+                    let no_carry = self.next_label("intrinsic_rotate_no_carry");
+                    self.line(&format!("    bcc {no_carry}"));
+                    self.line("    oraa #80h");
+                    self.line(&format!("{no_carry}:"));
+                }
+                self.staa(self.scratch(12));
+                self.ldaa(self.scratch(13));
+                self.line("    deca");
+                self.staa(self.scratch(13));
+                self.line(&format!("    bra {loop_label}"));
+                self.line(&format!("{done}:"));
+                self.ldaa(self.scratch(12));
+            }
+            BitsIntrinsic::Test
+            | BitsIntrinsic::Set
+            | BitsIntrinsic::Clear
+            | BitsIntrinsic::Toggle => {
+                self.require_arg_count(args, 2, "bit intrinsic")?;
+                self.require_u8_bit_value(&args[0])?;
+                let bit = self.intrinsic_constant(args, 1, "bit index")?;
+                let bit = u8::try_from(bit)
+                    .ok()
+                    .filter(|bit| *bit < 8)
+                    .ok_or_else(|| Diagnostic::new("bit index is outside the input width"))?;
+                self.emit_expr(&args[0], &u8_type())?;
+                let mask = 1_u8 << bit;
+                match operation {
+                    BitsIntrinsic::Test => {
+                        self.line(&format!("    bita #{mask:02X}h"));
+                        self.emit_bool_from_branch("bne");
+                    }
+                    BitsIntrinsic::Set => self.line(&format!("    oraa #{mask:02X}h")),
+                    BitsIntrinsic::Clear => self.line(&format!("    anda #{:02X}h", !mask)),
+                    BitsIntrinsic::Toggle => self.line(&format!("    eora #{mask:02X}h")),
+                    _ => unreachable!(),
+                }
+            }
+            BitsIntrinsic::Extract => {
+                self.require_arg_count(args, 3, "bits.extract")?;
+                self.require_u8_bit_value(&args[0])?;
+                let offset = self.intrinsic_constant(args, 1, "bit-range offset")?;
+                let width = self.intrinsic_constant(args, 2, "bit-range width")?;
+                let (offset, width) = self.validate_bit_range(offset, width)?;
+                self.emit_expr(&args[0], &u8_type())?;
+                for _ in 0..offset {
+                    self.line("    lsra");
+                }
+                self.line(&format!("    anda #{:02X}h", (1_u16 << width) - 1));
+            }
+            BitsIntrinsic::Insert => {
+                self.require_arg_count(args, 4, "bits.insert")?;
+                self.require_u8_bit_value(&args[0])?;
+                self.require_u8_bit_value(&args[1])?;
+                let offset = self.intrinsic_constant(args, 2, "bit-range offset")?;
+                let width = self.intrinsic_constant(args, 3, "bit-range width")?;
+                let (offset, width) = self.validate_bit_range(offset, width)?;
+                self.emit_expr(&args[0], &u8_type())?;
+                self.staa(self.scratch(12));
+                self.emit_expr(&args[1], &u8_type())?;
+                self.line(&format!("    anda #{:02X}h", (1_u16 << width) - 1));
+                for _ in 0..offset {
+                    self.line("    asla");
+                }
+                self.staa(self.scratch(13));
+                self.ldaa(self.scratch(12));
+                let field_mask = (((1_u16 << width) - 1) << offset) as u8;
+                self.line(&format!("    anda #{:02X}h", !field_mask));
+                self.line(&format!("    oraa >{:04X}h", self.scratch(13)));
+            }
+            BitsIntrinsic::ByteSwap => {
+                return Err(Diagnostic::new(
+                    "M6800/M6809 bits.byte_swap requires at least u16",
+                ));
+            }
+            BitsIntrinsic::Reverse => self.emit_reverse_bits(args)?,
+            BitsIntrinsic::CountOnes
+            | BitsIntrinsic::LeadingZeros
+            | BitsIntrinsic::TrailingZeros => self.emit_bit_count(operation, args)?,
+        }
+        Ok(())
+    }
+
+    fn emit_reverse_bits(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 1, "bits.reverse")?;
+        self.require_u8_bit_value(&args[0])?;
+        self.emit_expr(&args[0], &u8_type())?;
+        self.staa(self.scratch(12));
+        self.ldaa_imm(0);
+        self.staa(self.scratch(13));
+        self.line("    ldx #0008h");
+        let loop_label = self.next_label("intrinsic_reverse_loop");
+        self.line(&format!("{loop_label}:"));
+        self.ldaa(self.scratch(12));
+        self.line("    lsra");
+        self.staa(self.scratch(12));
+        self.ldab(self.scratch(13));
+        self.line("    rolb");
+        self.line(&format!("    stab >{:04X}h", self.scratch(13)));
+        self.decrement_x();
+        self.line(&format!("    bne {loop_label}"));
+        self.ldaa(self.scratch(13));
+        Ok(())
+    }
+
+    fn emit_bit_count(
+        &mut self,
+        operation: BitsIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 1, "bit count")?;
+        self.require_u8_bit_value(&args[0])?;
+        self.emit_expr(&args[0], &u8_type())?;
+        self.staa(self.scratch(12));
+        self.ldaa_imm(0);
+        self.staa(self.scratch(13));
+        self.line("    ldx #0008h");
+        let loop_label = self.next_label("intrinsic_count_loop");
+        let found = self.next_label("intrinsic_count_found");
+        self.line(&format!("{loop_label}:"));
+        self.ldaa(self.scratch(12));
+        match operation {
+            BitsIntrinsic::CountOnes | BitsIntrinsic::TrailingZeros => self.line("    lsra"),
+            BitsIntrinsic::LeadingZeros => self.line("    asla"),
+            _ => unreachable!(),
+        }
+        self.staa(self.scratch(12));
+        self.line(&format!("    bcs {found}"));
+        self.ldaa(self.scratch(13));
+        self.line("    inca");
+        self.staa(self.scratch(13));
+        self.decrement_x();
+        self.line(&format!("    bne {loop_label}"));
+        self.line(&format!("{found}:"));
+        self.ldaa(self.scratch(13));
+        Ok(())
+    }
+
+    fn emit_int_intrinsic(
+        &mut self,
+        operation: IntIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            IntIntrinsic::WideningMul => Err(Diagnostic::new(
+                "M6800/M6809 widening multiplication returns an unsupported 16-bit scalar",
+            )),
+            IntIntrinsic::MulHigh => {
+                self.emit_u8_full_mul(args)?;
+                self.transfer_b_to_a();
+                Ok(())
+            }
+            IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => {
+                self.emit_saturating(args, operation == IntIntrinsic::SaturatingSub)
+            }
+            IntIntrinsic::Divmod
+            | IntIntrinsic::AddCarry
+            | IntIntrinsic::SubBorrow
+            | IntIntrinsic::FullMul => Err(Diagnostic::new(
+                "two-result integer intrinsic requires a two-result binding",
+            )),
+        }
+    }
+
+    fn emit_u8_full_mul(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "int.full_mul")?;
+        self.require_u8_integer(&args[0])?;
+        self.require_u8_integer(&args[1])?;
+        self.emit_expr(&args[0], &u8_type())?;
+        self.staa(self.scratch(12));
+        self.emit_expr(&args[1], &u8_type())?;
+        self.staa(self.scratch(13));
+        let signed = matches!(
+            self.model.resolved_type(&self.expr_type(&args[0])?)?,
+            Type::Named(name) if name == "i8"
+        );
+        if signed {
+            self.prepare_u8_magnitude(12, 18);
+            self.prepare_u8_magnitude(13, 19);
+        }
+        if self.cpu == CpuFamily::M6809 {
+            self.transfer_a_to_b();
+            self.ldaa(self.scratch(12));
+            self.line("    mul");
+            self.staa(self.scratch(13));
+            self.transfer_b_to_a();
+            self.ldab(self.scratch(13));
+        } else {
+            self.staa(self.scratch(13));
+            self.ldaa_imm(0);
+            self.staa(self.scratch(14));
+            self.staa(self.scratch(15));
+            self.ldaa(self.scratch(12));
+            self.staa(self.scratch(16));
+            self.ldaa_imm(0);
+            self.staa(self.scratch(17));
+            self.line(&format!("    ldab >{:04X}h", self.scratch(13)));
+            self.line("    ldx #0008h");
+            let loop_label = self.next_label("intrinsic_mul_loop");
+            let skip = self.next_label("intrinsic_mul_skip");
+            self.line(&format!("{loop_label}:"));
+            self.line("    bitb #01h");
+            self.branch_long("beq", &skip);
+            self.ldaa(self.scratch(14));
+            self.line(&format!("    adda >{:04X}h", self.scratch(16)));
+            self.staa(self.scratch(14));
+            self.ldaa(self.scratch(15));
+            self.line(&format!("    adca >{:04X}h", self.scratch(17)));
+            self.staa(self.scratch(15));
+            self.line(&format!("{skip}:"));
+            self.ldaa(self.scratch(16));
+            self.line("    asla");
+            self.staa(self.scratch(16));
+            self.ldaa(self.scratch(17));
+            self.line("    adca #00h");
+            self.staa(self.scratch(17));
+            self.line("    lsrb");
+            self.decrement_x();
+            self.line(&format!("    bne {loop_label}"));
+            self.ldaa(self.scratch(14));
+            self.ldab(self.scratch(15));
+        }
+        if signed {
+            self.staa(self.scratch(20));
+            self.line(&format!("    stab >{:04X}h", self.scratch(21)));
+            self.ldaa(self.scratch(18));
+            self.line(&format!("    eora >{:04X}h", self.scratch(19)));
+            let signed_done = self.next_label("intrinsic_mul_signed_done");
+            self.line(&format!("    beq {signed_done}"));
+            self.ldaa(self.scratch(20));
+            self.line("    coma");
+            self.line("    adda #01h");
+            self.staa(self.scratch(20));
+            let high_no_carry = self.next_label("intrinsic_mul_high_no_carry");
+            self.line(&format!("    bcc {high_no_carry}"));
+            self.ldaa(self.scratch(21));
+            self.line("    coma");
+            self.line("    adda #01h");
+            self.line(&format!("    staa >{:04X}h", self.scratch(21)));
+            let high_done = self.next_label("intrinsic_mul_high_done");
+            self.line(&format!("    bra {high_done}"));
+            self.line(&format!("{high_no_carry}:"));
+            self.ldaa(self.scratch(21));
+            self.line("    coma");
+            self.line(&format!("    staa >{:04X}h", self.scratch(21)));
+            self.line(&format!("{high_done}:"));
+            self.line(&format!("{signed_done}:"));
+            self.ldaa(self.scratch(20));
+            self.ldab(self.scratch(21));
+        }
+        Ok(())
+    }
+
+    fn prepare_u8_magnitude(&mut self, value_offset: u32, sign_offset: u32) {
+        let positive = self.next_label("intrinsic_magnitude_positive");
+        self.ldaa(self.scratch(value_offset));
+        self.line(&format!("    bpl {positive}"));
+        self.line("    nega");
+        self.staa(self.scratch(value_offset));
+        self.ldaa_imm(1);
+        self.staa(self.scratch(sign_offset));
+        let done = self.next_label("intrinsic_magnitude_done");
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{positive}:"));
+        self.ldaa_imm(0);
+        self.staa(self.scratch(sign_offset));
+        self.line(&format!("{done}:"));
+        self.ldaa(self.scratch(value_offset));
+    }
+
+    fn emit_saturating(&mut self, args: &[Expr], subtract: bool) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "saturating arithmetic")?;
+        self.require_u8_integer(&args[0])?;
+        self.require_u8_integer(&args[1])?;
+        let signed = matches!(self.model.resolved_type(&self.expr_type(&args[0])?)?, Type::Named(name) if name == "i8");
+        self.emit_expr(&args[0], &u8_type())?;
+        self.staa(self.scratch(12));
+        self.emit_expr(&args[1], &u8_type())?;
+        self.staa(self.scratch(13));
+        self.ldaa(self.scratch(12));
+        if subtract {
+            self.line(&format!("    suba >{:04X}h", self.scratch(13)));
+        } else {
+            self.line(&format!("    adda >{:04X}h", self.scratch(13)));
+        }
+        let done = self.next_label("intrinsic_sat_done");
+        let clamp = self.next_label("intrinsic_sat_clamp");
+        if signed {
+            self.branch_long("bvc", &done);
+            self.ldaa(self.scratch(12));
+            self.line(&format!("    bmi {clamp}"));
+            self.ldaa_imm(0x7F);
+            self.line(&format!("    bra {done}"));
+            self.line(&format!("{clamp}:"));
+            self.ldaa_imm(0x80);
+        } else if subtract {
+            self.branch_long("bcc", &done);
+            self.ldaa_imm(0);
+        } else {
+            self.branch_long("bcc", &done);
+            self.ldaa_imm(0xFF);
+        }
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_intrinsic_pair(
+        &mut self,
+        resolution: IntrinsicResolution,
+        args: &[Expr],
+        first: &Binding,
+        second: &Binding,
+    ) -> Result<(), Diagnostic> {
+        if resolution.result_types.len() != 2 {
+            return Err(Diagnostic::new("intrinsic does not produce two results"));
+        }
+        if self.model.resolved_type(&first.ty)?
+            != self.model.resolved_type(&resolution.result_types[0])?
+            || self.model.resolved_type(&second.ty)?
+                != self.model.resolved_type(&resolution.result_types[1])?
+        {
+            return Err(Diagnostic::new(
+                "intrinsic result types do not match the two-result binding",
+            ));
+        }
+        match resolution.descriptor.operation {
+            IntrinsicOperation::Int(IntIntrinsic::FullMul) => self.emit_u8_full_mul(args)?,
+            IntrinsicOperation::Int(IntIntrinsic::Divmod) => self.emit_divmod(args)?,
+            IntrinsicOperation::Int(IntIntrinsic::AddCarry) => {
+                self.emit_add_sub_carry(args, false)?
+            }
+            IntrinsicOperation::Int(IntIntrinsic::SubBorrow) => {
+                self.emit_add_sub_carry(args, true)?
+            }
+            IntrinsicOperation::Mem(MemIntrinsic::FindByte) => {
+                return Err(Diagnostic::new(
+                    "M6800/M6809 find_byte cannot return a pointer in this ABI",
+                ));
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "intrinsic is not a supported paired operation",
+                ));
+            }
+        }
+        self.stab(second.storage.address);
+        self.staa(first.storage.address);
+        Ok(())
+    }
+
+    fn emit_divmod(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 2, "int.divmod")?;
+        self.require_u8_integer(&args[0])?;
+        self.require_u8_integer(&args[1])?;
+        let signed = matches!(self.model.resolved_type(&self.expr_type(&args[0])?)?, Type::Named(name) if name == "i8");
+        self.emit_expr(&args[0], &u8_type())?;
+        self.staa(self.scratch(12));
+        self.emit_expr(&args[1], &u8_type())?;
+        self.staa(self.scratch(13));
+        self.ldaa(self.scratch(12));
+        let left_positive = self.next_label("intrinsic_div_left_positive");
+        if signed {
+            self.line(&format!("    bpl {left_positive}"));
+            self.line("    nega");
+            self.staa(self.scratch(12));
+            self.ldaa_imm(1);
+            self.staa(self.scratch(14));
+            self.line(&format!("    bra {left_positive}_sign_done"));
+            self.line(&format!("{left_positive}:"));
+            self.ldaa_imm(0);
+            self.staa(self.scratch(14));
+            self.line(&format!("{left_positive}_sign_done:"));
+        } else {
+            self.staa(self.scratch(12));
+            self.ldaa_imm(0);
+            self.staa(self.scratch(14));
+        }
+        self.ldaa(self.scratch(13));
+        let right_positive = self.next_label("intrinsic_div_right_positive");
+        if signed {
+            self.line(&format!("    bpl {right_positive}"));
+            self.line("    nega");
+            self.staa(self.scratch(13));
+            self.ldaa_imm(1);
+            self.staa(self.scratch(15));
+            self.line(&format!("    bra {right_positive}_sign_done"));
+            self.line(&format!("{right_positive}:"));
+            self.ldaa_imm(0);
+            self.staa(self.scratch(15));
+            self.line(&format!("{right_positive}_sign_done:"));
+        } else {
+            self.staa(self.scratch(13));
+            self.ldaa_imm(0);
+            self.staa(self.scratch(15));
+        }
+        let zero = self.next_label("intrinsic_div_zero");
+        self.ldaa(self.scratch(13));
+        self.line(&format!("    beq {zero}"));
+        self.ldaa(self.scratch(12));
+        self.line("    clrb");
+        self.line("    ldx #0008h");
+        let loop_label = self.next_label("intrinsic_div_loop");
+        let no_sub = self.next_label("intrinsic_div_no_sub");
+        self.line(&format!("{loop_label}:"));
+        self.line("    asla");
+        self.line("    rolb");
+        self.line(&format!("    cmpb >{:04X}h", self.scratch(13)));
+        self.branch_long("blo", &no_sub);
+        self.line(&format!("    subb >{:04X}h", self.scratch(13)));
+        self.line("    oraa #01h");
+        self.line(&format!("{no_sub}:"));
+        self.decrement_x();
+        self.line(&format!("    bne {loop_label}"));
+        if signed {
+            let q_positive = self.next_label("intrinsic_div_q_positive");
+            self.staa(self.scratch(16));
+            self.ldaa(self.scratch(14));
+            self.line(&format!("    eora >{:04X}h", self.scratch(15)));
+            self.line(&format!("    beq {q_positive}"));
+            self.ldaa(self.scratch(16));
+            self.line("    nega");
+            self.staa(self.scratch(16));
+            self.line(&format!("{q_positive}:"));
+            self.ldaa(self.scratch(14));
+            let r_positive = self.next_label("intrinsic_div_r_positive");
+            self.line(&format!("    beq {r_positive}"));
+            self.line("    negb");
+            self.line(&format!("{r_positive}:"));
+            self.ldaa(self.scratch(16));
+        }
+        let done = self.next_label("intrinsic_div_done");
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{zero}:"));
+        self.clra();
+        self.clrb();
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_add_sub_carry(&mut self, args: &[Expr], subtract: bool) -> Result<(), Diagnostic> {
+        self.require_arg_count(
+            args,
+            3,
+            if subtract {
+                "int.sub_borrow"
+            } else {
+                "int.add_carry"
+            },
+        )?;
+        self.require_u8_integer(&args[0])?;
+        self.require_u8_integer(&args[1])?;
+        self.emit_expr(&args[0], &u8_type())?;
+        self.staa(self.scratch(12));
+        self.emit_expr(&args[1], &u8_type())?;
+        self.staa(self.scratch(13));
+        self.emit_expr(&args[2], &bool_type())?;
+        self.staa(self.scratch(14));
+        self.ldaa(self.scratch(12));
+        if subtract {
+            self.line(&format!("    suba >{:04X}h", self.scratch(13)));
+        } else {
+            self.line(&format!("    adda >{:04X}h", self.scratch(13)));
+        }
+        self.staa(self.scratch(15));
+        let set = self.next_label("intrinsic_carry_set");
+        let no_input = self.next_label("intrinsic_carry_no_input");
+        let done = self.next_label("intrinsic_carry_done");
+        self.line(&format!("    bcs {set}"));
+        self.ldaa(self.scratch(14));
+        self.line(&format!("    beq {no_input}"));
+        self.ldaa(self.scratch(15));
+        if subtract {
+            self.line("    suba #01h");
+        } else {
+            self.line("    adda #01h");
+        }
+        self.staa(self.scratch(15));
+        self.line(&format!("    bcs {set}"));
+        self.line(&format!("{no_input}:"));
+        self.ldab_imm(0);
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{set}:"));
+        self.ldab_imm(1);
+        self.line(&format!("{done}:"));
+        self.ldaa(self.scratch(15));
+        Ok(())
+    }
+
+    fn emit_mem_intrinsic(
+        &mut self,
+        operation: MemIntrinsic,
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        match operation {
+            MemIntrinsic::Peek8 => {
+                self.require_arg_count(args, 1, "mem.peek8")?;
+                self.emit_pointer_to_x(&args[0])?;
+                self.line("    ldaa 0,x");
+                Ok(())
+            }
+            MemIntrinsic::Poke8 => {
+                self.require_arg_count(args, 2, "mem.poke8")?;
+                self.emit_pointer_to_x(&args[0])?;
+                self.emit_expr(&args[1], &u8_type())?;
+                self.line("    staa 0,x");
+                Ok(())
+            }
+            MemIntrinsic::CopyNonoverlapping => self.emit_memory_copy(args, false),
+            MemIntrinsic::Move => self.emit_memory_copy(args, true),
+            MemIntrinsic::Fill => self.emit_memory_fill(args),
+            MemIntrinsic::Compare => self.emit_memory_compare(args),
+            MemIntrinsic::FindByte => Err(Diagnostic::new(
+                "M6800/M6809 find_byte cannot return a pointer in this ABI",
+            )),
+            MemIntrinsic::LoadLe16
+            | MemIntrinsic::LoadLe24
+            | MemIntrinsic::LoadBe16
+            | MemIntrinsic::LoadBe24
+            | MemIntrinsic::StoreLe16
+            | MemIntrinsic::StoreLe24
+            | MemIntrinsic::StoreBe16
+            | MemIntrinsic::StoreBe24 => Err(Diagnostic::new(
+                "M6800/M6809 endian memory intrinsics require an unsupported wider scalar",
+            )),
+        }
+    }
+
+    fn emit_memory_copy(&mut self, args: &[Expr], overlap_safe: bool) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "memory copy")?;
+        self.emit_pointer_to_x(&args[0])?;
+        self.line(&format!("    stx >{:04X}h", self.scratch(2)));
+        self.emit_pointer_to_x(&args[1])?;
+        self.line(&format!("    stx >{:04X}h", self.scratch(0)));
+        self.emit_memory_count(&args[2], 4)?;
+        let forward = self.next_label("intrinsic_copy_forward");
+        let backward = self.next_label("intrinsic_copy_backward");
+        let done = self.next_label("intrinsic_copy_done");
+        self.line(&format!("    ldx >{:04X}h", self.scratch(2)));
+        if overlap_safe {
+            self.line(&format!("    cpx >{:04X}h", self.scratch(0)));
+            self.branch_long("blo", &forward);
+            self.branch_long("beq", &forward);
+            self.line(&format!("    bra {backward}"));
+        } else {
+            self.line(&format!("    bra {forward}"));
+        }
+        self.line(&format!("{forward}:"));
+        let loop_label = self.next_label("intrinsic_copy_forward_loop");
+        self.line(&format!("{loop_label}:"));
+        self.counter_nonzero(4, &done);
+        self.line(&format!("    ldx >{:04X}h", self.scratch(0)));
+        self.line("    ldaa 0,x");
+        self.increment_x();
+        self.line(&format!("    stx >{:04X}h", self.scratch(0)));
+        self.line(&format!("    ldx >{:04X}h", self.scratch(2)));
+        self.line("    staa 0,x");
+        self.increment_x();
+        self.line(&format!("    stx >{:04X}h", self.scratch(2)));
+        self.counter_dec(4);
+        self.line(&format!("    bra {loop_label}"));
+        if overlap_safe {
+            self.line(&format!("{backward}:"));
+            self.copy_counter(4, 7);
+            self.advance_pointer(0, 7);
+            self.copy_counter(4, 7);
+            self.advance_pointer(2, 7);
+            let backward_loop = self.next_label("intrinsic_copy_backward_loop");
+            self.line(&format!("{backward_loop}:"));
+            self.counter_nonzero(4, &done);
+            self.line(&format!("    ldx >{:04X}h", self.scratch(0)));
+            self.decrement_x();
+            self.line("    ldaa 0,x");
+            self.line(&format!("    stx >{:04X}h", self.scratch(0)));
+            self.line(&format!("    ldx >{:04X}h", self.scratch(2)));
+            self.decrement_x();
+            self.line("    staa 0,x");
+            self.line(&format!("    stx >{:04X}h", self.scratch(2)));
+            self.counter_dec(4);
+            self.line(&format!("    bra {backward_loop}"));
+        }
+        self.line(&format!("{done}:"));
+        self.clra();
+        Ok(())
+    }
+
+    fn emit_memory_fill(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "mem.fill")?;
+        self.emit_pointer_to_x(&args[0])?;
+        self.line(&format!("    stx >{:04X}h", self.scratch(2)));
+        self.emit_expr(&args[1], &u8_type())?;
+        self.staa(self.scratch(10));
+        self.emit_memory_count(&args[2], 4)?;
+        let loop_label = self.next_label("intrinsic_fill_loop");
+        let done = self.next_label("intrinsic_fill_done");
+        self.line(&format!("{loop_label}:"));
+        self.counter_nonzero(4, &done);
+        self.line(&format!("    ldx >{:04X}h", self.scratch(2)));
+        self.ldaa(self.scratch(10));
+        self.line("    staa 0,x");
+        self.increment_x();
+        self.line(&format!("    stx >{:04X}h", self.scratch(2)));
+        self.counter_dec(4);
+        self.line(&format!("    bra {loop_label}"));
+        self.line(&format!("{done}:"));
+        self.clra();
+        Ok(())
+    }
+
+    fn emit_memory_compare(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
+        self.require_arg_count(args, 3, "mem.compare")?;
+        self.emit_pointer_to_x(&args[0])?;
+        self.line(&format!("    stx >{:04X}h", self.scratch(0)));
+        self.emit_pointer_to_x(&args[1])?;
+        self.line(&format!("    stx >{:04X}h", self.scratch(2)));
+        self.emit_memory_count(&args[2], 4)?;
+        let loop_label = self.next_label("intrinsic_compare_loop");
+        let less = self.next_label("intrinsic_compare_less");
+        let greater = self.next_label("intrinsic_compare_greater");
+        let done = self.next_label("intrinsic_compare_done");
+        self.line(&format!("{loop_label}:"));
+        self.counter_nonzero(4, &done);
+        self.line(&format!("    ldx >{:04X}h", self.scratch(0)));
+        self.line("    ldaa 0,x");
+        self.staa(self.scratch(10));
+        self.increment_x();
+        self.line(&format!("    stx >{:04X}h", self.scratch(0)));
+        self.line(&format!("    ldx >{:04X}h", self.scratch(2)));
+        self.line("    ldab 0,x");
+        self.line(&format!("    stab >{:04X}h", self.scratch(11)));
+        self.increment_x();
+        self.line(&format!("    stx >{:04X}h", self.scratch(2)));
+        self.ldaa(self.scratch(10));
+        self.line(&format!("    cmpa >{:04X}h", self.scratch(11)));
+        self.branch_long("blo", &less);
+        self.branch_long("bhi", &greater);
+        self.counter_dec(4);
+        self.line(&format!("    bra {loop_label}"));
+        self.line(&format!("{less}:"));
+        self.ldaa_imm(0xFF);
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{greater}:"));
+        self.ldaa_imm(1);
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_pointer_to_x(&mut self, expr: &Expr) -> Result<(), Diagnostic> {
+        let address = match expr {
+            Expr::AddressOf(name) => self.binding(name)?.storage.address,
+            Expr::AddressOfIndex { name, index } => {
+                let binding = self.binding(name)?;
+                let element = m6800_element_type(&self.model.resolved_type(&binding.ty)?)?;
+                let index = u32::try_from(self.model.const_value(index)?).map_err(|_| {
+                    Diagnostic::new("M6800 pointer index must be a nonnegative constant")
+                })?;
+                binding.storage.address + index * self.model.type_size(&element)?
+            }
+            Expr::AddressOfField { base, field } => {
+                let binding = self.binding(base)?;
+                binding.storage.address + self.model.field(&binding.ty, field)?.offset
+            }
+            Expr::Cast { expr, .. } | Expr::BankedPointer { pointer: expr, .. } => {
+                return self.emit_pointer_to_x(expr);
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "M6800 memory intrinsics require a direct pointer expression",
+                ));
+            }
+        };
+        let address = u16::try_from(address)
+            .map_err(|_| Diagnostic::new("M6800 pointer is outside the 16-bit address space"))?;
+        self.line(&format!("    ldx #{address:04X}h"));
+        Ok(())
+    }
+
+    fn emit_memory_count(&mut self, expr: &Expr, offset: u32) -> Result<(), Diagnostic> {
+        let value = self
+            .model
+            .const_value(expr)
+            .map_err(|_| Diagnostic::new("M6800 memory intrinsic length must be a constant"))?;
+        let value = u32::try_from(value)
+            .ok()
+            .filter(|value| *value <= 0xFF_FFFF)
+            .ok_or_else(|| Diagnostic::new("memory intrinsic length is outside u24"))?;
+        for (index, byte) in [value as u8, (value >> 8) as u8, (value >> 16) as u8]
+            .into_iter()
+            .enumerate()
+        {
+            self.ldaa_imm(byte);
+            self.staa(self.scratch(offset + index as u32));
+        }
+        Ok(())
+    }
+
+    fn counter_nonzero(&mut self, offset: u32, done: &str) {
+        self.ldaa(self.scratch(offset));
+        self.line(&format!("    oraa >{:04X}h", self.scratch(offset + 1)));
+        self.line(&format!("    oraa >{:04X}h", self.scratch(offset + 2)));
+        self.branch_long("beq", done);
+    }
+
+    fn counter_dec(&mut self, offset: u32) {
+        let no_borrow = self.next_label("intrinsic_counter_no_borrow");
+        let no_middle_borrow = self.next_label("intrinsic_counter_no_middle_borrow");
+        self.ldaa(self.scratch(offset));
+        self.line("    suba #01h");
+        self.staa(self.scratch(offset));
+        self.branch_long("bcc", &no_borrow);
+        self.ldaa(self.scratch(offset + 1));
+        self.line("    suba #01h");
+        self.staa(self.scratch(offset + 1));
+        self.branch_long("bcc", &no_middle_borrow);
+        self.ldaa(self.scratch(offset + 2));
+        self.line("    suba #01h");
+        self.staa(self.scratch(offset + 2));
+        self.line(&format!("{no_middle_borrow}:"));
+        self.line(&format!("{no_borrow}:"));
+    }
+
+    fn copy_counter(&mut self, source: u32, target: u32) {
+        for index in 0..3 {
+            self.ldaa(self.scratch(source + index));
+            self.staa(self.scratch(target + index));
+        }
+    }
+
+    fn advance_pointer(&mut self, pointer_offset: u32, counter_offset: u32) {
+        let loop_label = self.next_label("intrinsic_advance_pointer");
+        let done = self.next_label("intrinsic_advance_done");
+        self.line(&format!("{loop_label}:"));
+        self.counter_nonzero(counter_offset, &done);
+        self.line(&format!("    ldx >{:04X}h", self.scratch(pointer_offset)));
+        self.increment_x();
+        self.line(&format!("    stx >{:04X}h", self.scratch(pointer_offset)));
+        self.counter_dec(counter_offset);
+        self.line(&format!("    bra {loop_label}"));
+        self.line(&format!("{done}:"));
+    }
+
+    fn require_arg_count(
+        &self,
+        args: &[Expr],
+        expected: usize,
+        name: &str,
+    ) -> Result<(), Diagnostic> {
+        if args.len() == expected {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(format!(
+                "{name} requires {expected} arguments, got {}",
+                args.len()
+            )))
+        }
+    }
+
+    fn intrinsic_constant(
+        &self,
+        args: &[Expr],
+        index: usize,
+        requirement: &str,
+    ) -> Result<i64, Diagnostic> {
+        self.model.const_value(&args[index]).map_err(|_| {
+            Diagnostic::new(format!(
+                "intrinsic argument {index} requires a constant {requirement}"
+            ))
+        })
+    }
+
+    fn require_u8_integer(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        match self.model.resolved_type(&self.expr_type(expr)?)? {
+            Type::Named(name) if name == "u8" || name == "i8" => Ok(()),
+            _ => Err(Diagnostic::new(
+                "M6800/M6809 intrinsic requires an 8-bit integer",
+            )),
+        }
+    }
+
+    fn require_u8_bit_value(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        match self.model.resolved_type(&self.expr_type(expr)?)? {
+            Type::Named(name) if name == "u8" => Ok(()),
+            _ => Err(Diagnostic::new("M6800/M6809 bit intrinsic requires u8")),
+        }
+    }
+
+    fn validate_bit_range(&self, offset: i64, width: i64) -> Result<(u32, u32), Diagnostic> {
+        if offset < 0 || width <= 0 || offset + width > 8 {
+            return Err(Diagnostic::new("bit range is outside the u8 input width"));
+        }
+        Ok((offset as u32, width as u32))
+    }
+
+    fn scratch(&self, offset: u32) -> u32 {
+        self.intrinsic_scratch.address + offset
+    }
+
+    fn emit_bool_from_branch(&mut self, branch: &str) {
+        let yes = self.next_label("intrinsic_true");
+        let done = self.next_label("intrinsic_bool_done");
+        self.branch_long(branch, &yes);
+        self.ldaa_imm(0);
+        self.line(&format!("    bra {done}"));
+        self.line(&format!("{yes}:"));
+        self.ldaa_imm(1);
+        self.line(&format!("{done}:"));
+    }
+
+    fn transfer_b_to_a(&mut self) {
+        if self.cpu == CpuFamily::M6809 {
+            self.line("    tfr b,a");
+        } else {
+            self.line("    tba");
+        }
+    }
+
+    fn ldab(&mut self, address: u32) {
+        self.line(&format!("    ldab >{:04X}h", address));
+    }
+
+    fn ldab_imm(&mut self, value: u8) {
+        self.line(&format!("    ldab #{value:02X}h"));
+    }
+
+    fn clra(&mut self) {
+        self.ldaa_imm(0);
+    }
+
+    fn clrb(&mut self) {
+        self.ldab_imm(0);
+    }
+
+    fn emit_return_two(&mut self, first: &Expr, second: &Expr) -> Result<(), Diagnostic> {
+        let first_ty = self.return_types.last().cloned().flatten().ok_or_else(|| {
+            Diagnostic::new("function cannot return two values without a first return type")
+        })?;
+        let second_ty = self
+            .second_return_types
+            .last()
+            .cloned()
+            .flatten()
+            .ok_or_else(|| Diagnostic::new("function cannot return two values"))?;
+        self.require_scalar(&first_ty, "function return")?;
+        self.require_scalar(&second_ty, "second function return")?;
+        let first_storage = self.model.allocate(1)?;
+        self.emit_expr(first, &first_ty)?;
+        self.staa(first_storage.address);
+        self.emit_expr(second, &second_ty)?;
+        self.transfer_a_to_b();
+        self.ldaa(first_storage.address);
+        let label = self
+            .return_labels
+            .last()
+            .expect("function return label")
+            .clone();
+        self.line(&format!("    jmp {label}"));
+        Ok(())
+    }
+
+    fn emit_two_result_call(
+        &mut self,
+        path: &[String],
+        args: &[Expr],
+        first: &Binding,
+        second: &Binding,
+    ) -> Result<(), Diagnostic> {
+        if let Some(resolution) = self.resolve_intrinsic_call(path, args)? {
+            return self.emit_intrinsic_pair(resolution, args, first, second);
+        }
+        let name = path.join(".");
+        let signature = self
+            .model
+            .functions
+            .get(&name)
+            .or_else(|| path.last().and_then(|n| self.model.functions.get(n)))
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        let first_return_type = signature.return_type.clone().ok_or_else(|| {
+            Diagnostic::new(format!("function `{name}` does not return two values"))
+        })?;
+        let second_return_type = signature.second_return_type.clone().ok_or_else(|| {
+            Diagnostic::new(format!("function `{name}` does not return two values"))
+        })?;
+        self.require_scalar(&first_return_type, "function return")?;
+        self.require_scalar(&second_return_type, "second function return")?;
+        self.require_scalar(&first.ty, "local")?;
+        self.require_scalar(&second.ty, "local")?;
+        if signature.params.len() != args.len() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` expects {} arguments, got {}",
+                signature.params.len(),
+                args.len()
+            )));
+        }
+        for ((arg, ty), slot) in args
+            .iter()
+            .zip(&signature.params)
+            .zip(&signature.argument_slots)
+        {
+            self.require_scalar(ty, "function argument")?;
+            self.emit_expr(arg, ty)?;
+            self.staa(slot.address);
+        }
+        self.line(&format!(
+            "    jsr _{}",
+            sanitize_label(path.last().unwrap_or(&name))
+        ));
+        self.stab(second.storage.address);
+        self.staa(first.storage.address);
         Ok(())
     }
 
@@ -687,7 +1762,8 @@ impl Emitter {
             | Expr::Unary {
                 op: UnaryOp::Not, ..
             } => Ok(bool_type()),
-            Expr::Int(_) | Expr::TypedInt(_, _) | Expr::Char(_) => Ok(u8_type()),
+            Expr::Int(_) | Expr::Char(_) => Ok(u8_type()),
+            Expr::TypedInt(_, ty) => Ok(ty.clone()),
             Expr::Ident(name) => self
                 .model
                 .constant_types
@@ -695,24 +1771,87 @@ impl Emitter {
                 .cloned()
                 .or_else(|| self.binding(name).ok().map(|b| b.ty))
                 .ok_or_else(|| Diagnostic::new(format!("unknown value `{name}`"))),
-            Expr::Binary { left, op, .. }
+            Expr::Binary { op, .. }
                 if is_comparison(*op) || matches!(op, BinaryOp::And | BinaryOp::Or) =>
             {
                 Ok(bool_type())
             }
-            Expr::Binary { left, .. }
-            | Expr::Unary { expr: left, .. }
-            | Expr::Cast { expr: left, .. } => self.expr_type(left),
-            Expr::Call { path, .. } => self
-                .model
-                .functions
-                .get(&path.join("."))
-                .and_then(|s| s.return_type.clone())
-                .ok_or_else(|| Diagnostic::new("void function has no value")),
-            _ => Err(Diagnostic::new(
+            Expr::Binary { left, .. } | Expr::Unary { expr: left, .. } => self.expr_type(left),
+            Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
+            Expr::Call { path, args } => {
+                if let Some(resolution) = self.resolve_intrinsic_call(path, args)? {
+                    return resolution
+                        .result_types
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| Diagnostic::new("intrinsic has no scalar result"));
+                }
+                self.model
+                    .functions
+                    .get(&path.join("."))
+                    .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
+                    .and_then(|s| s.return_type.clone())
+                    .ok_or_else(|| Diagnostic::new("void function has no value"))
+            }
+            Expr::AddressOf(name) => {
+                let ty = self.model.resolved_type(&self.binding(name)?.ty)?;
+                match ty {
+                    Type::Array { element, .. } => Ok(Type::Ptr(element)),
+                    ty => Ok(Type::Ptr(Box::new(ty))),
+                }
+            }
+            Expr::AddressOfIndex { name, .. } => {
+                let ty = self.model.resolved_type(&self.binding(name)?.ty)?;
+                let Type::Array { element, .. } = ty else {
+                    return Err(Diagnostic::new("address-of index requires an array"));
+                };
+                Ok(Type::Ptr(element))
+            }
+            Expr::AddressOfField { base, field } => Ok(Type::Ptr(Box::new(
+                self.model.field(&self.binding(base)?.ty, field)?.ty.clone(),
+            ))),
+            Expr::Access(path) => self.access_type(path),
+            Expr::AddressOfAccess(path) => Ok(Type::Ptr(Box::new(self.access_type(path)?))),
+            Expr::Deref(pointer) => match self.model.resolved_type(&self.expr_type(pointer)?)? {
+                Type::Ptr(element) => Ok(*element),
+                _ => Err(Diagnostic::new("dereference requires a pointer")),
+            },
+            Expr::Index { name, .. } => {
+                let ty = self.model.resolved_type(&self.binding(name)?.ty)?;
+                let Type::Array { element, .. } = ty else {
+                    return Err(Diagnostic::new("indexing requires an array"));
+                };
+                Ok(*element)
+            }
+            Expr::Field { base, field } => {
+                Ok(self.model.field(&self.binding(base)?.ty, field)?.ty.clone())
+            }
+            Expr::String(_) => Ok(Type::Ptr(Box::new(u8_type()))),
+            Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
+            Expr::Array(_) | Expr::In(_) => Err(Diagnostic::new(
                 "M6800 source emitter supports scalar u8/bool expressions only",
             )),
         }
+    }
+
+    fn access_type(&self, path: &AccessPath) -> Result<Type, Diagnostic> {
+        let mut ty = self.binding(&path.root)?.ty;
+        for segment in &path.segments {
+            match segment {
+                AccessSegment::Field(field) => {
+                    ty = self.model.field(&ty, field)?.ty.clone();
+                }
+                AccessSegment::Index(_) => {
+                    let resolved = self.model.resolved_type(&ty)?;
+                    let Type::Array { element, .. } = resolved else {
+                        return Err(Diagnostic::new("indexing requires an array"));
+                    };
+                    ty = *element;
+                }
+            }
+        }
+        Ok(ty)
     }
 
     fn require_scalar(&self, ty: &Type, context: &str) -> Result<(), Diagnostic> {
@@ -784,11 +1923,30 @@ impl Emitter {
         }
     }
 
+    fn decrement_x(&mut self) {
+        if self.cpu == CpuFamily::M6809 {
+            self.line("    leax -1,x");
+        } else {
+            self.line("    dex");
+        }
+    }
+
+    fn increment_x(&mut self) {
+        if self.cpu == CpuFamily::M6809 {
+            self.line("    leax 1,x");
+        } else {
+            self.line("    inx");
+        }
+    }
+
     fn ldaa(&mut self, address: u32) {
         self.line(&format!("    ldaa >{:04X}h", address));
     }
     fn staa(&mut self, address: u32) {
         self.line(&format!("    staa >{:04X}h", address));
+    }
+    fn stab(&mut self, address: u32) {
+        self.line(&format!("    stab >{:04X}h", address));
     }
     fn ldaa_imm(&mut self, value: u8) {
         self.line(&format!("    ldaa #{value:02X}h"));
@@ -802,6 +1960,16 @@ impl Emitter {
             "bge" => "blt",
             "ble" => "bgt",
             "bgt" => "ble",
+            "blo" => "bhs",
+            "bhs" => "blo",
+            "bcs" => "bcc",
+            "bcc" => "bcs",
+            "bvs" => "bvc",
+            "bvc" => "bvs",
+            "bmi" => "bpl",
+            "bpl" => "bmi",
+            "bhi" => "bls",
+            "bls" => "bhi",
             _ => unreachable!(),
         };
         self.line(&format!("    {inverse} {skip}"));
@@ -962,6 +2130,23 @@ fn collect_source_locals(
                         .with_spill_classes(vec![M6800_STATIC_SPILL_CLASS]),
                 );
             }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                ..
+            } => {
+                for (name, ty) in [(first_name, first_ty), (second_name, second_ty)] {
+                    if local_types.insert(name.clone(), ty.clone()).is_some() {
+                        return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                    }
+                    locals.push(
+                        SourceLocal::new(name.clone(), 1, 1, M6800_LOCAL_CLASS)
+                            .with_spill_classes(vec![M6800_STATIC_SPILL_CLASS]),
+                    );
+                }
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -989,11 +2174,35 @@ fn regalloc_diagnostic(diagnostics: Vec<crate::regalloc::Diagnostic>) -> Diagnos
     )
 }
 
+fn block_guarantees_two_result_return(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_guarantees_two_result_return)
+}
+
+fn stmt_guarantees_two_result_return(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::ReturnTwo { .. } => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } if !else_body.is_empty() => {
+            block_guarantees_two_result_return(then_body)
+                && block_guarantees_two_result_return(else_body)
+        }
+        _ => false,
+    }
+}
+
 fn collect_calls(body: &[Stmt], calls: &mut Vec<String>) {
     for stmt in body {
         match stmt {
             Stmt::Expr(expr) => collect_expr_calls(expr, calls),
             Stmt::Let { value, .. } | Stmt::Return(Some(value)) => collect_expr_calls(value, calls),
+            Stmt::LetTwo { value, .. } => collect_expr_calls(value, calls),
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_calls(first, calls);
+                collect_expr_calls(second, calls);
+            }
             Stmt::Assign { value, .. } | Stmt::Out { value, .. } => {
                 collect_expr_calls(value, calls)
             }
@@ -1047,6 +2256,16 @@ fn calls_function(program: &Program, from: &str, wanted: &str, seen: &mut HashSe
         .iter()
         .any(|call| call == wanted || calls_function(program, call, wanted, seen))
 }
+
+fn m6800_element_type(ty: &Type) -> Result<Type, Diagnostic> {
+    match ty {
+        Type::Array { element, .. } | Type::Ptr(element) => Ok((**element).clone()),
+        _ => Err(Diagnostic::new(
+            "M6800 pointer requires an array or pointer value",
+        )),
+    }
+}
+
 fn is_comparison(op: BinaryOp) -> bool {
     matches!(
         op,

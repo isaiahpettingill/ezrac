@@ -186,7 +186,7 @@ fn emits_and_assembles_scalar_control_flow() {
     )
     .unwrap();
     assert!(assembly.contains("move.l #$F00000,sp"), "{assembly}");
-    assert!(assembly.contains("jsr _add"), "{assembly}");
+    assert!(assembly.contains("jsr (_add).l"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
 }
 
@@ -675,8 +675,14 @@ fn emits_and_assembles_memory_helpers() {
         },
     )
     .unwrap();
-    assert!(assembly.contains("__ezra_memcpy_loop"), "{assembly}");
-    assert!(assembly.contains("__ezra_memset_loop"), "{assembly}");
+    assert!(
+        assembly.contains("__ezra_intrinsic_copy_forward_"),
+        "{assembly}"
+    );
+    assert!(
+        assembly.contains("__ezra_intrinsic_fill_loop"),
+        "{assembly}"
+    );
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
 }
 
@@ -709,15 +715,15 @@ fn explicit_inline_calls_preserve_argument_and_unsafe_call_semantics() {
     )
     .unwrap();
 
-    assert_eq!(assembly.matches("jsr _first").count(), 1, "{assembly}");
-    assert_eq!(assembly.matches("jsr _second").count(), 1, "{assembly}");
+    assert_eq!(assembly.matches("jsr (_first).l").count(), 1, "{assembly}");
+    assert_eq!(assembly.matches("jsr (_second).l").count(), 1, "{assembly}");
     assert!(
-        assembly.find("jsr _first").unwrap() < assembly.find("jsr _second").unwrap(),
+        assembly.find("jsr (_first).l").unwrap() < assembly.find("jsr (_second).l").unwrap(),
         "{assembly}"
     );
-    assert!(!assembly.contains("jsr _pair"), "{assembly}");
-    assert!(!assembly.contains("jsr _bump"), "{assembly}");
-    assert_eq!(assembly.matches("jsr _yes").count(), 2, "{assembly}");
+    assert!(!assembly.contains("jsr (_pair).l"), "{assembly}");
+    assert!(!assembly.contains("jsr (_bump).l"), "{assembly}");
+    assert_eq!(assembly.matches("jsr (_yes).l").count(), 2, "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
 }
 
@@ -743,9 +749,155 @@ fn does_not_restore_direct_pointer_out_arguments() {
     )
     .unwrap();
 
-    assert!(assembly.contains("jsr _write"), "{assembly}");
+    assert!(assembly.contains("jsr (_write).l"), "{assembly}");
     assert!(!assembly.contains("-(sp)"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+}
+
+#[test]
+fn lowers_catalog_bits_integer_and_endian_intrinsics_with_native_m68k_ops() {
+    let program = parse_program(
+        Path::new("m68k_intrinsics.ezra"),
+        r#"
+            global source: [u8; 4] = [1, 2, 3, 4]
+            global destination: [u8; 4] = [0, 0, 0, 0]
+            fn main() {
+                let rotated: u16 = bits.rotate_left(0x1234u16, 3u8)
+                let tested: bool = bits.test(0x20u8, 5u8)
+                let set: u8 = bits.set(1u8, 3u8)
+                let clear: u8 = bits.clear(0xFFu8, 3u8)
+                let toggled: u8 = bits.toggle(0u8, 2u8)
+                let extracted: u8 = bits.extract(0xD8u8, 3u8, 3u8)
+                let inserted: u8 = bits.insert(0u8, 7u8, 2u8, 3u8)
+                let swapped: u24 = bits.byte_swap(0x112233u24)
+                let reversed: u8 = bits.reverse(0x12u8)
+                let ones: u8 = bits.count_ones(0xF0u8)
+                let leading: u8 = bits.leading_zeros(0x10u8)
+                let trailing: u8 = bits.trailing_zeros(0x10u8)
+                let product: u16 = int.widening_mul(0x12u8, 0x10u8)
+                let high: u16 = int.mul_high(0x1234u16, 2u16)
+                let saturated: u8 = int.saturating_add(250u8, 20u8)
+                let little: u16 = mem.load_le16(&source[0])
+                let big: u24 = mem.load_be24(&source[0])
+                mem.store_le24(&destination[0], 0x010203u24)
+                mem.copy_nonoverlapping(&destination[0], &source[0], 4u24)
+                mem.move(&destination[1], &destination[0], 3u24)
+                mem.fill(&destination[0], 0xAAu8, 4u24)
+            }
+        "#,
+    )
+    .unwrap();
+    let assembly = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+    for instruction in [
+        "rol.w d2,d0",
+        "btst #5,d0",
+        "bset #3,d0",
+        "bclr #3,d0",
+        "bchg #2,d0",
+        "mulu.w d2,d0",
+        "__ezra_intrinsic_copy_backward",
+        "__ezra_intrinsic_fill_loop",
+    ] {
+        assert!(
+            assembly.contains(instruction),
+            "missing {instruction}:\n{assembly}"
+        );
+    }
+    assert!(assembly.contains("move.b 0(a0),d0"), "{assembly}");
+    assert!(assembly.contains("move.b d1,0(a0)"), "{assembly}");
+    assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+}
+
+#[test]
+fn lowers_m68k_paired_intrinsics_and_preserves_divide_by_zero_branch() {
+    let program = parse_program(
+        Path::new("m68k_paired_intrinsics.ezra"),
+        r#"
+            global source: [u8; 3] = [4, 7, 9]
+            fn main() {
+                let quotient: u16, remainder: u16 = int.divmod(100u16, 7u16)
+                let sum: u16, carry: bool = int.add_carry(0xFFFFu16, 1u16, false)
+                let difference: u16, borrow: bool = int.sub_borrow(0u16, 1u16, false)
+                let low: u16, high: u16 = int.full_mul(0x1234u16, 2u16)
+                let address: ptr<u8>, found: bool = mem.find_byte(&source[0], 3u24, 7u8)
+            }
+        "#,
+    )
+    .unwrap();
+    let assembly = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(assembly.contains("divu.w d2,d0"), "{assembly}");
+    assert!(assembly.contains("__ezra_intrinsic_div_zero"), "{assembly}");
+    assert!(assembly.contains("add.w d2,d0"), "{assembly}");
+    assert!(assembly.contains("sub.w d2,d0"), "{assembly}");
+    assert!(assembly.contains("mulu.w d2,d0"), "{assembly}");
+    assert!(
+        assembly.contains("__ezra_intrinsic_find_loop"),
+        "{assembly}"
+    );
+    assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+}
+
+#[test]
+fn rejects_m68k_bit_indices_outside_the_value_width() {
+    let program = parse_program(
+        Path::new("m68k_bad_intrinsic.ezra"),
+        "fn main() { let value: u8 = bits.test(1u8, 8u8) }",
+    )
+    .unwrap();
+    let error = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("bit index must be within the input width"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_wider_endian_intrinsics_on_known_volatile_memory() {
+    let program = parse_program(
+        Path::new("m68k_volatile_intrinsic.ezra"),
+        r#"
+            volatile mmio REGISTER: u8 = 0xFFFF00
+            fn main() {
+                let value: u16 = mem.load_be16(&REGISTER)
+            }
+        "#,
+    )
+    .unwrap();
+    let error = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("ordinary nonvolatile memory"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -895,7 +1047,7 @@ fn spills_pointer_locals_across_calls() {
             "#,
     );
     let main = main_assembly(&assembly);
-    assert!(main.contains("    jsr _touch\n"), "{assembly}");
+    assert!(main.contains("    jsr (_touch).l\n"), "{assembly}");
     for register in M68K_ADDRESS_REGISTERS {
         assert!(!main.contains(&format!("a{register}")), "{assembly}");
     }
@@ -988,4 +1140,74 @@ fn preserves_static_locals_across_recursive_calls() {
     assert!(assembly.contains("move.b $040"), "{assembly}");
     assert!(assembly.contains("-(sp)"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+}
+
+#[cfg(feature = "test-runner")]
+#[test]
+fn executes_two_result_calls_with_d0_and_d1_abi() {
+    let (assembly, run) = emit_and_run(
+        r#"
+            volatile mmio DEBUG: u8 = 0xFFFFF0
+            volatile mmio HALT: u8 = 0xFFFFF2
+            fn main() {
+                let first: u8, second: bool = pair(41)
+                DEBUG = first
+                DEBUG = cast<u8>(second)
+                HALT = 1
+            }
+            fn pair(value: u8) -> u8, bool {
+                return value + 1, value == 41
+            }
+        "#,
+        2_000,
+    );
+    assert!(run.halted, "{run:?}\n{assembly}");
+    assert_eq!(run.debug_output, [42, 1], "{assembly}");
+    assert!(assembly.contains("    move.b d1,"), "{assembly}");
+}
+
+#[test]
+fn rejects_two_result_calls_in_single_result_context() {
+    let program = parse_program(
+        Path::new("m68k-two-result.ezra"),
+        "fn pair() -> u8, bool { return 1, true } fn main() { let value: u8 = pair() }",
+    )
+    .unwrap();
+    let error = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("two-result call `pair` may only be used"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_two_result_functions_that_can_fall_through() {
+    let program = parse_program(
+        Path::new("m68k-two-result-fallthrough.ezra"),
+        "fn pair(value: bool) -> u8, bool { if value { return 1, true } } fn main() { let first: u8, second: bool = pair(true) }",
+    )
+    .unwrap();
+    let error = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("missing two return values in function `pair`"),
+        "{error}"
+    );
 }

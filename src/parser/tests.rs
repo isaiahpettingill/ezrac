@@ -988,3 +988,88 @@ fn parses_nested_c64_bitmap_address_expressions_without_exhausting_the_stack() {
 
     assert_eq!(program.declarations.len(), 2);
 }
+
+#[test]
+fn parses_two_result_signatures_bindings_and_returns() {
+    let program = parse_program(
+        Path::new("multi.ezra"),
+        r#"
+            extern asm fn external_pair() -> u8, bool
+            fn pair(value: u8) -> u8, bool {
+                return value, true
+            }
+            fn caller(value: u8) -> u8, bool {
+                let first: u8, second: bool = pair(value)
+                return first, second
+            }
+            fn direct() -> u8, bool { return pair(1) }
+            fn main() {}
+        "#,
+    )
+    .unwrap();
+
+    let Declaration::ExternAsmFunction(external) = &program.declarations[0] else {
+        panic!("expected extern function");
+    };
+    assert_eq!(external.return_type, Some(Type::Named("u8".to_owned())));
+    assert_eq!(
+        external.second_return_type,
+        Some(Type::Named("bool".to_owned()))
+    );
+
+    let pair = match &program.declarations[1] {
+        Declaration::Function(function) => function,
+        declaration => panic!("expected pair function, got {declaration:?}"),
+    };
+    assert_eq!(
+        pair.second_return_type,
+        Some(Type::Named("bool".to_owned()))
+    );
+    assert!(matches!(
+        &pair.body[0],
+        Stmt::ReturnTwo {
+            first: Expr::Ident(name),
+            second: Expr::Bool(true),
+        } if name == "value"
+    ));
+
+    let caller = match &program.declarations[2] {
+        Declaration::Function(function) => function,
+        declaration => panic!("expected caller function, got {declaration:?}"),
+    };
+    assert!(matches!(
+        &caller.body[0],
+        Stmt::LetTwo {
+            first_name,
+            first_ty: Type::Named(first_ty),
+            second_name,
+            second_ty: Type::Named(second_ty),
+            value: Expr::Call { path, .. },
+        } if first_name == "first"
+            && first_ty == "u8"
+            && second_name == "second"
+            && second_ty == "bool"
+            && path == &["pair"]
+    ));
+    assert!(matches!(&caller.body[1], Stmt::ReturnTwo { .. }));
+
+    let direct = match &program.declarations[3] {
+        Declaration::Function(function) => function,
+        declaration => panic!("expected direct function, got {declaration:?}"),
+    };
+    assert!(matches!(
+        &direct.body[0],
+        Stmt::Return(Some(Expr::Call { path, .. })) if path == &["pair"]
+    ));
+}
+
+#[test]
+fn rejects_more_than_two_return_types_in_the_parser() {
+    let error = parse_program(
+        Path::new("multi.ezra"),
+        "fn too_many() -> u8, bool, u16 { return 0, true }",
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("at most two values"), "{error}");
+}

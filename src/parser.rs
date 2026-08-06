@@ -579,6 +579,7 @@ fn build_fn(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Function, Diagnos
     let mut name = None;
     let mut params = Vec::new();
     let mut return_type = None;
+    let mut second_return_type = None;
     let mut body = None;
     let mut body_spans = Vec::new();
 
@@ -597,7 +598,9 @@ fn build_fn(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Function, Diagnos
             }
             Rule::ident => name = Some(inner.as_str().to_owned()),
             Rule::params => params = build_params(inner)?,
-            Rule::ret_ty => return_type = Some(build_type(inner.into_inner().next().unwrap())?),
+            Rule::ret_ty => {
+                (return_type, second_return_type) = build_return_types(inner)?;
+            }
             Rule::block => {
                 let (statements, spans) = build_block(file, inner)?;
                 body = Some(statements);
@@ -613,6 +616,7 @@ fn build_fn(file: &SourcePath, pair: Pair<'_, Rule>) -> Result<Function, Diagnos
         name: name.unwrap(),
         params,
         return_type,
+        second_return_type,
         body: body.unwrap_or_default(),
         body_spans,
     })
@@ -623,13 +627,16 @@ fn build_extern(pair: Pair<'_, Rule>) -> Result<ExternFunction, Diagnostic> {
     let mut name = None;
     let mut params = Vec::new();
     let mut return_type = None;
+    let mut second_return_type = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::visibility => public = true,
             Rule::ident => name = Some(inner.as_str().to_owned()),
             Rule::params => params = build_params(inner)?,
-            Rule::ret_ty => return_type = Some(build_type(inner.into_inner().next().unwrap())?),
+            Rule::ret_ty => {
+                (return_type, second_return_type) = build_return_types(inner)?;
+            }
             _ => {}
         }
     }
@@ -639,6 +646,23 @@ fn build_extern(pair: Pair<'_, Rule>) -> Result<ExternFunction, Diagnostic> {
         name: name.unwrap(),
         params,
         return_type,
+        second_return_type,
+    })
+}
+
+fn build_return_types(pair: Pair<'_, Rule>) -> Result<(Option<Type>, Option<Type>), Diagnostic> {
+    let mut types = pair
+        .into_inner()
+        .map(build_type)
+        .collect::<Result<Vec<_>, _>>()?;
+    if types.len() > 2 {
+        return Err(Diagnostic::new("functions may return at most two values"));
+    }
+    Ok(match types.len() {
+        0 => (None, None),
+        1 => (Some(types.pop().unwrap()), None),
+        2 => (Some(types.remove(0)), Some(types.pop().unwrap())),
+        _ => unreachable!("return type count was checked above"),
     })
 }
 
@@ -684,10 +708,35 @@ fn build_stmt(
         }
         Rule::let_stmt => {
             let mut inner = pair.into_inner();
-            let name = inner.next().unwrap().as_str().to_owned();
-            let ty = build_type(inner.next().unwrap())?;
-            let value = expand_zeroes_initializer(&ty, build_expr(inner.next().unwrap())?)?;
-            (Stmt::Let { name, ty, value }, Vec::new())
+            let first_name = inner.next().unwrap().as_str().to_owned();
+            let first_ty = build_type(inner.next().unwrap())?;
+            let next = inner.next().unwrap();
+            if next.as_rule() == Rule::ident {
+                let second_name = next.as_str().to_owned();
+                let second_ty = build_type(inner.next().unwrap())?;
+                let value =
+                    expand_zeroes_initializer(&first_ty, build_expr(inner.next().unwrap())?)?;
+                (
+                    Stmt::LetTwo {
+                        first_name,
+                        first_ty,
+                        second_name,
+                        second_ty,
+                        value,
+                    },
+                    Vec::new(),
+                )
+            } else {
+                let value = expand_zeroes_initializer(&first_ty, build_expr(next)?)?;
+                (
+                    Stmt::Let {
+                        name: first_name,
+                        ty: first_ty,
+                        value,
+                    },
+                    Vec::new(),
+                )
+            }
         }
         Rule::assign_stmt => {
             let mut inner = pair.into_inner();
@@ -734,10 +783,28 @@ fn build_stmt(
         }
         Rule::break_stmt => (Stmt::Break, Vec::new()),
         Rule::continue_stmt => (Stmt::Continue, Vec::new()),
-        Rule::return_stmt => (
-            Stmt::Return(pair.into_inner().next().map(build_expr).transpose()?),
-            Vec::new(),
-        ),
+        Rule::return_stmt => {
+            let values = pair
+                .into_inner()
+                .next()
+                .map(|values| {
+                    values
+                        .into_inner()
+                        .map(build_expr)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?;
+            let statement = match values.unwrap_or_default().as_slice() {
+                [] => Stmt::Return(None),
+                [value] => Stmt::Return(Some(value.clone())),
+                [first, second] => Stmt::ReturnTwo {
+                    first: first.clone(),
+                    second: second.clone(),
+                },
+                _ => unreachable!("return_values accepts at most two expressions"),
+            };
+            (statement, Vec::new())
+        }
         Rule::asm_stmt => {
             let mut volatile = false;
             let mut inputs = Vec::new();

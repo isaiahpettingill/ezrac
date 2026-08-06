@@ -58,6 +58,7 @@ pub struct HirFunctionSig {
     pub name: String,
     pub params: Vec<HirParam>,
     pub return_type: Option<Type>,
+    pub second_return_type: Option<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -210,6 +211,7 @@ fn lower_declaration(
                 &function.name,
                 &function.params,
                 &function.return_type,
+                &function.second_return_type,
             )))
         }
         Declaration::Function(function) => Some(HirDeclaration::Function(lower_function(
@@ -233,6 +235,7 @@ fn lower_function(
             &function.name,
             &function.params,
             &function.return_type,
+            &function.second_return_type,
         ),
         attrs: function.attrs.clone(),
         body: function.body.clone(),
@@ -250,6 +253,7 @@ fn lower_function_sig(
     name: &str,
     params: &[crate::ast::Param],
     return_type: &Option<Type>,
+    second_return_type: &Option<Type>,
 ) -> HirFunctionSig {
     HirFunctionSig {
         public,
@@ -262,6 +266,7 @@ fn lower_function_sig(
             })
             .collect(),
         return_type: return_type.clone(),
+        second_return_type: second_return_type.clone(),
     }
 }
 
@@ -343,6 +348,10 @@ fn comptime_rejection(
         .return_type
         .as_ref()
         .is_some_and(type_contains_pointer)
+        || function
+            .second_return_type
+            .as_ref()
+            .is_some_and(type_contains_pointer)
     {
         return Some("pointers are not supported".to_owned());
     }
@@ -361,15 +370,32 @@ fn comptime_rejection(
                 }
                 Stmt::Asm { .. } => Some("inline asm is not supported"),
                 Stmt::Out { .. } => Some("ports are not supported"),
-                Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                Stmt::Let { value, .. }
+                | Stmt::LetTwo { value, .. }
+                | Stmt::Return(Some(value))
+                | Stmt::Expr(value) => visit_expr(
+                    value,
+                    function_name,
+                    comptime_functions,
+                    mutable_globals,
+                    ports_and_mmio,
+                ),
+                Stmt::ReturnTwo { first, second } => visit_expr(
+                    first,
+                    function_name,
+                    comptime_functions,
+                    mutable_globals,
+                    ports_and_mmio,
+                )
+                .or_else(|| {
                     visit_expr(
-                        value,
+                        second,
                         function_name,
                         comptime_functions,
                         mutable_globals,
                         ports_and_mmio,
                     )
-                }
+                }),
                 Stmt::If {
                     condition,
                     then_body,
@@ -581,10 +607,15 @@ fn analyze_stmts(stmts: &[Stmt], function_name: &str, analysis: &mut HirFunction
                 analyze_stmts(body, function_name, analysis);
             }
             Stmt::Let { value, .. }
+            | Stmt::LetTwo { value, .. }
             | Stmt::Assign { value, .. }
             | Stmt::Return(Some(value))
             | Stmt::Out { value, .. }
             | Stmt::Expr(value) => analyze_expr(value, function_name, analysis),
+            Stmt::ReturnTwo { first, second } => {
+                analyze_expr(first, function_name, analysis);
+                analyze_expr(second, function_name, analysis);
+            }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
         }
         if let Some(target) = tail_call_target(stmt) {

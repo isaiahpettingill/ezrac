@@ -728,6 +728,21 @@ fn visit_stmts(stmts: &mut [Stmt], context: &mut TypeContext) {
                 *value = visit_expr(core::mem::replace(value, Expr::Int(0)), context);
                 context.local_types.insert(name.clone(), ty.clone());
             }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                value,
+            } => {
+                *value = visit_expr(core::mem::replace(value, Expr::Int(0)), context);
+                context
+                    .local_types
+                    .insert(first_name.clone(), first_ty.clone());
+                context
+                    .local_types
+                    .insert(second_name.clone(), second_ty.clone());
+            }
             Stmt::Assign { target, value, .. } => {
                 *target = visit_place(
                     core::mem::replace(target, Place::Ident(String::new())),
@@ -757,6 +772,10 @@ fn visit_stmts(stmts: &mut [Stmt], context: &mut TypeContext) {
             }
             Stmt::Return(Some(value)) | Stmt::Expr(value) => {
                 *value = visit_expr(core::mem::replace(value, Expr::Int(0)), context);
+            }
+            Stmt::ReturnTwo { first, second } => {
+                *first = visit_expr(core::mem::replace(first, Expr::Int(0)), context);
+                *second = visit_expr(core::mem::replace(second, Expr::Int(0)), context);
             }
             Stmt::Out { value, .. } => {
                 *value = visit_expr(core::mem::replace(value, Expr::Int(0)), context);

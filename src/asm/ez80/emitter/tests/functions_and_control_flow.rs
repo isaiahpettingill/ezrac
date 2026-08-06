@@ -627,6 +627,108 @@ fn emits_and_runs_user_function_returning_u8() {
 }
 
 #[test]
+fn emits_and_runs_two_result_user_functions_with_a_hidden_return_slot() {
+    let source = r#"
+            fn pair(value: u8) -> u8, u16 {
+                return value + 1, 0x1234
+            }
+
+            fn main() {
+                let first: u8, second: u16 = pair(4)
+                test.assert_eq_u8(first, 5, 1)
+                test.assert_eq_u16(second, 0x1234, 2)
+                test.pass()
+            }
+        "#;
+
+    for cpu in [CpuFamily::Ez80, CpuFamily::Z80] {
+        let program = parse_program(Path::new("two_result.ezra"), source).unwrap();
+        let asm = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu,
+                stack_top: Address24::new(0xF000),
+                ram_base: Address24::new(0x2000),
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{cpu:?}: {error}"));
+        let run = crate::vm::run_assembly_test_with_cpu_options_at(
+            cpu,
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 8_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0xF000,
+            },
+            0x0100,
+        )
+        .unwrap();
+
+        assert!(run.halted, "{cpu:?}: {asm}");
+        assert_eq!(run.result_code, 0, "{cpu:?}: {asm}");
+        assert!(asm.contains("call _pair"), "{cpu:?}: {asm}");
+    }
+}
+
+#[test]
+fn emits_and_runs_direct_two_result_forwarding_and_recursive_forwarding() {
+    let source = r#"
+            fn pair(value: u8) -> u8, u16 {
+                return value + 1, 0x1200 + cast<u16>(value)
+            }
+
+            fn forward(value: u8) -> u8, u16 {
+                return pair(value)
+            }
+
+            fn recursive(value: u8) -> u8, u16 {
+                if value == 0 {
+                    return 7, 0x0109
+                }
+                return recursive(value - 1)
+            }
+
+            fn main() {
+                let first: u8, second: u16 = forward(4)
+                test.assert_eq_u8(first, 5, 1)
+                test.assert_eq_u16(second, 0x1204, 2)
+                let recursive_first: u8, recursive_second: u16 = recursive(4)
+                test.assert_eq_u8(recursive_first, 7, 3)
+                test.assert_eq_u16(recursive_second, 0x0109, 4)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("two_result_forwarding.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 20_000).unwrap();
+
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn rejects_scalar_calls_to_two_result_user_functions() {
+    let source = r#"
+            fn pair() -> u8, u8 {
+                return 1, 2
+            }
+
+            fn main() {
+                let value: u8 = pair()
+            }
+        "#;
+    let program = parse_program(Path::new("two_result_scalar.ezra"), source).unwrap();
+    let error = emit_ez80_assembly(&program).unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "two-result function `pair` requires a two-destination call"
+    );
+}
+
+#[test]
 fn emits_and_runs_user_function_with_u8_parameters() {
     let source = r#"
             fn inc(v: u8) -> u8 {

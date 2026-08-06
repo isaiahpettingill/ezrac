@@ -139,6 +139,7 @@ pub struct Function {
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
+    pub second_return_type: Option<Type>,
     pub body: Vec<Stmt>,
     pub body_spans: Vec<StmtSpan>,
 }
@@ -163,6 +164,7 @@ pub struct ExternFunction {
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
+    pub second_return_type: Option<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -176,6 +178,13 @@ pub enum Stmt {
     Let {
         name: String,
         ty: Type,
+        value: Expr,
+    },
+    LetTwo {
+        first_name: String,
+        first_ty: Type,
+        second_name: String,
+        second_ty: Type,
         value: Expr,
     },
     Assign {
@@ -198,6 +207,10 @@ pub enum Stmt {
     Break,
     Continue,
     Return(Option<Expr>),
+    ReturnTwo {
+        first: Expr,
+        second: Expr,
+    },
     Asm {
         volatile: bool,
         inputs: Vec<AsmInput>,

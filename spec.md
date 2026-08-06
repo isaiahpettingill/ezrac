@@ -40,7 +40,7 @@ Cart magic:     "EZRA"
 
 ## 2. Target and CPU Model
 
-EZRA code is compiled for an explicit target triple. The target defines the CPU family, pointer width, memory layout, cartridge or binary format, available SDK modules, and emulator/test-runner contract.
+EZRA code is compiled for an explicit target triple. The target defines the CPU family, pointer width, memory layout, cartridge or binary format, available SDK modules, and emulator/test-runner contract. Exact scalar, pointer, address, and ABI widths vary by target. A source-level intrinsic or return shape is not a promise that every target can lower it; unsupported operand widths, memory forms, or ABI combinations must diagnose.
 
 Target triples use this shape:
 
@@ -1093,10 +1093,10 @@ Raw ptr values cannot be dereferenced; cast them to ptr<T> first.
 Rules:
 
 ```text
-- pointer values are 24-bit
+- pointer width and address range come from the selected target
 - pointer arithmetic scales by the pointed-to type size
 - dereferencing ptr<T> loads or stores T
-- null pointer is 0x000000
+- the null pointer is zero at the selected pointer width
 ```
 
 Examples:
@@ -1124,6 +1124,8 @@ Volatile rules:
 - volatile stores are never removed
 - volatile operations are not reordered across other volatile operations
 - volatile pointer dereferences emit real memory access
+- generic block, search, compare, and endian memory intrinsics require nonvolatile memory
+- mem.peek8 and mem.poke8 preserve one explicit byte access for volatile/MMIO use
 ```
 
 Example:
@@ -1247,7 +1249,17 @@ let b: u16 = cast<u16>(a)
 let c: u8 = cast<u8>(b)
 ```
 
-Runtime multiplication/division are supported by compiler-emitted runtime helper calls.
+Runtime multiplication/division are supported by compiler-emitted runtime helper calls. EZRA integer arithmetic wraps at the declared width for both signed and unsigned values; signed division truncates toward zero, remainder follows the dividend, and division or remainder by zero produces zero. Intrinsic saturating arithmetic clamps instead of wrapping.
+
+The compiler also provides built-in, target-independent intrinsic catalogs. Their complete source API is in `docs/language.md`:
+
+```text
+import ezra.bits   // rotate, bit test/update, fields, byte swap/reverse, counts
+import ezra.int    // widening/high/full multiplication, saturation, divmod, carry/borrow
+import ezra.mem    // copy/move/fill, search/compare, endian access, byte peek/poke
+```
+
+Bit indexes must be compile-time constants within the input width. Bit ranges require compile-time offset and positive width fully contained in the input. `mem.copy_nonoverlapping` diagnoses statically known overlap; `mem.move` is overlap-safe. Endian operations use their named byte order and do not inherit target endianness. Catalog entries return zero, one, or two ordered primitive results, never tuples.
 
 ---
 
@@ -1323,7 +1335,10 @@ Return:
 ```text
 return
 return value
+return first, second
 ```
+
+A two-value return requires a function signature of the form `-> T, U` and primitive scalar result types. A two-result call is consumed by a matching two-place binding or returned directly; it is not a tuple. Arrays, structs, `bytes`, strings, and other aggregate or large values are returned through pointers instead.
 
 Conditions must be `bool`.
 
@@ -1362,9 +1377,11 @@ Rules:
 - recursion is allowed
 - function overloading is not allowed
 - varargs are not allowed
-- structs are passed by pointer only
+- functions may return zero, one, or two ordered primitive scalar values
+- two-result calls require a matching two-place binding or return
 - arrays cannot be function parameters; pass `ptr<T>` instead
-- structs and arrays cannot be return values; pass an output pointer instead
+- structs, arrays, bytes, strings, tuples, and other large returns use pointers
+- unsupported result shapes and target ABI combinations diagnose
 ```
 
 Attributes:
@@ -1401,14 +1418,18 @@ inline fn pressed(pad: u16, button: u16) -> bool {
 
 Internal EZRA calling convention:
 
-Return values:
+Return values are target-defined. The eZ80-family default is:
 
 ```text
+no result       -> no value
 bool/u8/i8      -> A
 u16/i16         -> HL low 16 bits
-u24/i24/ptr   -> HL
-arrays/structs -> unsupported; pass an output pointer
+u24/i24/ptr     -> HL
+second scalar   -> caller-provided hidden result pointer
+arrays/structs  -> unsupported; pass an output pointer
 ```
+
+Other backends may use paired registers or a different hidden-result convention. For example, TMS9900 uses `R0`/`R1` and DCPU-16 uses `A`/`EX` for supported two-result source functions. Some targets support only paired intrinsic calls and reject user-defined two-result functions. These details are target ABI facts, not a portable tuple representation.
 
 Arguments:
 
@@ -1781,12 +1802,11 @@ ezra.input
 ezra.video
 ezra.audio
 ezra.debug
-ezra.mem
 ezra.math
 ezra.test
 ```
 
-These modules are platform libraries built from normal EZRA features such as constants, `port` declarations, volatile MMIO declarations, functions, and inline assembly. They are not language intrinsics, and the compiler should not hardcode controller, video, or audio behavior into ordinary codegen. The default fantasy SDK symbols are a scaffold convenience and can be disabled for stricter target SDKs.
+These modules are platform libraries built from normal EZRA features such as constants, `port` declarations, volatile MMIO declarations, functions, and inline assembly. The compiler also provides the separate built-in intrinsic modules `ezra.bits`, `ezra.int`, and `ezra.mem`; those catalog calls are not normal SDK functions and are lowered according to their effects and the selected target. The compiler should not hardcode controller, video, or audio behavior into ordinary codegen. The default fantasy SDK symbols are a scaffold convenience and can be disabled for stricter target SDKs.
 
 Targets provide different SDKs for hardware such as Agon Light MOS, Agon Light VDP/graphical profiles, Agon Light console8, TI-84 Plus CE, and custom project-defined machines. Those SDKs should follow the same rules: expose typed constants and functions over generic port/MMIO primitives, keep volatile operations visible in generated assembly, and use compiler intrinsics only for target-independent operations.
 
@@ -1844,14 +1864,9 @@ pub fn hex_u16(v: u16)
 pub fn hex_u24(v: u24)
 ```
 
-### 34.5 ezra.mem
+### 34.5 Memory access
 
-```text
-pub fn memcpy(dst: ptr<u8>, src: ptr<u8>, len: u24)
-pub fn memset(dst: ptr<u8>, value: u8, len: u24)
-pub fn peek8(addr: ptr<u8>) -> u8
-pub fn poke8(addr: ptr<u8>, value: u8)
-```
+The compiler intrinsic catalog owns `mem.copy_nonoverlapping`, `mem.move`, `mem.fill`, `mem.find_byte`, `mem.compare`, explicit-endian 16- and 24-bit loads/stores, and the scalar byte-access operations `mem.peek8` and `mem.poke8`. `mem.memcpy`/`ezra.mem.memcpy` remain compatibility names for non-overlapping copy, and `mem.memset`/`ezra.mem.memset` remain compatibility names for fill. See `docs/language.md` for signatures and target restrictions.
 
 ### 34.6 ezra.math
 
@@ -2514,7 +2529,9 @@ decl_attr     = "@comptime" | "@no-comptime" | "@extern" | "@cfg" "(" ... ")"
 
 params        = param ("," param)*
 param         = ident ":" ty
-ret_ty        = "->" ty
+ret_ty        = "->" ty ("," ty)?
+
+let_stmt      = "let" ident ":" ty ("," ident ":" ty)? "=" expr
 
 block         = "{" stmt* "}"
 
@@ -2530,7 +2547,6 @@ stmt          = let_stmt
               | asm_stmt
               | expr_stmt
 
-let_stmt      = "let" ident ":" ty "=" expr
 assign_stmt   = place assign_op expr
 assign_op     = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
 if_stmt       = "if" expr block ("else" (if_stmt | block))?
@@ -2538,7 +2554,8 @@ while_stmt    = "while" expr block
 loop_stmt     = "loop" block
 break_stmt    = "break"
 continue_stmt = "continue"
-return_stmt   = "return" expr?
+return_stmt   = "return" return_values?
+return_values = expr ("," expr)?
 out_stmt      = "out" path "," expr
 
 asm_stmt      = "asm" "volatile"? asm_operands? "{" asm_lines "}"

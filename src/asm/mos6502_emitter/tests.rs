@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use crate::{asm::AssemblyOptions, parser::parse_program, target::CpuFamily};
@@ -768,4 +767,150 @@ fn executes_global_embed_and_string_initialization() {
     assert_eq!(memory.byte(0xFF00), 5);
     assert_eq!(memory.byte(0xFF01), 0x22);
     assert_eq!(memory.byte(0xFF02), b'O');
+}
+
+#[test]
+fn executes_direct_generic_two_result_user_function_returns() {
+    let memory = run(
+        r#"
+            volatile mmio RESULT0: ptr<u8> = 0xFF00
+            volatile mmio RESULT1: ptr<u8> = 0xFF01
+            fn pair(value: u8) -> u8, bool { return value + 1, value == 4 }
+            fn main() {
+                let first: u8, second: bool = pair(4)
+                *(RESULT0) = first
+                *(RESULT1) = cast<u8>(second)
+            }
+        "#,
+        20_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 5);
+    assert_eq!(memory.byte(0xFF01), 1);
+}
+
+#[test]
+fn executes_forwarded_and_recursive_two_result_returns() {
+    let (memory, assembly, _) = run_with_setup(
+        r#"
+            volatile mmio RESULT0: ptr<u8> = 0xFF00
+            volatile mmio RESULT1: ptr<u8> = 0xFF01
+            volatile mmio RESULT2: ptr<u8> = 0xFF02
+            volatile mmio RESULT3: ptr<u8> = 0xFF03
+            fn base(value: u8) -> u8, bool { return value + 1, value == 6 }
+            fn forward(value: u8) -> u8, bool { return base(value) }
+            fn recurse(value: u8) -> u8, bool {
+                if value == 0 { return 1, true }
+                let first: u8, second: bool = recurse(value - 1)
+                return first + 1, second
+            }
+            fn main() {
+                let first: u8, second: bool = forward(6)
+                let recursive_first: u8, recursive_second: bool = recurse(2)
+                *(RESULT0) = first
+                *(RESULT1) = cast<u8>(second)
+                *(RESULT2) = recursive_first
+                *(RESULT3) = cast<u8>(recursive_second)
+            }
+        "#,
+        100_000,
+        |_| {},
+    );
+    assert_eq!(memory.byte(0xFF00), 7, "{assembly}");
+    assert_eq!(memory.byte(0xFF01), 1, "{assembly}");
+    assert_eq!(memory.byte(0xFF02), 3, "{assembly}");
+    assert_eq!(memory.byte(0xFF03), 1, "{assembly}");
+}
+
+#[test]
+fn executes_void_one_and_two_result_user_functions() {
+    let memory = run(
+        r#"
+            volatile mmio RESULT0: ptr<u8> = 0xFF00
+            volatile mmio RESULT1: ptr<u8> = 0xFF01
+            volatile mmio RESULT2: ptr<u8> = 0xFF02
+            volatile mmio RESULT3: ptr<u8> = 0xFF03
+            global void_calls: u8 = 0
+
+            fn zero() { void_calls += 1 }
+            fn one(value: u8) -> u8 { return value + 2 }
+            fn pair(value: u8) -> u8, u8 { return one(value), value + 3 }
+
+            fn main() {
+                zero()
+                let scalar: u8 = one(3)
+                let first: u8, second: u8 = pair(scalar)
+                *(RESULT0) = void_calls
+                *(RESULT1) = scalar
+                *(RESULT2) = first
+                *(RESULT3) = second
+            }
+        "#,
+        20_000,
+    );
+    assert_eq!(memory.byte(0xFF00), 1);
+    assert_eq!(memory.byte(0xFF01), 5);
+    assert_eq!(memory.byte(0xFF02), 7);
+    assert_eq!(memory.byte(0xFF03), 8);
+}
+
+#[test]
+fn lowers_catalog_intrinsics_and_direct_two_result_bindings() {
+    let assembly = emit(
+        r#"
+            global result: u24 = 0
+            global source: [u8; 4] = [1, 2, 3, 4]
+            global destination: [u8; 4] = [0, 0, 0, 0]
+            fn main() {
+                let rotated: u8 = bits.rotate_right(1u8, 1u8)
+                let tested: bool = bits.test(rotated, 0u8)
+                let updated: u8 = bits.toggle(bits.set(rotated, 2u8), 1u8)
+                let quotient: u16, remainder: u16 = int.divmod(0x1234u16, 0x0011u16)
+                let sum: u16, carry: bool = int.add_carry(0xFFFFu16, 1u16, false)
+                let difference: u16, borrow: bool = int.sub_borrow(0u16, 1u16, false)
+                let low: u16, high: u16 = int.full_mul(0x1234u16, 3u16)
+                let found: ptr<u8>, present: bool = mem.find_byte(&source[0], 4u24, 3u8)
+                let loaded: u24 = mem.load_be24(&source[0])
+                mem.copy_nonoverlapping(&destination[0], &source[0], 4u24)
+                mem.store_le24(&destination[0], loaded)
+                result = cast<u24>(quotient) + cast<u24>(remainder) + cast<u24>(sum)
+                    + cast<u24>(difference) + cast<u24>(low) + cast<u24>(high)
+                    + cast<u24>(found) + cast<u24>(tested) + cast<u24>(carry)
+                    + cast<u24>(borrow) + cast<u24>(present) + cast<u24>(updated)
+            }
+        "#,
+    );
+    assert!(assembly.contains("    bit $"), "{assembly}");
+    assert!(assembly.contains("    rol "), "{assembly}");
+    assert!(assembly.contains("    ror "), "{assembly}");
+    assert!(assembly.contains("find_byte"), "{assembly}");
+    assert!(assembly.contains("mem_copy_forward"), "{assembly}");
+}
+
+#[test]
+fn rejects_volatile_memory_for_nonvolatile_intrinsics() {
+    let program = parse_program(
+        Path::new("mos6502-intrinsic-volatile.ezra"),
+        r#"
+            volatile mmio register: ptr<u8> = 0xD000
+            fn main() { let value: u16 = mem.load_le16(register) }
+        "#,
+    )
+    .unwrap();
+    let error = emit_mos6502_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Mos6502,
+            load_addr: crate::target::Address24::new(0x0200),
+            entry_addr: crate::target::Address24::new(0x0200),
+            code_base: crate::target::Address24::new(0x0200),
+            stack_top: crate::target::Address24::new(0x01FF),
+            ram_base: crate::target::Address24::new(0xA000),
+            rodata_base: crate::target::Address24::new(0x8000),
+            asset_base: crate::target::Address24::new(0xC000),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.message.contains("volatile memory"), "{error}");
 }

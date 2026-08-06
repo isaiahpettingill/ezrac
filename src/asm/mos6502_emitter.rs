@@ -12,6 +12,9 @@ use crate::{
     declaration::unwrapped_declaration,
     diagnostic::Diagnostic,
     hir::HirProgram,
+    intrinsics::{
+        BitsIntrinsic, CATALOG, IntIntrinsic, IntrinsicDescriptor, IntrinsicOperation, MemIntrinsic,
+    },
     regalloc::{
         Location, PhysReg, PhysicalRegister, RegClass, RegUnit, RegisterClass, RegisterUnit,
         SpillClass, SpillClassId, Target,
@@ -52,27 +55,36 @@ pub fn emit_mos6502_assembly_with_options(
 ) -> Result<String, Diagnostic> {
     reject_banked_declarations(program)?;
     let hir = HirProgram::from_ast(program)?;
-    let tbir = TbirProgram::lower(&hir, program, &options)?;
+    let (lowered_program, source_comments) = if contains_two_result_program(program) {
+        (program.clone(), Vec::new())
+    } else {
+        let tbir = TbirProgram::lower(&hir, program, &options)?;
+        (tbir.lowered_program, tbir.source_comments)
+    };
     let model = SemanticModel::from_program(
-        &tbir.lowered_program,
+        &lowered_program,
         options.cpu.capabilities().memory.pointer_width_bits,
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
     Emitter::new(model, options.clone())
-        .emit(&tbir.lowered_program)
+        .emit(&lowered_program)
         .map(|asm| strip_unreachable_generated_routines(&asm, RoutineProfile::Mos6502))
         .and_then(|asm| cleanup_assembly(&asm, options.cpu))
-        .map(|asm| {
-            with_readability_comments(asm, program, &options, "mos6502", &tbir.source_comments)
-        })
+        .map(|asm| with_readability_comments(asm, program, &options, "mos6502", &source_comments))
 }
 
 #[derive(Clone)]
 struct Binding {
     storage: Storage,
     ty: Type,
+}
+
+#[derive(Clone, Copy)]
+enum SecondResultDestination {
+    Direct(Storage),
+    Pointer(Storage),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +128,8 @@ struct Emitter {
     loops: Vec<LoopLabels>,
     return_labels: Vec<String>,
     return_types: Vec<Option<Type>>,
+    second_return_types: Vec<Option<Type>>,
+    second_return_pointers: Vec<Option<Storage>>,
     function_ram_bases: Vec<u32>,
     current_functions: Vec<String>,
     recursive_call_edges: HashSet<(String, String)>,
@@ -143,6 +157,8 @@ impl Emitter {
             loops: Vec::new(),
             return_labels: Vec::new(),
             return_types: Vec::new(),
+            second_return_types: Vec::new(),
+            second_return_pointers: Vec::new(),
             function_ram_bases: Vec::new(),
             current_functions: Vec::new(),
             recursive_call_edges: HashSet::new(),
@@ -158,6 +174,7 @@ impl Emitter {
     }
 
     fn emit(mut self, program: &Program) -> Result<String, Diagnostic> {
+        self.validate_function_signatures(program)?;
         self.recursive_call_edges = recursive_call_edges(program, &self.model);
         self.functions = program
             .declarations
@@ -230,11 +247,74 @@ impl Emitter {
         Ok(())
     }
 
+    fn validate_function_signatures(&self, program: &Program) -> Result<(), Diagnostic> {
+        for declaration in &program.declarations {
+            match unwrapped_declaration(declaration) {
+                Declaration::Function(function) => {
+                    if let Some(first) = &function.return_type {
+                        self.model.type_width(first)?;
+                    }
+                    if let Some(second) = &function.second_return_type {
+                        let first = function.return_type.as_ref().ok_or_else(|| {
+                            Diagnostic::new(format!(
+                                "MOS 6502 two-result function `{}` must have a first return type",
+                                function.name
+                            ))
+                        })?;
+                        if function.name == "main" {
+                            return Err(Diagnostic::new(
+                                "main cannot return two values because its startup caller has no second-result destination",
+                            ));
+                        }
+                        self.model.type_width(first)?;
+                        self.model.type_width(second)?;
+                    }
+                    if (function.return_type.is_some() || function.second_return_type.is_some())
+                        && block_can_complete_normally(&function.body, &self.model)
+                    {
+                        let message = if function.second_return_type.is_some() {
+                            format!(
+                                "function `{}` may fall through without returning two values",
+                                function.name
+                            )
+                        } else {
+                            format!(
+                                "function `{}` may fall through without returning a value",
+                                function.name
+                            )
+                        };
+                        return Err(Diagnostic::new(message));
+                    }
+                }
+                Declaration::ExternAsmFunction(function)
+                    if function.second_return_type.is_some() =>
+                {
+                    return Err(Diagnostic::new(format!(
+                        "MOS 6502 extern asm function `{}` cannot use two-result returns",
+                        function.name
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
         let return_label = self.next_label(&format!("{}_return", function.name));
         let naked = function.attrs.iter().any(|attr| attr == "naked");
         let interrupt = function.attrs.iter().any(|attr| attr == "interrupt");
-        if interrupt && (!function.params.is_empty() || function.return_type.is_some()) {
+        let function_ram_base = self.model.next_ram_address();
+        let second_return_pointer = function
+            .second_return_type
+            .as_ref()
+            .map(|_| self.model.allocate(u32::from(self.model.pointer_bytes())))
+            .transpose()?;
+        if interrupt
+            && (!function.params.is_empty()
+                || function.return_type.is_some()
+                || function.second_return_type.is_some())
+        {
             return Err(Diagnostic::new(format!(
                 "interrupt function `{}` cannot have parameters or a return value",
                 function.name
@@ -261,9 +341,15 @@ impl Emitter {
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
         self.return_types.push(function.return_type.clone());
-        self.function_ram_bases.push(self.model.next_ram_address());
+        self.second_return_types
+            .push(function.second_return_type.clone());
+        self.second_return_pointers.push(second_return_pointer);
+        self.function_ram_bases.push(function_ram_base);
         self.current_functions.push(function.name.clone());
 
+        if let Some(pointer) = second_return_pointer {
+            self.copy_zp_to_storage(pointer, self.model.pointer_bytes());
+        }
         if interrupt && !naked {
             self.line("    pha");
             self.line("    txa");
@@ -303,6 +389,8 @@ impl Emitter {
             self.line("    rts");
         }
 
+        self.second_return_pointers.pop();
+        self.second_return_types.pop();
         self.return_types.pop();
         self.return_labels.pop();
         self.function_ram_bases.pop();
@@ -333,6 +421,41 @@ impl Emitter {
                     })?;
                 self.bind(name.clone(), binding.storage, binding.ty)?;
                 self.emit_initializer(binding.storage, ty, value)?;
+            }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                value,
+            } => {
+                let first = self
+                    .planned_locals
+                    .last()
+                    .and_then(|locals| locals.get(first_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("missing planned storage for local `{first_name}`"))
+                    })?;
+                let second = self
+                    .planned_locals
+                    .last()
+                    .and_then(|locals| locals.get(second_name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "missing planned storage for local `{second_name}`"
+                        ))
+                    })?;
+                self.emit_two_result_call(
+                    value,
+                    first_ty,
+                    second_ty,
+                    SecondResultDestination::Direct(second.storage),
+                )?;
+                self.copy(self.r0, first.storage, first.storage.size);
+                self.bind(first_name.clone(), first.storage, first.ty)?;
+                self.bind(second_name.clone(), second.storage, second.ty)?;
             }
             Stmt::Assign { target, op, value } => {
                 let ty = self.place_type(target)?;
@@ -460,13 +583,48 @@ impl Emitter {
                 self.line(&format!("    jmp {label}"));
             }
             Stmt::Return(value) => {
-                if let Some(value) = value {
-                    let ty = self
-                        .return_types
+                if let Some(second_ty) = self.second_return_types.last().and_then(Clone::clone) {
+                    let first_ty = self.return_types.last().and_then(Clone::clone).ok_or_else(
+                        || {
+                            Diagnostic::new(
+                                "function cannot forward two values without a first return type",
+                            )
+                        },
+                    )?;
+                    let pointer = self
+                        .second_return_pointers
                         .last()
-                        .and_then(Clone::clone)
-                        .ok_or_else(|| Diagnostic::new("value return in void function"))?;
-                    self.emit_expr(value, &ty)?;
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "two-result function has no caller-provided return slot",
+                            )
+                        })?;
+                    let Some(Expr::Call { .. }) = value.as_ref() else {
+                        return Err(Diagnostic::new(
+                            "two-result function must use `return first, second` or forward a pair call",
+                        ));
+                    };
+                    self.emit_two_result_call(
+                        value.as_ref().expect("pair forwarding value"),
+                        &first_ty,
+                        &second_ty,
+                        SecondResultDestination::Pointer(pointer),
+                    )?;
+                } else {
+                    match (value, self.return_types.last().and_then(Clone::clone)) {
+                        (Some(value), Some(ty)) => self.emit_expr(value, &ty)?,
+                        (Some(_), None) => {
+                            return Err(Diagnostic::new("value return in void function"));
+                        }
+                        (None, Some(_)) => {
+                            return Err(Diagnostic::new(
+                                "value-returning function must return a value",
+                            ));
+                        }
+                        (None, None) => {}
+                    }
                 }
                 let label = self
                     .return_labels
@@ -475,6 +633,7 @@ impl Emitter {
                     .clone();
                 self.line(&format!("    jmp {label}"));
             }
+            Stmt::ReturnTwo { first, second } => self.emit_return_two(first, second)?,
             Stmt::Asm {
                 inputs,
                 outputs,
@@ -893,7 +1052,13 @@ impl Emitter {
                 }
             }
             Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, expected)?,
-            Expr::Call { path, args } => self.emit_call(path, args, expected)?,
+            Expr::Call { path, args } => {
+                if intrinsic_descriptor(path).is_some() {
+                    self.emit_intrinsic_call(path, args, expected)?;
+                } else {
+                    self.emit_call(path, args, expected)?;
+                }
+            }
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, expected)?;
                 self.emit_unary(*op, width);
@@ -971,6 +1136,189 @@ impl Emitter {
         Ok(())
     }
 
+    fn addressed_storage(&self, expr: &Expr) -> Option<Storage> {
+        match expr {
+            Expr::AddressOf(name) | Expr::AddressOfIndex { name, .. } => {
+                self.binding(name).ok().map(|binding| binding.storage)
+            }
+            Expr::AddressOfField { base, .. } => {
+                self.binding(base).ok().map(|binding| binding.storage)
+            }
+            Expr::AddressOfAccess(path) => {
+                self.binding(&path.root).ok().map(|binding| binding.storage)
+            }
+            Expr::BankedPointer { pointer, .. } | Expr::Cast { expr: pointer, .. } => {
+                self.addressed_storage(pointer)
+            }
+            _ => None,
+        }
+    }
+
+    fn emit_two_result_call(
+        &mut self,
+        value: &Expr,
+        first_ty: &Type,
+        second_ty: &Type,
+        destination: SecondResultDestination,
+    ) -> Result<(), Diagnostic> {
+        let Expr::Call { path, args } = value else {
+            return Err(Diagnostic::new(
+                "two-result bindings require a direct two-result call",
+            ));
+        };
+        if intrinsic_descriptor(path).is_some() {
+            match destination {
+                SecondResultDestination::Direct(second) => {
+                    return self.emit_two_result_intrinsic_call(
+                        path, args, self.r0, first_ty, second, second_ty,
+                    );
+                }
+                SecondResultDestination::Pointer(_) => {
+                    let first = self.model.allocate(self.model.type_size(first_ty)?)?;
+                    let second = self.model.allocate(self.model.type_size(second_ty)?)?;
+                    self.emit_two_result_intrinsic_call(
+                        path, args, first, first_ty, second, second_ty,
+                    )?;
+                    self.set_second_result_pointer(destination);
+                    self.copy_storage_to_indirect(second, second.size);
+                    self.copy(first, self.r0, first.size);
+                    return Ok(());
+                }
+            }
+        }
+
+        let name = path.join(".");
+        let resolved_name = resolve_called_function(path, &self.model)
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        let signature = self.model.functions[&resolved_name].clone();
+        let Some(signature_first) = signature.return_type.as_ref() else {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{name}` has no first return type"
+            )));
+        };
+        let Some(signature_second) = signature.second_return_type.as_ref() else {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` does not return two values"
+            )));
+        };
+        if self.model.resolved_type(signature_first)? != self.model.resolved_type(first_ty)? {
+            return Err(Diagnostic::new(format!(
+                "first result of `{name}` does not match binding type"
+            )));
+        }
+        if self.model.resolved_type(signature_second)? != self.model.resolved_type(second_ty)? {
+            return Err(Diagnostic::new(format!(
+                "second result of `{name}` does not match binding type"
+            )));
+        }
+        if signature.params.len() != args.len() {
+            return Err(Diagnostic::new(format!(
+                "function `{name}` expects {} arguments, got {}",
+                signature.params.len(),
+                args.len()
+            )));
+        }
+        if let SecondResultDestination::Direct(second) = destination {
+            let second_size = self.model.type_size(signature_second)?;
+            if second.size < second_size {
+                return Err(Diagnostic::new(format!(
+                    "second result destination for `{name}` is too small"
+                )));
+            }
+        }
+        let mut evaluated_args = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let ty = &signature.params[index];
+            self.emit_expr(arg, ty)?;
+            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            self.copy(self.r0, storage, storage.size);
+            evaluated_args.push(storage);
+        }
+        for (storage, argument_slot) in evaluated_args.into_iter().zip(&signature.argument_slots) {
+            self.copy(storage, *argument_slot, storage.size);
+        }
+        let recursive_edge = self.current_functions.last().is_some_and(|caller| {
+            self.recursive_call_edges
+                .contains(&(caller.clone(), resolved_name.clone()))
+        });
+        let additional_exclusion = match destination {
+            SecondResultDestination::Direct(storage) => Some(storage),
+            SecondResultDestination::Pointer(_) => None,
+        };
+        let saved = recursive_edge
+            .then(|| {
+                self.function_ram_bases.last().map(|base| Storage {
+                    address: *base,
+                    size: self.model.next_ram_address() - *base,
+                })
+            })
+            .flatten()
+            .map(|live| self.live_storage_segments(live, args, additional_exclusion))
+            .unwrap_or_default();
+        for storage in &saved {
+            for offset in 0..storage.size {
+                self.lda(storage.address + offset);
+                self.line("    pha");
+            }
+        }
+        self.set_second_result_pointer(destination);
+        self.line(&format!("    jsr {}", function_label(&resolved_name)));
+        let returned = self
+            .model
+            .allocate(self.model.type_size(signature_first)?)?;
+        self.copy(self.r0, returned, returned.size);
+        for storage in saved.iter().rev() {
+            for offset in (0..storage.size).rev() {
+                self.line("    pla");
+                self.sta(storage.address + offset);
+            }
+        }
+        self.copy(returned, self.r0, returned.size);
+        self.extend_result(
+            self.model.type_width(signature_first)?,
+            self.model.type_width(first_ty)?,
+            type_is_signed(signature_first),
+        );
+        Ok(())
+    }
+
+    fn emit_return_two(&mut self, first: &Expr, second: &Expr) -> Result<(), Diagnostic> {
+        let first_ty = self
+            .return_types
+            .last()
+            .and_then(Clone::clone)
+            .ok_or_else(|| {
+                Diagnostic::new("function cannot return two values without a first return type")
+            })?;
+        let second_ty = self
+            .second_return_types
+            .last()
+            .and_then(Clone::clone)
+            .ok_or_else(|| Diagnostic::new("function cannot return two values"))?;
+        let pointer = self
+            .second_return_pointers
+            .last()
+            .copied()
+            .flatten()
+            .ok_or_else(|| {
+                Diagnostic::new("two-result function has no caller-provided return slot")
+            })?;
+        let first_value = self.model.allocate(self.model.type_size(&first_ty)?)?;
+        self.emit_expr(first, &first_ty)?;
+        self.copy(self.r0, first_value, first_value.size);
+        self.emit_expr(second, &second_ty)?;
+        self.set_second_result_pointer(SecondResultDestination::Pointer(pointer));
+        self.copy_storage_to_indirect(self.r0, self.model.type_size(&second_ty)?);
+        self.copy(first_value, self.r0, first_value.size);
+        let label = self
+            .return_labels
+            .last()
+            .expect("function return label")
+            .clone();
+        self.line(&format!("    jmp {label}"));
+        Ok(())
+    }
+
     fn emit_call(
         &mut self,
         path: &[String],
@@ -978,6 +1326,9 @@ impl Emitter {
         expected: &Type,
     ) -> Result<(), Diagnostic> {
         let name = path.join(".");
+        if intrinsic_descriptor(path).is_some() {
+            return self.emit_intrinsic_call(path, args, expected);
+        }
         match name.as_str() {
             "mem.peek8" | "ezra.mem.peek8" => {
                 self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
@@ -1013,6 +1364,11 @@ impl Emitter {
             return Ok(());
         }
         let signature = self.model.functions[&resolved_name].clone();
+        if signature.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "two-result function `{name}` requires a two-result binding"
+            )));
+        }
         if signature.params.len() != args.len() {
             return Err(Diagnostic::new(format!(
                 "function `{name}` expects {} arguments, got {}",
@@ -1043,7 +1399,7 @@ impl Emitter {
                 })
             })
             .flatten()
-            .map(|live| self.live_storage_segments(live, args))
+            .map(|live| self.live_storage_segments(live, args, None))
             .unwrap_or_default();
         for storage in &saved {
             for offset in 0..storage.size {
@@ -1099,6 +1455,1278 @@ impl Emitter {
         self.recursive_call_edges
             .iter()
             .any(|(caller, callee)| caller == name || callee == name)
+    }
+
+    fn resolve_intrinsic(
+        &self,
+        path: &[String],
+        args: &[Expr],
+    ) -> Result<crate::intrinsics::IntrinsicResolution, Diagnostic> {
+        let name = path.join(".");
+        let argument_types = args
+            .iter()
+            .map(|arg| self.expr_type(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let constants = args
+            .iter()
+            .map(|arg| self.model.const_value(arg).ok())
+            .collect::<Vec<_>>();
+        match CATALOG.validate_types_with_constants(&name, &argument_types, &constants) {
+            Ok(resolution) => Ok(resolution),
+            Err(error)
+                if matches!(
+                    name.as_str(),
+                    "mem.memcpy" | "ezra.mem.memcpy" | "mem.memset" | "ezra.mem.memset"
+                ) && args.len() == 3 =>
+            {
+                let mut legacy_types = argument_types;
+                legacy_types[2] = Type::Named("u24".to_owned());
+                CATALOG
+                    .validate_types_with_constants(&name, &legacy_types, &constants)
+                    .map_err(|_| Diagnostic::new(error.to_string()))
+            }
+            Err(error) => Err(Diagnostic::new(error.to_string())),
+        }
+    }
+
+    fn eval_intrinsic_args(
+        &mut self,
+        args: &[Expr],
+        types: &[Type],
+    ) -> Result<Vec<Storage>, Diagnostic> {
+        let mut values = Vec::with_capacity(args.len());
+        for (arg, ty) in args.iter().zip(types) {
+            self.emit_expr(arg, ty)?;
+            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            self.copy(self.r0, storage, storage.size);
+            values.push(storage);
+        }
+        Ok(values)
+    }
+
+    fn check_intrinsic_result(
+        &self,
+        resolution: &crate::intrinsics::IntrinsicResolution,
+        expected: &Type,
+    ) -> Result<(), Diagnostic> {
+        let result = resolution
+            .result_types
+            .first()
+            .ok_or_else(|| Diagnostic::new("intrinsic has no scalar result"))?;
+        if self.model.resolved_type(result)? != self.model.resolved_type(expected)? {
+            return Err(Diagnostic::new(format!(
+                "intrinsic `{}` returns `{result:?}`, not `{expected:?}`",
+                resolution.canonical_name()
+            )));
+        }
+        Ok(())
+    }
+
+    fn emit_intrinsic_call(
+        &mut self,
+        path: &[String],
+        args: &[Expr],
+        expected: &Type,
+    ) -> Result<(), Diagnostic> {
+        let resolution = self.resolve_intrinsic(path, args)?;
+        if resolution.result_types.len() == 2 {
+            return Err(Diagnostic::new(format!(
+                "two-result intrinsic `{}` must be consumed by a two-place binding",
+                resolution.canonical_name()
+            )));
+        }
+        if resolution.result_types.len() == 1 {
+            self.check_intrinsic_result(&resolution, expected)?;
+        }
+        match resolution.descriptor.operation {
+            IntrinsicOperation::Bits(operation) => {
+                let values = self.eval_intrinsic_args(args, &resolution.argument_types)?;
+                self.emit_bits_intrinsic(operation, &values, args)?;
+            }
+            IntrinsicOperation::Int(operation) => {
+                let values = self.eval_intrinsic_args(args, &resolution.argument_types)?;
+                self.emit_int_intrinsic(operation, &values, args, &resolution.result_types)?;
+            }
+            IntrinsicOperation::Mem(operation) => {
+                self.emit_mem_intrinsic(operation, args, &resolution)?;
+            }
+        }
+        if resolution.result_types.is_empty() {
+            self.zero(self.r0);
+        }
+        Ok(())
+    }
+
+    fn emit_two_result_intrinsic_call(
+        &mut self,
+        path: &[String],
+        args: &[Expr],
+        first: Storage,
+        first_ty: &Type,
+        second: Storage,
+        second_ty: &Type,
+    ) -> Result<(), Diagnostic> {
+        let resolution = self.resolve_intrinsic(path, args)?;
+        if resolution.result_types.len() != 2 {
+            return Err(Diagnostic::new(format!(
+                "intrinsic `{}` does not produce two results",
+                resolution.canonical_name()
+            )));
+        }
+        if self.model.resolved_type(&resolution.result_types[0])?
+            != self.model.resolved_type(first_ty)?
+            || self.model.resolved_type(&resolution.result_types[1])?
+                != self.model.resolved_type(second_ty)?
+        {
+            return Err(Diagnostic::new(format!(
+                "intrinsic `{}` result types do not match the two-place binding",
+                resolution.canonical_name()
+            )));
+        }
+        let values = self.eval_intrinsic_args(args, &resolution.argument_types)?;
+        match resolution.descriptor.operation {
+            IntrinsicOperation::Int(IntIntrinsic::Divmod) => {
+                self.emit_divmod_values(&values, &resolution.argument_types)?;
+                self.copy(self.r0, first, first.size);
+                self.copy(self.r2, second, second.size);
+            }
+            IntrinsicOperation::Int(IntIntrinsic::AddCarry) => {
+                self.emit_carry_values(&values, &resolution.argument_types, false)?;
+                self.copy(self.r0, first, first.size);
+                self.copy(self.r2, second, second.size);
+            }
+            IntrinsicOperation::Int(IntIntrinsic::SubBorrow) => {
+                self.emit_carry_values(&values, &resolution.argument_types, true)?;
+                self.copy(self.r0, first, first.size);
+                self.copy(self.r2, second, second.size);
+            }
+            IntrinsicOperation::Int(IntIntrinsic::FullMul) => {
+                self.emit_full_product_values(&values, &resolution.argument_types)?;
+                self.copy(self.r0, first, first.size);
+                self.copy(self.r1, second, second.size);
+            }
+            IntrinsicOperation::Mem(MemIntrinsic::FindByte) => {
+                self.emit_find_byte_values(&values, &resolution.argument_types)?;
+                self.copy(self.r0, first, first.size);
+                self.copy(self.r1, second, second.size);
+            }
+            _ => {
+                return Err(Diagnostic::new(format!(
+                    "intrinsic `{}` is not a supported two-result operation",
+                    resolution.canonical_name()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_bits_intrinsic(
+        &mut self,
+        operation: BitsIntrinsic,
+        values: &[Storage],
+        args: &[Expr],
+    ) -> Result<(), Diagnostic> {
+        let width = self.model.type_width(&self.expr_type(&args[0])?)?;
+        match operation {
+            BitsIntrinsic::RotateLeft | BitsIntrinsic::RotateRight => {
+                self.copy(values[0], self.r0, u32::from(width));
+                self.emit_rotate(
+                    width,
+                    operation == BitsIntrinsic::RotateRight,
+                    values[1],
+                    self.model.type_width(&self.expr_type(&args[1])?)?,
+                    self.model.const_value(&args[1]).ok(),
+                )?;
+            }
+            BitsIntrinsic::Test => {
+                let bit = u32::try_from(self.model.const_value(&args[1]).map_err(|_| {
+                    Diagnostic::new("bit test index must be a compile-time constant")
+                })?)
+                .map_err(|_| Diagnostic::new("bit test index must be non-negative"))?;
+                self.emit_test_value(values[0], bit);
+            }
+            BitsIntrinsic::Set | BitsIntrinsic::Clear | BitsIntrinsic::Toggle => {
+                let bit = u32::try_from(self.model.const_value(&args[1]).map_err(|_| {
+                    Diagnostic::new("bit update index must be a compile-time constant")
+                })?)
+                .map_err(|_| Diagnostic::new("bit update index must be non-negative"))?;
+                self.copy(values[0], self.r0, u32::from(width));
+                self.emit_bit_update(operation, width, bit)?;
+            }
+            BitsIntrinsic::Extract => {
+                let offset = u32::try_from(self.model.const_value(&args[1])?)
+                    .map_err(|_| Diagnostic::new("bitfield offset must be non-negative"))?;
+                let field_width = u32::try_from(self.model.const_value(&args[2])?)
+                    .map_err(|_| Diagnostic::new("bitfield width must be non-negative"))?;
+                self.copy(values[0], self.r0, u32::from(width));
+                self.shift_constant(width, true, false, offset);
+                self.mask_result(width, bit_mask(field_width));
+            }
+            BitsIntrinsic::Insert => {
+                let offset = u32::try_from(self.model.const_value(&args[2])?)
+                    .map_err(|_| Diagnostic::new("bitfield offset must be non-negative"))?;
+                let field_width = u32::try_from(self.model.const_value(&args[3])?)
+                    .map_err(|_| Diagnostic::new("bitfield width must be non-negative"))?;
+                self.emit_insert(values[0], values[1], width, offset, field_width);
+            }
+            BitsIntrinsic::ByteSwap => {
+                if self.cpu == CpuFamily::Wdc65C816 && width == 2 {
+                    self.line("    rep #$20");
+                    self.lda(self.r0.address);
+                    self.line("    xba");
+                    self.sta(self.r0.address);
+                    self.line("    sep #$20");
+                } else {
+                    self.copy(values[0], self.r2, u32::from(width));
+                    for offset in 0..u32::from(width) {
+                        self.lda(self.r2.address + u32::from(width) - 1 - offset);
+                        self.sta(self.r0.address + offset);
+                    }
+                }
+            }
+            BitsIntrinsic::Reverse => self.emit_reverse(values[0], width)?,
+            BitsIntrinsic::CountOnes => self.emit_bit_count(values[0], width, false, true),
+            BitsIntrinsic::LeadingZeros => self.emit_bit_count(values[0], width, true, false),
+            BitsIntrinsic::TrailingZeros => self.emit_bit_count(values[0], width, false, false),
+        }
+        Ok(())
+    }
+
+    fn emit_int_intrinsic(
+        &mut self,
+        operation: IntIntrinsic,
+        values: &[Storage],
+        args: &[Expr],
+        result_types: &[Type],
+    ) -> Result<(), Diagnostic> {
+        let width = self.model.type_width(&self.expr_type(&args[0])?)?;
+        let signed = type_is_signed(&self.expr_type(&args[0])?);
+        match operation {
+            IntIntrinsic::WideningMul => {
+                let result_width = self.model.type_width(&result_types[0])?;
+                let right_width = self.model.type_width(&self.expr_type(&args[1])?)?;
+                let product = self.emit_full_product(
+                    values[0],
+                    values[1],
+                    width,
+                    right_width,
+                    signed,
+                    result_width,
+                );
+                self.copy(product, self.r0, u32::from(result_width));
+            }
+            IntIntrinsic::MulHigh => {
+                let product =
+                    self.emit_full_product(values[0], values[1], width, width, signed, width * 2);
+                self.copy(
+                    Storage {
+                        address: product.address + u32::from(width),
+                        size: u32::from(width),
+                    },
+                    self.r0,
+                    u32::from(width),
+                );
+            }
+            IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => {
+                self.emit_saturating(
+                    operation == IntIntrinsic::SaturatingSub,
+                    values[0],
+                    values[1],
+                    width,
+                    signed,
+                );
+            }
+            IntIntrinsic::Divmod
+            | IntIntrinsic::AddCarry
+            | IntIntrinsic::SubBorrow
+            | IntIntrinsic::FullMul => {
+                return Err(Diagnostic::new(
+                    "two-result intrinsic requires a two-place binding",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_full_product(
+        &mut self,
+        left: Storage,
+        right: Storage,
+        left_width: u8,
+        right_width: u8,
+        signed: bool,
+        result_width: u8,
+    ) -> Storage {
+        let multiplicand = self
+            .model
+            .allocate(u32::from(result_width))
+            .expect("multiplicand scratch");
+        let multiplier = self
+            .model
+            .allocate(u32::from(right_width))
+            .expect("multiplier scratch");
+        let result = self
+            .model
+            .allocate(u32::from(result_width))
+            .expect("product scratch");
+        let negative = self.model.allocate(1).expect("product sign scratch");
+        self.zero(negative);
+        if signed {
+            self.normalize_signed_operand(left, left_width, negative, false);
+            self.normalize_signed_operand(right, right_width, negative, true);
+        }
+        self.zero(multiplicand);
+        self.copy(left, multiplicand, u32::from(left_width));
+        self.copy(right, multiplier, u32::from(right_width));
+        self.zero(result);
+        for bit in 0..u32::from(right_width) * 8 {
+            let skip = self.next_label("product_skip_add");
+            self.emit_bit_test_branch(multiplier, bit, &skip, true);
+            self.add_storages(result, multiplicand, result, result_width);
+            self.line(&format!("{skip}:"));
+            self.shift_storage_once(multiplicand, result_width, false);
+            self.shift_storage_once(multiplier, right_width, true);
+        }
+        if signed {
+            self.negate_if_flag(result, result_width, negative);
+        }
+        result
+    }
+
+    fn emit_full_product_values(
+        &mut self,
+        values: &[Storage],
+        args: &[Type],
+    ) -> Result<(), Diagnostic> {
+        let width = self.model.type_width(&args[0])?;
+        let product = self.emit_full_product(
+            values[0],
+            values[1],
+            width,
+            width,
+            type_is_signed(&args[0]),
+            width * 2,
+        );
+        self.copy(product, self.r0, u32::from(width));
+        self.copy(
+            Storage {
+                address: product.address + u32::from(width),
+                size: u32::from(width),
+            },
+            self.r1,
+            u32::from(width),
+        );
+        Ok(())
+    }
+
+    fn emit_divmod_values(&mut self, values: &[Storage], args: &[Type]) -> Result<(), Diagnostic> {
+        let width = self.model.type_width(&args[0])?;
+        self.copy(values[0], self.r0, u32::from(width));
+        self.copy(values[1], self.r1, u32::from(width));
+        self.divide(width, false, type_is_signed(&args[0]));
+        Ok(())
+    }
+
+    fn emit_carry_values(
+        &mut self,
+        values: &[Storage],
+        args: &[Type],
+        borrow: bool,
+    ) -> Result<(), Diagnostic> {
+        let width = self.model.type_width(&args[0])?;
+        self.copy(values[0], self.r0, u32::from(width));
+        self.copy(values[1], self.r1, u32::from(width));
+        let no_carry = self.next_label("carry_clear");
+        let operation = self.next_label("carry_operation");
+        let done = self.next_label("carry_done");
+        self.jump_if_zero(values[2].address, &no_carry);
+        self.line(if borrow { "    clc" } else { "    sec" });
+        self.line(&format!("    jmp {operation}"));
+        self.line(&format!("{no_carry}:"));
+        self.line(if borrow { "    sec" } else { "    clc" });
+        self.line(&format!("{operation}:"));
+        if borrow {
+            self.sub_without_initial_carry(width);
+        } else {
+            self.add_without_initial_carry(width);
+        }
+        let saved = self.model.allocate(u32::from(width))?;
+        self.copy(self.r0, saved, u32::from(width));
+        let flag = self.model.allocate(1)?;
+        let set = self.next_label("carry_set");
+        self.branch_long(if borrow { "bcc" } else { "bcs" }, &set);
+        self.zero(flag);
+        self.line(&format!("    jmp {done}"));
+        self.line(&format!("{set}:"));
+        self.load_constant(1, 1);
+        self.copy(self.r0, flag, 1);
+        self.line(&format!("{done}:"));
+        self.copy(saved, self.r0, u32::from(width));
+        self.copy(flag, self.r2, 1);
+        Ok(())
+    }
+
+    fn add_without_initial_carry(&mut self, width: u8) {
+        for offset in 0..u32::from(width) {
+            self.lda(self.r0.address + offset);
+            self.line(&format!("    adc ${:04X}", self.r1.address + offset));
+            self.sta(self.r0.address + offset);
+        }
+    }
+
+    fn sub_without_initial_carry(&mut self, width: u8) {
+        for offset in 0..u32::from(width) {
+            self.lda(self.r0.address + offset);
+            self.line(&format!("    sbc ${:04X}", self.r1.address + offset));
+            self.sta(self.r0.address + offset);
+        }
+    }
+
+    fn emit_rotate(
+        &mut self,
+        width: u8,
+        right: bool,
+        count: Storage,
+        count_width: u8,
+        constant: Option<i64>,
+    ) -> Result<(), Diagnostic> {
+        let bits = u32::from(width) * 8;
+        if let Some(count) = constant {
+            let count = u32::try_from(count)
+                .map_err(|_| Diagnostic::new("rotate count must be non-negative"))?
+                % bits;
+            for _ in 0..count {
+                self.rotate_once(width, right);
+            }
+            return Ok(());
+        }
+        let count_value = self.model.allocate(u32::from(count_width))?;
+        self.copy(count, count_value, u32::from(count_width));
+        let modulus = self.model.allocate(u32::from(count_width))?;
+        self.zero(modulus);
+        self.load_constant(i64::from(bits), count_width);
+        self.copy(self.r0, modulus, u32::from(count_width));
+        let modulo = self.next_label("rotate_modulo");
+        let modulo_done = self.next_label("rotate_modulo_done");
+        self.line(&format!("{modulo}:"));
+        self.jump_if_less(count_value, modulus, count_width, &modulo_done);
+        self.sub_storages(count_value, modulus, count_value, count_width);
+        self.line(&format!("    jmp {modulo}"));
+        self.line(&format!("{modulo_done}:"));
+        let loop_label = self.next_label("rotate_loop");
+        let done = self.next_label("rotate_done");
+        self.line(&format!("{loop_label}:"));
+        self.jump_storage_zero(count_value, count_width, &done);
+        self.rotate_once(width, right);
+        self.decrement(count_value, count_width);
+        self.line(&format!("    jmp {loop_label}"));
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn rotate_once(&mut self, width: u8, right: bool) {
+        self.line("    clc");
+        if right {
+            for offset in (0..u32::from(width)).rev() {
+                self.line(&format!("    ror ${:04X}", self.r0.address + offset));
+            }
+            let no_carry = self.next_label("rotate_no_carry");
+            self.branch_long("bcc", &no_carry);
+            self.lda(self.r0.address + u32::from(width) - 1);
+            self.line("    ora #$80");
+            self.sta(self.r0.address + u32::from(width) - 1);
+            self.line(&format!("{no_carry}:"));
+        } else {
+            for offset in 0..u32::from(width) {
+                self.line(&format!("    rol ${:04X}", self.r0.address + offset));
+            }
+            let no_carry = self.next_label("rotate_no_carry");
+            self.branch_long("bcc", &no_carry);
+            self.lda(self.r0.address);
+            self.line("    ora #$01");
+            self.sta(self.r0.address);
+            self.line(&format!("{no_carry}:"));
+        }
+    }
+
+    fn emit_test_value(&mut self, source: Storage, bit: u32) {
+        let set = self.next_label("bit_test_set");
+        let done = self.next_label("bit_test_done");
+        self.zero(self.r0);
+        self.emit_bit_test_branch(source, bit, &set, true);
+        self.line(&format!("    jmp {done}"));
+        self.line(&format!("{set}:"));
+        self.load_constant(1, 1);
+        self.line(&format!("{done}:"));
+    }
+
+    fn emit_bit_test_branch(&mut self, source: Storage, bit: u32, target: &str, set: bool) {
+        self.lda_imm(1_u8 << (bit % 8));
+        self.line(&format!("    bit ${:04X}", source.address + bit / 8));
+        self.branch_long(if set { "bne" } else { "beq" }, target);
+    }
+
+    fn emit_bit_update(
+        &mut self,
+        operation: BitsIntrinsic,
+        width: u8,
+        bit: u32,
+    ) -> Result<(), Diagnostic> {
+        if bit >= u32::from(width) * 8 {
+            return Err(Diagnostic::new("bit index is outside the value width"));
+        }
+        let address = self.r0.address + bit / 8;
+        let mask = 1_u8 << (bit % 8);
+        self.lda(address);
+        match operation {
+            BitsIntrinsic::Set => self.line(&format!("    ora #${mask:02X}")),
+            BitsIntrinsic::Clear => self.line(&format!("    and #${:02X}", !mask)),
+            BitsIntrinsic::Toggle => self.line(&format!("    eor #${mask:02X}")),
+            _ => unreachable!(),
+        }
+        self.sta(address);
+        Ok(())
+    }
+
+    fn mask_result(&mut self, width: u8, mask: u64) {
+        let source = self
+            .model
+            .allocate(u32::from(width))
+            .expect("bit mask source scratch");
+        let mask_storage = self
+            .model
+            .allocate(u32::from(width))
+            .expect("bit mask scratch");
+        self.copy(self.r0, source, u32::from(width));
+        self.load_constant(mask as i64, width);
+        self.copy(self.r0, mask_storage, u32::from(width));
+        self.copy(source, self.r0, u32::from(width));
+        self.copy(mask_storage, self.r1, u32::from(width));
+        self.emit_binary_op(BinaryOp::BitAnd, width, false)
+            .expect("bit mask operation");
+    }
+
+    fn emit_insert(
+        &mut self,
+        base: Storage,
+        value: Storage,
+        width: u8,
+        offset: u32,
+        field_width: u32,
+    ) {
+        let field_mask = bit_mask(field_width);
+        let shifted_mask = field_mask << offset;
+        let inverse = self
+            .model
+            .allocate(u32::from(width))
+            .expect("insert mask scratch");
+        let cleared = self
+            .model
+            .allocate(u32::from(width))
+            .expect("insert base scratch");
+        let inserted = self
+            .model
+            .allocate(u32::from(width))
+            .expect("insert value scratch");
+        self.load_constant((!shifted_mask) as i64, width);
+        self.copy(self.r0, inverse, u32::from(width));
+        self.copy(base, self.r0, u32::from(width));
+        self.copy(inverse, self.r1, u32::from(width));
+        self.emit_binary_op(BinaryOp::BitAnd, width, false)
+            .expect("insert clear operation");
+        self.copy(self.r0, cleared, u32::from(width));
+        self.load_constant(field_mask as i64, width);
+        self.copy(self.r0, self.r1, u32::from(width));
+        self.copy(value, self.r0, u32::from(width));
+        self.emit_binary_op(BinaryOp::BitAnd, width, false)
+            .expect("insert value mask operation");
+        self.shift_constant(width, false, false, offset);
+        self.copy(self.r0, inserted, u32::from(width));
+        self.copy(cleared, self.r0, u32::from(width));
+        self.copy(inserted, self.r1, u32::from(width));
+        self.emit_binary_op(BinaryOp::BitOr, width, false)
+            .expect("insert combine operation");
+    }
+
+    fn emit_reverse(&mut self, value: Storage, width: u8) -> Result<(), Diagnostic> {
+        let source = self.model.allocate(u32::from(width))?;
+        let result = self.model.allocate(u32::from(width))?;
+        let bit = self.model.allocate(u32::from(width))?;
+        self.copy(value, source, u32::from(width));
+        self.zero(result);
+        for _ in 0..u32::from(width) * 8 {
+            self.copy(source, bit, u32::from(width));
+            self.copy(bit, self.r0, u32::from(width));
+            self.load_constant(1, width);
+            self.copy(self.r0, self.r1, u32::from(width));
+            self.copy(bit, self.r0, u32::from(width));
+            self.emit_binary_op(BinaryOp::BitAnd, width, false)?;
+            let source_bit = self.model.allocate(u32::from(width))?;
+            self.copy(self.r0, source_bit, u32::from(width));
+            self.copy(result, self.r0, u32::from(width));
+            self.shift_constant(width, false, false, 1);
+            self.copy(source_bit, self.r1, u32::from(width));
+            self.emit_binary_op(BinaryOp::BitOr, width, false)?;
+            self.copy(self.r0, result, u32::from(width));
+            self.copy(source, self.r0, u32::from(width));
+            self.shift_constant(width, true, false, 1);
+            self.copy(self.r0, source, u32::from(width));
+        }
+        self.copy(result, self.r0, u32::from(width));
+        Ok(())
+    }
+
+    fn emit_bit_count(&mut self, source: Storage, width: u8, leading: bool, ones: bool) {
+        let count = self.model.allocate(1).expect("bit count scratch");
+        self.zero(count);
+        let total = u32::from(width) * 8;
+        let order = if leading {
+            (0..total).rev().collect::<Vec<_>>()
+        } else {
+            (0..total).collect::<Vec<_>>()
+        };
+        for bit in order {
+            if ones {
+                let add = self.next_label("bit_count_add");
+                let next = self.next_label("bit_count_next");
+                self.emit_bit_test_branch(source, bit, &add, true);
+                self.line(&format!("    jmp {next}"));
+                self.line(&format!("{add}:"));
+                self.increment(count, 1);
+                self.line(&format!("{next}:"));
+            } else {
+                let stop = self.next_label("bit_count_stop");
+                self.emit_bit_test_branch(source, bit, &stop, true);
+                self.increment(count, 1);
+                self.line(&format!("{stop}:"));
+            }
+        }
+        self.zero(self.r0);
+        self.copy(count, self.r0, 1);
+    }
+
+    fn emit_saturating(
+        &mut self,
+        subtract: bool,
+        left: Storage,
+        right: Storage,
+        width: u8,
+        signed: bool,
+    ) {
+        if !signed {
+            if subtract {
+                self.sub_storages(left, right, self.r0, width);
+                let no_borrow = self.next_label("saturating_no_borrow");
+                let done = self.next_label("saturating_done");
+                self.branch_long("bcs", &no_borrow);
+                self.zero(self.r0);
+                self.line(&format!("    jmp {done}"));
+                self.line(&format!("{no_borrow}:"));
+                self.line(&format!("{done}:"));
+            } else {
+                self.add_storages(left, right, self.r0, width);
+                let no_carry = self.next_label("saturating_no_carry");
+                let done = self.next_label("saturating_done");
+                self.branch_long("bcc", &no_carry);
+                self.load_constant(bit_mask(u32::from(width) * 8) as i64, width);
+                self.line(&format!("    jmp {done}"));
+                self.line(&format!("{no_carry}:"));
+                self.line(&format!("{done}:"));
+            }
+            return;
+        }
+        if subtract {
+            self.sub_storages(left, right, self.r0, width);
+        } else {
+            self.add_storages(left, right, self.r0, width);
+        }
+        let left_negative = self.next_label("saturating_left_negative");
+        let right_negative = self.next_label("saturating_right_negative");
+        let overflow_max = self.next_label("saturating_max");
+        let overflow_min = self.next_label("saturating_min");
+        let done = self.next_label("saturating_done");
+        self.jump_if_negative(left, &left_negative);
+        if subtract {
+            self.jump_if_negative(right, &right_negative);
+            self.line(&format!("    jmp {done}"));
+            self.line(&format!("{right_negative}:"));
+            self.jump_if_negative(self.r0, &done);
+            self.line(&format!("    jmp {overflow_max}"));
+        } else {
+            self.jump_if_negative(right, &right_negative);
+            self.jump_if_negative(self.r0, &overflow_max);
+            self.line(&format!("    jmp {done}"));
+            self.line(&format!("{right_negative}:"));
+            self.line(&format!("    jmp {done}"));
+        }
+        self.line(&format!("{left_negative}:"));
+        if subtract {
+            let left_neg_right_neg = self.next_label("saturating_sub_no_overflow");
+            self.jump_if_negative(right, &left_neg_right_neg);
+            self.jump_if_negative(self.r0, &done);
+            self.line(&format!("    jmp {overflow_min}"));
+            self.line(&format!("{left_neg_right_neg}:"));
+            self.line(&format!("    jmp {done}"));
+        } else {
+            self.jump_if_negative(right, &right_negative);
+            self.line(&format!("    jmp {done}"));
+            self.line(&format!("{right_negative}:"));
+            self.jump_if_negative(self.r0, &done);
+            self.line(&format!("    jmp {overflow_min}"));
+        }
+        self.line(&format!("{overflow_max}:"));
+        self.load_constant((1_i64 << (u32::from(width) * 8 - 1)) - 1, width);
+        self.line(&format!("    jmp {done}"));
+        self.line(&format!("{overflow_min}:"));
+        self.load_constant(1_i64 << (u32::from(width) * 8 - 1), width);
+        self.line(&format!("{done}:"));
+    }
+
+    fn jump_if_negative(&mut self, storage: Storage, label: &str) {
+        self.lda(storage.address + storage.size - 1);
+        self.branch_long("bmi", label);
+    }
+
+    fn shift_storage_once(&mut self, storage: Storage, width: u8, right: bool) {
+        self.line("    clc");
+        if right {
+            for offset in (0..u32::from(width)).rev() {
+                self.line(&format!("    ror ${:04X}", storage.address + offset));
+            }
+        } else {
+            for offset in 0..u32::from(width) {
+                self.line(&format!("    rol ${:04X}", storage.address + offset));
+            }
+        }
+    }
+
+    fn emit_mem_intrinsic(
+        &mut self,
+        operation: MemIntrinsic,
+        args: &[Expr],
+        resolution: &crate::intrinsics::IntrinsicResolution,
+    ) -> Result<(), Diagnostic> {
+        if matches!(
+            resolution.descriptor.effects.volatile,
+            crate::intrinsics::VolatilePolicy::NonVolatileOnly
+        ) && args.iter().any(|arg| self.is_volatile_pointer(arg))
+        {
+            return Err(Diagnostic::new(format!(
+                "intrinsic `{}` cannot access volatile memory",
+                resolution.canonical_name()
+            )));
+        }
+        match operation {
+            MemIntrinsic::CopyNonoverlapping | MemIntrinsic::Move => self.emit_memory_transfer(
+                args,
+                &resolution.argument_types,
+                operation == MemIntrinsic::Move,
+            )?,
+            MemIntrinsic::Fill => self.emit_memory_fill(args, &resolution.argument_types)?,
+            MemIntrinsic::FindByte => {
+                return Err(Diagnostic::new(
+                    "mem.find_byte requires a two-place binding",
+                ));
+            }
+            MemIntrinsic::Compare => self.emit_memory_compare(args, &resolution.argument_types)?,
+            MemIntrinsic::LoadLe16
+            | MemIntrinsic::LoadLe24
+            | MemIntrinsic::LoadBe16
+            | MemIntrinsic::LoadBe24 => {
+                self.emit_endian_load(operation, args, &resolution.argument_types)?
+            }
+            MemIntrinsic::StoreLe16
+            | MemIntrinsic::StoreLe24
+            | MemIntrinsic::StoreBe16
+            | MemIntrinsic::StoreBe24 => {
+                self.emit_endian_store(operation, args, &resolution.argument_types)?
+            }
+            MemIntrinsic::Peek8 => self.emit_peek8(args, &resolution.argument_types)?,
+            MemIntrinsic::Poke8 => self.emit_poke8(args, &resolution.argument_types)?,
+        }
+        Ok(())
+    }
+
+    fn is_volatile_pointer(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(name) => self
+                .model
+                .mmio
+                .get(name)
+                .is_some_and(|(_, _, volatile)| *volatile),
+            Expr::Access(path) | Expr::AddressOfAccess(path) => self
+                .model
+                .mmio
+                .get(&path.root)
+                .is_some_and(|(_, _, volatile)| *volatile),
+            Expr::Cast { expr, .. } | Expr::BankedPointer { pointer: expr, .. } => {
+                self.is_volatile_pointer(expr)
+            }
+            Expr::Binary { left, right, .. } => {
+                self.is_volatile_pointer(left) || self.is_volatile_pointer(right)
+            }
+            _ => false,
+        }
+    }
+
+    fn zero_extend_memory_length(
+        &mut self,
+        value: Storage,
+        ty: &Type,
+    ) -> Result<Storage, Diagnostic> {
+        let width = self.model.type_width(ty)?;
+        let count = self.model.allocate(3)?;
+        self.zero(count);
+        self.copy(value, count, u32::from(width.min(3)));
+        Ok(count)
+    }
+
+    fn emit_memory_transfer(
+        &mut self,
+        args: &[Expr],
+        types: &[Type],
+        moving: bool,
+    ) -> Result<(), Diagnostic> {
+        let values = self.eval_intrinsic_args(args, types)?;
+        let pointer_width = self.model.pointer_bytes();
+        if self
+            .model
+            .const_value(&args[2])
+            .ok()
+            .is_some_and(|length| length == 0)
+        {
+            return Ok(());
+        }
+        if self.cpu == CpuFamily::Wdc65C816 && self.emit_65c816_block_transfer(args, moving)? {
+            return Ok(());
+        }
+        let source = values[1];
+        let destination = values[0];
+        let length = self.zero_extend_memory_length(values[2], &types[2])?;
+        let forward = self.next_label("mem_forward");
+        let backward = self.next_label("mem_backward");
+        let done = self.next_label("mem_done");
+        let source_end = self.pointer_plus_storage(source, length, pointer_width)?;
+        let maybe_backward = self.next_label("mem_maybe_backward");
+        if moving {
+            self.jump_if_equal(source, destination, pointer_width, &forward);
+            self.jump_if_less(source, destination, pointer_width, &maybe_backward);
+        }
+        self.line(&format!("    jmp {forward}"));
+        self.line(&format!("{maybe_backward}:"));
+        if moving {
+            self.jump_if_less(destination, source_end, pointer_width, &backward);
+        }
+        self.line(&format!("    jmp {forward}"));
+        self.line(&format!("{backward}:"));
+        if moving {
+            let offset = self.pointer_minus_one(length, pointer_width)?;
+            let source_end = self.pointer_plus_storage(source, offset, pointer_width)?;
+            let destination_end = self.pointer_plus_storage(destination, offset, pointer_width)?;
+            self.set_pointer_from_storage(POINTER_ZP, source_end, pointer_width);
+            self.set_pointer_from_storage(
+                POINTER_ZP + u32::from(pointer_width),
+                destination_end,
+                pointer_width,
+            );
+            self.emit_memory_loop(length, pointer_width, false, &done);
+        }
+        self.line(&format!("{forward}:"));
+        self.set_pointer_from_storage(POINTER_ZP, source, pointer_width);
+        self.set_pointer_from_storage(
+            POINTER_ZP + u32::from(pointer_width),
+            destination,
+            pointer_width,
+        );
+        self.emit_memory_loop(length, pointer_width, true, &done);
+        self.line(&format!("{done}:"));
+        self.zero(self.r0);
+        Ok(())
+    }
+
+    fn emit_65c816_block_transfer(
+        &mut self,
+        args: &[Expr],
+        moving: bool,
+    ) -> Result<bool, Diagnostic> {
+        let Some(destination) = self.constant_pointer_address(&args[0]) else {
+            return Ok(false);
+        };
+        let Some(source) = self.constant_pointer_address(&args[1]) else {
+            return Ok(false);
+        };
+        let Ok(length) = self.model.const_value(&args[2]) else {
+            return Ok(false);
+        };
+        let Ok(length) = u32::try_from(length) else {
+            return Ok(false);
+        };
+        if length == 0 || length > 0x1_0000 {
+            return Ok(false);
+        }
+        let overlap = (source < destination && destination < source.saturating_add(length))
+            || (destination < source && source < destination.saturating_add(length));
+        if overlap && !moving {
+            return Err(Diagnostic::new(
+                "mem.copy_nonoverlapping source and destination ranges overlap",
+            ));
+        }
+        let backwards = moving && overlap;
+        let source_address = if backwards {
+            source + length - 1
+        } else {
+            source
+        };
+        let destination_address = if backwards {
+            destination + length - 1
+        } else {
+            destination
+        };
+        self.line("    rep #$30");
+        self.line(&format!("    ldx #${:04X}", source_address & 0xFFFF));
+        self.line(&format!("    ldy #${:04X}", destination_address & 0xFFFF));
+        self.line(&format!("    lda #${:04X}", (length - 1) & 0xFFFF));
+        let mnemonic = if backwards { "mvp" } else { "mvn" };
+        self.line(&format!(
+            "    {mnemonic} ${:02X},${:02X}",
+            source_address >> 16,
+            destination_address >> 16
+        ));
+        self.line("    sep #$30");
+        self.zero(self.r0);
+        Ok(true)
+    }
+
+    fn emit_memory_loop(&mut self, length: Storage, pointer_width: u8, forward: bool, done: &str) {
+        let loop_label = self.next_label(if forward {
+            "mem_copy_forward"
+        } else {
+            "mem_copy_backward"
+        });
+        self.line(&format!("{loop_label}:"));
+        self.jump_storage_zero(length, 3, done);
+        self.load_pointer_byte(POINTER_ZP, pointer_width, self.r0.address);
+        self.store_pointer_byte(
+            POINTER_ZP + u32::from(pointer_width),
+            pointer_width,
+            self.r0.address,
+        );
+        if forward {
+            self.increment_pointer_zp(POINTER_ZP, pointer_width);
+            self.increment_pointer_zp(POINTER_ZP + u32::from(pointer_width), pointer_width);
+        } else {
+            self.decrement_pointer_zp(POINTER_ZP, pointer_width);
+            self.decrement_pointer_zp(POINTER_ZP + u32::from(pointer_width), pointer_width);
+        }
+        self.decrement(length, 3);
+        self.line(&format!("    jmp {loop_label}"));
+    }
+
+    fn emit_memory_fill(&mut self, args: &[Expr], types: &[Type]) -> Result<(), Diagnostic> {
+        let values = self.eval_intrinsic_args(args, types)?;
+        let length = self.zero_extend_memory_length(values[2], &types[2])?;
+        let pointer_width = self.model.pointer_bytes();
+        let loop_label = self.next_label("mem_fill");
+        let done = self.next_label("mem_fill_done");
+        self.set_pointer_from_storage(POINTER_ZP, values[0], pointer_width);
+        self.line(&format!("{loop_label}:"));
+        self.jump_storage_zero(length, 3, &done);
+        self.store_pointer_byte(POINTER_ZP, pointer_width, values[1].address);
+        self.increment_pointer_zp(POINTER_ZP, pointer_width);
+        self.decrement(length, 3);
+        self.line(&format!("    jmp {loop_label}"));
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_memory_compare(&mut self, args: &[Expr], types: &[Type]) -> Result<(), Diagnostic> {
+        let values = self.eval_intrinsic_args(args, types)?;
+        let length = self.zero_extend_memory_length(values[2], &types[2])?;
+        let pointer_width = self.model.pointer_bytes();
+        let left_byte = self.model.allocate(1)?;
+        let less = self.next_label("mem_compare_less");
+        let greater = self.next_label("mem_compare_greater");
+        let equal = self.next_label("mem_compare_equal");
+        let done = self.next_label("mem_compare_done");
+        self.set_pointer_from_storage(POINTER_ZP, values[0], pointer_width);
+        self.set_pointer_from_storage(
+            POINTER_ZP + u32::from(pointer_width),
+            values[1],
+            pointer_width,
+        );
+        let loop_label = self.next_label("mem_compare_loop");
+        self.line(&format!("{loop_label}:"));
+        self.jump_storage_zero(length, 3, &equal);
+        self.load_pointer_byte(POINTER_ZP, pointer_width, left_byte.address);
+        self.load_pointer_byte(
+            POINTER_ZP + u32::from(pointer_width),
+            pointer_width,
+            self.r0.address,
+        );
+        self.lda(left_byte.address);
+        self.line(&format!("    cmp ${:04X}", self.r0.address));
+        self.branch_long("bcc", &less);
+        self.branch_long("bne", &greater);
+        self.increment_pointer_zp(POINTER_ZP, pointer_width);
+        self.increment_pointer_zp(POINTER_ZP + u32::from(pointer_width), pointer_width);
+        self.decrement(length, 3);
+        self.line(&format!("    jmp {loop_label}"));
+        self.line(&format!("{less}:"));
+        self.load_constant(-1, 1);
+        self.line(&format!("    jmp {done}"));
+        self.line(&format!("{greater}:"));
+        self.load_constant(1, 1);
+        self.line(&format!("    jmp {done}"));
+        self.line(&format!("{equal}:"));
+        self.load_constant(0, 1);
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn emit_endian_load(
+        &mut self,
+        operation: MemIntrinsic,
+        args: &[Expr],
+        types: &[Type],
+    ) -> Result<(), Diagnostic> {
+        let values = self.eval_intrinsic_args(args, types)?;
+        let pointer_width = self.model.pointer_bytes();
+        let width = if matches!(operation, MemIntrinsic::LoadLe16 | MemIntrinsic::LoadBe16) {
+            2
+        } else {
+            3
+        };
+        let big = matches!(operation, MemIntrinsic::LoadBe16 | MemIntrinsic::LoadBe24);
+        self.set_pointer_from_storage(POINTER_ZP, values[0], pointer_width);
+        self.zero(self.r0);
+        for offset in 0..width {
+            self.load_pointer_byte(
+                POINTER_ZP,
+                pointer_width,
+                self.r0.address + if big { width - 1 - offset } else { offset },
+            );
+            if offset + 1 < width {
+                self.increment_pointer_zp(POINTER_ZP, pointer_width);
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_endian_store(
+        &mut self,
+        operation: MemIntrinsic,
+        args: &[Expr],
+        types: &[Type],
+    ) -> Result<(), Diagnostic> {
+        let values = self.eval_intrinsic_args(args, types)?;
+        let pointer_width = self.model.pointer_bytes();
+        let width = if matches!(operation, MemIntrinsic::StoreLe16 | MemIntrinsic::StoreBe16) {
+            2
+        } else {
+            3
+        };
+        let big = matches!(operation, MemIntrinsic::StoreBe16 | MemIntrinsic::StoreBe24);
+        self.set_pointer_from_storage(POINTER_ZP, values[0], pointer_width);
+        for offset in 0..width {
+            self.store_pointer_byte(
+                POINTER_ZP,
+                pointer_width,
+                values[1].address + if big { width - 1 - offset } else { offset },
+            );
+            if offset + 1 < width {
+                self.increment_pointer_zp(POINTER_ZP, pointer_width);
+            }
+        }
+        self.zero(self.r0);
+        Ok(())
+    }
+
+    fn emit_peek8(&mut self, args: &[Expr], types: &[Type]) -> Result<(), Diagnostic> {
+        let values = self.eval_intrinsic_args(args, types)?;
+        self.zero(self.r0);
+        self.set_pointer_from_storage(POINTER_ZP, values[0], self.model.pointer_bytes());
+        self.load_pointer_byte(POINTER_ZP, self.model.pointer_bytes(), self.r0.address);
+        Ok(())
+    }
+
+    fn emit_poke8(&mut self, args: &[Expr], types: &[Type]) -> Result<(), Diagnostic> {
+        let values = self.eval_intrinsic_args(args, types)?;
+        self.set_pointer_from_storage(POINTER_ZP, values[0], self.model.pointer_bytes());
+        self.store_pointer_byte(POINTER_ZP, self.model.pointer_bytes(), values[1].address);
+        self.zero(self.r0);
+        Ok(())
+    }
+
+    fn emit_find_byte_values(
+        &mut self,
+        values: &[Storage],
+        types: &[Type],
+    ) -> Result<(), Diagnostic> {
+        let length = self.zero_extend_memory_length(values[1], &types[1])?;
+        let pointer_width = self.model.pointer_bytes();
+        self.set_pointer_from_storage(POINTER_ZP, values[0], pointer_width);
+        let loop_label = self.next_label("find_byte_loop");
+        let found = self.next_label("find_byte_found");
+        let not_found = self.next_label("find_byte_not_found");
+        let done = self.next_label("find_byte_done");
+        self.line(&format!("{loop_label}:"));
+        self.jump_storage_zero(length, 3, &not_found);
+        self.load_pointer_byte(POINTER_ZP, pointer_width, self.r0.address);
+        self.line(&format!("    cmp ${:04X}", values[2].address));
+        self.branch_long("beq", &found);
+        self.increment_pointer_zp(POINTER_ZP, pointer_width);
+        self.decrement(length, 3);
+        self.line(&format!("    jmp {loop_label}"));
+        self.line(&format!("{found}:"));
+        self.copy_zp_width_to_result(pointer_width);
+        let found_pointer = self.model.allocate(u32::from(pointer_width))?;
+        self.copy(self.r0, found_pointer, u32::from(pointer_width));
+        self.load_constant(1, 1);
+        self.copy(self.r0, self.r1, 1);
+        self.copy(found_pointer, self.r0, u32::from(pointer_width));
+        self.line(&format!("    jmp {done}"));
+        self.line(&format!("{not_found}:"));
+        self.copy_zp_width_to_result(pointer_width);
+        self.zero(self.r1);
+        self.line(&format!("{done}:"));
+        Ok(())
+    }
+
+    fn pointer_plus_storage(
+        &mut self,
+        pointer: Storage,
+        offset: Storage,
+        width: u8,
+    ) -> Result<Storage, Diagnostic> {
+        let result = self.model.allocate(u32::from(width))?;
+        let rhs = self.model.allocate(u32::from(width))?;
+        self.zero(rhs);
+        self.copy(offset, rhs, u32::from(width).min(offset.size));
+        self.add_storages(pointer, rhs, result, width);
+        Ok(result)
+    }
+
+    fn pointer_minus_one(&mut self, value: Storage, width: u8) -> Result<Storage, Diagnostic> {
+        let result = self.model.allocate(u32::from(width))?;
+        self.zero(result);
+        self.load_constant(1, 1);
+        self.copy(self.r0, result, 1);
+        self.sub_storages(value, result, result, width);
+        Ok(result)
+    }
+
+    fn set_pointer_from_storage(&mut self, zero_page: u32, storage: Storage, width: u8) {
+        for offset in 0..u32::from(width) {
+            self.lda(storage.address + offset);
+            self.sta(zero_page + offset);
+        }
+    }
+
+    fn copy_zp_to_storage(&mut self, storage: Storage, width: u8) {
+        for offset in 0..u32::from(width) {
+            self.lda(POINTER_ZP + offset);
+            self.sta(storage.address + offset);
+        }
+    }
+
+    fn copy_result_to_zp_width(&mut self, width: u8) {
+        for offset in 0..u32::from(width) {
+            self.lda(self.r0.address + offset);
+            self.sta(POINTER_ZP + offset);
+        }
+    }
+
+    fn set_second_result_pointer(&mut self, destination: SecondResultDestination) {
+        let width = self.model.pointer_bytes();
+        match destination {
+            SecondResultDestination::Direct(storage) => {
+                self.load_constant(i64::from(storage.address), width);
+                self.copy_result_to_zp_width(width);
+            }
+            SecondResultDestination::Pointer(storage) => {
+                self.set_pointer_from_storage(POINTER_ZP, storage, width);
+            }
+        }
+    }
+
+    fn copy_storage_to_indirect(&mut self, source: Storage, size: u32) {
+        let pointer_width = self.model.pointer_bytes();
+        for offset in 0..size {
+            self.store_pointer_byte(POINTER_ZP, pointer_width, source.address + offset);
+        }
+    }
+
+    fn increment_pointer_zp(&mut self, zero_page: u32, width: u8) {
+        let done = self.next_label("pointer_incremented");
+        for offset in 0..u32::from(width) {
+            self.line(&format!("    inc ${:02X}", zero_page + offset));
+            self.branch_long("bne", &done);
+        }
+        self.line(&format!("{done}:"));
+    }
+
+    fn decrement_pointer_zp(&mut self, zero_page: u32, width: u8) {
+        let done = self.next_label("pointer_decremented");
+        for offset in 0..u32::from(width) {
+            self.line(&format!("    dec ${:02X}", zero_page + offset));
+            self.branch_long("bne", &done);
+        }
+        self.line(&format!("{done}:"));
+    }
+
+    fn load_pointer_byte(&mut self, zero_page: u32, pointer_width: u8, destination: u32) {
+        if pointer_width == 3 {
+            self.line("    phb");
+            self.lda(zero_page + 2);
+            self.line("    pha");
+            self.line("    plb");
+        }
+        self.line("    ldy #$00");
+        self.line(&format!("    lda (${:02X}),y", zero_page));
+        self.sta(destination);
+        if pointer_width == 3 {
+            self.line("    plb");
+        }
+    }
+
+    fn store_pointer_byte(&mut self, zero_page: u32, pointer_width: u8, source: u32) {
+        if pointer_width == 3 {
+            self.line("    phb");
+            self.lda(zero_page + 2);
+            self.line("    pha");
+            self.line("    plb");
+        }
+        self.lda(source);
+        self.line("    ldy #$00");
+        self.line(&format!("    sta (${:02X}),y", zero_page));
+        if pointer_width == 3 {
+            self.line("    plb");
+        }
+    }
+
+    fn copy_zp_width_to_result(&mut self, width: u8) {
+        for offset in 0..u32::from(width) {
+            self.lda(POINTER_ZP + offset);
+            self.sta(self.r0.address + offset);
+        }
+    }
+
+    fn add_storages(&mut self, left: Storage, right: Storage, result: Storage, width: u8) {
+        self.line("    clc");
+        for offset in 0..u32::from(width) {
+            self.lda(left.address + offset);
+            self.line(&format!("    adc ${:04X}", right.address + offset));
+            self.sta(result.address + offset);
+        }
+    }
+
+    fn sub_storages(&mut self, left: Storage, right: Storage, result: Storage, width: u8) {
+        self.line("    sec");
+        for offset in 0..u32::from(width) {
+            self.lda(left.address + offset);
+            self.line(&format!("    sbc ${:04X}", right.address + offset));
+            self.sta(result.address + offset);
+        }
     }
 
     fn emit_memcpy(&mut self, args: &[Expr]) -> Result<(), Diagnostic> {
@@ -2126,13 +3754,23 @@ impl Emitter {
                 _ => Err(Diagnostic::new("dereference requires pointer")),
             },
             Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
-            Expr::Call { path, .. } => self
-                .model
-                .functions
-                .get(&path.join("."))
-                .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
-                .and_then(|signature| signature.return_type.clone())
-                .ok_or_else(|| Diagnostic::new("void function has no value")),
+            Expr::Call { path, args } => {
+                if let Some(descriptor) = intrinsic_descriptor(path) {
+                    let resolution = self.resolve_intrinsic(path, args)?;
+                    return resolution.result_types.first().cloned().ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "intrinsic `{}` has no scalar result",
+                            descriptor.canonical_name
+                        ))
+                    });
+                }
+                self.model
+                    .functions
+                    .get(&path.join("."))
+                    .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
+                    .and_then(|signature| signature.return_type.clone())
+                    .ok_or_else(|| Diagnostic::new("void function has no value"))
+            }
             Expr::Unary {
                 op: UnaryOp::Not, ..
             } => Ok(Type::Named("bool".to_owned())),
@@ -2229,15 +3867,20 @@ impl Emitter {
         Err(Diagnostic::new(format!("unknown variable `{name}`")))
     }
 
-    fn live_storage_segments(&self, live: Storage, args: &[Expr]) -> Vec<Storage> {
+    fn live_storage_segments(
+        &self,
+        live: Storage,
+        args: &[Expr],
+        additional_exclusion: Option<Storage>,
+    ) -> Vec<Storage> {
         let mut excluded = args
             .iter()
-            .filter_map(|arg| match arg {
+            .filter_map(|arg| {
                 // The callee can mutate this storage through its pointer parameter.
                 // Restoring a pre-call snapshot would discard that mutation.
-                Expr::AddressOf(name) => self.binding(name).ok().map(|binding| binding.storage),
-                _ => None,
+                self.addressed_storage(arg)
             })
+            .chain(additional_exclusion)
             .filter_map(|storage| {
                 let start = storage.address.max(live.address);
                 let end = storage
@@ -2737,7 +4380,7 @@ fn block_terminates(body: &[Stmt]) -> bool {
 
 fn stmt_terminates(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Return(_) | Stmt::ReturnTwo { .. } | Stmt::Break | Stmt::Continue => true,
         Stmt::If {
             then_body,
             else_body,
@@ -2940,6 +4583,121 @@ fn instruction_parts(line: &str) -> Option<(&str, &str)> {
     }
     let end = text.find(char::is_whitespace).unwrap_or(text.len());
     Some((&text[..end], text[end..].trim()))
+}
+
+fn intrinsic_descriptor(path: &[String]) -> Option<&'static IntrinsicDescriptor> {
+    CATALOG.lookup(&path.join("."))
+}
+
+fn contains_two_result_program(program: &Program) -> bool {
+    program
+        .declarations
+        .iter()
+        .any(|declaration| match unwrapped_declaration(declaration) {
+            Declaration::Function(function) => {
+                function.second_return_type.is_some()
+                    || contains_two_result_statement(&function.body)
+            }
+            Declaration::ExternAsmFunction(function) => function.second_return_type.is_some(),
+            _ => false,
+        })
+}
+
+fn block_can_complete_normally(body: &[Stmt], model: &SemanticModel) -> bool {
+    let mut reachable = true;
+    for stmt in body {
+        if !reachable {
+            break;
+        }
+        reachable = stmt_can_complete_normally(stmt, model);
+    }
+    reachable
+}
+
+fn stmt_can_complete_normally(stmt: &Stmt, model: &SemanticModel) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::ReturnTwo { .. } | Stmt::Break | Stmt::Continue => false,
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => match model.const_value(condition) {
+            Ok(0) => block_can_complete_normally(else_body, model),
+            Ok(_) => block_can_complete_normally(then_body, model),
+            Err(_) => {
+                block_can_complete_normally(then_body, model)
+                    || block_can_complete_normally(else_body, model)
+            }
+        },
+        Stmt::Loop { body } => block_can_break_current_loop(body, model),
+        Stmt::While { condition, body } => {
+            !condition_is_const_true(condition, model) || block_can_break_current_loop(body, model)
+        }
+        _ => true,
+    }
+}
+
+fn condition_is_const_true(condition: &Expr, model: &SemanticModel) -> bool {
+    matches!(condition, Expr::Bool(true))
+        || matches!(condition, Expr::Ident(name) if name == "true")
+        || model.const_value(condition).is_ok_and(|value| value != 0)
+}
+
+fn block_can_break_current_loop(body: &[Stmt], model: &SemanticModel) -> bool {
+    let mut reachable = true;
+    for stmt in body {
+        if !reachable {
+            break;
+        }
+        if stmt_can_break_current_loop(stmt, model) {
+            return true;
+        }
+        reachable = stmt_can_complete_normally(stmt, model);
+    }
+    false
+}
+
+fn stmt_can_break_current_loop(stmt: &Stmt, model: &SemanticModel) -> bool {
+    match stmt {
+        Stmt::Break => true,
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => match model.const_value(condition) {
+            Ok(0) => block_can_break_current_loop(else_body, model),
+            Ok(_) => block_can_break_current_loop(then_body, model),
+            Err(_) => {
+                block_can_break_current_loop(then_body, model)
+                    || block_can_break_current_loop(else_body, model)
+            }
+        },
+        Stmt::While { .. } | Stmt::Loop { .. } => false,
+        _ => false,
+    }
+}
+
+fn contains_two_result_statement(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::LetTwo { .. } | Stmt::ReturnTwo { .. } => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => contains_two_result_statement(then_body) || contains_two_result_statement(else_body),
+        Stmt::While { body, .. } | Stmt::Loop { body } => contains_two_result_statement(body),
+        _ => false,
+    })
+}
+
+fn bit_mask(bits: u32) -> u64 {
+    if bits >= 64 {
+        u64::MAX
+    } else if bits == 0 {
+        0
+    } else {
+        (1_u64 << bits) - 1
+    }
 }
 
 fn element_type(ty: &Type) -> Result<Type, Diagnostic> {
@@ -3407,6 +5165,29 @@ fn collect_static_locals(
                     .with_force_memory(true),
                 );
             }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                ..
+            } => {
+                for (name, ty) in [(first_name, first_ty), (second_name, second_ty)] {
+                    if local_types.insert(name.clone(), ty.clone()).is_some() {
+                        return Err(Diagnostic::new(format!("duplicate local `{name}`")));
+                    }
+                    locals.push(
+                        SourceLocal::new(
+                            name.clone(),
+                            model.type_size(ty)?,
+                            1,
+                            MOS6502_MEMORY_LOCAL_CLASS,
+                        )
+                        .with_spill_classes(vec![MOS6502_STATIC_SPILL_CLASS])
+                        .with_force_memory(true),
+                    );
+                }
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -3548,8 +5329,13 @@ fn resolve_called_function(path: &[String], model: &SemanticModel) -> Option<Str
 fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<Vec<String>>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+            Stmt::Let { value, .. } | Stmt::LetTwo { value, .. } | Stmt::Expr(value) => {
                 collect_expr_calls(value, calls);
+            }
+            Stmt::Return(Some(value)) => collect_expr_calls(value, calls),
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_calls(first, calls);
+                collect_expr_calls(second, calls);
             }
             Stmt::Assign { target, value, .. } => {
                 collect_place_calls(target, calls);
@@ -3639,6 +5425,7 @@ fn collect_access_path_calls(path: &AccessPath, calls: &mut Vec<Vec<String>>) {
 fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
     if !function.params.is_empty()
         || function.return_type.is_some()
+        || function.second_return_type.is_some()
         || function
             .attrs
             .iter()

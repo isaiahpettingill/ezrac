@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{
     asm::AssemblyOptions,
@@ -535,4 +534,162 @@ fn interrupt_and_naked_functions_assemble() {
     );
     assert!(assembly.contains("reti"));
     assert!(assembly.contains("_reset:"));
+}
+
+#[cfg(feature = "test-runner")]
+fn run(source: &str, instruction_budget: u64) -> crate::vm::TestRun {
+    let assembly = emit(source);
+    crate::vm::run_assembly_test_with_cpu_options_at(
+        CpuFamily::Lr35902,
+        &assembly,
+        &crate::vm::TestRunOptions {
+            instruction_budget,
+            initial_ports: Vec::new(),
+            initial_memory: Vec::new(),
+            stack_top: 0xFFFE,
+        },
+        0x0150,
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "test-runner")]
+#[test]
+fn executes_direct_generic_two_result_user_function_returns() {
+    let run = run(
+        r#"
+            volatile mmio DEBUG: ptr<u8> = 0xFF80
+            volatile mmio RESULT: ptr<u8> = 0xFF81
+            volatile mmio HALT: ptr<u8> = 0xFF82
+            fn pair(value: u8) -> u8, bool { return value + 1, value == 4 }
+            fn main() {
+                let first: u8, second: bool = pair(4)
+                *DEBUG = first
+                *DEBUG = cast<u8>(second)
+                *RESULT = 0
+                *HALT = 1
+            }
+        "#,
+        10_000,
+    );
+    assert!(run.halted, "{run:?}");
+    assert_eq!(run.result_code, 0);
+    assert!(run.debug_output.ends_with(&[5, 1]), "{run:?}");
+    assert_eq!(run.failure, None);
+}
+
+#[cfg(feature = "test-runner")]
+#[test]
+fn executes_void_one_and_two_result_user_functions() {
+    let run = run(
+        r#"
+            volatile mmio DEBUG: ptr<u8> = 0xFF80
+            volatile mmio HALT: ptr<u8> = 0xFF82
+            global void_calls: u8 = 0
+
+            fn zero() { void_calls += 1 }
+            fn one(value: u8) -> u8 { return value + 2 }
+            fn pair(value: u8) -> u8, u8 { return one(value), value + 3 }
+
+            fn main() {
+                zero()
+                let scalar: u8 = one(3)
+                let first: u8, second: u8 = pair(scalar)
+                *DEBUG = void_calls
+                *DEBUG = scalar
+                *DEBUG = first
+                *DEBUG = second
+                *HALT = 1
+            }
+        "#,
+        20_000,
+    );
+    assert!(run.halted, "{run:?}");
+    assert!(run.debug_output.ends_with(&[1, 5, 7, 8]), "{run:?}");
+    assert_eq!(run.failure, None);
+}
+
+#[test]
+fn lowers_catalog_scalar_and_two_result_intrinsics() {
+    let assembly = emit(
+        r#"
+            global output: u16 = 0
+            global source: [u8; 4] = [1, 2, 3, 4]
+            global destination: [u8; 4] = [0, 0, 0, 0]
+            fn main() {
+                let rotated: u8 = bits.rotate_left(0x81u8, 1u8)
+                let tested: bool = bits.test(rotated, 0u8)
+                let updated: u8 = bits.clear(bits.set(rotated, 3u8), 0u8)
+                let quotient: u16, remainder: u16 = int.divmod(0x1234u16, 0x0011u16)
+                let found: ptr<u8>, present: bool = mem.find_byte(&source[0], 4u24, 3u8)
+                mem.copy_nonoverlapping(&destination[0], &source[0], 4u24)
+                mem.store_be16(&destination[0], quotient)
+                output = quotient + cast<u16>(remainder) + cast<u16>(updated) + cast<u16>(tested) + cast<u16>(found)
+            }
+        "#,
+    );
+    assert!(assembly.contains("bit"), "{assembly}");
+    assert!(assembly.contains("set"), "{assembly}");
+    assert!(assembly.contains("res"), "{assembly}");
+    assert!(assembly.contains("rl"), "{assembly}");
+    assert!(assembly.contains("find_byte"), "{assembly}");
+    assert!(assembly.contains("mem_copy_forward"), "{assembly}");
+}
+
+#[test]
+fn rejects_static_overlapping_nonoverlapping_copy() {
+    let program = parse_program(
+        Path::new("lr35902-intrinsic-overlap.ezra"),
+        r#"
+            global bytes: [u8; 4] = [1, 2, 3, 4]
+            fn main() { mem.copy_nonoverlapping(&bytes[0], &bytes[1], 3u24) }
+        "#,
+    )
+    .unwrap();
+    let error = emit_lr35902_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Lr35902,
+            stack_top: Address24::new(0x0aff),
+            ram_base: Address24::new(0x0100),
+            rodata_base: Address24::new(0x0800),
+            asset_base: Address24::new(0x0900),
+            default_sdk_symbols: false,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.message.contains("ranges overlap"), "{error}");
+}
+
+#[cfg(feature = "test-runner")]
+#[test]
+fn executes_forwarded_two_result_returns() {
+    let run = run(
+        r#"
+            volatile mmio DEBUG: ptr<u8> = 0xFF80
+            volatile mmio RESULT: ptr<u8> = 0xFF81
+            volatile mmio HALT: ptr<u8> = 0xFF82
+
+            fn base(value: u8) -> u8, bool { return value + 1, value == 6 }
+            fn forward(value: u8) -> u8, bool { return base(value) }
+            fn recurse(value: u8) -> u8, bool {
+                if value == 0 { return 1, true }
+                let first: u8, second: bool = recurse(value - 1)
+                return first + 1, second
+            }
+            fn main() {
+                let first: u8, second: bool = forward(6)
+                *DEBUG = first
+                *DEBUG = cast<u8>(second)
+                *RESULT = 0
+                *HALT = 1
+            }
+        "#,
+        50_000,
+    );
+    assert!(run.halted, "{run:?}");
+    assert_eq!(run.result_code, 0);
+    assert!(run.debug_output.ends_with(&[7, 1]), "{run:?}");
+    assert_eq!(run.failure, None);
 }

@@ -88,6 +88,10 @@ mode = "application" # or "library" for an importable SDK/module project
 - `[sdk].paths` adds project SDK source roots in addition to bundled target SDKs.
 - `[lsp].mode = "library"` checks the configured source and imports as a library module without requiring `fn main()`. Library mode supports LSP diagnostics and SDK imports, but `build` still creates executables only.
 
+## Implemented language features
+
+The compiler includes built-in `ezra.bits`, `ezra.int`, and `ezra.mem` intrinsic catalogs. They cover width-aware bit operations, defined integer helpers, overlap-aware memory operations, explicit-endian loads/stores, and scalar byte access. Functions may have zero, one, or two ordered primitive results using `-> T, U`, two-place `let`, and `return a, b`; this is not tuple or large-value return support. Exact widths, pointer widths, and result ABIs are target-specific, and unsupported combinations diagnose. See [`docs/language.md`](docs/language.md) for the complete catalog and restrictions.
+
 ## Agon Light MOS
 
 The `agonlight-mos-ez80` target emits eZ80 ADL-mode programs for Agon MOS. It uses the built-in SDK under `toolchains/agonlight-mos-ez80/sdk`, including `agon.mos` wrappers for MOS character output, string output, blocking key reads, and keyboard-state clearing, plus `agon.console` convenience wrappers for console-style output.

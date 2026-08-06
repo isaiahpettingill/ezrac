@@ -769,6 +769,9 @@ fn aggregate_return_diagnostics(program: &Program) -> Vec<Diagnostic> {
     for declaration in &program.declarations {
         visit(declaration, &aliases, &structs, &mut diagnostics);
     }
+    if let Err(error) = crate::tbir::diagnostics::validate_multi_value_returns(program) {
+        diagnostics.push(error);
+    }
     diagnostics
 }
 
@@ -842,6 +845,14 @@ fn collect_local_names(stmts: &[Stmt], names: &mut HashSet<String>) {
             Stmt::Let { name, .. } => {
                 names.insert(name.clone());
             }
+            Stmt::LetTwo {
+                first_name,
+                second_name,
+                ..
+            } => {
+                names.insert(first_name.clone());
+                names.insert(second_name.clone());
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -872,8 +883,12 @@ fn collect_stmt_references(
         let child_spans: &[crate::ast::StmtSpan] =
             span.map_or(&[], |span| span.children.as_slice());
         match stmt {
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) => {
+            Stmt::Let { value, .. } | Stmt::LetTwo { value, .. } | Stmt::Return(Some(value)) => {
                 collect_expr_references(value, names, default_sdk_symbols, output)
+            }
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_references(first, names, default_sdk_symbols, output);
+                collect_expr_references(second, names, default_sdk_symbols, output);
             }
             Stmt::Assign { target, value, .. } => {
                 collect_place_references(target, names, default_sdk_symbols, output);
@@ -1283,7 +1298,7 @@ fn validate_main_signature(main: &Function) -> Result<(), Diagnostic> {
     if !main.params.is_empty() {
         return Err(Diagnostic::new("main function cannot take parameters"));
     }
-    if main.return_type.is_some() {
+    if main.return_type.is_some() || main.second_return_type.is_some() {
         return Err(Diagnostic::new("main function cannot return a value"));
     }
     Ok(())
@@ -1501,7 +1516,9 @@ fn builtin_sdk_path(target: Option<&str>, import: &str) -> PathBuf {
 }
 
 fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
-    if target.is_some_and(|target| target.contains("dcpu")) {
+    if matches!(import, "ezra.bits" | "ezra.int" | "ezra.mem") {
+        Some("// Compiler intrinsic module. Calls are resolved by ezrac.\n")
+    } else if target.is_some_and(|target| target.contains("dcpu")) {
         match import {
             "dcpu.hardware" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/hardware.ezra"),
@@ -1735,13 +1752,34 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
         }
     } else if target.is_some_and(|target| target.starts_with("nes-")) {
         match import {
-            "nes.ppu" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/ppu.ezra"), "nes.ppu")),
-            "nes.palette" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/palette.ezra"), "nes.palette")),
-            "nes.sprites" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/sprites.ezra"), "nes.sprites")),
-            "nes.input" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/input.ezra"), "nes.input")),
-            "nes.audio" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/audio.ezra"), "nes.audio")),
-            "nes.timing" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/timing.ezra"), "nes.timing")),
-            "nes.memory" => Some(builtin_sdk_utf8(include_bytes!("../toolchains/nes-2a03/sdk/nes/memory.ezra"), "nes.memory")),
+            "nes.ppu" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/nes-2a03/sdk/nes/ppu.ezra"),
+                "nes.ppu",
+            )),
+            "nes.palette" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/nes-2a03/sdk/nes/palette.ezra"),
+                "nes.palette",
+            )),
+            "nes.sprites" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/nes-2a03/sdk/nes/sprites.ezra"),
+                "nes.sprites",
+            )),
+            "nes.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/nes-2a03/sdk/nes/input.ezra"),
+                "nes.input",
+            )),
+            "nes.audio" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/nes-2a03/sdk/nes/audio.ezra"),
+                "nes.audio",
+            )),
+            "nes.timing" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/nes-2a03/sdk/nes/timing.ezra"),
+                "nes.timing",
+            )),
+            "nes.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/nes-2a03/sdk/nes/memory.ezra"),
+                "nes.memory",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("commodore64-6502")) {
@@ -1859,6 +1897,9 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
 /// LSP cannot advertise a module that import resolution would reject.
 pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
     const MODULES: &[&str] = &[
+        "ezra.bits",
+        "ezra.int",
+        "ezra.mem",
         "dcpu.hardware",
         "dcpu.lem1802",
         "dcpu.keyboard",
@@ -2242,6 +2283,19 @@ fn validate_stmt_private_import_access(
             validate_expr_private_import_access(value, private_imports, locals)?;
             locals.insert(name.clone());
         }
+        Stmt::LetTwo {
+            first_name,
+            first_ty,
+            second_name,
+            second_ty,
+            value,
+        } => {
+            validate_type_private_import_access(first_ty, private_imports)?;
+            validate_type_private_import_access(second_ty, private_imports)?;
+            validate_expr_private_import_access(value, private_imports, locals)?;
+            locals.insert(first_name.clone());
+            locals.insert(second_name.clone());
+        }
         Stmt::Assign { target, value, .. } => {
             validate_place_private_import_access(target, private_imports, locals)?;
             validate_expr_private_import_access(value, private_imports, locals)?;
@@ -2276,6 +2330,10 @@ fn validate_stmt_private_import_access(
         }
         Stmt::Return(Some(expr)) | Stmt::Expr(expr) => {
             validate_expr_private_import_access(expr, private_imports, locals)?;
+        }
+        Stmt::ReturnTwo { first, second } => {
+            validate_expr_private_import_access(first, private_imports, locals)?;
+            validate_expr_private_import_access(second, private_imports, locals)?;
         }
         Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
         Stmt::Asm {

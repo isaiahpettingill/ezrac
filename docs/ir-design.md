@@ -20,7 +20,7 @@ source
   -> final artifact
 ```
 
-HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions plus typed global/MMIO/embed object provenance, applies scalar simplification, typed immutable-local propagation, local common-subexpression cleanup, pure scalar loop-invariant hoisting, and named global-read LICM, expands approved explicit-inline calls, decides safe tail calls, rewrites supported direct tail recursion into loops, and supplies the transformed program to every source emitter. Target emitters then select native arithmetic and shift instructions for their CPU. TBIR is not yet a fully lowered basic-block or register-allocation IR.
+HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions plus typed global/MMIO/embed object provenance, applies scalar simplification, typed immutable-local propagation, local common-subexpression cleanup, pure scalar loop-invariant hoisting, and named global-read LICM, expands approved explicit-inline calls, decides safe tail calls, rewrites supported direct tail recursion into loops, and supplies the transformed program to every source emitter. Target emitters then select native arithmetic and shift instructions for their CPU. The shared intrinsic catalog and zero/one/two-result source nodes are implemented, but target lowering remains uneven. TBIR is not yet a fully lowered basic-block or register-allocation IR.
 
 The remaining sections use design language (`should`, `must`, and planned examples) to define the intended direction. HIR and TBIR are Rust structs in memory today; textual dumps are provided for debugging and tests, not as a stable serialized IR format.
 
@@ -106,7 +106,13 @@ array<T, N>
 struct S
 ```
 
-Pointer width is selected by target. Integer widths are semantic widths, not host-machine widths. Operations must encode EZRA's defined behavior directly.
+Pointer width is selected by target. Integer widths are semantic widths, not host-machine widths. Operations must encode EZRA's defined behavior directly. The intrinsic catalog can validate source types independently of a target, but target lowering checks legal scalar widths, address widths, instruction forms, and ABI resources; unsupported combinations diagnose rather than silently changing width.
+
+### Intrinsic result lists and the catalog
+
+Intrinsic results are stored as ordered scalar result lists in HIR/TBIR. A result list has zero, one, or two entries; it is not a tuple type and cannot be used as an aggregate expression. The catalog records each operation's canonical name and aliases, argument/result counts, memory read/write effect, volatile policy, overlap rule, and compile-time bit-index or bit-range requirements. The source catalog is documented in `docs/language.md`.
+
+User functions use the same zero/one/two result shape. A two-result call must feed a matching two-place binding or a matching return; arrays, structs, `bytes`, strings, tuples, and other aggregate or large values remain pointer-passed.
 
 Arithmetic operations should distinguish signedness and behavior:
 
@@ -148,13 +154,16 @@ region vram {
 }
 ```
 
-TBIR memory operations name width, address, memory space or object, volatility, and source location.
+TBIR memory operations name width, address, memory space or object, volatility, and source location. Intrinsic block operations also carry their source/destination range relationship and explicit endian mode.
 
 ```text
 %x = load.u8 object @_player_x
 store.u8 object @_player_x, %value
 %status = load.u8 volatile region vram, 0x080010
+%copy = mem.move nonvolatile %destination, %source, %length
 ```
+
+`copy_nonoverlapping` has a must-not-overlap rule and diagnoses statically proven overlap. `move` has overlap-safe copy semantics. Endian load/store intrinsics name little- or big-endian byte order rather than inheriting target order. These general memory intrinsics require ordinary nonvolatile memory; `mem.peek8` and `mem.poke8` are the scalar-access exceptions and preserve one byte access for volatile/MMIO use.
 
 ## Pointer Provenance and Bounds
 
@@ -202,7 +211,7 @@ port.write.u8 vdp_data, %byte
 
 The target port map defines valid ports, width, direction, volatility, and optional symbolic names. Diagnostics should reject invalid widths, invalid directions, unavailable ports, and values outside the port width when known.
 
-MMIO is memory with volatility and region constraints. MMIO loads/stores must not be reordered around other volatile, port, asm, or unknown-effect operations unless a target-specific rule explicitly permits it.
+MMIO is memory with volatility and region constraints. MMIO loads/stores must not be reordered around other volatile, port, asm, or unknown-effect operations unless a target-specific rule explicitly permits it. Intrinsics that may combine or repeat memory accesses reject statically known volatile/MMIO operands; they do not imply safe device-register read-modify-write. Target SDK functions remain the right place for device-specific access sequences.
 
 ## Effects Model
 
@@ -359,11 +368,14 @@ Machine lowering owns:
   absolute local storage loads
 - stack frame layout
 - parameter and return passing
+- zero/one/two-result ABI placement
 - helper ABI calls. eZ80 helpers are emitted on demand from a dependency graph;
   a helper is not emitted merely because another helper exists.
 - concrete branch forms
 - target instruction choice
 - target assembly emission
+
+A two-result ABI is target-owned. Current implementations include a normal first result plus caller-provided hidden storage for the second result on eZ80-family and AVR paths, `R0`/`R1` on TMS9900, and `A`/`EX` on DCPU-16. Some targets lower paired intrinsic calls but reject user-defined two-result functions. Extern assembly declarations are accepted only when the selected backend has a matching result convention; otherwise the compiler diagnoses the declaration or call.
 
 TBIR remains above machine lowering. It should not hard-code exact register allocation, but it may know target register classes and constraints for cost modeling.
 

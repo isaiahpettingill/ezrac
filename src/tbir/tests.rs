@@ -201,6 +201,75 @@ fn tbir_attaches_standalone_comments_to_the_next_statement() {
 }
 
 #[test]
+fn tbir_preserves_two_result_nodes_and_signature() {
+    let program = parse_program(
+        Path::new("multi.ezra"),
+        r#"
+                fn pair() -> u8, bool { return 1, true }
+                fn caller() -> u8, bool {
+                    let value: u8, flag: bool = pair()
+                    return value, flag
+                }
+                fn main() {}
+            "#,
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+    let caller = tbir
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            TbirDeclaration::Function {
+                name,
+                second_return_type,
+                body,
+                ..
+            } if name == "caller" => Some((second_return_type, body)),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(caller.0, &Some(Type::Named("bool".to_owned())));
+    assert!(matches!(caller.1[0], TbirStmt::LetTwo { .. }));
+    assert!(matches!(caller.1[1], TbirStmt::ReturnTwo { .. }));
+}
+
+#[test]
+fn tbir_accepts_catalog_paired_intrinsics() {
+    let program = parse_program(
+        Path::new("intrinsics_two_result.ezra"),
+        r#"
+            global bytes: [u8; 4] = [1, 2, 3, 4]
+            fn main() {
+                let quotient: u8, remainder: u8 = ezra.int.divmod(7u8, 3u8)
+                let sum: u8, carry: bool = ezra.int.add_carry(0xFFu8, 1u8, false)
+                let difference: u8, borrow: bool = ezra.int.sub_borrow(0u8, 1u8, false)
+                let low: u8, high: u8 = ezra.int.full_mul(3u8, 4u8)
+                let found: ptr<u8>, present: bool = ezra.mem.find_byte(&bytes[0], 4u24, 2u8)
+            }
+        "#,
+    )
+    .unwrap();
+    let hir = HirProgram::from_ast(&program).unwrap();
+    let tbir = TbirProgram::for_ez80(&hir, &program, &AssemblyOptions::default()).unwrap();
+    let main = tbir
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            TbirDeclaration::Function { name, body, .. } if name == "main" => Some(body),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        main.iter()
+            .filter(|statement| matches!(statement, TbirStmt::LetTwo { .. }))
+            .count(),
+        5
+    );
+}
+
+#[test]
 fn tbir_preserves_function_analysis() {
     let program = parse_program(
         Path::new("test.ezra"),

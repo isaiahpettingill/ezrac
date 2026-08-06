@@ -297,6 +297,22 @@ impl Builder<'_> {
                 self.push_instruction(block, instruction, false);
                 Some(block)
             }
+            Stmt::LetTwo {
+                first_name,
+                second_name,
+                value,
+                ..
+            } => {
+                let mut instruction = Instruction::new();
+                let has_call = self.collect_expr(value, &mut instruction);
+                self.add_def(first_name, &mut instruction);
+                self.add_def(second_name, &mut instruction);
+                if has_call {
+                    self.opaque_locals.extend(instruction.uses.iter().copied());
+                }
+                self.push_instruction(block, instruction, false);
+                Some(block)
+            }
             Stmt::Assign { target, op, value } => {
                 let mut instruction = Instruction::new();
                 let value_has_call = self.collect_expr(value, &mut instruction);
@@ -382,6 +398,13 @@ impl Builder<'_> {
                     let has_call = self.collect_expr(value, &mut instruction);
                     self.push_instruction(block, instruction, has_call);
                 }
+                None
+            }
+            Stmt::ReturnTwo { first, second } => {
+                let mut instruction = Instruction::new();
+                let first_has_call = self.collect_expr(first, &mut instruction);
+                let second_has_call = self.collect_expr(second, &mut instruction);
+                self.push_instruction(block, instruction, first_has_call || second_has_call);
                 None
             }
             Stmt::Asm {

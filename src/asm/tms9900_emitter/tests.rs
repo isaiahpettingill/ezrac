@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use libre99_core::{
@@ -866,4 +865,95 @@ fn emits_a_bootable_ti99_cartridge_header() {
         &image.bytes[16..26],
         &[0, 0, 0x60, 0x1A, 4, b'E', b'Z', b'R', b'A', 0]
     );
+}
+
+#[test]
+fn lowers_catalog_bit_integer_and_memory_intrinsics() {
+    let assembly = emit(
+        r#"
+            fn main() {
+                let rotated: u16 = bits.rotate_left(0x1234u16, 4u8)
+                let product: u16 = int.widening_mul(0x12u8, 3u8)
+                let value: u16 = mem.load_le16(cast<ptr<u8>>(0x9000))
+                mem.fill(cast<ptr<u8>>(0x9000), 0x55u8, 2u24)
+            }
+        "#,
+        test_options(),
+    );
+    assert!(assembly.contains("intrinsic_rotate_loop"), "{assembly}");
+    assert!(assembly.contains("    mpy "), "{assembly}");
+    assert!(assembly.contains("    movb *r3"), "{assembly}");
+    assert!(assembly.contains("intrinsic_fill_loop"), "{assembly}");
+}
+
+#[test]
+fn lowers_catalog_paired_division_and_rejects_volatile_wide_access() {
+    let assembly = emit(
+        r#"
+            global quotient: u16 = 0
+            global remainder: u16 = 0
+            fn main() {
+                let q: u16, r: u16 = int.divmod(1000u16, 37u16)
+                quotient = q
+                remainder = r
+            }
+        "#,
+        test_options(),
+    );
+    assert!(assembly.contains("    div "), "{assembly}");
+    assert!(assembly.contains("    mov r3, r2"), "{assembly}");
+
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "volatile mmio DEVICE: ptr<u8> = 0x9000 fn main() { let value: u16 = mem.load_be16(DEVICE) }",
+    )
+    .unwrap();
+    let error = emit_tms9900_assembly_with_options(&program, test_options()).unwrap_err();
+    assert!(error.message.contains("volatile"), "{}", error.message);
+}
+
+#[test]
+fn rejects_catalog_24_bit_scalar_results() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn main() { let value: u24 = mem.load_le24(cast<ptr<u8>>(0x9000)) }",
+    )
+    .unwrap();
+    let error = emit_tms9900_assembly_with_options(&program, test_options()).unwrap_err();
+    assert!(error.message.contains("24-bit"), "{}", error.message);
+}
+
+#[test]
+fn preserves_two_results_through_user_function_calls() {
+    let assembly = emit(
+        r#"
+            global result: u16 = 0
+            fn pair(seed: u16) -> u16, u8 {
+                return seed + 1, cast<u8>(seed + 3)
+            }
+            fn forward(seed: u16) -> u16, u8 {
+                return pair(seed)
+            }
+            fn main() {
+                let first: u16, second: u8 = forward(40)
+                result = first + cast<u16>(second)
+            }
+            "#,
+        test_options(),
+    );
+    assert!(assembly.contains("    mov r0, r2"), "{assembly}");
+    assert!(assembly.contains("    mov r2, r1"), "{assembly}");
+
+    let image =
+        crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::Tms9900, &assembly, 0x0100)
+            .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    let mut ram = FlatRam::new();
+    ram.load(0x0100, &image.bytes);
+    let mut cpu = Cpu::new();
+    cpu.set_pc(0x0100);
+    for _ in 0..500 {
+        cpu.step(&mut ram);
+    }
+
+    assert_eq!(ram.read_word(0xA000), 84, "{assembly}");
 }
