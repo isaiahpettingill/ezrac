@@ -229,6 +229,36 @@ fn omits_unused_public_functions() {
 }
 
 #[test]
+fn emits_typed_function_pointer_calls_for_globals_and_locals() {
+    let (bus, assembly, _) = run_with_setup(
+        r#"
+                volatile mmio DEBUG: ptr<u8> = 0x2401
+                global callback: ptr<fn(u8, u8)u8> = &add
+
+                fn add(left: u8, right: u8) -> u8 { return left + right }
+                fn invoke(callback: ptr<fn(u8, u8)u8>, left: u8, right: u8) -> u8 {
+                    return callback(left, right)
+                }
+                fn unused() -> u8 { return 0 }
+
+                fn main() {
+                    let local_callback: ptr<fn(u8, u8)u8> = &add
+                    *DEBUG = invoke(callback, 20, 22)
+                    *DEBUG = local_callback(9, 12)
+                }
+            "#,
+        3_000,
+        |_| {},
+    );
+
+    assert_eq!(bus.byte(0x2401), 21);
+    assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
+    assert!(assembly.contains("jsr __ezra_indirect_call"), "{assembly}");
+    assert!(assembly.contains("_add:"), "{assembly}");
+    assert!(!assembly.contains("_unused:"), "{assembly}");
+}
+
+#[test]
 fn emits_core_6502_source_constructs() {
     let assembly = emit(
         r#"

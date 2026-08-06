@@ -11,6 +11,11 @@ global PLAYER_Y: u8 = STARTING_Y
 global OLD_PLAYER_Y: u8 = FLOOR_Y
 global PLAYER_VY: u8 = 0
 global PLAYER_LIVES: u8 = 20
+global DID_JUMP: bool = false
+
+@inline pub fn get_player_pos() -> u8,u8 {
+    return PLAYER_X, PLAYER_Y
+}
 
 @inline pub fn get_lives() -> u8 {
     return PLAYER_LIVES
@@ -26,8 +31,8 @@ pub fn deal_damage(damage: u8) {
     }
 }
 
-fn die() {
-    
+@inline fn die() {
+    asm { "nop" }    
 }
 
 fn set_player_x(x: u8){
@@ -76,28 +81,34 @@ fn do_player_controls(){
     if console.button_down(0, console.BUTTON_LEFT) {
         dec_player_x(1)
     }
-    if console.button_down(0, console.BUTTON_A) && PLAYER_Y >= FLOOR_Y {
+    if console.button_down(0, console.BUTTON_A) && !DID_JUMP {
         PLAYER_VY = 2
+        DID_JUMP=true
     }
 }
 
 fn gravity(){
-    let char: u8 = helpers.get_char(PLAYER_X, PLAYER_Y + 1)
-
-    if char != console.CHAR_SPACE {
-        return
-    }
-
+    
     if PLAYER_VY != 0  {
         dec_player_y(PLAYER_VY)
         PLAYER_VY -= 1
+        return
     }
-    else if PLAYER_Y < FLOOR_Y {
+    
+    let char: u8 = helpers.get_char(PLAYER_X, PLAYER_Y + 1)
+
+    if char != console.CHAR_SPACE {
+        DID_JUMP=false
+        return
+    }
+
+    if PLAYER_Y < FLOOR_Y {
         set_player_y(PLAYER_Y + 1)
     }
     else {
         set_player_y(FLOOR_Y)
     }
+    DID_JUMP=false
 }
 
 

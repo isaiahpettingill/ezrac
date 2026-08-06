@@ -35,6 +35,37 @@ fn m6809_options() -> AssemblyOptions {
 }
 
 #[test]
+fn lowers_global_and_local_typed_function_pointers() {
+    let program = parse_program(
+        Path::new("m6800_function_pointer.ezra"),
+        "global callback: ptr<fn(u8, u8)u8> = &add global answer: u8 = 0 fn add(left: u8, right: u8) -> u8 { return left + right } fn main() { let local: ptr<fn(u8, u8)u8> = &add; answer = callback(20, 22); answer = local(20, 22) }",
+    )
+    .unwrap();
+    let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+    assert_eq!(assembly.matches("    jsr 0,x").count(), 2, "{assembly}");
+    assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
+    assert!(assembly.contains("    jsr _add"), "{assembly}");
+    assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+}
+
+#[cfg(feature = "m6809")]
+#[test]
+fn lowers_m6809_global_and_local_typed_function_pointers() {
+    let program = parse_program(
+        Path::new("m6809_function_pointer.ezra"),
+        "global callback: ptr<fn(u8, u8)u8> = &add global answer: u8 = 0 fn add(left: u8, right: u8) -> u8 { return left + right } fn main() { let local: ptr<fn(u8, u8)u8> = &add; answer = callback(20, 22); answer = local(20, 22) }",
+    )
+    .unwrap();
+    let assembly = emit_m6809_assembly_with_options(&program, m6809_options()).unwrap();
+    assert_eq!(assembly.matches("    jsr 0,x").count(), 2, "{assembly}");
+    assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
+    assert!(assembly.contains("    jsr _add"), "{assembly}");
+    assemble_subset_with_symbols_at(AssemblerCpu::M6809, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+}
+
+#[test]
 fn local_target_models_accumulators_and_uses_memory_only_locals() {
     let m6800 = super::m6800_local_target(CpuFamily::M6800);
     assert_eq!(

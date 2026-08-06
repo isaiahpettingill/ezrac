@@ -1225,3 +1225,118 @@ fn emits_and_runs_user_function_with_spilled_parameters() {
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }
+
+#[test]
+fn emits_and_runs_typed_function_pointer_calls_on_16_and_24_bit_targets() {
+    let source = r#"
+            global callback: ptr<fn(u8, u8)u8> = &add
+            global result: u8 = 0
+
+            fn add(left: u8, right: u8) -> u8 {
+                return left + right
+            }
+
+            fn main() {
+                let local: ptr<fn(u8, u8)u8> = callback
+                result = local(20, 22)
+                test.assert_eq_u8(result, 42, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+
+    for cpu in [CpuFamily::Ez80, CpuFamily::Z80, CpuFamily::I8080] {
+        let classic = cpu != CpuFamily::Ez80;
+        let stack_top = if classic {
+            0xF000
+        } else {
+            EZRA_STACK_TOP.get()
+        };
+        let rodata_base = if classic {
+            0x3000
+        } else {
+            EZRA_RODATA_BASE.get()
+        };
+        let asm = emit_ez80_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu,
+                ram_base: Address24::new(if classic { 0x2000 } else { EZRA_RAM_BASE.get() }),
+                rodata_base: Address24::new(rodata_base),
+                stack_top: Address24::new(stack_top),
+                section_bases: vec![(".rodata".to_owned(), Address24::new(rodata_base))],
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{} failed to emit: {error}", cpu.as_str()));
+        let has_function_pointer_load = match cpu {
+            CpuFamily::I8080 => asm.contains("pop h"),
+            _ => asm.contains("ld hl, _add"),
+        };
+        assert!(has_function_pointer_load, "{asm}");
+        let run = crate::vm::run_assembly_test_with_cpu_options_at(
+            cpu,
+            &asm,
+            &TestRunOptions {
+                instruction_budget: 6_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top,
+            },
+            if classic {
+                0x0100
+            } else {
+                EZRA_LOAD_ADDR.get()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{} failed: {error}\n{asm}", cpu.as_str()));
+        assert!(run.halted, "{}\n{asm}", cpu.as_str());
+        assert_eq!(run.result_code, 0, "{}\n{asm}", cpu.as_str());
+    }
+}
+
+#[test]
+fn emits_typed_function_pointer_trampolines_for_wide_third_arguments() {
+    let source = r#"
+            global callback: ptr<fn(u8, u8, u16)u8> = &add
+
+            fn add(first: u8, second: u8, third: u16) -> u8 {
+                return first + second + cast<u8>(third)
+            }
+
+            fn main() {
+                test.assert_eq_u8(callback(1, 2, 3), 6, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let run = run_assembly_test(&asm, 6_000).unwrap();
+
+    assert!(asm.contains("__ezra_fn_ptr_add:"), "{asm}");
+    assert!(asm.contains("call _add"), "{asm}");
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn validates_typed_function_pointer_call_arguments_and_results() {
+    for (source, expected) in [
+        (
+            "global callback: ptr<fn(u8)u8> = &identity fn identity(value: u8) -> u8 { return value } fn main() { callback(1, 2) }",
+            "function pointer `callback` expects 1 arguments but got 2",
+        ),
+        (
+            "global callback: ptr<fn(u8)u8> = &identity fn identity(value: u8) -> u8 { return value } fn main() { callback(true) }",
+            "type mismatch",
+        ),
+        (
+            "global callback: ptr<fn(u8)u8> = &identity fn identity(value: u8) -> u8 { return value } fn main() { let result: u16 = callback(1) }",
+            "widening without cast",
+        ),
+    ] {
+        let program = parse_program(Path::new("game.ezra"), source).unwrap();
+        let error = emit_ez80_assembly(&program).unwrap_err();
+        assert!(error.message.contains(expected), "{}: {}", expected, error);
+    }
+}

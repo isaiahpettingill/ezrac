@@ -1,6 +1,6 @@
 import ezra.int
 
-global lives_string: [u8; 9] = ['L', 'i', 'v', 'e', 's', ':', ' ', '2', '0']
+global lives_string: [u8; 10] = ['L', 'i', 'v', 'e', 's', ':', ' ', '2', '0', '\0']
 
 const CHAR_ZERO : u8 = 48
 
@@ -13,9 +13,25 @@ pub fn set_lives_string(lives: u8) {
     if lives > 99 {
         the_lives = 99
     }
-    let high_byte: u8, low_byte: u8 = int.divmod(lives, 10)
+    let high_byte: u8, low_byte: u8 = int.divmod(the_lives, 10)
     lives_string[7] = high_byte + CHAR_ZERO
     lives_string[8] = low_byte + CHAR_ZERO
+}
+
+pub fn fill_hline(x1: u8, x2: u8, y: u8, char: u8) {
+    let x: u8 = x1
+    while x <= x2 {
+        console.put_char(x, y, char)
+        x+=1
+    }
+}
+
+pub fn fill_vline(x: u8, y1: u8, y2: u8, char: u8) {
+    let y: u8 = y1
+    while y <= y2 {
+        console.put_char(x, y, char)
+        y += 1
+    }
 }
 
 pub fn write_line(x: u8, y: u8, text: ptr<u8>){

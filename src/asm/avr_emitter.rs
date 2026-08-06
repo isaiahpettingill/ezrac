@@ -39,19 +39,24 @@ pub fn emit_avr_assembly_with_options(
         return Err(Diagnostic::new("AVR programs require a `main` function"));
     }
     let hir = HirProgram::from_ast(program)?;
-    let tbir = TbirProgram::lower(&hir, program, &options)?;
+    let (lowered_program, source_comments) = if contains_function_pointer_program(program) {
+        (program.clone(), Vec::new())
+    } else {
+        let tbir = TbirProgram::lower(&hir, program, &options)?;
+        (tbir.lowered_program, tbir.source_comments)
+    };
     let model = SemanticModel::from_program(
-        &tbir.lowered_program,
+        &lowered_program,
         16,
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
     Emitter::new(model, options.clone())
-        .emit(&tbir.lowered_program)
+        .emit(&lowered_program)
         .map(|asm| {
             let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Avr);
-            with_readability_comments(asm, program, &options, "avr", &tbir.source_comments)
+            with_readability_comments(asm, program, &options, "avr", &source_comments)
         })
 }
 
@@ -88,6 +93,7 @@ struct Emitter {
     second_return_types: Vec<Option<Type>>,
     second_return_pointers: Vec<Option<Storage>>,
     function_ram_bases: Vec<u32>,
+    function_pointer_values: HashMap<String, Storage>,
     r0: Storage,
     r1: Storage,
     r2: Storage,
@@ -110,6 +116,7 @@ impl Emitter {
             second_return_types: Vec::new(),
             second_return_pointers: Vec::new(),
             function_ram_bases: Vec::new(),
+            function_pointer_values: HashMap::new(),
             r0,
             r1,
             r2,
@@ -132,6 +139,8 @@ impl Emitter {
         self.line("    ldi r16, 0Ah");
         self.line("    out 3Eh, r16");
         self.line("    clr r1");
+        self.prepare_function_pointer_values(program)?;
+        self.emit_function_pointer_initializers()?;
         self.emit_static_initializers(program)?;
         self.line("    call _main");
         self.line("__ezra_exit:");
@@ -368,6 +377,86 @@ impl Emitter {
             }
         }
         Ok(())
+    }
+
+    fn prepare_function_pointer_values(&mut self, program: &Program) -> Result<(), Diagnostic> {
+        let mut names = Vec::new();
+        for declaration in &program.declarations {
+            match declaration {
+                Declaration::Function(function) => {
+                    collect_stmt_function_references(&function.body, &mut names);
+                }
+                Declaration::Global(global) => {
+                    collect_expr_function_references(&global.value, &mut names);
+                }
+                _ => {}
+            }
+        }
+        names.sort();
+        names.dedup();
+        for name in names {
+            if self
+                .model
+                .functions
+                .get(&name)
+                .is_some_and(|signature| signature.second_return_type.is_none())
+            {
+                let storage = self.model.allocate(2)?;
+                self.function_pointer_values.insert(name, storage);
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_function_pointer_initializers(&mut self) -> Result<(), Diagnostic> {
+        let mut initializers = self
+            .function_pointer_values
+            .iter()
+            .map(|(name, storage)| (name.clone(), *storage))
+            .collect::<Vec<_>>();
+        initializers.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name, storage) in initializers {
+            let capture_label = self.next_label("function_pointer_capture");
+            let trampoline_label = self.next_label("function_pointer_trampoline");
+            let after_label = self.next_label("function_pointer_after");
+
+            // AVR CALL leaves the word address of the following instruction on
+            // the stack. Put the trampoline there and capture that address
+            // without linker-specific low/high symbol expressions.
+            self.line(&format!("    call {capture_label}"));
+            self.line(&format!("{trampoline_label}:"));
+            self.line(&format!("    jmp {}", function_label(&name)));
+            self.line(&format!("{capture_label}:"));
+            self.line("    pop r30");
+            self.line("    pop r31");
+            self.line(&format!("    sts {:04X}h, r30", self.r0.address));
+            self.line(&format!("    sts {:04X}h, r31", self.r0.address + 1));
+            self.line(&format!("    jmp {after_label}"));
+            self.line(&format!("{after_label}:"));
+            self.copy(self.r0, storage, 2);
+        }
+        Ok(())
+    }
+
+    fn emit_function_pointer_value(&mut self, name: &str) -> Result<(), Diagnostic> {
+        let storage = self
+            .function_pointer_values
+            .get(name)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        self.copy(storage, self.r0, 2);
+        Ok(())
+    }
+
+    fn function_value_type(&self, name: &str) -> Option<Type> {
+        self.model
+            .functions
+            .get(name)
+            .filter(|signature| signature.second_return_type.is_none())
+            .map(|signature| Type::Function {
+                params: signature.params.clone(),
+                return_type: signature.return_type.clone().map(Box::new),
+            })
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
@@ -766,9 +855,30 @@ impl Emitter {
                 )));
             }
             Expr::AddressOf(name) => {
-                let binding = self.binding(name)?;
-                let storage = self.binding_storage(&binding, "take address of register local")?;
-                self.load_constant(i64::from(storage.address), width);
+                if let Some(function_ty) = self.function_value_type(name) {
+                    let expected = self.model.resolved_type(expected)?;
+                    let actual = Type::Ptr(Box::new(self.model.resolved_type(&function_ty)?));
+                    if expected != actual {
+                        return Err(Diagnostic::new(format!(
+                            "function `{name}` has an incompatible function-pointer type"
+                        )));
+                    }
+                    self.emit_function_pointer_value(name)?;
+                } else if self
+                    .model
+                    .functions
+                    .get(name)
+                    .is_some_and(|signature| signature.second_return_type.is_some())
+                {
+                    return Err(Diagnostic::new(format!(
+                        "AVR function pointer cannot reference two-result function `{name}`"
+                    )));
+                } else {
+                    let binding = self.binding(name)?;
+                    let storage =
+                        self.binding_storage(&binding, "take address of register local")?;
+                    self.load_constant(i64::from(storage.address), width);
+                }
             }
             Expr::AddressOfIndex { name, index } => {
                 self.emit_named_index_address(name, index)?;
@@ -1139,9 +1249,49 @@ impl Emitter {
             }
             _ => {}
         }
-        let resolved_name = resolve_called_function(path, &self.model)
-            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
-        let signature = self.model.functions[&resolved_name].clone();
+        let (signature, direct_target, indirect_target) =
+            if let Some(resolved_name) = resolve_called_function(path, &self.model) {
+                (
+                    self.model.functions[&resolved_name].clone(),
+                    Some(resolved_name),
+                    None,
+                )
+            } else {
+                if path.len() != 1 {
+                    return Err(Diagnostic::new(format!("unknown function `{name}`")));
+                }
+                let binding = self.binding(&path[0])?;
+                let resolved_binding_type = self.model.resolved_type(&binding.ty)?;
+                let Type::Ptr(inner) = &resolved_binding_type else {
+                    return Err(Diagnostic::new(format!(
+                        "function pointer call requires `ptr<fn(...)>`, got `{name}`"
+                    )));
+                };
+                let Type::Function {
+                    params,
+                    return_type,
+                } = inner.as_ref()
+                else {
+                    return Err(Diagnostic::new(format!(
+                        "function pointer call requires `ptr<fn(...)>`, got `{name}`"
+                    )));
+                };
+                let argument_slots = params
+                    .iter()
+                    .map(|param| self.model.allocate_type(param))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let pointer_storage = self.model.allocate(2)?;
+                (
+                    crate::tbir::model::FunctionSignature {
+                        params: params.clone(),
+                        return_type: return_type.clone().map(|ty| *ty),
+                        second_return_type: None,
+                        argument_slots,
+                    },
+                    None,
+                    Some((binding, pointer_storage)),
+                )
+            };
         if signature.second_return_type.is_some() {
             return Err(Diagnostic::new(format!(
                 "two-result function `{name}` requires a two-destination call"
@@ -1161,9 +1311,17 @@ impl Emitter {
             self.emit_initializer(storage, ty, arg)?;
             evaluated_args.push(storage);
         }
+        if let Some((binding, pointer_storage)) = &indirect_target {
+            self.load_binding_result(binding)?;
+            self.copy(self.r0, *pointer_storage, 2);
+        }
         for (storage, argument_slot) in evaluated_args.into_iter().zip(&signature.argument_slots) {
             self.copy(storage, *argument_slot, storage.size);
         }
+        let protected = indirect_target
+            .as_ref()
+            .map(|(_, storage)| vec![*storage])
+            .unwrap_or_default();
         let saved = self
             .function_ram_bases
             .last()
@@ -1171,7 +1329,7 @@ impl Emitter {
                 address: *base,
                 size: self.model.next_ram_address() - *base,
             })
-            .map(|live| self.live_storage_segments(live, args, &[]))
+            .map(|live| self.live_storage_segments(live, args, &protected))
             .unwrap_or_default();
         for storage in &saved {
             for offset in 0..storage.size {
@@ -1196,7 +1354,16 @@ impl Emitter {
                 }
             }
         }
-        self.line(&format!("    jsr {}", function_label(&resolved_name)));
+        if let Some(resolved_name) = direct_target {
+            self.line(&format!("    jsr {}", function_label(&resolved_name)));
+        } else if let Some((_, pointer_storage)) = indirect_target {
+            self.line(&format!("    lds r30, {:04X}h", pointer_storage.address));
+            self.line(&format!(
+                "    lds r31, {:04X}h",
+                pointer_storage.address + 1
+            ));
+            self.line("    icall");
+        }
         if let Some(ty) = &signature.return_type {
             for offset in 0..self.model.type_size(ty)? {
                 self.line(&format!(
@@ -2714,7 +2881,22 @@ impl Emitter {
             ))),
             Expr::Access(path) => self.access_type(path),
             Expr::AddressOfAccess(path) => Ok(Type::Ptr(Box::new(self.access_type(path)?))),
-            Expr::AddressOf(name) => Ok(Type::Ptr(Box::new(self.binding(name)?.ty))),
+            Expr::AddressOf(name) => {
+                if let Some(function_ty) = self.function_value_type(name) {
+                    Ok(Type::Ptr(Box::new(function_ty)))
+                } else if self
+                    .model
+                    .functions
+                    .get(name)
+                    .is_some_and(|signature| signature.second_return_type.is_some())
+                {
+                    Err(Diagnostic::new(format!(
+                        "AVR function pointer cannot reference two-result function `{name}`"
+                    )))
+                } else {
+                    Ok(Type::Ptr(Box::new(self.binding(name)?.ty)))
+                }
+            }
             Expr::StructInit { ty, .. } => Ok(Type::Named(ty.clone())),
             Expr::BankedPointer { pointer, .. } => self.expr_type(pointer),
             Expr::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
@@ -2735,12 +2917,25 @@ impl Emitter {
                         Diagnostic::new(format!("intrinsic `{name}` has no scalar result"))
                     });
                 }
-                self.model
-                    .functions
-                    .get(&name)
-                    .or_else(|| path.last().and_then(|name| self.model.functions.get(name)))
-                    .and_then(|signature| signature.return_type.clone())
-                    .ok_or_else(|| Diagnostic::new("void function has no value"))
+                if let Some(name) = resolve_called_function(path, &self.model) {
+                    return self.model.functions[&name]
+                        .return_type
+                        .clone()
+                        .ok_or_else(|| Diagnostic::new("void function has no value"));
+                }
+                if path.len() == 1
+                    && let Type::Ptr(inner) =
+                        self.model.resolved_type(&self.binding(&path[0])?.ty)?
+                    && let Type::Function { return_type, .. } = *inner
+                {
+                    return return_type
+                        .map(|ty| *ty)
+                        .ok_or_else(|| Diagnostic::new("void function has no value"));
+                }
+                Err(Diagnostic::new(format!(
+                    "unknown function `{}`",
+                    path.join(".")
+                )))
             }
             Expr::Unary {
                 op: UnaryOp::Not, ..
@@ -3600,6 +3795,139 @@ fn assign_binary(op: AssignOp) -> BinaryOp {
     }
 }
 
+fn contains_function_pointer_program(program: &Program) -> bool {
+    let function_names = program
+        .declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            Declaration::Function(function) => Some(function.name.clone()),
+            Declaration::ExternAsmFunction(function) => Some(function.name.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    program
+        .declarations
+        .iter()
+        .any(|declaration| match declaration {
+            Declaration::Function(function) => {
+                function
+                    .params
+                    .iter()
+                    .any(|param| type_contains_function_pointer(&param.ty))
+                    || function
+                        .return_type
+                        .as_ref()
+                        .is_some_and(type_contains_function_pointer)
+                    || function
+                        .second_return_type
+                        .as_ref()
+                        .is_some_and(type_contains_function_pointer)
+                    || function_body_contains_function_pointer(&function.body, &function_names)
+            }
+            Declaration::Global(global) => {
+                type_contains_function_pointer(&global.ty)
+                    || expr_contains_function_pointer(&global.value, &function_names)
+            }
+            _ => false,
+        })
+}
+
+fn type_contains_function_pointer(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(inner) | Type::Array { element: inner, .. } => {
+            type_contains_function_pointer(inner)
+        }
+        Type::Function { .. } => true,
+        Type::Named(_) => false,
+    }
+}
+
+fn function_body_contains_function_pointer(
+    body: &[Stmt],
+    function_names: &HashSet<String>,
+) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Let { ty, value, .. } => {
+            type_contains_function_pointer(ty)
+                || expr_contains_function_pointer(value, function_names)
+        }
+        Stmt::LetTwo {
+            first_ty,
+            second_ty,
+            value,
+            ..
+        } => {
+            type_contains_function_pointer(first_ty)
+                || type_contains_function_pointer(second_ty)
+                || expr_contains_function_pointer(value, function_names)
+        }
+        Stmt::Return(Some(value)) | Stmt::Expr(value) | Stmt::Out { value, .. } => {
+            expr_contains_function_pointer(value, function_names)
+        }
+        Stmt::ReturnTwo { first, second } => {
+            expr_contains_function_pointer(first, function_names)
+                || expr_contains_function_pointer(second, function_names)
+        }
+        Stmt::Assign { value, .. } => expr_contains_function_pointer(value, function_names),
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            expr_contains_function_pointer(condition, function_names)
+                || function_body_contains_function_pointer(then_body, function_names)
+                || function_body_contains_function_pointer(else_body, function_names)
+        }
+        Stmt::While { condition, body } => {
+            expr_contains_function_pointer(condition, function_names)
+                || function_body_contains_function_pointer(body, function_names)
+        }
+        Stmt::Loop { body } => function_body_contains_function_pointer(body, function_names),
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => false,
+    })
+}
+
+fn expr_contains_function_pointer(expr: &Expr, function_names: &HashSet<String>) -> bool {
+    match expr {
+        Expr::AddressOf(name) => function_names.contains(name),
+        Expr::Cast { ty, expr } => {
+            type_contains_function_pointer(ty)
+                || expr_contains_function_pointer(expr, function_names)
+        }
+        Expr::Array(values) => values
+            .iter()
+            .any(|value| expr_contains_function_pointer(value, function_names)),
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+            expr_contains_function_pointer(index, function_names)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => path.segments.iter().any(|segment| {
+            matches!(segment, AccessSegment::Index(index) if expr_contains_function_pointer(index, function_names))
+        }),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| expr_contains_function_pointer(value, function_names)),
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. } => expr_contains_function_pointer(value, function_names),
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_contains_function_pointer(arg, function_names)),
+        Expr::Binary { left, right, .. } => {
+            expr_contains_function_pointer(left, function_names)
+                || expr_contains_function_pointer(right, function_names)
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. } => false,
+    }
+}
+
 fn reachable_function_names(program: &Program, model: &SemanticModel) -> HashSet<String> {
     let mut graph = HashMap::new();
     let mut roots = vec!["main".to_owned()];
@@ -3609,10 +3937,13 @@ fn reachable_function_names(program: &Program, model: &SemanticModel) -> HashSet
             Declaration::Function(function) => {
                 let mut calls = Vec::new();
                 collect_stmt_calls(&function.body, &mut calls);
+                let mut references = Vec::new();
+                collect_stmt_function_references(&function.body, &mut references);
                 graph.insert(
                     function.name.clone(),
                     calls
                         .into_iter()
+                        .chain(references.into_iter().map(|name| vec![name]))
                         .filter_map(|path| resolve_called_function(&path, model))
                         .collect::<Vec<_>>(),
                 );
@@ -3631,6 +3962,13 @@ fn reachable_function_names(program: &Program, model: &SemanticModel) -> HashSet
                     calls
                         .into_iter()
                         .filter_map(|path| resolve_called_function(&path, model)),
+                );
+                let mut references = Vec::new();
+                collect_expr_function_references(&global.value, &mut references);
+                roots.extend(
+                    references
+                        .into_iter()
+                        .filter(|name| model.functions.contains_key(name)),
                 );
             }
             _ => {}
@@ -3695,6 +4033,82 @@ fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<Vec<String>>) {
             Stmt::Out { value, .. } => collect_expr_calls(value, calls),
             Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
         }
+    }
+}
+
+fn collect_stmt_function_references(stmts: &[Stmt], references: &mut Vec<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. }
+            | Stmt::LetTwo { value, .. }
+            | Stmt::Return(Some(value))
+            | Stmt::Expr(value)
+            | Stmt::Out { value, .. } => {
+                collect_expr_function_references(value, references);
+            }
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_function_references(first, references);
+                collect_expr_function_references(second, references);
+            }
+            Stmt::Assign { value, .. } => collect_expr_function_references(value, references),
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_function_references(condition, references);
+                collect_stmt_function_references(then_body, references);
+                collect_stmt_function_references(else_body, references);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_function_references(condition, references);
+                collect_stmt_function_references(body, references);
+            }
+            Stmt::Loop { body } => collect_stmt_function_references(body, references),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_expr_function_references(expr: &Expr, references: &mut Vec<String>) {
+    match expr {
+        Expr::AddressOf(name) => references.push(name.clone()),
+        Expr::Array(values) => values
+            .iter()
+            .for_each(|value| collect_expr_function_references(value, references)),
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+            collect_expr_function_references(index, references)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_expr_function_references(index, references);
+                }
+            }
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .for_each(|(_, value)| collect_expr_function_references(value, references)),
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => collect_expr_function_references(value, references),
+        Expr::Call { args, .. } => args
+            .iter()
+            .for_each(|arg| collect_expr_function_references(arg, references)),
+        Expr::Binary { left, right, .. } => {
+            collect_expr_function_references(left, references);
+            collect_expr_function_references(right, references);
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. } => {}
     }
 }
 

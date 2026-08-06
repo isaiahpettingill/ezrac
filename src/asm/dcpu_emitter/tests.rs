@@ -34,6 +34,16 @@ fn functions_control_flow_and_frames_assemble() {
     assert!(assembly.contains("__ezra_while"));
 }
 #[test]
+fn lowers_global_and_local_typed_function_pointers() {
+    let assembly = emit(
+        "global callback: ptr<fn(u16, u16)u16> = &add global answer: u16 = 0 fn add(left: u16, right: u16) -> u16 { return left + right } fn main() { let local: ptr<fn(u16, u16)u16> = &add; answer = callback(20, 22); answer = local(20, 22) }",
+    );
+    assert_eq!(assembly.matches("    jsr a").count(), 2, "{assembly}");
+    assert!(assembly.contains("    set a, _add"), "{assembly}");
+    assert!(assembly.contains("_add:"), "{assembly}");
+}
+
+#[test]
 fn globals_arrays_structs_pointers_strings_and_mmio_assemble() {
     let assembly = emit(
         "struct Pair { left: u16 right: u16 } global values: [u16; 2] = [1, 2] global pair: Pair = Pair { left: 3, right: 4 } mmio SCREEN: u16 = 0x8000 fn main() { values[1] = 7; let equal: bool = values[0] == values[1]; let unequal: bool = values[0] != values[1]; pair.right += 1; let p: ptr<u16> = &values[0]; *p = 9; let s: ptr<u8> = \"ok\"; SCREEN = cast<u16>(*s) }",

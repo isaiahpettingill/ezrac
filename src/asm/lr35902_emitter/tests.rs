@@ -555,6 +555,38 @@ fn run(source: &str, instruction_budget: u64) -> crate::vm::TestRun {
 
 #[cfg(feature = "test-runner")]
 #[test]
+fn executes_typed_function_pointer_calls_for_globals_and_locals() {
+    let source = r#"
+            volatile mmio DEBUG: ptr<u8> = 0xFF80
+            volatile mmio HALT: ptr<u8> = 0xFF82
+            global callback: ptr<fn(u8, u8)u8> = &add
+
+            fn add(left: u8, right: u8) -> u8 { return left + right }
+            fn invoke(callback: ptr<fn(u8, u8)u8>, left: u8, right: u8) -> u8 {
+                return callback(left, right)
+            }
+            fn unused() -> u8 { return 0 }
+
+            fn main() {
+                let local_callback: ptr<fn(u8, u8)u8> = &add
+                *DEBUG = invoke(callback, 20, 22)
+                *DEBUG = local_callback(9, 12)
+                *HALT = 1
+            }
+        "#;
+    let assembly = emit(source);
+    assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
+    assert!(assembly.contains("call __ezra_indirect_call"), "{assembly}");
+    assert!(assembly.contains("jp hl"), "{assembly}");
+
+    let result = run(source, 20_000);
+    assert!(result.halted, "{result:?}");
+    assert!(result.debug_output.ends_with(&[42, 21]), "{result:?}");
+    assert_eq!(result.failure, None);
+}
+
+#[cfg(feature = "test-runner")]
+#[test]
 fn executes_direct_generic_two_result_user_function_returns() {
     let run = run(
         r#"

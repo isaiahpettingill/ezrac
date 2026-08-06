@@ -46,10 +46,15 @@ pub fn emit_dcpu_assembly_with_options(
         ));
     }
     let hir = HirProgram::from_ast(program)?;
-    let tbir = TbirProgram::lower(&hir, program, &options)?;
-    Emitter::new().emit(&tbir.lowered_program).map(|assembly| {
+    let (lowered_program, source_comments) = if contains_function_pointer_program(program) {
+        (program.clone(), Vec::new())
+    } else {
+        let tbir = TbirProgram::lower(&hir, program, &options)?;
+        (tbir.lowered_program, tbir.source_comments)
+    };
+    Emitter::new().emit(&lowered_program).map(|assembly| {
         let assembly = strip_unreachable_generated_routines(&assembly, RoutineProfile::Dcpu);
-        with_readability_comments(assembly, program, &options, "dcpu", &tbir.source_comments)
+        with_readability_comments(assembly, program, &options, "dcpu", &source_comments)
     })
 }
 
@@ -549,7 +554,7 @@ impl Emitter {
             }
             Expr::Ident(name) => self.load_ident(name, ty)?,
             Expr::Field { base, field } => self.load_ident(&format!("{base}.{field}"), ty)?,
-            Expr::AddressOf(name) => self.emit_named_address(name)?,
+            Expr::AddressOf(name) => self.emit_address_of(name)?,
             Expr::AddressOfIndex { name, index } => {
                 self.emit_named_address(name)?;
                 self.line("    set push, a");
@@ -986,23 +991,45 @@ impl Emitter {
             }
             return self.emit_intrinsic(path, args, &resolution);
         }
-        let function = match self
+        let direct_function = self
             .functions
             .get(name)
             .cloned()
-            .or_else(|| self.functions.get(&path.join(".")).cloned())
-        {
-            Some(function) => function,
-            None => return Err(unknown_function_error(self, name, args)),
+            .or_else(|| self.functions.get(&path.join(".")).cloned());
+        let (params, second_return_type, indirect) = if let Some(function) = direct_function {
+            (
+                function.params.into_iter().map(|param| param.ty).collect(),
+                function.second_return_type,
+                false,
+            )
+        } else {
+            if path.len() != 1 {
+                return Err(unknown_function_error(self, name, args));
+            }
+            let pointer_type = self.named_type(name)?;
+            let Type::Ptr(inner) = pointer_type.clone() else {
+                return Err(Diagnostic::new(format!(
+                    "DCPU function pointer call requires `ptr<fn(...)>`, got `{pointer_type:?}`"
+                )));
+            };
+            let Type::Function {
+                params,
+                return_type: _,
+            } = *inner
+            else {
+                return Err(Diagnostic::new(format!(
+                    "DCPU function pointer call requires `ptr<fn(...)>`, got `{pointer_type:?}`"
+                )));
+            };
+            (params, None, true)
         };
-        if function.second_return_type.is_some() != two_results {
-            return Err(Diagnostic::new(if function.second_return_type.is_some() {
+        if second_return_type.is_some() != two_results {
+            return Err(Diagnostic::new(if second_return_type.is_some() {
                 format!("DCPU two-result call `{name}` cannot be used where one result is expected")
             } else {
                 format!("DCPU call `{name}` does not return two values")
             }));
         }
-        let params = function.params;
         if args.len() != params.len() {
             return Err(Diagnostic::new(format!(
                 "function `{name}` expects {} arguments, got {}",
@@ -1012,10 +1039,16 @@ impl Emitter {
         }
         // Pushing in reverse gives the callee arguments [J+2], [J+3], ... in source order.
         for (arg, param) in args.iter().zip(params.iter()).rev() {
-            self.emit_expr(arg, &param.ty)?;
+            self.emit_expr(arg, param)?;
             self.line("    set push, a");
         }
-        self.line(&format!("    jsr {}", function_label(name)));
+        if indirect {
+            let pointer_type = self.named_type(name)?;
+            self.emit_expr(&Expr::Ident(name.to_owned()), &pointer_type)?;
+            self.line("    jsr a");
+        } else {
+            self.line(&format!("    jsr {}", function_label(name)));
+        }
         if two_results {
             // `add sp` may change EX, so save the second result in scratch B
             // before cleaning the argument words.
@@ -2008,6 +2041,19 @@ impl Emitter {
         Err(Diagnostic::new(format!("unknown DCPU value `{name}`")))
     }
 
+    fn emit_address_of(&mut self, name: &str) -> Result<(), Diagnostic> {
+        if let Some(function) = self.functions.get(name) {
+            if function.second_return_type.is_some() {
+                return Err(Diagnostic::new(format!(
+                    "DCPU function pointer cannot reference two-result function `{name}`"
+                )));
+            }
+            self.line(&format!("    set a, {}", function_label(name)));
+            return Ok(());
+        }
+        self.emit_named_address(name)
+    }
+
     fn emit_named_address(&mut self, name: &str) -> Result<(), Diagnostic> {
         if let Some(binding) = self.bindings.get(name).cloned() {
             let BindingLocation::Frame(offset) = binding.location else {
@@ -2318,7 +2364,24 @@ impl Emitter {
             Expr::Field { base, field } => self.field_type(&self.named_type(base)?, field),
             Expr::Index { name, .. } => self.array_element(&self.named_type(name)?),
             Expr::Access(path) => self.access_type(path),
-            Expr::AddressOf(name) => Ok(Type::Ptr(Box::new(self.named_type(name)?))),
+            Expr::AddressOf(name) => {
+                if let Some(function) = self.functions.get(name) {
+                    if function.second_return_type.is_some() {
+                        return Err(Diagnostic::new(format!(
+                            "DCPU function pointer cannot reference two-result function `{name}`"
+                        )));
+                    }
+                    return Ok(Type::Ptr(Box::new(Type::Function {
+                        params: function
+                            .params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect(),
+                        return_type: function.return_type.clone().map(Box::new),
+                    })));
+                }
+                Ok(Type::Ptr(Box::new(self.named_type(name)?)))
+            }
             Expr::AddressOfIndex { name, .. } => Ok(Type::Ptr(Box::new(
                 self.array_element(&self.named_type(name)?)?,
             ))),
@@ -2343,12 +2406,25 @@ impl Emitter {
                     });
                 }
                 let name = path.last().ok_or_else(|| Diagnostic::new("empty call"))?;
-                self.functions
-                    .get(name)
-                    .and_then(|function| function.return_type.clone())
-                    .ok_or_else(|| {
+                if let Some(function) = self.functions.get(name) {
+                    return function.return_type.clone().ok_or_else(|| {
                         Diagnostic::new(format!("DCPU function `{name}` has no value return"))
-                    })
+                    });
+                }
+                let pointer_type = self.named_type(name)?;
+                let Type::Ptr(inner) = pointer_type else {
+                    return Err(Diagnostic::new(format!(
+                        "DCPU function pointer call requires `ptr<fn(...)>`, got `{pointer_type:?}`"
+                    )));
+                };
+                let Type::Function { return_type, .. } = *inner else {
+                    return Err(Diagnostic::new(format!(
+                        "DCPU function pointer call requires `ptr<fn(...)>`, got `ptr`"
+                    )));
+                };
+                return return_type
+                    .map(|ty| *ty)
+                    .ok_or_else(|| Diagnostic::new("void function has no value"));
             }
             Expr::Array(_) | Expr::StructInit { .. } => {
                 Err(Diagnostic::new("aggregate expression has no scalar type"))
@@ -2485,6 +2561,69 @@ impl Emitter {
             Expr::Cast { expr, .. } => self.const_value(expr),
             _ => Err(Diagnostic::new("expression is not constant")),
         }
+    }
+}
+
+fn contains_function_pointer_program(program: &Program) -> bool {
+    program
+        .declarations
+        .iter()
+        .any(|declaration| match declaration {
+            Declaration::Global(global) => type_contains_function_pointer(&global.ty),
+            Declaration::Function(function) => {
+                function
+                    .params
+                    .iter()
+                    .any(|param| type_contains_function_pointer(&param.ty))
+                    || function
+                        .return_type
+                        .as_ref()
+                        .is_some_and(type_contains_function_pointer)
+                    || function
+                        .second_return_type
+                        .as_ref()
+                        .is_some_and(type_contains_function_pointer)
+                    || statements_contain_function_pointer(&function.body)
+            }
+            _ => false,
+        })
+}
+
+fn statements_contain_function_pointer(statements: &[Stmt]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Stmt::Let { ty, .. } => type_contains_function_pointer(ty),
+        Stmt::LetTwo {
+            first_ty,
+            second_ty,
+            ..
+        } => type_contains_function_pointer(first_ty) || type_contains_function_pointer(second_ty),
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            statements_contain_function_pointer(then_body)
+                || statements_contain_function_pointer(else_body)
+        }
+        Stmt::While { body, .. } | Stmt::Loop { body } => statements_contain_function_pointer(body),
+        _ => false,
+    })
+}
+
+fn type_contains_function_pointer(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(inner) => matches!(inner.as_ref(), Type::Function { .. }),
+        Type::Array { element, .. } => type_contains_function_pointer(element),
+        Type::Function {
+            params,
+            return_type,
+        } => {
+            params.iter().any(type_contains_function_pointer)
+                || return_type
+                    .as_ref()
+                    .is_some_and(|ty| type_contains_function_pointer(ty))
+        }
+        Type::Named(_) => false,
     }
 }
 

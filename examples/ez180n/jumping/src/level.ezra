@@ -1,0 +1,36 @@
+import helpers
+import ez180n.console
+import player
+import state
+
+
+fn interact_level_0(){
+    let player_x: u8, player_y: u8 = player.get_player_pos()
+    if player_x == 19 && player_y == console.HEIGHT - 4 {
+        state.LEVEL = 1
+    } 
+}
+
+fn draw_level_0(){
+    helpers.fill_hline(0, 20, console.HEIGHT - 3, '=')
+    console.put_char(19, console.HEIGHT - 4, '*')
+}
+
+fn draw_level_1(){
+    helpers.fill_hline(0, 10, console.HEIGHT - 3, '=')
+    helpers.fill_hline(10, 20, console.HEIGHT - 6, '=')
+    helpers.fill_hline(20, 30, console.HEIGHT - 9, '=')
+}
+
+pub fn draw_level(){
+    if state.LEVEL == 0 {
+        draw_level_0()
+    }
+    else {
+        draw_level_1()
+    }
+}
+
+pub fn interact_level(){
+    interact_level_0()
+}

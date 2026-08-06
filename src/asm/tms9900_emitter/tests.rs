@@ -61,6 +61,17 @@ fn planned_main_frame(source: &str) -> FunctionFrame {
 }
 
 #[test]
+fn lowers_global_and_local_typed_function_pointers() {
+    let assembly = emit(
+        "global callback: ptr<fn(u16, u16)u16> = &add global answer: u16 = 0 fn add(left: u16, right: u16) -> u16 { return left + right } fn main() { let local: ptr<fn(u16, u16)u16> = &add; answer = callback(20, 22); answer = local(20, 22) }",
+        test_options(),
+    );
+    assert_eq!(assembly.matches("    bl *r0").count(), 2, "{assembly}");
+    assert!(assembly.contains("    li r0, _add"), "{assembly}");
+    assert!(assembly.contains("_add:"), "{assembly}");
+}
+
+#[test]
 fn allocates_straight_scalar_locals_to_r6_through_r8() {
     let assembly = emit(
         r#"

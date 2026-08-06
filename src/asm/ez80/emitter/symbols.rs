@@ -94,6 +94,7 @@ pub(super) struct Symbols {
     pub(super) readonly_global_pointer_aliases: HashMap<String, u32>,
     pub(super) volatile_ranges: Vec<(u32, u32)>,
     pub(super) functions: HashMap<String, FunctionSig>,
+    pub(super) function_pointer_arg_slots: HashMap<String, Vec<Variable>>,
     static_liveness: Option<StaticLiveness>,
     function_pointer_width: ValueWidth,
     next_addr: u32,
@@ -158,6 +159,7 @@ impl Symbols {
             readonly_global_pointer_aliases: HashMap::new(),
             volatile_ranges: Vec::new(),
             functions: HashMap::new(),
+            function_pointer_arg_slots: HashMap::new(),
             static_liveness: static_liveness.cloned(),
             function_pointer_width: match memory_model_for_cpu(options.cpu)
                 .map(|memory| memory.pointer_width_bits)
@@ -930,6 +932,47 @@ impl Symbols {
             size: offset,
             fields: layout_fields,
         })
+    }
+
+    pub(super) fn function_pointer_arg_slots(
+        &mut self,
+        params: &[Type],
+        return_type: Option<&Type>,
+    ) -> Result<Vec<Variable>, Diagnostic> {
+        let params = params
+            .iter()
+            .map(|param| self.resolved_type(param))
+            .collect::<Result<Vec<_>, _>>()?;
+        let return_type = return_type
+            .map(|return_type| self.resolved_type(return_type))
+            .transpose()?;
+        let key = format!(
+            "{:?}",
+            Type::Function {
+                params: params.clone(),
+                return_type: return_type.clone().map(Box::new),
+            }
+        );
+        if let Some(slots) = self.function_pointer_arg_slots.get(&key) {
+            return Ok(slots.clone());
+        }
+
+        let widths = params
+            .iter()
+            .map(|param| self.type_width(param))
+            .collect::<Result<Vec<_>, _>>()?;
+        let uses_arg_slots = widths.get(2).is_some_and(|third| third.bytes() != 1)
+            && widths.get(1).is_some_and(|second| second.bytes() == 1);
+        let slots = if uses_arg_slots {
+            widths
+                .iter()
+                .map(|width| self.alloc_var(width.bytes()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.function_pointer_arg_slots.insert(key, slots.clone());
+        Ok(slots)
     }
 
     pub(super) fn type_width(&self, ty: &Type) -> Result<ValueWidth, Diagnostic> {

@@ -167,6 +167,28 @@ fn wide_division_has_bounded_runtime_for_large_values() {
 }
 
 #[test]
+fn lowers_global_and_local_typed_function_pointers() {
+    let program = parse_program(
+        Path::new("m68k_function_pointer.ezra"),
+        "global callback: ptr<fn(u8, u8)u8> = &add global answer: u8 = 0 fn add(left: u8, right: u8) -> u8 { return left + right } fn main() { let local: ptr<fn(u8, u8)u8> = &add; answer = callback(20, 22); answer = local(20, 22) }",
+    )
+    .unwrap();
+    let assembly = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(assembly.matches("    jsr (a0)").count(), 2, "{assembly}");
+    assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
+    assert!(assembly.contains("    jsr (_add).l"), "{assembly}");
+    assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+}
+
+#[test]
 fn emits_and_assembles_scalar_control_flow() {
     let program = parse_program(
         Path::new("test.ezra"),

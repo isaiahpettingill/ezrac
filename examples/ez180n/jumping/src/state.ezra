@@ -1,0 +1,2 @@
+
+pub global LEVEL: u8 = 0

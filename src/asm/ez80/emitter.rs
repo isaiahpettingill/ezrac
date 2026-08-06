@@ -351,7 +351,14 @@ pub fn emit_ez80_assembly_from_checked(
     checked: &CheckedEz80Program,
     options: AssemblyOptions,
 ) -> Result<String, Diagnostic> {
-    let program = &checked.tbir.lowered_program;
+    let lowered_program = &checked.tbir.lowered_program;
+    let preserve_function_pointer_locals =
+        program_contains_function_pointer_locals(original_program, &options)?;
+    let program = if preserve_function_pointer_locals {
+        original_program
+    } else {
+        lowered_program
+    };
     debug_assert_eq!(checked.hir.source_path, program.source_path);
     let tail_call_edges = checked.tbir.optimizations.tail_call_edges();
     let analysis_symbols = Symbols::from_program(program, options.clone(), None)?;
@@ -361,7 +368,25 @@ pub fn emit_ez80_assembly_from_checked(
     validate_main_signature(main)?;
     validate_all_function_calls(program, &analysis_symbols.functions)?;
     let recursive_call_edges = recursive_call_edges(program, &analysis_symbols.functions);
-    let emitted_functions = reachable_function_names(program, &analysis_symbols);
+    let mut emitted_functions = reachable_function_names(program, &analysis_symbols);
+    let mut function_references = Vec::new();
+    for declaration in &program.declarations {
+        match unwrapped_declaration(declaration) {
+            Declaration::Global(global) => {
+                collect_expr_function_references(&global.value, &mut function_references)
+            }
+            Declaration::Function(function) => {
+                collect_stmt_function_references(&function.body, &mut function_references)
+            }
+            _ => {}
+        }
+    }
+    emitted_functions.extend(
+        function_references
+            .iter()
+            .filter(|name| analysis_symbols.functions.contains_key(*name))
+            .cloned(),
+    );
     let static_liveness = static_liveness(program, &emitted_functions);
     let mut validation_emitter = Emitter::new(
         analysis_symbols.clone(),
@@ -404,6 +429,7 @@ pub fn emit_ez80_assembly_from_checked(
             emitter.emit_function(function)?;
         }
     }
+    emitter.emit_function_pointer_trampolines(program, &emitted_functions)?;
     emitter.emit_required_sections();
     let assembly = peephole_cleanup_with_ranges(&emitter.out, &emitter.cacheable_ranges);
     translate_assembly_for_cpu(cpu, &assembly).map(|asm| {
@@ -412,7 +438,7 @@ pub fn emit_ez80_assembly_from_checked(
         } else {
             RoutineProfile::Ez80
         };
-        let assembly_roots = program
+        let mut assembly_roots = program
             .declarations
             .iter()
             .filter_map(|declaration| match unwrapped_declaration(declaration) {
@@ -429,6 +455,18 @@ pub fn emit_ez80_assembly_from_checked(
                 _ => None,
             })
             .collect::<Vec<_>>();
+        for name in &function_references {
+            let Some(signature) = analysis_symbols.functions.get(name) else {
+                continue;
+            };
+            assembly_roots.push(if signature.uses_arg_slots {
+                function_pointer_label(name)
+            } else {
+                function_label(name)
+            });
+        }
+        assembly_roots.sort();
+        assembly_roots.dedup();
         let assembly_root_refs = assembly_roots
             .iter()
             .map(String::as_str)
@@ -1231,6 +1269,7 @@ struct Emitter {
     tail_call_edges: HashSet<(String, String)>,
     static_liveness: Option<StaticLiveness>,
     required_runtime_helpers: HashSet<RuntimeHelper>,
+    function_pointer_constants: HashSet<String>,
 
     cpu: CpuFamily,
     mos_executable: bool,
@@ -1283,6 +1322,7 @@ impl Emitter {
             tail_call_edges,
             static_liveness,
             required_runtime_helpers: HashSet::new(),
+            function_pointer_constants: HashSet::new(),
 
             cpu: options.cpu,
             mos_executable: options.mos_executable,
@@ -1365,7 +1405,18 @@ impl Emitter {
             self.line(&format!("org {:06X}h", self.rodata_base.get()));
             self.out.push_str(&self.rodata);
         }
-        for section in [".data", ".bss", ".assets", ".scratch"] {
+        self.line("section .data");
+        let mut function_pointer_constants = self
+            .function_pointer_constants
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        function_pointer_constants.sort();
+        for target in function_pointer_constants {
+            self.line(&format!("{}:", function_pointer_constant_label(&target)));
+            self.line(&format!("    dw {target}"));
+        }
+        for section in [".bss", ".assets", ".scratch"] {
             self.line(&format!("section {section}"));
         }
     }
@@ -1923,6 +1974,43 @@ impl Emitter {
                 .push_str(&terminated_text_data_line(".dm", value, "00h"));
             self.rodata.push('\n');
         }
+    }
+
+    fn emit_function_pointer_trampolines(
+        &mut self,
+        program: &Program,
+        emitted_functions: &HashSet<String>,
+    ) -> Result<(), Diagnostic> {
+        for declaration in &program.declarations {
+            let Declaration::Function(function) = unwrapped_declaration(declaration) else {
+                continue;
+            };
+            if !emitted_functions.contains(&function.name) {
+                continue;
+            }
+            let Some(signature) = self.symbols.functions.get(&function.name).cloned() else {
+                continue;
+            };
+            if !signature.uses_arg_slots || signature.second_return_type.is_some() {
+                continue;
+            }
+            let slots = self.symbols.function_pointer_arg_slots(
+                &signature.param_types,
+                signature.return_type.as_ref(),
+            )?;
+            self.line(&format!("{}:", function_pointer_label(&function.name)));
+            for (source, target) in slots
+                .iter()
+                .copied()
+                .zip(signature.arg_slots.iter().copied())
+            {
+                self.emit_load_width(source);
+                self.emit_store_width(target);
+            }
+            self.line(&format!("    call {}", function_label(&function.name)));
+            self.line("    ret");
+        }
+        Ok(())
     }
 
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
@@ -3776,9 +3864,19 @@ impl Emitter {
             "mem.memset" | "ezra.mem.memset" => {
                 self.emit_memset(args)?;
             }
-            path => self.emit_user_call(path, args)?,
+            path => self.emit_callable_call(path, args)?,
         }
         Ok(())
+    }
+
+    fn emit_callable_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        if self.symbols.functions.contains_key(name) {
+            self.emit_user_call(name, args)
+        } else if name.split_once('.').is_none() && self.variable_type(name).is_some() {
+            self.emit_indirect_call(name, args)
+        } else {
+            self.emit_user_call(name, args)
+        }
     }
 
     fn emit_test_fail_call(&mut self) {
@@ -4379,6 +4477,324 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_indirect_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
+        if self.current_function_is_interrupt() {
+            return Err(Diagnostic::new(format!(
+                "interrupt function `{}` cannot call through a function pointer",
+                self.current_function_name()
+            )));
+        }
+        let pointer = self.variable(name)?;
+        let sig = self.indirect_function_signature(name)?;
+        if sig.arity != args.len() {
+            return Err(Diagnostic::new(format!(
+                "function pointer `{name}` expects {} arguments but got {}",
+                sig.arity,
+                args.len()
+            )));
+        }
+
+        let mut temps = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let width = sig.params[index];
+            let ty = &sig.param_types[index];
+            let temp = self.alloc_var(width.bytes());
+            self.emit_expr_to_type(arg, ty)?;
+            self.emit_store_width(temp);
+            temps.push(temp);
+        }
+
+        let saved_variables = self.indirect_call_saved_variables(args, &[]);
+        let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
+            None
+        } else {
+            Some(self.alloc_var(sig.return_width.bytes()))
+        };
+
+        if sig.uses_arg_slots {
+            let slots = self
+                .symbols
+                .function_pointer_arg_slots(&sig.param_types, sig.return_type.as_ref())?;
+            for (temp, slot) in temps.iter().copied().zip(slots) {
+                self.emit_load_width(temp);
+                self.emit_store_width(slot);
+            }
+        }
+
+        self.emit_save_recursive_call_variables(&saved_variables);
+        if sig.stack_arg_bytes > 0 {
+            for temp in temps.iter().copied().skip(3).rev() {
+                self.emit_push_stack_arg_variable(temp);
+            }
+        }
+        if let Some(temp) = temps.get(2).copied() {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld c, a");
+            } else if sig.params.get(1).is_some_and(|width| width.bytes() != 1) {
+                self.emit_load_width(temp);
+                self.line("    push hl");
+                self.line("    pop bc");
+            } else if !sig.uses_arg_slots {
+                return Err(Diagnostic::new(
+                    "current codegen supports a wide third argument only when the second argument is also wide",
+                ));
+            }
+        }
+        if let Some(temp) = temps.get(1).copied()
+            && !sig.uses_arg_slots
+        {
+            if temp.size == 1 {
+                self.emit_load_a(temp);
+                self.line("    ld b, a");
+            } else {
+                self.emit_load_width(temp);
+                self.line("    ex de, hl");
+            }
+        }
+        if let Some(temp) = temps.first().copied()
+            && !sig.uses_arg_slots
+        {
+            self.emit_load_width(temp);
+        }
+        let first_arg_temp = if !sig.uses_arg_slots && !sig.params.is_empty() {
+            let temp = self.alloc_var(sig.params[0].bytes());
+            if sig.params[0].bytes() == 1 {
+                self.emit_store_a(temp);
+            } else {
+                self.emit_store_width(temp);
+            }
+            Some(temp)
+        } else {
+            None
+        };
+
+        let helper_label = self.next_label("indirect_call");
+        let continuation_label = self.next_label("indirect_call_continue");
+        self.line(&format!("    call {helper_label}"));
+        self.line(&format!("    jp {continuation_label}"));
+        self.line(&format!("{helper_label}:"));
+        self.emit_load_width(pointer);
+        self.line("    push hl");
+        if let Some(first_arg_temp) = first_arg_temp {
+            if first_arg_temp.size == 1 {
+                self.emit_load_a(first_arg_temp);
+            } else {
+                self.emit_load_width(first_arg_temp);
+            }
+        }
+        self.line("    ret");
+        self.line(&format!("{continuation_label}:"));
+        if sig.stack_arg_bytes > 0 {
+            self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
+        }
+        self.emit_store_recursive_call_return(return_temp);
+        self.emit_restore_recursive_call_variables(&saved_variables);
+        self.emit_load_recursive_call_return(return_temp);
+        Ok(())
+    }
+
+    fn function_value_type(&self, name: &str) -> Result<Type, Diagnostic> {
+        let signature = self
+            .symbols
+            .functions
+            .get(name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if signature.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "function pointer cannot reference two-result function `{name}`"
+            )));
+        }
+        Ok(Type::Function {
+            params: signature.param_types.clone(),
+            return_type: signature.return_type.clone().map(Box::new),
+        })
+    }
+
+    fn emit_intel8080_function_pointer(&mut self, name: &str) -> Result<(), Diagnostic> {
+        let signature = self
+            .symbols
+            .functions
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if signature.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "function pointer cannot reference two-result function `{name}`"
+            )));
+        }
+
+        let target_label = self.next_label("function_pointer_target");
+        let continuation_label = self.next_label("function_pointer_continue");
+        let capture_label = self.next_label("function_pointer_capture");
+        let after_capture_label = self.next_label("function_pointer_after_capture");
+
+        self.line(&format!("    call {capture_label}"));
+        self.line(&format!("{target_label}:"));
+        if signature.uses_arg_slots {
+            let slots = self.symbols.function_pointer_arg_slots(
+                &signature.param_types,
+                signature.return_type.as_ref(),
+            )?;
+            for (source, target) in slots
+                .iter()
+                .copied()
+                .zip(signature.arg_slots.iter().copied())
+            {
+                self.emit_load_width(source);
+                self.emit_store_width(target);
+            }
+        }
+        self.line(&format!("    call {}", function_label(name)));
+        self.line("    ret");
+        self.line(&format!("{continuation_label}:"));
+        self.line(&format!("    jp {after_capture_label}"));
+        self.line(&format!("{capture_label}:"));
+        self.line("    pop hl");
+        self.line(&format!("    jp {continuation_label}"));
+        self.line(&format!("{after_capture_label}:"));
+        Ok(())
+    }
+
+    fn function_pointer_target_label(&self, name: &str) -> Result<String, Diagnostic> {
+        let signature = self
+            .symbols
+            .functions
+            .get(name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+        if signature.second_return_type.is_some() {
+            return Err(Diagnostic::new(format!(
+                "function pointer cannot reference two-result function `{name}`"
+            )));
+        }
+        Ok(if signature.uses_arg_slots {
+            function_pointer_label(name)
+        } else {
+            function_label(name)
+        })
+    }
+
+    fn function_pointer_type(&self, name: &str) -> Result<Type, Diagnostic> {
+        let variable_type = self
+            .variable_type(name)
+            .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))?;
+        let resolved = self.symbols.resolved_type(variable_type)?;
+        let Type::Ptr(inner) = resolved else {
+            return Err(Diagnostic::new(format!(
+                "function pointer call requires `ptr<fn(...)>`, got `{}`",
+                type_display(&resolved)
+            )));
+        };
+        if !matches!(inner.as_ref(), Type::Function { .. }) {
+            return Err(Diagnostic::new(format!(
+                "function pointer call requires `ptr<fn(...)>`, got `{}`",
+                type_display(&Type::Ptr(inner))
+            )));
+        }
+        Ok(*inner)
+    }
+
+    fn indirect_function_signature(&self, name: &str) -> Result<FunctionSig, Diagnostic> {
+        let Type::Function {
+            params,
+            return_type,
+        } = self.function_pointer_type(name)?
+        else {
+            unreachable!("function_pointer_type only returns function types")
+        };
+        let params = params;
+        let param_widths = params
+            .iter()
+            .map(|param| self.symbols.type_width(param))
+            .collect::<Result<Vec<_>, _>>()?;
+        let uses_arg_slots = param_widths.get(2).is_some_and(|third| third.bytes() != 1)
+            && param_widths
+                .get(1)
+                .is_some_and(|second| second.bytes() == 1);
+        let mut stack_arg_offsets = vec![None; params.len()];
+        let mut stack_arg_bytes = 0u8;
+        let mut stack_offset = self
+            .symbols
+            .type_width(&Type::Named("ptr".to_owned()))?
+            .bytes()
+            .saturating_mul(2);
+        if !uses_arg_slots && params.len() > 3 {
+            for (index, width) in param_widths.iter().enumerate().skip(3) {
+                let bytes = width.bytes();
+                if stack_offset as u16 + bytes as u16 > 0x80 {
+                    return Err(Diagnostic::new(
+                        "function pointer stack arguments exceed IX displacement range",
+                    ));
+                }
+                stack_arg_offsets[index] = Some(stack_offset);
+                stack_offset += bytes;
+                stack_arg_bytes += bytes;
+            }
+        }
+        let return_type = return_type.map(|return_type| *return_type);
+        let return_width = return_type
+            .as_ref()
+            .map(|return_type| self.symbols.type_width(return_type))
+            .transpose()?
+            .unwrap_or(ValueWidth::U8);
+        Ok(FunctionSig {
+            arity: params.len(),
+            params: param_widths,
+            param_types: params,
+            arg_slots: Vec::new(),
+            uses_arg_slots,
+            stack_arg_offsets,
+            stack_arg_bytes,
+            return_width,
+            return_type,
+            second_return_width: ValueWidth::U8,
+            second_return_type: None,
+            hidden_return_arg_offset: None,
+            is_interrupt: false,
+        })
+    }
+
+    fn indirect_call_saved_variables(
+        &self,
+        args: &[Expr],
+        extra_excluded: &[Variable],
+    ) -> Vec<Variable> {
+        let Some(storage) = self.function_storage_stack.last() else {
+            return Vec::new();
+        };
+        let mut excluded = args
+            .iter()
+            .filter_map(|arg| match arg {
+                Expr::AddressOf(name) => self.variable_opt(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        excluded.extend_from_slice(extra_excluded);
+        let mut addresses = storage
+            .iter()
+            .flat_map(|variable| variable.addr..variable.addr.saturating_add(variable.size))
+            .filter(|addr| {
+                !excluded.iter().any(|variable| {
+                    (variable.addr..variable.addr.saturating_add(variable.size)).contains(addr)
+                })
+            })
+            .collect::<Vec<_>>();
+        addresses.sort_unstable();
+        addresses.dedup();
+
+        let mut variables: Vec<Variable> = Vec::new();
+        for addr in addresses {
+            if let Some(variable) = variables.last_mut()
+                && variable.addr + variable.size == addr
+            {
+                variable.size += 1;
+            } else {
+                variables.push(scalar_var(addr, 1));
+            }
+        }
+        variables
+    }
+
     fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
         let sig = self
             .symbols
@@ -4888,7 +5304,16 @@ impl Emitter {
                 self.emit_access_address(&path)?;
             }
             Expr::AddressOf(name) => {
-                self.emit_variable_address(name)?;
+                if self.symbols.functions.contains_key(name) {
+                    if is_intel_8080_family(self.cpu) {
+                        self.emit_intel8080_function_pointer(name)?;
+                    } else {
+                        let label = self.function_pointer_target_label(name)?;
+                        self.line(&format!("    ld hl, {label}"));
+                    }
+                } else {
+                    self.emit_variable_address(name)?;
+                }
             }
             Expr::String(value) => {
                 self.emit_string_literal_address(value)?;
@@ -5011,7 +5436,7 @@ impl Emitter {
                 self.emit_intrinsic_value(&path_text(path), args)?;
             }
             Expr::Call { path, args } => {
-                self.emit_user_call(&path_text(path), args)?;
+                self.emit_callable_call(&path_text(path), args)?;
             }
             Expr::Array(_) | Expr::StructInit { .. } | Expr::In(_) => {
                 return Err(Diagnostic::new(format!(
@@ -5306,7 +5731,7 @@ impl Emitter {
                 self.emit_intrinsic_value(&path_text(path), args)?;
             }
             Expr::Call { path, args } => {
-                self.emit_user_call(&path_text(path), args)?;
+                self.emit_callable_call(&path_text(path), args)?;
             }
             Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
@@ -8086,6 +8511,9 @@ impl Emitter {
                 Ok(Type::Ptr(Box::new(self.access_type(&path)?)))
             }
             Expr::AddressOf(name) => {
+                if self.symbols.functions.contains_key(name) {
+                    return Ok(Type::Ptr(Box::new(self.function_value_type(name)?)));
+                }
                 if self.symbols.embeds.contains_key(name) {
                     return Ok(Type::Ptr(Box::new(Type::Named("u8".to_owned()))));
                 }
@@ -8198,10 +8626,10 @@ impl Emitter {
                     self.symbols.type_width(&self.access_type(&path)?)
                 }
             }
-            Expr::AddressOfIndex { .. } => Ok(ValueWidth::U24),
-            Expr::AddressOfField { .. } => Ok(ValueWidth::U24),
-            Expr::AddressOfAccess(_) => Ok(ValueWidth::U24),
-            Expr::AddressOf(_) => Ok(ValueWidth::U24),
+            Expr::AddressOfIndex { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOfAccess(_)
+            | Expr::AddressOf(_) => self.symbols.type_width(&self.expr_type(expr)?),
             Expr::Deref(ptr) => match self.symbols.resolved_type(&self.expr_type(ptr)?)? {
                 Type::Ptr(inner) => self.symbols.type_width(&inner),
                 Type::Named(name) if name == "ptr" => Err(Diagnostic::new(
@@ -9260,29 +9688,30 @@ impl Emitter {
 
     fn call_return_type(&self, path: &[String]) -> Result<Type, Diagnostic> {
         let name = path_text(path);
-        let sig = self
-            .symbols
-            .functions
-            .get(&name)
-            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
-        sig.return_type
-            .clone()
-            .ok_or_else(|| Diagnostic::new(format!("function `{name}` does not return a value")))
+        if self.symbols.functions.contains_key(&name) {
+            let sig = self
+                .symbols
+                .functions
+                .get(&name)
+                .expect("function was checked above");
+            return sig.return_type.clone().ok_or_else(|| {
+                Diagnostic::new(format!("function `{name}` does not return a value"))
+            });
+        }
+        if path.len() == 1 && self.variable_type(&name).is_some() {
+            let Type::Function { return_type, .. } = self.function_pointer_type(&name)? else {
+                unreachable!("function_pointer_type only returns function types")
+            };
+            return return_type.map(|return_type| *return_type).ok_or_else(|| {
+                Diagnostic::new(format!("function pointer `{name}` does not return a value"))
+            });
+        }
+        Err(Diagnostic::new(format!("unknown function `{name}`")))
     }
 
     fn call_return_width(&self, path: &[String]) -> Result<ValueWidth, Diagnostic> {
-        let name = path_text(path);
-        let sig = self
-            .symbols
-            .functions
-            .get(&name)
-            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
-        if sig.return_type.is_none() {
-            return Err(Diagnostic::new(format!(
-                "function `{name}` does not return a value"
-            )));
-        }
-        Ok(sig.return_width)
+        let return_type = self.call_return_type(path)?;
+        self.symbols.type_width(&return_type)
     }
 
     fn maybe_const_shift_count(&self, expr: &Expr) -> Result<Option<u8>, Diagnostic> {
@@ -10179,6 +10608,7 @@ fn function_call_graph(
         };
         let mut calls = Vec::new();
         collect_stmt_calls(&function.body, &mut calls);
+        collect_stmt_function_references(&function.body, &mut calls);
         calls.retain(|name| functions.contains_key(name));
         graph.insert(function.name.clone(), calls);
     }
@@ -10464,9 +10894,15 @@ fn validate_call_signature(
         }
         return Ok(());
     }
-    let sig = functions
-        .get(name)
-        .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
+    let Some(sig) = functions.get(name) else {
+        // A single-name call may be a call through a local or global
+        // `ptr<fn(...)>` binding. The emitter validates its typed signature
+        // once the binding scope is available.
+        if !name.contains('.') {
+            return Ok(());
+        }
+        return Err(Diagnostic::new(format!("unknown function `{name}`")));
+    };
     if sig.arity != arity {
         return Err(Diagnostic::new(format!(
             "function `{name}` expects {} arguments but got {arity}",
@@ -10539,6 +10975,70 @@ fn builtin_arity_error(name: &str, actual: usize) -> String {
     }
 }
 
+fn program_contains_function_pointer_locals(
+    program: &Program,
+    options: &AssemblyOptions,
+) -> Result<bool, Diagnostic> {
+    let symbols = Symbols::from_program(program, options.clone(), None)?;
+    for declaration in &program.declarations {
+        let Declaration::Function(function) = unwrapped_declaration(declaration) else {
+            continue;
+        };
+        if statements_contain_function_pointer_local(&function.body, &symbols)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn statements_contain_function_pointer_local(
+    statements: &[Stmt],
+    symbols: &Symbols,
+) -> Result<bool, Diagnostic> {
+    for statement in statements {
+        match statement {
+            Stmt::Let { ty, .. } => {
+                let resolved = symbols.resolved_type(ty)?;
+                if matches!(resolved, Type::Ptr(inner) if matches!(inner.as_ref(), Type::Function { .. }))
+                {
+                    return Ok(true);
+                }
+            }
+            Stmt::LetTwo {
+                first_ty,
+                second_ty,
+                ..
+            } => {
+                for ty in [first_ty, second_ty] {
+                    let resolved = symbols.resolved_type(ty)?;
+                    if matches!(resolved, Type::Ptr(inner) if matches!(inner.as_ref(), Type::Function { .. }))
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                if statements_contain_function_pointer_local(then_body, symbols)?
+                    || statements_contain_function_pointer_local(else_body, symbols)?
+                {
+                    return Ok(true);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => {
+                if statements_contain_function_pointer_local(body, symbols)? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
 fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<String> {
     let mut graph = HashMap::new();
     let mut seeds = Vec::new();
@@ -10548,6 +11048,7 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
             Declaration::Function(function) => {
                 let mut calls = Vec::new();
                 collect_reachable_stmt_calls(&function.body, &mut calls, symbols);
+                collect_stmt_function_references(&function.body, &mut calls);
                 calls.retain(|name| symbols.functions.contains_key(name));
                 graph.insert(function.name.clone(), calls);
                 if function.name == "main"
@@ -10558,6 +11059,15 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
                 {
                     seeds.push(function.name.clone());
                 }
+            }
+            Declaration::Global(global) => {
+                let mut references = Vec::new();
+                collect_expr_function_references(&global.value, &mut references);
+                seeds.extend(
+                    references
+                        .into_iter()
+                        .filter(|name| symbols.functions.contains_key(name)),
+                );
             }
             Declaration::ExternAsmFunction(_) => has_extern_assembly = true,
             _ => {}
@@ -10576,6 +11086,26 @@ fn reachable_function_names(program: &Program, symbols: &Symbols) -> HashSet<Str
     }
     if has_extern_assembly {
         return graph.keys().cloned().collect();
+    }
+
+    // Keep address-taken functions even when the reference is stored in a
+    // static initializer or passes through an optimizer-removed binding.
+    for declaration in &program.declarations {
+        let mut references = Vec::new();
+        match unwrapped_declaration(declaration) {
+            Declaration::Global(global) => {
+                collect_expr_function_references(&global.value, &mut references)
+            }
+            Declaration::Function(function) => {
+                collect_stmt_function_references(&function.body, &mut references)
+            }
+            _ => {}
+        }
+        reachable.extend(
+            references
+                .into_iter()
+                .filter(|name| symbols.functions.contains_key(name)),
+        );
     }
     reachable
 }
@@ -10878,7 +11408,8 @@ fn collect_expr_static_references(expr: &Expr, references: &mut StaticReferences
         | Expr::BankedPointer { pointer, .. } => {
             collect_expr_static_references(pointer, references)
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { path, args } => {
+            references.names.insert(path_text(path));
             for arg in args {
                 collect_expr_static_references(arg, references);
             }
@@ -10923,6 +11454,80 @@ fn collect_embed_static_references(
         crate::ast::EmbedSource::File(_)
         | crate::ast::EmbedSource::Text(_)
         | crate::ast::EmbedSource::CStr(_) => {}
+    }
+}
+
+fn collect_stmt_function_references(stmts: &[Stmt], references: &mut Vec<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. }
+            | Stmt::LetTwo { value, .. }
+            | Stmt::Return(Some(value))
+            | Stmt::Expr(value)
+            | Stmt::Out { value, .. } => collect_expr_function_references(value, references),
+            Stmt::ReturnTwo { first, second } => {
+                collect_expr_function_references(first, references);
+                collect_expr_function_references(second, references);
+            }
+            Stmt::Assign { value, .. } => collect_expr_function_references(value, references),
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_function_references(condition, references);
+                collect_stmt_function_references(then_body, references);
+                collect_stmt_function_references(else_body, references);
+            }
+            Stmt::While { condition, body } => {
+                collect_expr_function_references(condition, references);
+                collect_stmt_function_references(body, references);
+            }
+            Stmt::Loop { body } => collect_stmt_function_references(body, references),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm { .. } => {}
+        }
+    }
+}
+
+fn collect_expr_function_references(expr: &Expr, references: &mut Vec<String>) {
+    match expr {
+        Expr::AddressOf(name) => references.push(name.clone()),
+        Expr::Array(values) => values
+            .iter()
+            .for_each(|value| collect_expr_function_references(value, references)),
+        Expr::Index { index, .. } | Expr::AddressOfIndex { index, .. } => {
+            collect_expr_function_references(index, references)
+        }
+        Expr::Access(path) | Expr::AddressOfAccess(path) => {
+            for segment in &path.segments {
+                if let AccessSegment::Index(index) = segment {
+                    collect_expr_function_references(index, references);
+                }
+            }
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .for_each(|(_, value)| collect_expr_function_references(value, references)),
+        Expr::Deref(value)
+        | Expr::BankedPointer { pointer: value, .. }
+        | Expr::Unary { expr: value, .. }
+        | Expr::Cast { expr: value, .. } => collect_expr_function_references(value, references),
+        Expr::Call { args, .. } => args
+            .iter()
+            .for_each(|arg| collect_expr_function_references(arg, references)),
+        Expr::Binary { left, right, .. } => {
+            collect_expr_function_references(left, references);
+            collect_expr_function_references(right, references);
+        }
+        Expr::Int(_)
+        | Expr::TypedInt(_, _)
+        | Expr::Bool(_)
+        | Expr::Char(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::In(_)
+        | Expr::Field { .. }
+        | Expr::AddressOfField { .. } => {}
     }
 }
 
@@ -11120,6 +11725,20 @@ fn function_label(name: &str) -> String {
         }
     }
     label
+}
+
+fn function_pointer_label(name: &str) -> String {
+    format!(
+        "__ezra_fn_ptr_{}",
+        function_label(name).trim_start_matches('_')
+    )
+}
+
+fn function_pointer_constant_label(target: &str) -> String {
+    format!(
+        "__ezra_fn_addr_{}",
+        target.trim_start_matches('_').replace('.', "_")
+    )
 }
 
 fn inline_asm_references_label(line: &str, label: &str) -> bool {

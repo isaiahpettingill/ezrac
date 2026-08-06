@@ -284,6 +284,42 @@ fn scalars_operators_control_flow_calls_and_recursion_assemble() {
 }
 
 #[test]
+fn lowers_global_function_pointer_calls_with_the_avr_abi() {
+    let assembly = emit(
+        r#"
+            global callback: ptr<fn(u8, u8)u8> = &add
+            global answer: u8 = 0
+            fn add(left: u8, right: u8) -> u8 { return left + right }
+            fn main() { answer = callback(20, 22) }
+        "#,
+    );
+
+    assert!(assembly.contains("icall"), "{assembly}");
+    assert!(assembly.contains("jmp _add"), "{assembly}");
+    assert!(assembly.contains("_add:"), "{assembly}");
+    assert!(assembly.contains("pop r30"), "{assembly}");
+    assert!(assembly.contains("pop r31"), "{assembly}");
+}
+
+#[test]
+fn lowers_local_function_pointer_initializers_and_calls() {
+    let assembly = emit(
+        r#"
+            global answer: u8 = 0
+            fn add(left: u8, right: u8) -> u8 { return left + right }
+            fn main() {
+                let callback: ptr<fn(u8, u8)u8> = &add
+                answer = callback(20, 22)
+            }
+        "#,
+    );
+
+    assert_eq!(assembly.matches("icall").count(), 1, "{assembly}");
+    assert!(assembly.contains("jmp _add"), "{assembly}");
+    assert!(assembly.contains("function_pointer_capture"), "{assembly}");
+}
+
+#[test]
 fn lowers_two_result_calls_with_a_hidden_pointer_and_preserves_both_values() {
     let assembly = emit(
         r#"

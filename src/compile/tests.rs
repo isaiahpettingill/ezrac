@@ -1265,6 +1265,31 @@ fn resolves_imported_declarations() {
 }
 
 #[test]
+fn resolves_sibling_imports_relative_to_src_main() {
+    let root = temp_root("src_relative_imports");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let main_path = root.join("src/main.ezra");
+    let helper_path = root.join("src/helpers.ezra");
+    std::fs::write(&helper_path, "pub fn answer() -> u8 { return 42 }\n").unwrap();
+    let source = "import helpers\nfn main() { let x: u8 = answer(); test.pass() }\n";
+    std::fs::write(&main_path, source).unwrap();
+
+    let options = CompileOptions {
+        source: main_path.clone(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+    };
+    check_source(source, &options).expect("src/main.ezra should resolve src/helpers.ezra");
+    let program = load_program(&main_path).unwrap();
+
+    assert!(program.declarations.iter().any(|decl| {
+        matches!(decl, Declaration::Function(function) if function.name == "answer")
+    }));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn resolves_imports_from_project_root_ancestor() {
     let root = temp_root("project_root_imports");
     std::fs::create_dir_all(root.join("src")).unwrap();
