@@ -357,18 +357,21 @@ fn ez180n_layouts_match_cpu_address_widths() {
     assert_eq!(adl.validate(), Ok(()));
     assert_eq!(adl.load.get(), 0x010000);
     assert_eq!(adl.entry.get(), 0x010000);
-    assert!(adl
-        .regions
-        .iter()
-        .all(|region| { !matches!(region.name.as_str(), "low" | "header") }));
-    assert!(adl
-        .sections
-        .iter()
-        .any(|section| { section.name == ".header" && section.region == "code" }));
-    assert!(adl
-        .regions
-        .iter()
-        .any(|region| { region.name == "vram" && region.start.get() == 0x080000 }));
+    assert!(
+        adl.regions
+            .iter()
+            .all(|region| { !matches!(region.name.as_str(), "low" | "header") })
+    );
+    assert!(
+        adl.sections
+            .iter()
+            .any(|section| { section.name == ".header" && section.region == "code" })
+    );
+    assert!(
+        adl.regions
+            .iter()
+            .any(|region| { region.name == "vram" && region.start.get() == 0x080000 })
+    );
 
     for target in [
         "ez180n-i8080",
@@ -383,14 +386,18 @@ fn ez180n_layouts_match_cpu_address_widths() {
         assert_eq!(layout.load.get(), 0);
         assert_eq!(layout.entry.get(), 0);
         assert!(layout.stack.get() < 0xE000);
-        assert!(layout
-            .regions
-            .iter()
-            .all(|region| region.end.get() <= 0xFFFF));
-        assert!(layout
-            .symbols
-            .iter()
-            .all(|symbol| symbol.value.get() <= 0xFFFF));
+        assert!(
+            layout
+                .regions
+                .iter()
+                .all(|region| region.end.get() <= 0xFFFF)
+        );
+        assert!(
+            layout
+                .symbols
+                .iter()
+                .all(|symbol| symbol.value.get() <= 0xFFFF)
+        );
         assert!(layout.regions.iter().any(|region| {
             region.name == "vram" && region.start.get() == 0xE000 && region.end.get() == 0xF1FF
         }));

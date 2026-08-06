@@ -2189,11 +2189,8 @@ fn diagnostic_symbol(message: &str) -> Option<&str> {
 }
 
 fn completion_prefix(source: &str, position: Position) -> String {
-    let Some(line) = source.lines().nth(position.line as usize) else {
-        return String::new();
-    };
-    let end = byte_index_for_character(line, position.character as usize);
-    let prefix = &line[..end];
+    let end = source_offset(source, position);
+    let prefix = &source[..end.min(source.len())];
     prefix
         .chars()
         .rev()

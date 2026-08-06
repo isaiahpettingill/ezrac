@@ -607,6 +607,29 @@ fn layout_symbols_are_available_for_completion_and_hover() {
 }
 
 #[test]
+fn completion_detects_properties_in_a_multiline_if_body() {
+    let line = "        player.";
+    let document = OpenDocument {
+        path: PathBuf::from("multiline-property.ezra"),
+        text: format!(
+            "struct Player {\n    x: u8\n    y: u8\n}\nfn main() {{\n    let player: Player = Player {{ x: 0, y: 0 }}\n    if true\n    {{\n{line}\n    }}\n}}\n"
+        ),
+        version: None,
+    };
+    let items = completion_items(
+        Some(&document),
+        Position {
+            line: 8,
+            character: utf16_len(line),
+        },
+    );
+    assert!(items["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| item["label"] == "player.x")
+            && items.iter().any(|item| item["label"] == "player.y")
+    }));
+}
+
+#[test]
 fn completion_keeps_imported_members_when_control_flow_is_incomplete() {
     let root = std::env::temp_dir().join(format!(
         "ezrac-lsp-incomplete-import-{}",
@@ -618,16 +641,18 @@ fn completion_keeps_imported_members_when_control_flow_is_incomplete() {
         "[build]\ntarget = \"ez180n-ez80\"\n",
     )
     .unwrap();
-    let line = "    while ez180n.console.pu";
+    let line = "        ez180n.console.pu";
     let document = OpenDocument {
         path: root.join("src/main.ezra"),
-        text: format!("import ez180n.console\nfn main() {{\n{line}\n}}\n"),
+        text: format!(
+            "import ez180n.console\nfn main() {{\n    if true\n    {{\n{line}\n    }}\n}}\n"
+        ),
         version: None,
     };
     let items = completion_items(
         Some(&document),
         Position {
-            line: 2,
+            line: 4,
             character: utf16_len(line),
         },
     );
