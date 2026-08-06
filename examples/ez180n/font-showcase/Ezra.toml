@@ -1,0 +1,6 @@
+[project]
+name = "ez180n-font-showcase"
+
+[build]
+target = "ez180n-ez80"
+executable = "font-showcase"

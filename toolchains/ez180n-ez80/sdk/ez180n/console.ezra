@@ -143,8 +143,8 @@ pub fn set_background_color(color: u8) {
     out BACKGROUND_COLOR_PORT, color
 }
 
-pub fn set_font(font: u8) {
-    out FONT_PORT, font
+pub fn set_font(font_id: u8) {
+    out FONT_PORT, font_id
 }
 
 pub fn play_sound(sound: u8) {

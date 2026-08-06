@@ -1,0 +1,88 @@
+import ez180n.console
+
+const MAX_FONT: u8 = 23
+const MAX_COLOR: u8 = 255
+
+global text_color: u8 = console.DEFAULT_TEXT_COLOR
+global background_color: u8 = console.DEFAULT_BACKGROUND_COLOR
+global font: u8 = console.FONT_DEFAULT
+global previous_low: u8 = 0
+global previous_high: u8 = 0
+
+fn previous_button_pressed(button: u8) -> bool {
+    let bit: u8 = button
+    let was_pressed: bool = false
+    if button < 8 {
+        was_pressed = (previous_low & (1 << bit)) != 0
+    } else {
+        bit = button - 8
+        was_pressed = (previous_high & (1 << bit)) != 0
+    }
+    return console.button_down(0, button) && !was_pressed
+}
+
+fn cycle_forward(value: u8, maximum: u8) -> u8 {
+    if value == maximum {
+        return 0
+    }
+    return value + 1
+}
+
+fn cycle_backward(value: u8, maximum: u8) -> u8 {
+    if value == 0 {
+        return maximum
+    }
+    return value - 1
+}
+
+fn handle_input() {
+    if previous_button_pressed(console.BUTTON_LEFT) {
+        text_color = cycle_backward(text_color, MAX_COLOR)
+    }
+    if previous_button_pressed(console.BUTTON_RIGHT) {
+        text_color = cycle_forward(text_color, MAX_COLOR)
+    }
+    if previous_button_pressed(console.BUTTON_UP) {
+        background_color = cycle_forward(background_color, MAX_COLOR)
+    }
+    if previous_button_pressed(console.BUTTON_DOWN) {
+        background_color = cycle_backward(background_color, MAX_COLOR)
+    }
+    if previous_button_pressed(console.BUTTON_A) {
+        font = cycle_forward(font, MAX_FONT)
+    }
+    if previous_button_pressed(console.BUTTON_B) {
+        font = cycle_backward(font, MAX_FONT)
+    }
+
+    previous_low = console.input_low(0)
+    previous_high = console.input_high(0)
+}
+
+fn draw_glyphs() {
+    let code: u16 = 0
+    while code < 256 {
+        let x: u8 = cast<u8>(code % 16)
+        let y: u8 = cast<u8>(code / 16)
+        console.put_char(x, y, cast<u8>(code))
+        code += 1
+    }
+}
+
+fn render() {
+    console.set_font(font)
+    console.set_text_color(text_color)
+    console.set_background_color(background_color)
+    console.fill(console.CHAR_SPACE)
+    draw_glyphs()
+    console.present()
+}
+
+fn main() {
+    render()
+    loop {
+        console.wait_tick()
+        handle_input()
+        render()
+    }
+}
