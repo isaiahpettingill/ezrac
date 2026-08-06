@@ -20,6 +20,24 @@ fn standard_completion_includes_u32_and_i32_primitives() {
 }
 
 #[test]
+fn completion_includes_boolean_types_and_literals() {
+    let items = standard_completion_items();
+
+    for ty in ["bool", "char"] {
+        assert!(items.iter().any(|item| {
+            item.get("label").and_then(Value::as_str) == Some(ty)
+                && item.get("detail").and_then(Value::as_str) == Some("primitive type")
+        }));
+    }
+    for literal in ["true", "false"] {
+        assert!(items.iter().any(|item| {
+            item.get("label").and_then(Value::as_str) == Some(literal)
+                && item.get("detail").and_then(Value::as_str) == Some("keyword")
+        }));
+    }
+}
+
+#[test]
 fn function_pointer_types_appear_in_lsp_details() {
     let ty = Type::Ptr(Box::new(Type::Function {
         params: vec![Type::Named("u8".to_owned()), Type::Named("u8".to_owned())],
@@ -438,6 +456,33 @@ fn signature_help_tracks_the_outer_call_after_a_nested_call() {
             .as_str()
             .is_some_and(|label| label.starts_with("fn outer("))
     );
+}
+
+#[test]
+fn booleans_and_boolean_expressions_work_across_lsp_features() {
+    let source = "fn main() { let ready: bool = true && !false || 1 < 2 }\n";
+    let document = OpenDocument {
+        path: PathBuf::from("booleans.ezra"),
+        text: source.to_owned(),
+        version: None,
+    };
+
+    assert!(check_document_diagnostics(&document).is_empty());
+
+    let true_start = source.find("true").unwrap();
+    let hover = hover(
+        Some(&document),
+        Position {
+            line: 0,
+            character: utf16_len(&source[..true_start + 2]),
+        },
+    );
+    assert!(hover.to_string().contains("true: bool"), "{hover}");
+
+    let mut tokens = Vec::new();
+    collect_line_semantic_tokens(source.trim_end(), 0, &SymbolIndex::default(), &mut tokens);
+    assert_eq!(tokens.iter().filter(|token| token.3 == 8).count(), 5);
+    assert_eq!(tokens.iter().filter(|token| token.3 == 4).count(), 4);
 }
 
 #[test]

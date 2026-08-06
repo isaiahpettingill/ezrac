@@ -1228,6 +1228,12 @@ fn hover_with_overrides(
     let Some(symbol) = symbol_at_position(&document.text, position) else {
         return Value::Null;
     };
+    if matches!(symbol.as_str(), "true" | "false") {
+        return hover_markdown(&format!("```ezra\n{symbol}: bool\n```"));
+    }
+    if symbol == "bool" {
+        return hover_markdown("```ezra\nbool\n```");
+    }
     let index = symbol_index_with_overrides(document, source_overrides);
     if let Some(info) = index.symbols.get(&symbol) {
         let mut body = format!("```ezra\n{}\n```", info.detail);
@@ -1412,6 +1418,25 @@ fn collect_line_semantic_tokens(
                 utf16_len(&line[..start]),
                 utf16_len(&line[start..end]),
                 6,
+            ));
+            continue;
+        }
+        if matches!(ch, '!' | '&' | '|' | '=' | '<' | '>') {
+            let mut end = start + ch.len_utf8();
+            if let Some((offset, next)) = chars.peek().copied()
+                && matches!(
+                    (ch, next),
+                    ('!', '=') | ('&', '&') | ('|', '|') | ('=', '=') | ('<', '=') | ('>', '=')
+                )
+            {
+                chars.next();
+                end = offset + next.len_utf8();
+            }
+            tokens.push((
+                line_index,
+                utf16_len(&line[..start]),
+                utf16_len(&line[start..end]),
+                8,
             ));
             continue;
         }
@@ -2416,10 +2441,12 @@ const KEYWORDS: &[&str] = &[
     "volatile",
     "as",
     "clobber",
+    "true",
+    "false",
 ];
 
 const PRIMITIVE_TYPES: &[&str] = &[
-    "u8", "i8", "u16", "i16", "u24", "i24", "u32", "i32", "ptr", "bytes",
+    "u8", "i8", "u16", "i16", "u24", "i24", "u32", "i32", "bool", "char", "ptr", "bytes",
 ];
 
 const CFG_PREDICATES: &[&str] = &[
