@@ -60,12 +60,16 @@ fn handle_input() {
 }
 
 fn draw_glyphs() {
-    let code: u16 = 0
-    while code < 256 {
-        let x: u8 = cast<u8>(code % 16)
-        let y: u8 = cast<u8>(code / 16)
-        console.put_char(x, y, cast<u8>(code))
-        code += 1
+    let row: u24 = 0
+    while row < 16u24 {
+        let column: u24 = 0
+        let cell: ptr<u8> = console.FRAMEBUFFER + row * 80u24
+        while column < 16u24 {
+            *cell = cast<u8>(row * 16u24 + column)
+            cell += 1u24
+            column += 1u24
+        }
+        row += 1u24
     }
 }
 
@@ -73,7 +77,6 @@ fn render() {
     console.set_font(font)
     console.set_text_color(text_color)
     console.set_background_color(background_color)
-    console.fill(console.CHAR_SPACE)
     draw_glyphs()
     console.present()
 }
