@@ -130,4 +130,6 @@
 (field_declaration (identifier) @property)
 (field_initializer (identifier) @property)
 (field_expression (identifier) @variable (identifier) @property)
-(call_expression function: (path (identifier) @function))
+(call_expression
+  function: (path
+    (identifier) @function .))

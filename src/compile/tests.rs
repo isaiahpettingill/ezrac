@@ -1879,6 +1879,24 @@ fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
 }
 
 #[test]
+fn short_intrinsic_aliases_are_known_compiler_functions() {
+    let diagnostics = check_source_diagnostics(
+        "fn main() {\n    let quotient: u8, remainder: u8 = int.divmod(9u8, 4u8)\n    let rotated: u8 = bits.rotate_left(1u8, 1u8)\n}\n",
+        &CompileOptions {
+            source: PathBuf::from("intrinsic-aliases.ezra"),
+            debug_comments: false,
+            default_sdk_symbols: true,
+        },
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("unknown function")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn intrinsic_modules_resolve_for_every_target() {
     for target in [
         "generic-z80-baremetal",

@@ -54,6 +54,8 @@ dependencies = [
  "dcpu16-core",
  "ez80",
  "hashbrown 0.15.5",
+ "libre99-asm",
+ "libre99-core",
  "m6800",
  "m68000",
  "mc6809-core",
@@ -146,7 +148,7 @@ dependencies = [
 [[package]]
 name = "libre99-asm"
 version = "0.1.0"
-source = "git+https://github.com/joelodom/libre99.git?rev=6c86f10bae65f4cc3bdc13289e14bb20af03ab61#6c86f10bae65f4cc3bdc13289e14bb20af03ab61"
+source = "git+https://github.com/isaiahpettingill/libre99.git?rev=6c86f10bae65f4cc3bdc13289e14bb20af03ab61#6c86f10bae65f4cc3bdc13289e14bb20af03ab61"
 dependencies = [
  "libre99-core",
 ]
@@ -154,7 +156,7 @@ dependencies = [
 [[package]]
 name = "libre99-core"
 version = "0.1.0"
-source = "git+https://github.com/joelodom/libre99.git?rev=6c86f10bae65f4cc3bdc13289e14bb20af03ab61#6c86f10bae65f4cc3bdc13289e14bb20af03ab61"
+source = "git+https://github.com/isaiahpettingill/libre99.git?rev=6c86f10bae65f4cc3bdc13289e14bb20af03ab61#6c86f10bae65f4cc3bdc13289e14bb20af03ab61"
 
 [[package]]
 name = "log"

@@ -16,6 +16,7 @@ use ezra::{
         parse_and_resolve_imports_with_sdk_and_overrides, resolve_import_source,
     },
     diagnostic::{Diagnostic, SourcePosition, SourceSpan},
+    intrinsics::{INTRINSIC_DESCRIPTORS, IntrinsicDescriptor, ResultCount},
     layout::parse_layout,
     parser::parse_program,
     project::{LspMode, load_nearest_project_config},
@@ -1112,6 +1113,16 @@ fn collect_binding_types(stmts: &[Stmt], output: &mut BTreeMap<String, String>) 
             Stmt::Let { name, ty, .. } => {
                 output.insert(name.clone(), type_text(ty));
             }
+            Stmt::LetTwo {
+                first_name,
+                first_ty,
+                second_name,
+                second_ty,
+                ..
+            } => {
+                output.insert(first_name.clone(), type_text(first_ty));
+                output.insert(second_name.clone(), type_text(second_ty));
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -1631,6 +1642,14 @@ fn collect_stmt_definition_names(stmts: &[Stmt], names: &mut BTreeSet<String>) {
             Stmt::Let { name, .. } => {
                 names.insert(name.clone());
             }
+            Stmt::LetTwo {
+                first_name,
+                second_name,
+                ..
+            } => {
+                names.insert(first_name.clone());
+                names.insert(second_name.clone());
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -1883,6 +1902,7 @@ fn recovery_identifier(text: &str) -> Option<&str> {
 }
 
 fn add_builtin_modules(index: &mut SymbolIndex, sdk: Option<&SdkResolver>) {
+    add_intrinsic_symbols(index);
     for module in available_modules(sdk) {
         for prefix in module_prefixes(&module) {
             index.modules.insert(prefix);
@@ -1899,6 +1919,69 @@ fn add_builtin_modules(index: &mut SymbolIndex, sdk: Option<&SdkResolver>) {
             },
         );
     }
+}
+
+fn add_intrinsic_symbols(index: &mut SymbolIndex) {
+    for descriptor in INTRINSIC_DESCRIPTORS {
+        let detail = intrinsic_detail(descriptor);
+        for name in
+            std::iter::once(descriptor.canonical_name).chain(descriptor.aliases.iter().copied())
+        {
+            add_symbol(
+                index,
+                SymbolInfo {
+                    label: name.to_owned(),
+                    kind: 3,
+                    detail: detail.replace(descriptor.canonical_name, name),
+                },
+            );
+        }
+    }
+}
+
+fn intrinsic_detail(descriptor: &IntrinsicDescriptor) -> String {
+    let parameters = match descriptor.canonical_name {
+        "ezra.bits.rotate_left" | "ezra.bits.rotate_right" => "value, count",
+        "ezra.bits.test" | "ezra.bits.set" | "ezra.bits.clear" | "ezra.bits.toggle" => {
+            "value, index"
+        }
+        "ezra.bits.extract" => "value, offset, width",
+        "ezra.bits.insert" => "base, value, offset, width",
+        "ezra.bits.byte_swap"
+        | "ezra.bits.reverse"
+        | "ezra.bits.count_ones"
+        | "ezra.bits.leading_zeros"
+        | "ezra.bits.trailing_zeros" => "value",
+        "ezra.int.divmod" => "dividend, divisor",
+        "ezra.int.add_carry" => "a, b, carry_in",
+        "ezra.int.sub_borrow" => "a, b, borrow_in",
+        "ezra.int.widening_mul"
+        | "ezra.int.mul_high"
+        | "ezra.int.saturating_add"
+        | "ezra.int.saturating_sub"
+        | "ezra.int.full_mul" => "a, b",
+        "ezra.mem.copy_nonoverlapping" | "ezra.mem.move" => "destination, source, length",
+        "ezra.mem.fill" => "destination, value, length",
+        "ezra.mem.find_byte" => "data, length, value",
+        "ezra.mem.compare" => "left, right, length",
+        "ezra.mem.load_le16" | "ezra.mem.load_le24" | "ezra.mem.load_be16"
+        | "ezra.mem.load_be24" | "ezra.mem.peek8" => "address",
+        "ezra.mem.store_le16"
+        | "ezra.mem.store_le24"
+        | "ezra.mem.store_be16"
+        | "ezra.mem.store_be24"
+        | "ezra.mem.poke8" => "address, value",
+        _ => "",
+    };
+    let returns = match descriptor.result_count {
+        ResultCount::Zero => "",
+        ResultCount::One => " -> value",
+        ResultCount::Two => " -> value, value",
+    };
+    format!(
+        "compiler intrinsic fn {}({parameters}){returns}",
+        descriptor.canonical_name
+    )
 }
 
 fn available_modules(sdk: Option<&SdkResolver>) -> Vec<String> {

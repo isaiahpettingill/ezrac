@@ -607,12 +607,76 @@ fn layout_symbols_are_available_for_completion_and_hover() {
 }
 
 #[test]
+fn intrinsic_aliases_have_diagnostics_completion_hover_and_signature_help() {
+    let line = "    let quotient: u8, remainder: u8 = int.divmod(9u8, 4u8)";
+    let document = OpenDocument {
+        path: PathBuf::from("intrinsic-lsp.ezra"),
+        text: format!("import ezra.int\nfn main() {{\n{line}\n}}\n"),
+        version: None,
+    };
+
+    let diagnostics = check_document_diagnostics(&document);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("unknown function")),
+        "{diagnostics:?}"
+    );
+
+    let completion_line = "    int.div";
+    let completion_document = OpenDocument {
+        path: PathBuf::from("intrinsic-completion.ezra"),
+        text: format!("import ezra.int\nfn main() {{\n{completion_line}\n}}\n"),
+        version: None,
+    };
+    let completion = completion_items(
+        Some(&completion_document),
+        Position {
+            line: 2,
+            character: utf16_len(completion_line),
+        },
+    );
+    assert!(completion["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.get("label").and_then(Value::as_str) == Some("int.divmod")
+                && item
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .is_some_and(|detail| detail.contains("compiler intrinsic"))
+        })
+    }));
+
+    let call_start = line.find("int.divmod").unwrap() as u32;
+    let hover = hover(
+        Some(&document),
+        Position {
+            line: 2,
+            character: call_start + 5,
+        },
+    );
+    assert!(
+        hover
+            .to_string()
+            .contains("compiler intrinsic fn int.divmod")
+    );
+
+    let signature = signature_help(
+        Some(&document),
+        Position {
+            line: 2,
+            character: utf16_len(line) - 4,
+        },
+    );
+    assert!(signature.to_string().contains("dividend, divisor"));
+}
+
+#[test]
 fn completion_detects_properties_in_a_multiline_if_body() {
     let line = "        player.";
     let document = OpenDocument {
         path: PathBuf::from("multiline-property.ezra"),
         text: format!(
-            "struct Player {\n    x: u8\n    y: u8\n}\nfn main() {{\n    let player: Player = Player {{ x: 0, y: 0 }}\n    if true\n    {{\n{line}\n    }}\n}}\n"
+            "struct Player {{\n    x: u8\n    y: u8\n}}\nfn main() {{\n    let player: Player = Player {{ x: 0, y: 0 }}\n    if true\n    {{\n{line}\n    }}\n}}\n"
         ),
         version: None,
     };

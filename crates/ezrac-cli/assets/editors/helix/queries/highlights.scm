@@ -51,5 +51,7 @@
 (pointer_type "ptr" @type.builtin)
 (function_type "fn" @type.builtin)
 (function_item name: (identifier) @function)
-(call_expression function: (path (identifier) @function))
+(call_expression
+  function: (path
+    (identifier) @function .))
 (struct_item name: (identifier) @type)

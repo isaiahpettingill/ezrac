@@ -1067,10 +1067,11 @@ fn push_unknown_reference(
     output: &mut ReferenceDiagnostics,
 ) {
     if names.contains(name)
+        || function && crate::intrinsics::lookup(name).is_some()
         || default_sdk_symbols
             && matches!(
                 name.split('.').next(),
-                Some("test" | "debug" | "mem" | "ezra")
+                Some("test" | "debug" | "bits" | "int" | "mem" | "ezra")
             )
     {
         return;

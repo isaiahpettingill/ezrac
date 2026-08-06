@@ -920,7 +920,11 @@ fn rejects_catalog_24_bit_scalar_results() {
     )
     .unwrap();
     let error = emit_tms9900_assembly_with_options(&program, test_options()).unwrap_err();
-    assert!(error.message.contains("24-bit"), "{}", error.message);
+    assert!(
+        error.message.contains("must fit in 16 bits"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
