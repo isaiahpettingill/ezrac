@@ -1959,6 +1959,8 @@ fn ez180n_console_builtin_sdk_resolves_for_every_cpu_target() {
             "import ez180n.console
 fn main() {
     ez180n.console.fill(65)
+    ez180n.console.set_text_color(ez180n.console.DEFAULT_TEXT_COLOR)
+    ez180n.console.set_background_color(ez180n.console.DEFAULT_BACKGROUND_COLOR)
     if ez180n.console.button_down(0, ez180n.console.BUTTON_A) {
         ez180n.console.put_char(0, 0, 65)
     }
