@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.34
 
 - Added built-in `ezra.bits`, `ezra.int`, and `ezra.mem` intrinsic catalogs with width-aware bit operations, defined integer helpers, overlap-aware memory operations, explicit-endian access, and volatile/MMIO restrictions.
 - Added zero-, one-, and two-result function syntax (`-> T, U`, two-place `let`, and `return a, b`) without introducing tuples or aggregate returns. Target-specific widths and ABIs reject unsupported combinations.
