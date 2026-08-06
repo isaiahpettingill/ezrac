@@ -110,6 +110,12 @@ struct DidCloseParams {
 }
 
 #[derive(Deserialize)]
+struct DidSaveParams {
+    #[serde(rename = "textDocument")]
+    text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
 struct DidChangeWatchedFilesParams {
     changes: Vec<WatchedFileChange>,
 }
@@ -214,10 +220,12 @@ impl Server {
                 if let Some(id) = message.id {
                     write_response(output, id, Value::Null)?;
                 }
+                return Ok(true);
             }
             "exit" => return Ok(true),
-            "textDocument/didOpen" => self.did_open(message.params, output)?,
-            "textDocument/didChange" => self.did_change(message.params, output)?,
+            "textDocument/didOpen" => self.did_open(message.params)?,
+            "textDocument/didChange" => self.did_change(message.params)?,
+            "textDocument/didSave" => self.did_save(message.params, output)?,
             "textDocument/didClose" => self.did_close(message.params, output)?,
             "textDocument/completion" => {
                 if let Some(id) = message.id {
@@ -309,23 +317,23 @@ impl Server {
         Ok(false)
     }
 
-    fn did_open(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
+    fn did_open(&mut self, params: Value) -> Result<(), String> {
         let params: DidOpenParams = serde_json::from_value(params)
             .map_err(|error| format!("invalid didOpen params: {error}"))?;
         let uri = params.text_document.uri;
         let path = uri_to_path(&uri)?;
         self.documents.insert(
-            uri.clone(),
+            uri,
             OpenDocument {
                 path,
                 text: params.text_document.text,
                 version: Some(params.text_document.version),
             },
         );
-        self.publish_workspace_diagnostics(output)
+        Ok(())
     }
 
-    fn did_change(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
+    fn did_change(&mut self, params: Value) -> Result<(), String> {
         let params: DidChangeParams = serde_json::from_value(params)
             .map_err(|error| format!("invalid didChange params: {error}"))?;
         if let Some(document) = self.documents.get_mut(&params.text_document.uri)
@@ -333,6 +341,15 @@ impl Server {
         {
             document.text = change.text;
             document.version = params.text_document.version;
+        }
+        Ok(())
+    }
+
+    fn did_save(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
+        let params: DidSaveParams = serde_json::from_value(params)
+            .map_err(|error| format!("invalid didSave params: {error}"))?;
+        if !self.documents.contains_key(&params.text_document.uri) {
+            return Ok(());
         }
         self.publish_workspace_diagnostics(output)
     }
@@ -372,8 +389,16 @@ impl Server {
     fn did_close(&mut self, params: Value, output: &mut impl Write) -> Result<(), String> {
         let params: DidCloseParams = serde_json::from_value(params)
             .map_err(|error| format!("invalid didClose params: {error}"))?;
-        self.documents.remove(&params.text_document.uri);
-        self.publish_workspace_diagnostics(output)
+        let uri = params.text_document.uri;
+        self.documents.remove(&uri);
+        if self.published_diagnostic_uris.remove(&uri) {
+            write_notification(
+                output,
+                TextDocumentPublishDiagnostics::METHOD,
+                json!({ "uri": uri, "diagnostics": [] }),
+            )?;
+        }
+        Ok(())
     }
 
     fn did_change_watched_files(
@@ -898,7 +923,11 @@ fn project_layout_diagnostics(
 fn initialize_result() -> Value {
     json!({
         "capabilities": {
-            "textDocumentSync": 1,
+            "textDocumentSync": {
+                "openClose": true,
+                "change": 1,
+                "save": true
+            },
             "completionProvider": { "triggerCharacters": completion_trigger_characters() },
             "hoverProvider": true,
             "definitionProvider": true,

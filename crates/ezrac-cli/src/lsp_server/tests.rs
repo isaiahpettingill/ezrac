@@ -822,6 +822,77 @@ fn initialize_advertises_navigation_and_semantic_tokens() {
     assert_eq!(capabilities["documentSymbolProvider"], true);
     assert_eq!(capabilities["workspaceSymbolProvider"], true);
     assert_eq!(capabilities["semanticTokensProvider"]["full"], true);
+    assert_eq!(capabilities["textDocumentSync"]["change"], 1);
+    assert_eq!(capabilities["textDocumentSync"]["save"], true);
+}
+
+#[test]
+fn changes_are_lightweight_and_saves_publish_diagnostics() {
+    let path =
+        std::env::temp_dir().join(format!("ezrac-lsp-change-save-{}.ezra", std::process::id()));
+    let uri = path_to_uri(&path);
+    let mut server = Server::default();
+    server.documents.insert(
+        uri.clone(),
+        OpenDocument {
+            path,
+            text: "fn main() {}\n".to_owned(),
+            version: Some(1),
+        },
+    );
+
+    let mut output = Vec::new();
+    server
+        .handle_message(
+            Message {
+                id: None,
+                method: "textDocument/didChange".to_owned(),
+                params: json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": "fn main() { let value: u8 = true }\n" }]
+                }),
+            },
+            &mut output,
+        )
+        .unwrap();
+    assert!(output.is_empty());
+    assert_eq!(server.documents.values().next().unwrap().version, Some(2));
+
+    server
+        .handle_message(
+            Message {
+                id: None,
+                method: "textDocument/didSave".to_owned(),
+                params: json!({ "textDocument": { "uri": uri } }),
+            },
+            &mut output,
+        )
+        .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("publishDiagnostics"), "{output}");
+    assert!(output.contains("type mismatch"), "{output}");
+}
+
+#[test]
+fn shutdown_responds_and_stops_without_waiting_for_exit() {
+    let mut server = Server::default();
+    let mut output = Vec::new();
+    let stop = server
+        .handle_message(
+            Message {
+                id: Some(json!(7)),
+                method: "shutdown".to_owned(),
+                params: Value::Null,
+            },
+            &mut output,
+        )
+        .unwrap();
+
+    assert!(stop);
+    assert!(server.shutdown_requested);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("\"id\":7"), "{output}");
+    assert!(output.contains("\"result\":null"), "{output}");
 }
 
 #[test]
