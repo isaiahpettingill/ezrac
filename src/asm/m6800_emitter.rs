@@ -333,16 +333,68 @@ impl Emitter {
 
     fn emit_global_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
         for declaration in &program.declarations {
-            if let Declaration::Global(global) = declaration {
-                let storage = self.model.globals[&global.name];
-                if is_function_pointer_type(&self.model, &global.ty)? {
-                    self.emit_function_pointer_value(&global.value, &global.ty)?;
-                    self.stx(storage.address);
-                } else {
-                    self.require_scalar(&global.ty, "global")?;
-                    self.emit_expr(&global.value, &global.ty)?;
-                    self.staa(storage.address);
+            match declaration {
+                Declaration::Const(constant) if matches!(constant.ty, Type::Array { .. }) => {
+                    let storage = self.model.globals[&constant.name];
+                    self.emit_const_array_initializer(storage, &constant.ty, &constant.value)?;
                 }
+                Declaration::Global(global) => {
+                    let storage = self.model.globals[&global.name];
+                    if is_function_pointer_type(&self.model, &global.ty)? {
+                        self.emit_function_pointer_value(&global.value, &global.ty)?;
+                        self.stx(storage.address);
+                    } else {
+                        self.require_scalar(&global.ty, "global")?;
+                        self.emit_expr(&global.value, &global.ty)?;
+                        self.staa(storage.address);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_const_array_initializer(
+        &mut self,
+        storage: Storage,
+        ty: &Type,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let Type::Array { element, len } = self.model.resolved_type(ty)? else {
+            return Err(Diagnostic::new(
+                "const array initializer requires an array type",
+            ));
+        };
+        let len = u32::try_from(self.model.const_value(&len)?)
+            .map_err(|_| Diagnostic::new("invalid const array length"))?;
+        let Expr::Array(values) = value else {
+            return Err(Diagnostic::new(
+                "const array initializer requires an array literal",
+            ));
+        };
+        let element_size = self.model.type_size(&element)?;
+        for index in 0..len {
+            let element_storage = Storage {
+                address: storage
+                    .address
+                    .checked_add(index.checked_mul(element_size).ok_or_else(|| {
+                        Diagnostic::new("const array initializer address overflow")
+                    })?)
+                    .ok_or_else(|| Diagnostic::new("const array initializer address overflow"))?,
+                size: element_size,
+            };
+            if let Some(value) = values.get(index as usize) {
+                if matches!(self.model.resolved_type(&element)?, Type::Array { .. }) {
+                    self.emit_const_array_initializer(element_storage, &element, value)?;
+                } else {
+                    self.require_scalar(&element, "const array element")?;
+                    self.emit_expr(value, &element)?;
+                    self.staa(element_storage.address);
+                }
+            } else {
+                self.ldaa_imm(0);
+                self.staa(element_storage.address);
             }
         }
         Ok(())
@@ -642,6 +694,7 @@ impl Emitter {
                     self.ldaa(self.binding(name)?.storage.address);
                 }
             }
+            Expr::Index { name, index } => self.emit_array_index(name, index)?,
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, expected)?;
                 match op {
@@ -683,7 +736,6 @@ impl Emitter {
             Expr::String(_)
             | Expr::Array(_)
             | Expr::StructInit { .. }
-            | Expr::Index { .. }
             | Expr::Field { .. }
             | Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
@@ -697,6 +749,55 @@ impl Emitter {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn emit_array_index(&mut self, name: &str, index: &Expr) -> Result<(), Diagnostic> {
+        let binding = self.binding(name)?;
+        let array_ty = self.model.resolved_type(&binding.ty)?;
+        let Type::Array { element, len } = array_ty else {
+            return Err(Diagnostic::new("indexing requires an array"));
+        };
+        let element = *element;
+        let element_size = self.model.type_size(&element)?;
+        if element_size != 1 {
+            return Err(Diagnostic::new(
+                "M6800 array indexing supports one-byte elements only",
+            ));
+        }
+        if let Ok(index_value) = self.model.const_value(index) {
+            let length = self.model.const_value(&len)?;
+            if index_value < 0 || index_value >= length {
+                return Err(Diagnostic::new(format!(
+                    "array index {index_value} is out of bounds for `{name}` length {length}"
+                )));
+            }
+            let address = binding
+                .storage
+                .address
+                .checked_add(
+                    u32::try_from(index_value)
+                        .map_err(|_| Diagnostic::new("array index offset overflow"))?,
+                )
+                .ok_or_else(|| Diagnostic::new("array index offset overflow"))?;
+            self.ldaa(address);
+            return Ok(());
+        }
+
+        let base = u16::try_from(binding.storage.address)
+            .map_err(|_| Diagnostic::new("M6800 array is outside the 16-bit address space"))?;
+        self.line(&format!("    ldx #{base:04X}h"));
+        self.emit_expr(index, &u8_type())?;
+        let loop_label = self.next_label("array_index_loop");
+        let done = self.next_label("array_index_done");
+        self.line(&format!("{loop_label}:"));
+        self.line("    tsta");
+        self.branch_long("beq", &done);
+        self.increment_x();
+        self.line("    deca");
+        self.line(&format!("    bra {loop_label}"));
+        self.line(&format!("{done}:"));
+        self.line("    ldaa 0,x");
         Ok(())
     }
 

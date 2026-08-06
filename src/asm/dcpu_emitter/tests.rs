@@ -55,6 +55,32 @@ fn globals_arrays_structs_pointers_strings_and_mmio_assemble() {
     assert!(!assembly.contains("    and a, 0x00ff"));
 }
 #[test]
+fn initializes_const_char_arrays_and_reads_them_through_runtime_indexes() {
+    let assembly = emit(
+        r#"
+            const LETTERS: [u8; 4] = ['E', 'Z', 'R', 'A']
+            const UNUSED: [u8; 2] = ['x', 'y']
+
+            fn read(index: u16) -> u8 {
+                return LETTERS[index]
+            }
+
+            fn main() {
+                let value: u8 = read(1)
+            }
+        "#,
+    );
+
+    assert!(assembly.contains("__ezra_global_LETTERS:"), "{assembly}");
+    assert!(assembly.contains("__ezra_global_UNUSED:"), "{assembly}");
+    assert!(assembly.contains("set a, 0x0045"), "{assembly}");
+    assert!(assembly.contains("set a, 0x005a"), "{assembly}");
+    let read = &assembly[assembly.find("_read:\n").expect("missing read")..];
+    assert!(read.contains("set a, __ezra_global_LETTERS"), "{read}");
+    assert!(read.contains("set a, [i]"), "{read}");
+}
+
+#[test]
 fn lowers_masked_conditions_without_materializing_booleans() {
     let assembly = emit(
         r#"

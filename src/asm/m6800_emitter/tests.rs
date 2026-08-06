@@ -186,6 +186,46 @@ fn m6809_source_uses_tbir_strength_reduction_and_assembles() {
 }
 
 #[test]
+fn initializes_const_char_arrays_and_reads_them_through_runtime_indexes() {
+    let result = run_main_result(
+        r#"
+            const LETTERS: [u8; 4] = ['E', 'Z', 'R', 'A']
+            const UNUSED: [u8; 2] = ['x', 'y']
+
+            fn read(index: u8) -> u8 {
+                return LETTERS[index]
+            }
+
+            fn main() -> u8 {
+                return read(1)
+            }
+        "#,
+    );
+    assert_eq!(result, b'Z');
+}
+
+#[cfg(feature = "m6809")]
+#[test]
+fn initializes_and_indexes_const_char_arrays_on_m6809() {
+    let program = parse_program(
+        Path::new("m6809_const_array.ezra"),
+        r#"
+            const LETTERS: [u8; 4] = ['E', 'Z', 'R', 'A']
+            const UNUSED: [u8; 2] = ['x', 'y']
+            fn read(index: u8) -> u8 { return LETTERS[index] }
+            fn main() { let value: u8 = read(1) }
+        "#,
+    )
+    .unwrap();
+    let assembly = emit_m6809_assembly_with_options(&program, m6809_options()).unwrap();
+    assert!(assembly.contains("    ldaa #45h"), "{assembly}");
+    assert!(assembly.contains("    ldaa #5Ah"), "{assembly}");
+    assert!(assembly.contains("    ldaa 0,x"), "{assembly}");
+    assemble_subset_with_symbols_at(AssemblerCpu::M6809, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+}
+
+#[test]
 fn emits_original_m6800_constant_shift_instructions_and_strength_reduces_multiply() {
     let program = parse_program(
         Path::new("m6800_shift_test.ezra"),

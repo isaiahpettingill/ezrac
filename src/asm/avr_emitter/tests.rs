@@ -479,6 +479,31 @@ fn aggregate_constants_have_addressable_storage_and_mmio_names_are_writable_plac
 }
 
 #[test]
+fn const_arrays_with_characters_initialize_and_index() {
+    let assembly = emit(
+        r#"
+            volatile mmio OUTPUT: ptr<u8> = 0x0A00
+            const LEVELS: [u8; 2] = ['1', '2']
+            const UNUSED: [u8; 2] = ['x', 'y']
+            global values: [u8; 2] = [0, 0]
+
+            fn read(index: u8) -> u8 { return LEVELS[index] }
+
+            fn main() {
+                let local: [u8; 2] = [3, 4]
+                OUTPUT = read(1)
+                values[0] = local[1]
+            }
+        "#,
+    );
+
+    assert!(assembly.contains("ldi r16, 31h"), "{assembly}");
+    assert!(assembly.contains("ldi r16, 32h"), "{assembly}");
+    assert!(assembly.contains("ldi r16, 78h"), "{assembly}");
+    assert!(assembly.contains("sts 0A00h, r16"), "{assembly}");
+}
+
+#[test]
 fn unrolls_constant_shifts_and_power_of_two_multiplication() {
     let assembly = emit(
         r#"

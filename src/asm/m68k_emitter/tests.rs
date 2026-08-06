@@ -246,6 +246,42 @@ fn emits_and_assembles_pointer_aggregate_and_string_operations() {
 }
 
 #[test]
+fn initializes_const_char_arrays_and_reads_them_through_runtime_indexes() {
+    let program = parse_program(
+        Path::new("m68k_const_array.ezra"),
+        r#"
+            const LETTERS: [u8; 4] = ['E', 'Z', 'R', 'A']
+            const UNUSED: [u8; 2] = ['x', 'y']
+
+            fn read(index: u8) -> u8 {
+                return LETTERS[index]
+            }
+
+            fn main() {
+                let value: u8 = read(1)
+            }
+        "#,
+    )
+    .unwrap();
+    let assembly = emit_m68k_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::M68k,
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+    assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+
+    assert!(assembly.contains("    move.b #$45,d0"), "{assembly}");
+    assert!(assembly.contains("    move.b #$5A,d0"), "{assembly}");
+    let read = &assembly[assembly.find("_read:\n").expect("missing read function")..];
+    assert!(read.contains("    adda.l d0,a0"), "{read}");
+    assert!(read.contains("    move.b (a0),d0"), "{read}");
+}
+
+#[test]
 fn lowers_one_bit_mask_branches_to_btst() {
     let program = parse_program(
         Path::new("test.ezra"),

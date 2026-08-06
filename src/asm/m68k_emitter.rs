@@ -244,12 +244,19 @@ impl Emitter {
 
     fn emit_static_initializers(&mut self, program: &Program) -> Result<(), Diagnostic> {
         for declaration in &program.declarations {
-            let Declaration::Global(global) = declaration else {
-                continue;
-            };
-            let storage = self.model.globals[&global.name];
-            let ty = self.model.resolved_type(&global.ty)?;
-            self.emit_initializer(storage, &ty, &global.value)?;
+            match declaration {
+                Declaration::Const(constant) if matches!(constant.ty, Type::Array { .. }) => {
+                    let storage = self.model.globals[&constant.name];
+                    let ty = self.model.resolved_type(&constant.ty)?;
+                    self.emit_initializer(storage, &ty, &constant.value)?;
+                }
+                Declaration::Global(global) => {
+                    let storage = self.model.globals[&global.name];
+                    let ty = self.model.resolved_type(&global.ty)?;
+                    self.emit_initializer(storage, &ty, &global.value)?;
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

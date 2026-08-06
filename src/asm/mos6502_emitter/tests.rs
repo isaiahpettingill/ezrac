@@ -299,6 +299,31 @@ fn emitted_core_program_assembles() {
 }
 
 #[test]
+fn executes_const_arrays_with_characters_and_preserves_global_local_arrays() {
+    let bus = run(
+        r#"
+            volatile mmio OUTPUT: ptr<u8> = 0xD000
+            const LEVELS: [u8; 2] = ['1', '2']
+            const UNUSED: [u8; 2] = ['x', 'y']
+            global values: [u8; 2] = [0, 0]
+
+            fn read(index: u8) -> u8 { return LEVELS[index] }
+
+            fn main() {
+                let local: [u8; 2] = [3, 4]
+                *OUTPUT = read(1)
+                values[0] = local[1]
+            }
+        "#,
+        2_000,
+    );
+
+    assert_eq!(bus.byte(0xD000), b'2');
+    assert_eq!(bus.byte(0xA000), 4);
+    assert_eq!(bus.byte(0x8002), b'x');
+}
+
+#[test]
 fn complete_language_surface_emits_and_assembles() {
     let assembly = emit(
         r#"

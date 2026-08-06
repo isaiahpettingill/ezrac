@@ -843,12 +843,19 @@ impl Emitter {
             }
         }
         for declaration in &program.declarations {
-            if let Declaration::Global(global) = unwrapped_declaration(declaration) {
-                if self.banked_layout.globals.contains(&global.name) {
-                    continue;
+            match unwrapped_declaration(declaration) {
+                Declaration::Global(global) => {
+                    if self.banked_layout.globals.contains(&global.name) {
+                        continue;
+                    }
+                    let storage = self.model.globals[&global.name];
+                    self.emit_initializer(storage, &global.ty, &global.value)?;
                 }
-                let storage = self.model.globals[&global.name];
-                self.emit_initializer(storage, &global.ty, &global.value)?;
+                Declaration::Const(constant) if matches!(constant.ty, Type::Array { .. }) => {
+                    let storage = self.model.globals[&constant.name];
+                    self.emit_initializer(storage, &constant.ty, &constant.value)?;
+                }
+                _ => {}
             }
         }
         Ok(())

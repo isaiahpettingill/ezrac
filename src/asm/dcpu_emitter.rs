@@ -147,6 +147,16 @@ impl Emitter {
     fn collect_declarations(&mut self, program: &Program) -> Result<(), Diagnostic> {
         for declaration in &program.declarations {
             match unwrapped_declaration(declaration) {
+                Declaration::Const(value) if matches!(value.ty, Type::Array { .. }) => {
+                    self.globals.insert(value.name.clone(), value.ty.clone());
+                    self.global_initializers.push((
+                        value.name.clone(),
+                        value.ty.clone(),
+                        value.value.clone(),
+                    ));
+                    self.constant_types
+                        .insert(value.name.clone(), value.ty.clone());
+                }
                 Declaration::Const(value) => {
                     let constant = self.const_value(&value.value)?;
                     self.constants.insert(value.name.clone(), constant);

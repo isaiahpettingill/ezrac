@@ -308,13 +308,63 @@ impl Emitter {
             }
         }
         for declaration in &program.declarations {
-            let Declaration::Global(global) = unwrapped_declaration(declaration) else {
-                continue;
+            match unwrapped_declaration(declaration) {
+                Declaration::Const(constant) if matches!(constant.ty, Type::Array { .. }) => {
+                    let storage = self.model.globals[&constant.name];
+                    self.emit_const_array_initializer(storage, &constant.ty, &constant.value)?;
+                }
+                Declaration::Global(global) => {
+                    let storage = self.model.globals[&global.name];
+                    let ty = self.model.resolved_type(&global.ty)?;
+                    self.emit_expr(&global.value, &ty)?;
+                    self.store_r0(storage, &ty)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_const_array_initializer(
+        &mut self,
+        storage: Storage,
+        ty: &Type,
+        value: &Expr,
+    ) -> Result<(), Diagnostic> {
+        let Type::Array { element, len } = self.model.resolved_type(ty)? else {
+            return Err(Diagnostic::new(
+                "const array initializer requires an array type",
+            ));
+        };
+        let len = u32::try_from(self.model.const_value(&len)?)
+            .map_err(|_| Diagnostic::new("invalid const array length"))?;
+        let Expr::Array(values) = value else {
+            return Err(Diagnostic::new(
+                "const array initializer requires an array literal",
+            ));
+        };
+        let element_size = self.model.type_size(&element)?;
+        for index in 0..len {
+            let element_storage = Storage {
+                address: storage
+                    .address
+                    .checked_add(index.checked_mul(element_size).ok_or_else(|| {
+                        Diagnostic::new("const array initializer address overflow")
+                    })?)
+                    .ok_or_else(|| Diagnostic::new("const array initializer address overflow"))?,
+                size: element_size,
             };
-            let storage = self.model.globals[&global.name];
-            let ty = self.model.resolved_type(&global.ty)?;
-            self.emit_expr(&global.value, &ty)?;
-            self.store_r0(storage, &ty)?;
+            if let Some(value) = values.get(index as usize) {
+                if matches!(self.model.resolved_type(&element)?, Type::Array { .. }) {
+                    self.emit_const_array_initializer(element_storage, &element, value)?;
+                } else {
+                    self.emit_expr(value, &element)?;
+                    self.store_r0(element_storage, &element)?;
+                }
+            } else {
+                self.load_immediate(0)?;
+                self.store_r0(element_storage, &element)?;
+            }
         }
         Ok(())
     }
@@ -663,6 +713,7 @@ impl Emitter {
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
                 self.load_indirect_r0(ty)?;
             }
+            Expr::Index { name, index } => self.emit_array_index(name, index)?,
             Expr::BankedPointer { pointer, .. } => self.emit_expr(pointer, ty)?,
             Expr::Call { path, args } => self.emit_call(path, args, false)?,
             Expr::Unary { op, expr } => {
@@ -735,7 +786,6 @@ impl Emitter {
             }
             Expr::Access(_)
             | Expr::AddressOfAccess(_)
-            | Expr::Index { .. }
             | Expr::AddressOfIndex { .. }
             | Expr::AddressOfField { .. }
             | Expr::Array(_)
@@ -2149,6 +2199,47 @@ impl Emitter {
         self.line(&format!("{done}:"));
     }
 
+    fn emit_array_index(&mut self, name: &str, index: &Expr) -> Result<(), Diagnostic> {
+        let array_ty = self.model.resolved_type(&self.named_type(name)?)?;
+        let Type::Array { element, len } = array_ty else {
+            return Err(Diagnostic::new("indexing requires an array"));
+        };
+        let storage = self
+            .model
+            .globals
+            .get(name)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(format!("unknown const array `{name}`")))?;
+        let element = *element;
+        let element_size = self.model.type_size(&element)?;
+        if let Ok(index_value) = self.model.const_value(index) {
+            let length = self.model.const_value(&len)?;
+            if index_value < 0 || index_value >= length {
+                return Err(Diagnostic::new(format!(
+                    "array index {index_value} is out of bounds for `{name}` length {length}"
+                )));
+            }
+            let offset = u32::try_from(index_value)
+                .ok()
+                .and_then(|index| index.checked_mul(element_size))
+                .ok_or_else(|| Diagnostic::new("array index offset overflow"))?;
+            return self.load_address_r0(storage.address + offset, &element);
+        }
+
+        self.emit_expr(index, &Type::Named("u16".to_owned()))?;
+        if element_size == 2 {
+            self.line("    sla r0, 1");
+        } else if element_size != 1 {
+            return Err(Diagnostic::new(
+                "TMS9900 dynamic array indexing supports one- and two-byte elements only",
+            ));
+        }
+        self.line(&format!("    li r1, >{:04X}", storage.address));
+        self.line("    a r1, r0");
+        self.load_indirect_r0(&element)?;
+        Ok(())
+    }
+
     fn load_ident(&mut self, name: &str, expected: &Type) -> Result<(), Diagnostic> {
         if let Some(binding) = self.binding(name) {
             return self.load_binding_r0(&binding);
@@ -2351,6 +2442,10 @@ impl Emitter {
             Expr::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
                 Type::Ptr(inner) => Ok(*inner),
                 _ => Err(Diagnostic::new("dereference requires pointer")),
+            },
+            Expr::Index { name, .. } => match self.model.resolved_type(&self.named_type(name)?)? {
+                Type::Array { element, .. } => Ok(*element),
+                _ => Err(Diagnostic::new("indexing requires an array")),
             },
             _ => Err(Diagnostic::new(
                 "expression type is not implemented by the initial TMS9900 source backend",

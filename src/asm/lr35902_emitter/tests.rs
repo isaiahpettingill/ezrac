@@ -301,6 +301,33 @@ fn aggregates_pointers_strings_and_inline_asm_assemble() {
     assert!(assembly.contains("ld a, (hl)") || assembly.contains("ld (hl), a"));
 }
 
+#[cfg(feature = "test-runner")]
+#[test]
+fn executes_const_arrays_with_characters_and_preserves_global_local_arrays() {
+    let source = r#"
+            volatile mmio DEBUG: ptr<u8> = 0xFF80
+            volatile mmio HALT: ptr<u8> = 0xFF82
+            const LEVELS: [u8; 2] = ['1', '2']
+            const UNUSED: [u8; 2] = ['x', 'y']
+            global values: [u8; 2] = [0, 0]
+
+            fn read(index: u8) -> u8 { return LEVELS[index] }
+
+            fn main() {
+                let local: [u8; 2] = [3, 4]
+                *DEBUG = read(1)
+                values[0] = local[1]
+                *DEBUG = values[0]
+                *HALT = 1
+            }
+        "#;
+    let result = run(source, 20_000);
+
+    assert!(result.halted, "{result:?}");
+    assert_eq!(result.debug_output, [b'2', 4]);
+    assert_eq!(result.failure, None);
+}
+
 #[test]
 fn variable_indices_use_direct_scaled_pointer_arithmetic() {
     let assembly = emit(

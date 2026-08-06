@@ -265,9 +265,16 @@ impl Emitter {
             }
         }
         for declaration in &program.declarations {
-            if let Declaration::Global(global) = unwrapped_declaration(declaration) {
-                let storage = self.model.globals[&global.name];
-                self.emit_initializer(storage, &global.ty, &global.value)?;
+            match unwrapped_declaration(declaration) {
+                Declaration::Global(global) => {
+                    let storage = self.model.globals[&global.name];
+                    self.emit_initializer(storage, &global.ty, &global.value)?;
+                }
+                Declaration::Const(constant) if matches!(constant.ty, Type::Array { .. }) => {
+                    let storage = self.model.globals[&constant.name];
+                    self.emit_initializer(storage, &constant.ty, &constant.value)?;
+                }
+                _ => {}
             }
         }
         Ok(())

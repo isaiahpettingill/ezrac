@@ -680,6 +680,52 @@ fn assembles_aggregates_pointers_access_and_memory_helpers() {
 }
 
 #[test]
+fn initializes_const_char_arrays_and_reads_them_through_runtime_indexes() {
+    let assembly = emit_and_assemble(
+        r#"
+            const LETTERS: [u8; 4] = ['E', 'Z', 'R', 'A']
+            global result: u8 = 0
+
+            fn read(index: u8) -> u8 {
+                return LETTERS[index]
+            }
+
+            fn main() {
+                result = read(1)
+            }
+        "#,
+    );
+
+    assert!(
+        assembly.contains("    mov al,045h\n    mov [06000h],al\n"),
+        "{assembly}"
+    );
+    assert!(
+        assembly.contains("    mov al,05Ah\n    mov [06001h],al\n"),
+        "{assembly}"
+    );
+    let read = function_assembly(&assembly, "read");
+    assert!(read.contains("    mov bx,06000h\n"), "{read}");
+    assert!(read.contains("    add bx,ax\n"), "{read}");
+    assert!(read.contains("    mov al,[bx]\n"), "{read}");
+}
+
+#[test]
+fn unused_const_char_arrays_are_not_evaluated_as_scalars() {
+    let assembly = emit_and_assemble(
+        r#"
+            const UNUSED: [u8; 2] = ['x', 'y']
+            fn main() {}
+        "#,
+    );
+
+    assert!(
+        assembly.contains("    mov al,078h\n    mov [06000h],al\n"),
+        "{assembly}"
+    );
+}
+
+#[test]
 fn assembles_ports_inline_asm_interrupt_and_naked_functions() {
     let assembly = emit_and_assemble(
         r#"

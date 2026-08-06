@@ -21,6 +21,7 @@ fn test_options() -> AssemblyOptions {
         code_base: crate::target::Address24::new(0x0100),
         stack_top: crate::target::Address24::new(0xFFFE),
         ram_base: crate::target::Address24::new(0xA000),
+        rodata_base: crate::target::Address24::new(0x8000),
         ..AssemblyOptions::default()
     }
 }
@@ -254,6 +255,32 @@ fn emits_and_executes_scalar_source_on_libre99() {
     }
 
     assert_eq!(ram.read_word(0xA000), 42);
+}
+
+#[test]
+fn initializes_const_char_arrays_and_reads_them_through_runtime_indexes() {
+    let assembly = emit(
+        r#"
+            const LETTERS: [u8; 4] = ['E', 'Z', 'R', 'A']
+            const UNUSED: [u8; 2] = ['x', 'y']
+            global result: u8 = 0
+
+            fn read(index: u8) -> u8 {
+                return LETTERS[index]
+            }
+
+            fn main() {
+                result = read(1)
+            }
+        "#,
+        test_options(),
+    );
+
+    assert!(assembly.contains("li r0, >0045"), "{assembly}");
+    assert!(assembly.contains("li r0, >005A"), "{assembly}");
+    assert!(assembly.contains("li r1, >8000"), "{assembly}");
+    assert!(assembly.contains("a r1, r0"), "{assembly}");
+    assert_eq!(execute(&assembly, 400).read_byte(0xA000), b'Z');
 }
 
 #[test]
