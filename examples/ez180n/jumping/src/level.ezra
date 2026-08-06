@@ -7,6 +7,7 @@ import state
 fn interact_level_0(){
     let player_x: u8, player_y: u8 = player.get_player_pos()
     if player_x == 19 && player_y == console.HEIGHT - 4 {
+        console.set_background_color(22)
         state.LEVEL = 1
     } 
 }

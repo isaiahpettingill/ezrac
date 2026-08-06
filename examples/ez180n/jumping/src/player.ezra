@@ -107,8 +107,8 @@ fn gravity(){
     }
     else {
         set_player_y(FLOOR_Y)
+        DID_JUMP=false
     }
-    DID_JUMP=false
 }
 
 

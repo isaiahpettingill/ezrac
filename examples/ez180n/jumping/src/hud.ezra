@@ -1,17 +1,20 @@
 import ez180n.console
 import helpers
-
+import state
 // HUD
 // ==================================================
 
 global HUD_STATE: u8 = 0
+
+const LEVELS: [u8; 2] = ['1', '2']
 
 pub fn draw_hud() {
     if HUD_STATE == 0 {
         helpers.write_line(1, 1, "DPAD to move, A to jump")
     }
     if HUD_STATE == 1 {
-        helpers.write_line(1, 1, "Level 1 ")
+        helpers.write_line(1, 1, "Level ")
+        console.put_char(6, 1, state.LEVEL)
     }
 
     helpers.write_line(console.WIDTH - 10, 1, helpers.get_lives_string())
