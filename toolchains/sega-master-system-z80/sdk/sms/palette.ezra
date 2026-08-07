@@ -1,0 +1,24 @@
+import sms.vdp
+
+// SMS CRAM colors use --BBGGRR.
+pub const BLACK: u8 = 0x00
+pub const WHITE: u8 = 0x3F
+pub const RED: u8 = 0x03
+pub const GREEN: u8 = 0x0C
+pub const BLUE: u8 = 0x30
+pub const YELLOW: u8 = 0x0F
+pub const CYAN: u8 = 0x3C
+pub const MAGENTA: u8 = 0x33
+
+pub fn set_color(index: u8, color: u8) {
+    vdp.set_cram_write_address(index)
+    vdp.write_data(color)
+}
+
+pub fn set_background(index: u8, color: u8) {
+    set_color(index & 0x0F, color)
+}
+
+pub fn set_sprite(index: u8, color: u8) {
+    set_color(0x10 | (index & 0x0F), color)
+}

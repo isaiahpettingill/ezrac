@@ -56,6 +56,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
 | `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | `nes.*` | Optional `mos6502` feature; EZRA source, bundled SDK, and raw assembly NROM-128 target |
+| `sega-master-system-z80` | 3 | Z80 | 16 | `.sms` | `sms.*` | Fixed 32 KiB export-SMS source target; mapper and interrupt runtime pending |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
@@ -405,6 +406,16 @@ cargo run -- build examples/nes-2a03/hello-world/helloWorld.asm
 ```
 
 Run the resulting `target/nes-2a03/helloWorld.nes` in an NES emulator. The target currently has no emulator-backed NES test runner.
+
+## Sega Master System
+
+`sega-master-system-z80` builds a fixed 32 KiB export-SMS `.sms` ROM. The packager writes the standard header at `$7FF0`, pads unused ROM with `$FF`, and installs reset, IM 1, and NMI return stubs before source-generated code at `$0069`. Bundled `sms.*` modules provide polling VBlank, VDP, mode-4 video, palette, and memory constants. Build [`examples/sega-master-system/source-hello`](../examples/sega-master-system/source-hello) with:
+
+```sh
+cargo run -- build examples/sega-master-system/source-hello/src/main.ezra
+```
+
+Mapper control, frame interrupts, sprites, input, PSG, SRAM, Game Gear, and emulator-backed runtime testing are not implemented. See [`targets/sega-master-system.md`](targets/sega-master-system.md).
 
 ## Nintendo Game Boy
 

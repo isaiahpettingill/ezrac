@@ -1,0 +1,43 @@
+import sms.vdp
+
+pub const SCREEN_WIDTH_TILES: u8 = 32
+pub const SCREEN_HEIGHT_TILES: u8 = 28
+pub const NAME_TABLE_BASE: u16 = 0x3800
+pub const SPRITE_TABLE_BASE: u16 = 0x3F00
+pub const TILE_BYTES: u16 = 32
+
+// Initializes the normal 256x192 mode-4 display with rendering disabled.
+pub fn init_mode4() {
+    vdp.write_register(0, 0x04)
+    vdp.write_register(1, 0x00)
+    vdp.write_register(2, 0x0E)
+    vdp.write_register(5, 0x7E)
+    vdp.write_register(6, 0x00)
+    vdp.write_register(7, 0x00)
+    vdp.write_register(8, 0x00)
+    vdp.write_register(9, 0x00)
+    vdp.write_register(10, 0xFF)
+}
+
+pub fn enable_display() {
+    vdp.write_register(1, 0x40)
+}
+
+pub fn disable_display() {
+    vdp.write_register(1, 0x00)
+}
+
+pub fn set_scroll(x: u8, y: u8) {
+    vdp.write_register(8, x)
+    vdp.write_register(9, y)
+}
+
+pub fn upload_tile(tile: u16, source: ptr<u8>) {
+    vdp.write_vram(tile << 5, source, TILE_BYTES)
+}
+
+pub fn set_name_table_entry(index: u16, value: u16) {
+    vdp.set_vram_write_address(NAME_TABLE_BASE + (index << 1))
+    vdp.write_data(cast<u8>(value))
+    vdp.write_data(cast<u8>(value >> 8))
+}

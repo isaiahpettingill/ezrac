@@ -187,6 +187,19 @@ fn resolves_bare_targets_without_default_sdk_symbols() {
     assert!(!target.default_sdk_symbols);
 }
 
+#[test]
+fn resolves_sega_master_system_z80_target_profile() {
+    let profile = resolve_target_profile(Some("sega-master-system-z80")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Z80);
+    assert_eq!(profile.output_format, OutputFormat::SmsRom);
+    assert_eq!(profile.output_format.extension(), "sms");
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert!(profile.default_sdk_symbols);
+    assert_eq!(parse_output_format("sms"), Ok(OutputFormat::SmsRom));
+}
+
 #[cfg(feature = "mos6502")]
 #[test]
 fn resolves_nes_2a03_target_profile() {

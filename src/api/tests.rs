@@ -143,6 +143,20 @@ fn compiles_nes_source_with_the_ricoh_2a03_backend() {
     assert!(compilation.assembly.contains("__ezra_start:"));
 }
 
+#[test]
+fn compiles_all_builtin_sms_sdk_modules() {
+    let source = "import sms.system\nimport sms.vdp\nimport sms.video\nimport sms.palette\nimport sms.memory\nfn main() { video.init_mode4(); palette.set_background(0, palette.BLUE); video.set_name_table_entry(0, 0); system.wait_vblank(); let status: u8 = vdp.read_status(); if status != 0 { video.enable_display() } }";
+    let compilation = compile_source_to_assembly(
+        source,
+        &CompileRequest::new("memory.ezra", "sega-master-system-z80"),
+    )
+    .unwrap();
+
+    assert!(compilation.assembly.contains("out (BEh), a"));
+    assert!(compilation.assembly.contains("in a, (BFh)"));
+    assert!(compilation.assembly.contains("ld sp, DFF0h"));
+}
+
 #[cfg(feature = "mos6502")]
 #[test]
 fn compiles_all_builtin_nes_sdk_modules() {

@@ -1,0 +1,7 @@
+[project]
+name = "sms-source-hello"
+
+[build]
+input = "src/main.ezra"
+target = "sega-master-system-z80"
+executable = "source-hello"

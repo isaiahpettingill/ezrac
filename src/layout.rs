@@ -1,7 +1,7 @@
 use crate::target::{
     Address24, AssemblerCpu, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
-    EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE, ez180n_cpu_id,
-    is_ez180n_target, is_msdos_i8086_target,
+    EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
+    SEGA_MASTER_SYSTEM_Z80_TARGET, ez180n_cpu_id, is_ez180n_target, is_msdos_i8086_target,
 };
 use crate::{compat::prelude::*, diagnostic::Diagnostic};
 use pest::{Parser, iterators::Pair};
@@ -104,6 +104,8 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::commodore64_6502()
     } else if target.starts_with("nes-") {
         Layout::nes_2a03()
+    } else if target == SEGA_MASTER_SYSTEM_Z80_TARGET {
+        Layout::sega_master_system_z80()
     } else if target.starts_with("ti99-4a-tms9900") {
         Layout::ti99_4a_tms9900()
     } else if target.starts_with("arduboy-") {
@@ -608,6 +610,66 @@ impl Layout {
                 symbol("TI99_VDP_CONTROL", Address24::new(0x8C02)),
                 symbol("TI99_GROM_READ", Address24::new(0x9800)),
                 symbol("TI99_GROM_WRITE", Address24::new(0x9C00)),
+            ],
+        }
+    }
+
+    pub fn sega_master_system_z80() -> Self {
+        Self {
+            name: "sega_master_system_z80".to_owned(),
+            load: Address24::new(0x0000),
+            entry: Address24::new(0x0069),
+            stack: Address24::new(0xDFF0),
+            regions: vec![
+                region(
+                    "rom",
+                    0x0000,
+                    0x7FEF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("header", 0x7FF0, 0x7FFF, &[RegionFlags::READ]),
+                region(
+                    "slot2",
+                    0x8000,
+                    0xBFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region(
+                    "ram",
+                    0xC000,
+                    0xDFEF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "stack",
+                    0xDFF0,
+                    0xDFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "ram_mirror",
+                    0xE000,
+                    0xFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+            ],
+            sections: vec![
+                section(".header", "header", 1),
+                section(".text", "rom", 1),
+                section(".rodata", "rom", 1),
+                section(".data", "ram", 1),
+                section(".bss", "ram", 1),
+                section(".assets", "slot2", 1),
+                section(".scratch", "ram", 1),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x0000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x0069)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x0069)),
+                symbol("EZRA_STACK_TOP", Address24::new(0xDFF0)),
+                symbol("EZRA_RAM_BASE", Address24::new(0xC000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x0000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x8000)),
             ],
         }
     }

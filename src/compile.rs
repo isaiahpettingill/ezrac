@@ -1753,6 +1753,30 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target.is_some_and(|target| target == "sega-master-system-z80") {
+        match import {
+            "sms.system" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/system.ezra"),
+                "sms.system",
+            )),
+            "sms.vdp" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/vdp.ezra"),
+                "sms.vdp",
+            )),
+            "sms.video" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/video.ezra"),
+                "sms.video",
+            )),
+            "sms.palette" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/palette.ezra"),
+                "sms.palette",
+            )),
+            "sms.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/memory.ezra"),
+                "sms.memory",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(|target| target.starts_with("nes-")) {
         match import {
             "nes.ppu" => Some(builtin_sdk_utf8(
@@ -1938,6 +1962,11 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "nes.audio",
         "nes.timing",
         "nes.memory",
+        "sms.system",
+        "sms.vdp",
+        "sms.video",
+        "sms.palette",
+        "sms.memory",
         "agon.buffers",
         "agon.console",
         "agon.mos",

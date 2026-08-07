@@ -1,0 +1,9 @@
+pub const WORK_RAM_START: u16 = 0xC000
+pub const WORK_RAM_END: u16 = 0xDFFF
+pub const APPLICATION_RAM_END: u16 = 0xDFEF
+pub const STACK_TOP: u16 = 0xDFF0
+
+pub const MAPPER_RAM_CONTROL: u16 = 0xFFFC
+pub const MAPPER_SLOT0: u16 = 0xFFFD
+pub const MAPPER_SLOT1: u16 = 0xFFFE
+pub const MAPPER_SLOT2: u16 = 0xFFFF

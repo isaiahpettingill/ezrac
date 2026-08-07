@@ -1,0 +1,39 @@
+// Mode 4 VDP ports. VDP commands are written low byte first.
+pub port DATA: u8 = 0xBE
+pub port CONTROL: u8 = 0xBF
+pub port STATUS: u8 = 0xBF
+
+pub const STATUS_VBLANK: u8 = 0x80
+
+pub fn read_status() -> u8 {
+    return in STATUS
+}
+
+pub fn write_data(value: u8) {
+    out DATA, value
+}
+
+pub fn set_vram_write_address(address: u16) {
+    out CONTROL, cast<u8>(address)
+    out CONTROL, 0x40 | (cast<u8>(address >> 8) & 0x3F)
+}
+
+pub fn set_cram_write_address(address: u8) {
+    out CONTROL, address & 0x3F
+    out CONTROL, 0xC0
+}
+
+pub fn write_register(register: u8, value: u8) {
+    out CONTROL, value
+    out CONTROL, 0x80 | (register & 0x0F)
+}
+
+pub fn write_vram(address: u16, source: ptr<u8>, count: u16) {
+    set_vram_write_address(address)
+
+    let index: u16 = 0
+    while index < count {
+        write_data(*(source + index))
+        index = index + 1
+    }
+}

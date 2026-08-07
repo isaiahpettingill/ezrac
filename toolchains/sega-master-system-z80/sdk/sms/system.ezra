@@ -1,0 +1,11 @@
+import sms.vdp
+
+// This first SDK pass polls VDP status. It does not enable Z80 interrupts.
+pub fn wait_vblank() {
+    while (vdp.read_status() & vdp.STATUS_VBLANK) == 0 {}
+}
+
+// Kept as the frame-loop API name. This is polling, not the Z80 HALT instruction.
+pub fn halt_until_frame() {
+    wait_vblank()
+}

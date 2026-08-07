@@ -3095,6 +3095,14 @@ fn print_targets() {
             sdk: "nes.*",
             status: "EZRA source and raw assembly NROM-128 target",
         },
+        TargetRow {
+            triple: "sega-master-system-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "sms",
+            sdk: "sms.*",
+            status: "fixed 32 KiB export-SMS source target",
+        },
         #[cfg(feature = "tms9900")]
         TargetRow {
             triple: "ti99-4a-tms9900",

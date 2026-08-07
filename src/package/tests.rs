@@ -63,6 +63,50 @@ fn rejects_nes_images_with_the_wrong_mapper_or_size() {
 }
 
 #[test]
+fn packages_sms_code_as_a_padded_32k_rom_with_standard_header() {
+    let code = [0xF3, 0x31, 0xF0, 0xDF];
+    let image = package_executable(
+        &PackageRequest::new("sega-master-system-z80", OutputFormat::SmsRom, 0, 0x0069),
+        &code,
+    )
+    .unwrap();
+
+    assert_eq!(image.len(), 0x8000);
+    assert_eq!(&image[..3], &[0xC3, 0x69, 0x00]);
+    assert_eq!(&image[0x0038..0x003A], &[0xED, 0x4D]);
+    assert_eq!(&image[0x0066..0x0068], &[0xED, 0x45]);
+    assert_eq!(&image[0x0069..0x0069 + code.len()], &code);
+    assert!(
+        image[0x0069 + code.len()..0x7FF0]
+            .iter()
+            .all(|byte| *byte == 0xFF)
+    );
+    assert_eq!(&image[0x7FF0..0x7FF8], b"TMR SEGA");
+    assert_eq!(&image[0x7FF8..0x7FFA], &[0xFF, 0xFF]);
+    assert_eq!(&image[0x7FFC..0x7FFF], &[0, 0, 0]);
+    assert_eq!(image[0x7FFF], 0x4C);
+    let checksum = image[..0x7FF0]
+        .iter()
+        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
+    assert_eq!(u16::from_le_bytes([image[0x7FFA], image[0x7FFB]]), checksum);
+}
+
+#[test]
+fn rejects_sms_code_that_overlaps_the_rom_header() {
+    let error = package_executable(
+        &PackageRequest::new("sega-master-system-z80", OutputFormat::SmsRom, 0, 0x0069),
+        &vec![0; 0x7FF0 - 0x0069 + 1],
+    )
+    .unwrap_err();
+
+    assert!(
+        error.message.contains("before the ROM header"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn packages_agon_mos_in_memory() {
     let image = package_executable(
         &PackageRequest::new("agonlight-mos-ez80", OutputFormat::RawBin, 0x40000, 0x40045),

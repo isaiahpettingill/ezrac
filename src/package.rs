@@ -223,6 +223,7 @@ pub fn package_executable_with_context(
         OutputFormat::Commodore64Prg => commodore64_prg_bytes(request, code),
         OutputFormat::Commodore64Crt => commodore64_crt_bytes(request, code),
         OutputFormat::NesRom => nes_rom_bytes(request, context, code),
+        OutputFormat::SmsRom => sms_rom_bytes(request, code),
         OutputFormat::Ti8ek | OutputFormat::Ti8xk => Err(PackageError::new(format!(
             "TI flash application output `.{}` is not implemented; use `.8xp` protected-program output",
             request.output_format.extension()
@@ -305,6 +306,47 @@ fn nes_rom_bytes(
         }
     }
     Ok(code.to_vec())
+}
+
+fn sms_rom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
+    const IMAGE_SIZE: usize = 0x8000;
+    const ENTRY_OFFSET: usize = 0x0069;
+    const HEADER_OFFSET: usize = 0x7FF0;
+
+    if request.target != "sega-master-system-z80" {
+        return Err(PackageError::new(format!(
+            "target `{}` does not support Sega Master System `.sms` output",
+            request.target
+        )));
+    }
+    if request.load_addr != 0 || request.entry_addr != ENTRY_OFFSET as u32 {
+        return Err(PackageError::new(
+            "Sega Master System ROM layouts must load at 0x0000 and enter at 0x0069",
+        ));
+    }
+    if code.len() > HEADER_OFFSET - ENTRY_OFFSET {
+        return Err(PackageError::new(format!(
+            "Sega Master System program code must fit in {} bytes before the ROM header, got {}",
+            HEADER_OFFSET - ENTRY_OFFSET,
+            code.len()
+        )));
+    }
+
+    let mut image = vec![0xFF; IMAGE_SIZE];
+    image[..3].copy_from_slice(&[0xC3, 0x69, 0x00]); // JP $0069
+    image[0x0038..0x003A].copy_from_slice(&[0xED, 0x4D]); // RETI
+    image[0x0066..0x0068].copy_from_slice(&[0xED, 0x45]); // RETN
+    image[ENTRY_OFFSET..ENTRY_OFFSET + code.len()].copy_from_slice(code);
+    let checksum = image[..HEADER_OFFSET]
+        .iter()
+        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
+
+    image[HEADER_OFFSET..HEADER_OFFSET + 8].copy_from_slice(b"TMR SEGA");
+    image[HEADER_OFFSET + 8..HEADER_OFFSET + 10].copy_from_slice(&[0xFF, 0xFF]);
+    image[HEADER_OFFSET + 10..HEADER_OFFSET + 12].copy_from_slice(&checksum.to_le_bytes());
+    image[HEADER_OFFSET + 12..HEADER_OFFSET + 15].fill(0);
+    image[HEADER_OFFSET + 15] = 0x4C; // Export SMS, 32 KiB ROM.
+    Ok(image)
 }
 
 fn commodore64_prg_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {

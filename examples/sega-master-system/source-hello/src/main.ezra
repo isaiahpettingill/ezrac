@@ -1,0 +1,13 @@
+import sms.palette
+import sms.system
+import sms.video
+
+fn main() {
+    video.init_mode4()
+    palette.set_background(0, palette.BLUE)
+    video.enable_display()
+
+    loop {
+        system.halt_until_frame()
+    }
+}
