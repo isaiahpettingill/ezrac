@@ -31,10 +31,12 @@ bank_files = ["assets/page2.bin", "assets/page3.bin"]
 
 The packager emits the configured ROM capacity, places each bank file in a 16 KiB page starting at page 2, writes `TMR SEGA` at `$7FF0`, calculates the checksum across all pages outside the header, and writes the matching export-Game-Gear system and ROM-size nibbles. For example, 32 KiB uses `$7C` and 64 KiB uses `$7E`.
 
-Build the example with:
+Build the basic example with:
 
 ```sh
 cargo run -- build examples/sega-game-gear/source-hello/src/main.ezra
 ```
+
+The [`banked-scenes`](../../examples/sega-game-gear/banked-scenes) example maps tile scenes from pages 2 and 3 and switches them with the two action buttons.
 
 Generated executable code remains fixed below `$7FF0`; banked executable functions are not supported. Cartridge SRAM, interrupt callbacks, and emulator-backed mapper tests are not implemented yet.

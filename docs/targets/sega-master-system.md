@@ -10,7 +10,7 @@
 - The bundled SDK provides `sms.vdp`, `sms.video`, `sms.palette`, `sms.system`, `sms.memory`, and `sms.input`.
 - `sms.input` supports two standard SMS pads. `read_player1()` and `read_player2()` return active-high `UP`, `DOWN`, `LEFT`, `RIGHT`, `BUTTON_1`, and `BUTTON_2` masks.
 - `sms.system.wait_vblank()` polls VDP status. `halt_until_frame()` is an alias and does not execute the Z80 `HALT` instruction.
-- See [`examples/sega-master-system/source-hello`](../../examples/sega-master-system/source-hello) and [`examples/sega-game-gear/source-hello`](../../examples/sega-game-gear/source-hello).
+- See [`examples/sega-master-system/source-hello`](../../examples/sega-master-system/source-hello), [`examples/sega-master-system/banked-scenes`](../../examples/sega-master-system/banked-scenes), [`examples/sega-game-gear/source-hello`](../../examples/sega-game-gear/source-hello), and [`examples/sega-game-gear/banked-scenes`](../../examples/sega-game-gear/banked-scenes).
 
 ## Scope
 

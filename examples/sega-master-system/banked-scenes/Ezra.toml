@@ -1,0 +1,11 @@
+[project]
+name = "sms-banked-scenes"
+
+[build]
+input = "src/main.ezra"
+target = "sega-master-system-z80"
+executable = "banked-scenes"
+
+[sega]
+rom_size_kib = 64
+bank_files = ["assets/scene-a.bin", "assets/scene-b.bin"]

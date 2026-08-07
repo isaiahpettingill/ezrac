@@ -1,0 +1,54 @@
+import gg.input
+import gg.palette
+import gg.viewport
+import sms.bank
+import sms.system
+import sms.video
+
+fn load_scene(page: u8) {
+    bank.select_slot2(page)
+    let source: ptr<u8> = cast<ptr<u8>>(cast<u24>(bank.SLOT2_START))
+    video.upload_tile(1, source)
+    video.upload_tile(2, source + 32)
+    video.upload_tile(3, source + 64)
+    video.upload_tile(4, source + 96)
+
+    let y: u8 = 0
+    while y < viewport.VIEWPORT_HEIGHT_TILES {
+        let x: u8 = 0
+        while x < viewport.VIEWPORT_WIDTH_TILES {
+            let tile: u16 = 1 + (cast<u16>(x + y) & 3)
+            video.set_name_table_entry(viewport.name_table_index(x, y), tile)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    if page == 2 {
+        palette.set_background(0, palette.BLUE)
+        palette.set_background(1, palette.WHITE)
+        palette.set_background(2, palette.CYAN)
+        palette.set_background(3, palette.YELLOW)
+    } else {
+        palette.set_background(0, palette.RED)
+        palette.set_background(1, palette.WHITE)
+        palette.set_background(2, palette.MAGENTA)
+        palette.set_background(3, palette.YELLOW)
+    }
+}
+
+fn main() {
+    video.init_mode4()
+    load_scene(2)
+    video.enable_display()
+
+    loop {
+        system.wait_vblank()
+        let buttons: u8 = input.read_buttons()
+        if (buttons & input.BUTTON_1) != 0 {
+            load_scene(2)
+        } else if (buttons & input.BUTTON_2) != 0 {
+            load_scene(3)
+        }
+    }
+}
