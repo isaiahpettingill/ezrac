@@ -353,6 +353,9 @@ section .text
     ld iy, 040000h
     ld iy, 040000h
     ld b, a
+    ld c, c
+    ld a, 03h
+    ld b, a
 "#,
     );
 
@@ -360,7 +363,11 @@ section .text
     assert_eq!(asm.matches("    ld hl, 040000h").count(), 1, "{asm}");
     assert_eq!(asm.matches("    ld e, 02h").count(), 1, "{asm}");
     assert_eq!(asm.matches("    ld iy, 040000h").count(), 1, "{asm}");
-    assert!(asm.contains("    ld b, a"), "{asm}");
+    assert_eq!(asm.matches("    ld b, a").count(), 2, "{asm}");
+    assert!(!asm.contains("    ld c, c"), "{asm}");
+
+    let disabled = peephole_cleanup_with_ranges("    ld b, a\n    ld b, a\n", &[], false);
+    assert_eq!(disabled.matches("    ld b, a").count(), 2, "{disabled}");
 }
 
 #[test]
@@ -378,6 +385,7 @@ _main:
     ret
 "#,
         &[(0x040000, 2)],
+        true,
     );
 
     assert_eq!(asm.matches("    ld a, (040000h)").count(), 2, "{asm}");
@@ -426,6 +434,7 @@ fn peephole_removes_proven_storage_reload_pairs_only() {
     ; end asm
 "#,
         &[(0x040000, 1), (0x040001, 3), (0x040004, 1)],
+        true,
     );
 
     assert_eq!(asm.matches("    ld a, (040000h)").count(), 2, "{asm}");

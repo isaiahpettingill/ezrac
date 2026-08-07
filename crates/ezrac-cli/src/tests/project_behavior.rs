@@ -120,6 +120,9 @@ fn build_uses_project_input_when_path_is_omitted() {
         assembler_cpu: None,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let expected_base = root.join("target/cpm-2.2-z80/demo");
@@ -160,6 +163,9 @@ fn build_builds_every_configured_project_target() {
         assembler_cpu: None,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -195,6 +201,9 @@ fn explicit_build_target_overrides_project_target_array() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -307,6 +316,9 @@ fn commands_use_ezra_toml_target_and_layout() {
         default_sdk_symbols: true,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -334,6 +346,9 @@ fn cli_target_overrides_project_target() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ti84plusce-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -389,6 +404,9 @@ fn source_less_build_finds_the_nearest_ancestor_project() {
         assembler_cpu: None,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     assert_eq!(outputs.executable, root.join("target/cpm-2.2-z80/demo.com"));

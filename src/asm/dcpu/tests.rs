@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn words(bytes: &[u8]) -> Vec<u16> {

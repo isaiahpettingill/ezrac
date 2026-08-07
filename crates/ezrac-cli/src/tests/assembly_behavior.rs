@@ -261,6 +261,9 @@ fn assembly_build_can_reference_layout_symbols() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("cpm-2.2-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -294,6 +297,9 @@ fn assembly_build_reports_source_location_for_assembler_errors() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("cpm-2.2-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
 
@@ -333,6 +339,9 @@ fn assembly_build_maps_layout_sections_and_includes() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("cpm-2.2-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let map = std::fs::read_to_string(outputs.map).unwrap();
@@ -488,6 +497,9 @@ fn assembly_errors_in_nested_includes_report_included_file() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("cpm-2.2-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
 
@@ -539,6 +551,9 @@ fn assembly_build_respects_custom_layout_entry() {
         assembler_cpu: None,
         layout_path: Some(layout_path.clone()),
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let map = std::fs::read_to_string(outputs.map).unwrap();
@@ -563,6 +578,11 @@ fn bare_assembly_targets_cover_each_cpu_mode() {
         ("bare-i8080", "mvi a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
         ("bare-i8085", "rim\nsim\nret\n", vec![0x20, 0x30, 0xC9]),
         ("bare-z80", "ld a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
+        (
+            "bare-r800",
+            "mulub a, b\nmuluw hl, sp\nret\n",
+            vec![0xED, 0xC1, 0xED, 0xF3, 0xC9],
+        ),
         ("bare-z80n", "ld a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
         ("bare-z180", "mlt bc\nret\n", vec![0xED, 0x4C, 0xC9]),
         ("bare-ez80", "ld a, 42h\nret\n", vec![0x3E, 0x42, 0xC9]),
@@ -784,6 +804,9 @@ fn m6800_target_builds_ezra_source() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-m6800".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 

@@ -56,7 +56,14 @@ pub fn emit_m68k_assembly_with_options(
     Emitter::new(model, options.clone())?
         .emit(&lowered_program)
         .map(|asm| {
-            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M68k);
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+            {
+                strip_unreachable_generated_routines(&asm, RoutineProfile::M68k)
+            } else {
+                asm
+            };
             with_readability_comments(asm, program, &options, "m68k", &source_comments)
         })
 }

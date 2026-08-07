@@ -72,6 +72,12 @@ pub fn emit_mos6502_assembly_with_options(
     Emitter::new(model, options.clone())
         .emit(&lowered_program)
         .map(|asm| {
+            if !options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+            {
+                return asm;
+            }
             let roots = asm
                 .lines()
                 .filter_map(|line| line.trim().strip_suffix(':'))
@@ -151,6 +157,7 @@ struct Emitter {
     r2: Storage,
     c64_executable: bool,
     cpu: CpuFamily,
+    dead_code_elimination: bool,
 }
 
 impl Emitter {
@@ -182,6 +189,9 @@ impl Emitter {
             r2,
             c64_executable: options.c64_executable,
             cpu: options.cpu,
+            dead_code_elimination: options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination),
         }
     }
 
@@ -196,7 +206,11 @@ impl Emitter {
                 _ => None,
             })
             .collect();
-        let emitted_functions = reachable_function_names(program, &self.model);
+        let emitted_functions = if self.dead_code_elimination {
+            reachable_function_names(program, &self.model)
+        } else {
+            self.functions.keys().cloned().collect()
+        };
         let function_references = function_pointer_references(program, &self.model)
             .into_iter()
             .filter(|name| emitted_functions.contains(name))

@@ -72,6 +72,8 @@ pub struct CompileRequest {
     pub debug_comments: bool,
     /// Enable default target SDK symbols.
     pub default_sdk_symbols: bool,
+    /// Optimization level and per-pass overrides.
+    pub optimization: crate::optimization::OptimizationOptions,
 }
 
 impl CompileRequest {
@@ -83,6 +85,7 @@ impl CompileRequest {
             sdk_paths: Vec::new(),
             debug_comments: false,
             default_sdk_symbols: true,
+            optimization: crate::optimization::OptimizationOptions::default(),
         }
     }
 
@@ -1479,12 +1482,13 @@ fn compile_source_to_assembly_with_overrides(
         &sdk,
         source_overrides,
     )?;
-    let assembly_options = assembly_options_for_target(
+    let mut assembly_options = assembly_options_for_target(
         &request.target,
         target.triple.cpu,
         request.debug_comments,
         request.default_sdk_symbols,
     );
+    assembly_options.optimization = request.optimization.clone();
     let assembly = emit_source_assembly(&program, assembly_options)?;
     validate_generated_assembly(&assembly, target.triple.cpu, &layout)?;
 
@@ -1539,6 +1543,7 @@ pub fn assembly_options_for_layout(
             || target.starts_with("ti83premiumce-ez80"),
         arduboy_executable: target.starts_with("arduboy-"),
         gameboy_banking: None,
+        optimization: defaults.optimization.clone(),
         load_addr: symbol("EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: symbol("EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: symbol("EZRA_CODE_BASE").unwrap_or(layout.entry),

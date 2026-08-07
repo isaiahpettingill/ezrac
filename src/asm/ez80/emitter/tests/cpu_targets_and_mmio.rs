@@ -82,6 +82,63 @@ fn emits_and_runs_port_io_for_each_supported_cpu_form() {
 }
 
 #[test]
+fn r800_codegen_uses_native_multiply_instructions() {
+    let source = r#"
+        fn multiply8(left: u8, right: u8) -> u8 {
+            return left * right
+        }
+
+        fn multiply16(left: u16, right: u16) -> u16 {
+            return left * right
+        }
+
+        fn main() {
+            test.assert_eq_u8(multiply8(12, 10), 120, 1)
+            test.assert_eq_u16(multiply16(1000, 300), 0x93E0, 2)
+            test.pass()
+        }
+    "#;
+    let program = parse_program(Path::new("r800-multiply.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::R800,
+            default_sdk_symbols: true,
+            ram_base: Address24::new(0x2000),
+            stack_top: Address24::new(0xF000),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(asm.contains("; target: R800"), "{asm}");
+    assert!(
+        asm.contains("__ezra_mul_u8:\n    mulub a, c\n    ld a, l\n    ret"),
+        "{asm}"
+    );
+    assert!(
+        asm.contains("__ezra_mul_u16:\n    muluw hl, bc\n    ret"),
+        "{asm}"
+    );
+    crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::R800, &asm, 0x0100)
+        .unwrap_or_else(|error| panic!("R800 codegen did not assemble: {error}\n{asm}"));
+    let run = crate::vm::run_assembly_test_with_cpu_options_at(
+        CpuFamily::R800,
+        &asm,
+        &TestRunOptions {
+            instruction_budget: 20_000,
+            initial_ports: Vec::new(),
+            initial_memory: Vec::new(),
+            stack_top: 0xF000,
+        },
+        0x0100,
+    )
+    .unwrap();
+    assert!(run.halted, "{run:?}\n{asm}");
+    assert_eq!(run.result_code, 0, "{run:?}\n{asm}");
+}
+
+#[test]
 fn emits_and_runs_generic_hardware_port_examples() {
     let source = r#"
             port PAD1_LO: u8 = 0x01

@@ -1,4 +1,3 @@
-
 use alloc::{boxed::Box, string::ToString, vec};
 
 use crate::ast::{AsmInput, AsmOutput, BinaryOp, Type};

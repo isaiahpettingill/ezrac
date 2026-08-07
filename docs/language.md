@@ -103,7 +103,7 @@ Supported predicates:
 ```text
 target("full-target-triple")
 target_family("first-target-part")
-cpu("ez80" | "z80" | "z80n" | "z180" | "i8080" | "i8085" | "lr35902")
+cpu("ez80" | "z80" | "r800" | "z80n" | "z180" | "i8080" | "i8085" | "lr35902")
 vendor("second-target-part")
 os("mos" | "cpm" | "baremetal")
 pointer_width(16 | 24)

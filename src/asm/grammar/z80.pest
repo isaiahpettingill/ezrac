@@ -1,4 +1,4 @@
-// eZ80, Z80N, Z180, and Z80 operand/addressing grammar.
+// eZ80, R800, Z80N, Z180, and Z80 operand/addressing grammar.
 architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
 architecture_mnemonic = { architecture_atom }
 architecture_operands = { z80_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ z80_operand)* }

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::ast::{EmbedSource, Expr};
 
@@ -148,11 +147,9 @@ fn compiles_nes_source_with_the_ricoh_2a03_backend() {
 #[test]
 fn compiles_all_builtin_nes_sdk_modules() {
     let source = "import nes.ppu\nimport nes.palette\nimport nes.sprites\nimport nes.input\nimport nes.audio\nimport nes.timing\nimport nes.memory\nfn main() { ppu.disable_rendering(); audio.disable(); timing.wait_two_vblanks(); palette.set_background(palette.DARK_BLUE); palette.set_sprite_color(0, 1, palette.WHITE); sprites.set(0, 120, 112, 0, 0); let buttons: u8 = input.read_controller1(); if buttons != 0 { ppu.set_mask(ppu.MASK_SPRITES) } memory.clear_internal_ram() }";
-    let compilation = compile_source_to_assembly(
-        source,
-        &CompileRequest::new("memory.ezra", "nes-2a03"),
-    )
-    .unwrap();
+    let compilation =
+        compile_source_to_assembly(source, &CompileRequest::new("memory.ezra", "nes-2a03"))
+            .unwrap();
 
     assert!(compilation.assembly.contains("sta $2004"));
     assert!(compilation.assembly.contains("sta $4016"));
@@ -621,7 +618,6 @@ fn rejects_non_i8086_and_noncanonical_msdos_targets() {
         );
     }
 }
-
 
 #[test]
 fn ez180n_gaem_uses_a_flat_output_map() {

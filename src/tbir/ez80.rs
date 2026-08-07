@@ -33,8 +33,12 @@ pub fn lower(
     let objects = provenance::memory_objects(lowered_program, &semantic, &memory);
     let context = provenance::OptimizationContext::from_objects(&objects);
     let source_comments = collect_source_comments(lowered_program);
-    let (lowered_program, optimizations) =
-        optimize::optimize_program_with_context(lowered_program, options.cpu, &context);
+    let (lowered_program, optimizations) = optimize::optimize_program_with_context_and_options(
+        lowered_program,
+        options.cpu,
+        &context,
+        &options.optimization,
+    );
     let declarations = hir
         .declarations
         .iter()

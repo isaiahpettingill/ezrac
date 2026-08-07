@@ -1058,7 +1058,9 @@ fn cfg_value_completion(source: &str, position: Position) -> Option<(String, Vec
         .next_back()?;
     let values: &[&str] = match name {
         "target" => DOCUMENTED_TARGETS,
-        "cpu" => &["ez80", "z80", "z80n", "z180", "i8080", "i8085", "lr35902"],
+        "cpu" => &[
+            "ez80", "z80", "r800", "z80n", "z180", "i8080", "i8085", "lr35902",
+        ],
         "pointer_width" | "address_width" => &["16", "24"],
         _ => return None,
     };
@@ -2525,6 +2527,7 @@ const DOCUMENTED_TARGETS: &[&str] = &[
     "gameboy-dmg-lr35902",
     "gameboy-color-lr35902",
     "bare-z80",
+    "bare-r800",
     "bare-z80n",
     "bare-z180",
     "bare-i8080",

@@ -55,6 +55,21 @@ fn materialized_embed_bytes(program: &Program, name: &str) -> Vec<u8> {
 
 #[cfg(feature = "z80")]
 #[test]
+fn builds_bare_r800_workspace_without_host_io() {
+    let files = [WorkspaceFile::text("main.ezra", "fn main() {}\n")];
+    let build = build_workspace(
+        &Workspace::new(&files),
+        "main.ezra",
+        &CompileRequest::new("main.ezra", "bare-r800"),
+    )
+    .expect("virtual no-std R800 workspace should build");
+
+    assert!(!build.machine_code.is_empty());
+    assert_eq!(build.executable_extension, "bin");
+}
+
+#[cfg(feature = "z80")]
+#[test]
 fn builds_imported_z80_workspace_without_host_io() {
     let files = [
         WorkspaceFile::text(

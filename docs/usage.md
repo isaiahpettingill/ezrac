@@ -100,7 +100,7 @@ ezrac test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--
 With no file argument, `test` loads `Ezra.toml` from the current directory, discovers `tests/**/*.ezra` in deterministic path order, builds each artifact, and reports a per-test result plus a CI-friendly summary. Target selection is `--target`, then `[test].target`, then `[build].target`, then the compiler default.
 
 The built-in test runner uses the `ez80` emulator backend for eZ80 ADL, Z80,
-Z80N, Z180, i8080, and i8085 target profiles. eZ80 uses a 24-bit ADL address
+Z80N, Z180, i8080, and i8085 target profiles. R800 assembly and execution targets are supported through the built-in emulator. eZ80 uses a 24-bit ADL address
 space; the other built-in CPU modes use 16-bit address and stack bounds. The
 runner backend interface is extensible, so new CPU families can supply an
 emulator without changing the compiler test command.
@@ -135,11 +135,20 @@ Use `ezrac targets` to list the target triples with documented layouts and SDKs.
 
 `--no-default-sdk-symbols` prevents automatic default SDK/runtime symbols when the target would normally provide them.
 
+Source commands accept `-O0`, `-O1`, `-O2`, or `-O3` (also `-O <level>` or `--opt-level <level>`). The default is `-O2`:
+
+- `-O0` disables optional TBIR rewrites but still eliminates dead code.
+- `-O1` also enables scalar simplification, local propagation/common-subexpression cleanup, known-bits simplification, and redundant register-copy cleanup.
+- `-O2` also enables pure and memory-read loop-invariant code motion, explicit function inlining, tail calls, tail-recursion conversion, and idempotent bit-operation cleanup.
+- `-O3` uses the `-O2` pass set and runs a second local cleanup sweep for opportunities exposed by earlier passes.
+
+Use repeatable `--enable-optimization <pass>` and `--disable-optimization <pass>` options to override the level. Valid pass names are `scalar-simplification`, `local-propagation`, `loop-invariant-code-motion`, `known-bits`, `memory-read-licm`, `function-inlining`, `dead-code-elimination`, `tail-calls`, `tail-recursion`, `idempotent-operations`, and `redundant-register-copies`. Dead-code elimination is enabled by default even at `-O0`; use `--disable-optimization dead-code-elimination` to turn it off explicitly. A CLI override takes precedence over `Ezra.toml`; if the same pass is both enabled and disabled on the CLI, disabling wins.
+
 `--input-kind ezra|assembly` overrides input detection for `build`. Without it, `.ezra` is treated as source and `.asm`, `.s`, `.z80`, `.ez80`, `.i8080`, `.8080`, `.i8086`, and `.8086` are treated as assembly. NES raw assembly projects use the `nes-2a03` target and produce validating `.nes` images.
 
 `--size-budget NAME=BYTES` adds a repeatable post-link budget to `build`. Use `target=BYTES` (or `package=BYTES`) for the final package, or a section/metric such as `.text=4096`, `.rodata=1024`, `.data=256`, `.assets=8192`, `runtime_helpers=512`, `machine_code_payload=4096`, `address_span=65536`, or `address_gaps=0`. Decimal, `0x` hexadecimal, and `h`-suffixed hexadecimal byte counts are accepted. An overflow names the measured section or helper class and suggests what to reduce.
 
-`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support every compiler backend: `i8080`, `i8085`, `i8086`, `z80`, `z80n`, `z180`, `ez80`, `lr35902`, `avr`, `dcpu`, `m6800`, `m6809`, `m68k`, `6502`, and `tms9900`. Consumers using `--no-default-features` can enable only the backend features they need. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800/M6809, M68k, and 8086 have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The 8086 source ABI supports scalar recursion and constrained interrupt handlers while requiring aggregate parameters and returns to be passed by pointer. CLI and library source compilation run generated assembly through the strict assembler for the selected target and require its assembled `.text` bytes to fit the layout's `.text` region; `emit-asm` prints only after validation succeeds. See [`dcpu-assembly.md`](dcpu-assembly.md), [`i8086-assembly.md`](i8086-assembly.md), [`msdos-sdk.md`](msdos-sdk.md), and [`tms9900-assembly.md`](tms9900-assembly.md) for details.
+`--cpu <mode>` selects assembly syntax and opcode validation for assembly input. Default builds support every compiler backend: `i8080`, `i8085`, `i8086`, `z80`, `r800`, `z80n`, `z180`, `ez80`, `lr35902`, `avr`, `dcpu`, `m6800`, `m6809`, `m68k`, `6502`, and `tms9900`. Consumers using `--no-default-features` can enable only the backend features they need. AVR has a complete instruction-set assembler and register-ABI source backend; DCPU-16, M6800/M6809, M68k, and 8086 have generic source backends; TMS9900 provides handwritten assembly plus the initial scalar source backend and `ti99-4a-tms9900` cartridge target. The 8086 source ABI supports scalar recursion and constrained interrupt handlers while requiring aggregate parameters and returns to be passed by pointer. CLI and library source compilation run generated assembly through the strict assembler for the selected target and require its assembled `.text` bytes to fit the layout's `.text` region; `emit-asm` prints only after validation succeeds. See [`dcpu-assembly.md`](dcpu-assembly.md), [`i8086-assembly.md`](i8086-assembly.md), [`msdos-sdk.md`](msdos-sdk.md), and [`tms9900-assembly.md`](tms9900-assembly.md) for details.
 
 `--base <addr>` assembles at an explicit base address. Addresses may be decimal, `0x` hexadecimal, or `h`-suffixed hexadecimal.
 
@@ -311,6 +320,11 @@ input_kind = "ezra"
 assembler_cpu = "ez80"
 executable = "my-program"
 
+[optimization]
+level = 2
+enable = ["idempotent-operations"]
+disable = ["function-inlining"]
+
 [layout]
 file = "layouts/custom.ezralayout"
 
@@ -325,8 +339,11 @@ Supported fields:
 [build].target          target triple
 [build].output          output format: bin, com, gaem, hex, arduboy, tap, gb, prg, crt, 8xp, 8ek, or 8xk
 [build].input_kind      ezra or assembly
-[build].assembler_cpu   i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, avr, dcpu, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
+[build].assembler_cpu   i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, avr, dcpu, m6800, m68k, 6502, or tms9900 (optional families require their Cargo feature)
 [build].executable      artifact basename and TI variable/app name source
+[optimization].level    0, 1, 2, or 3 (default 2)
+[optimization].enable   pass names enabled in addition to the selected level
+[optimization].disable  pass names disabled after level and enable processing
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
 [lsp].mode              application (default) or library
@@ -338,6 +355,8 @@ Supported fields:
 [arduboy].genre          optional package genre
 [arduboy].source_url     optional package source URL
 ```
+
+Optimization pass names are the same in `Ezra.toml`, the CLI, and the Rust API's `OptimizationPass::name()`. The per-pass settings override the selected level; `disable` wins if a pass appears in both project lists.
 
 `[lsp].mode = "library"` makes the language server type-check the configured source and its SDK imports without requiring `fn main()`. It does not add shared-library output; `build` remains executable-only.
 
@@ -478,7 +497,7 @@ ezrac assemble --target cpm-2.2-z80 --map console-output.map examples/cpm-z80/co
 ezrac build --target cpm-2.2-z80 --input-kind assembly examples/cpm-z80/console-output.asm
 ```
 
-The assembler accepts implemented instruction subsets for 8080, 8085, Z80, Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for strict original-8086, AVR, M6800, M68k, and TMS9900 when built with their Cargo features. AVR source builds lower the language through the documented register ABI; see [`platforms.md`](platforms.md#avr-and-arduboy). TMS9900 also has the initial scalar source backend and TI-99/4A cartridge profile; see [`tms9900-assembly.md`](tms9900-assembly.md) for syntax and scope. See `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
+The assembler accepts implemented instruction subsets for 8080, 8085, Z80, R800 (including `MULUB` and `MULUW`), Z80N, Z180, eZ80, LR35902, and MOS 6502. Optional assemblers are available for strict original-8086, AVR, M6800, M68k, and TMS9900 when built with their Cargo features. AVR source builds lower the language through the documented register ABI; see [`platforms.md`](platforms.md#avr-and-arduboy). TMS9900 also has the initial scalar source backend and TI-99/4A cartridge profile; see [`tms9900-assembly.md`](tms9900-assembly.md) for syntax and scope. See [`r800-assembly.md`](r800-assembly.md) for R800 syntax and code generation, and `docs/ez80-opcode-coverage.md` for Zilog-family opcode coverage notes.
 
 ## Custom Layouts
 

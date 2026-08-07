@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::diagnostic::Diagnostic;
+use crate::{
+    diagnostic::Diagnostic,
+    optimization::{OptimizationOptions, OptimizationPass},
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LspMode {
@@ -21,6 +24,7 @@ pub struct ProjectConfig {
     pub input_kind: Option<String>,
     pub assembler_cpu: Option<String>,
     pub executable: Option<String>,
+    pub optimization: OptimizationOptions,
     pub lsp_mode: LspMode,
     pub test_target: Option<String>,
     pub layout_file: Option<PathBuf>,
@@ -198,6 +202,8 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         .map(required_basename("build.executable"))
         .transpose()?;
 
+    let optimization = parse_optimization_config(&value)?;
+
     let lsp_mode = value
         .get("lsp")
         .and_then(|lsp| lsp.get("mode"))
@@ -259,6 +265,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         input_kind,
         assembler_cpu,
         executable,
+        optimization,
         lsp_mode,
         test_target,
         layout_file,
@@ -270,6 +277,59 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         assets,
         sdk_paths,
     })
+}
+
+fn parse_optimization_config(value: &toml::Value) -> Result<OptimizationOptions, Diagnostic> {
+    let Some(table) = value.get("optimization") else {
+        return Ok(OptimizationOptions::default());
+    };
+    if !table.is_table() {
+        return Err(Diagnostic::new(
+            "project field `optimization` must be a table",
+        ));
+    }
+    let level = table
+        .get("level")
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or_else(|| {
+                    Diagnostic::new("project field `optimization.level` must be 0, 1, 2, or 3")
+                })
+        })
+        .transpose()?
+        .unwrap_or(2);
+    let mut options = OptimizationOptions::new(level).map_err(Diagnostic::new)?;
+    for (field, enable) in [("enable", true), ("disable", false)] {
+        let Some(values) = table.get(field) else {
+            continue;
+        };
+        let values = values.as_array().ok_or_else(|| {
+            Diagnostic::new(format!(
+                "project field `optimization.{field}` must be an array of pass names"
+            ))
+        })?;
+        for value in values {
+            let name = value.as_str().ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "project field `optimization.{field}` must contain only strings"
+                ))
+            })?;
+            let pass = OptimizationPass::parse(name).ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "unknown optimization pass `{name}`; expected one of: {}",
+                    OptimizationPass::names()
+                ))
+            })?;
+            if enable {
+                options.enable(pass);
+            } else {
+                options.disable(pass);
+            }
+        }
+    }
+    Ok(options)
 }
 
 fn parse_arduboy_config(

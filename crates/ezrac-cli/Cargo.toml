@@ -51,7 +51,7 @@ dcpu = ["ezra/dcpu"]
 lsp = ["std", "ezra/lsp", "dep:lsp", "dep:serde", "dep:serde_json"]
 
 [dev-dependencies]
-ez80 = "0.5.0"
+ez80 = "0.6.0"
 play96 = "0.3.2"
 libre99-core = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
 libre99-asm = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }

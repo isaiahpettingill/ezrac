@@ -59,7 +59,14 @@ pub fn emit_m6800_assembly_with_options(
     Emitter::new(model, CpuFamily::M6800)?
         .emit(&lowered_program)
         .map(|asm| {
-            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+            {
+                strip_unreachable_generated_routines(&asm, RoutineProfile::M6800)
+            } else {
+                asm
+            };
             with_readability_comments(asm, program, &options, "m6800", &source_comments)
         })
 }
@@ -96,7 +103,14 @@ pub fn emit_m6809_assembly_with_options(
     Emitter::new(model, CpuFamily::M6809)?
         .emit(&lowered_program)
         .map(|asm| {
-            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::M6800);
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+            {
+                strip_unreachable_generated_routines(&asm, RoutineProfile::M6800)
+            } else {
+                asm
+            };
             let asm = asm.replace(
                 "; target: Motorola M6800 scalar RAM ABI",
                 "; target: Motorola M6809 scalar RAM ABI",

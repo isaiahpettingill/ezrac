@@ -23,6 +23,9 @@ fn ez80_flat_harness_target_runs_and_captures_output() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-flat-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -56,6 +59,9 @@ fn ez80_harness_target_reports_execution_traps() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-flat-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
 
@@ -93,6 +99,9 @@ fn ez80_harness_preserves_port_output_ordering() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-flat-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -133,6 +142,9 @@ fn ez80_harness_preserves_inline_asm_memory_clobber_barrier() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-flat-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -165,6 +177,9 @@ fn ez80_harness_preserves_volatile_memory_ordering() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-flat-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -183,6 +198,9 @@ fn ez80_flat_harness_runs_complex_sdk_fixture_and_raw_artifacts() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-flat-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     };
     let run = run_source_with_command_options(&options).unwrap();
     assert_eq!(run.result_code, 0, "{run:?}");
@@ -215,6 +233,9 @@ fn ez80_split_harness_runs_complex_sdk_fixture_and_split_artifacts() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-split-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     };
     let run = run_source_with_command_options(&options).unwrap();
     assert_eq!(run.result_code, 0, "{run:?}");
@@ -332,6 +353,9 @@ fn commands_run_z80_source_on_emulator() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -368,6 +392,9 @@ fn test_command_runs_cpm_8080_and_8085_source_targets() {
             default_sdk_symbols: false,
             layout_path: None,
             target: Some(target.to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap();
     }

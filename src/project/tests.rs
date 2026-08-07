@@ -84,6 +84,50 @@ paths = ["sdk", "../shared"]
 }
 
 #[test]
+fn parses_optimization_level_and_pass_overrides() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        r#"
+[optimization]
+level = 1
+enable = ["function-inlining", "idempotent-operations"]
+disable = ["known-bits"]
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.optimization.level, 1);
+    assert!(
+        config
+            .optimization
+            .is_enabled(OptimizationPass::FunctionInlining)
+    );
+    assert!(
+        config
+            .optimization
+            .is_enabled(OptimizationPass::IdempotentOperations)
+    );
+    assert!(!config.optimization.is_enabled(OptimizationPass::KnownBits));
+    assert!(
+        config
+            .optimization
+            .is_enabled(OptimizationPass::ScalarSimplification)
+    );
+}
+
+#[test]
+fn rejects_unknown_optimization_passes() {
+    let error = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        "[optimization]\nenable = [\"made-up-pass\"]\n",
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("made-up-pass"), "{error}");
+    assert!(error.message.contains("scalar-simplification"), "{error}");
+}
+
+#[test]
 fn parses_explicit_banking_configuration() {
     let config = parse_project_config(
         Path::new("/project/Ezra.toml"),

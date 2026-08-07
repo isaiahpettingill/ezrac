@@ -6,7 +6,7 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80 variants, Intel 8080/8085/8086, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800/M6809, and M68k. Default builds enable every compiler backend. Consumers using `--no-default-features` can enable only the backend features they need; every backend supports `no_std + alloc` compilation.
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80/R800 variants, Intel 8080/8085/8086, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800/M6809, and M68k. Default builds enable every compiler backend. Consumers using `--no-default-features` can enable only the backend features they need; every backend supports `no_std + alloc` compilation.
 
 Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have complete EZRA source code generation; optional DCPU-16, M6800, M68k, and TMS9900 targets have target-specific source emitters. MOS 6502 variants also have a source emitter; the initial TMS9900 backend is a documented 8-/16-bit scalar subset. AVR has a complete register-ABI source backend.
 
@@ -45,6 +45,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `cpm-*-i8080` | 4 | 8080 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
 | `cpm-*-i8085` | 4 | 8085 | 16 | `.com` | `cpm.*` | Assembly/source scaffold |
 | `bare-z80` | 4 | Z80 | 16 | `.bin` | none | Bare assembly/source scaffold |
+| `bare-r800` | 4 | R800 | 16 | `.bin` | none | Bare assembly/source target with built-in VM execution |
 | `bare-z80n` | 4 | Z80N | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-z180` | 4 | Z180 | 16 | `.bin` | none | Bare assembly/source scaffold |
 | `bare-i8080` | 4 | 8080 | 16 | `.bin` | none | Bare assembly/source scaffold |
@@ -482,6 +483,7 @@ Target patterns:
 ```text
 bare-ez80
 bare-z80
+bare-r800
 bare-z80n
 bare-z180
 bare-i8080
@@ -509,7 +511,7 @@ Use conditional declarations for target-specific hardware:
 @cfg(cpu("ez80"))
 pub alias PtrInt = u24
 
-@cfg(any(cpu("z80"), cpu("z80n"), cpu("z180"), cpu("i8080"), cpu("i8085")))
+@cfg(any(cpu("z80"), cpu("r800"), cpu("z80n"), cpu("z180"), cpu("i8080"), cpu("i8085")))
 pub alias PtrInt = u16
 ```
 

@@ -71,9 +71,11 @@ pub(crate) fn parse_instruction(
                 ))
             }
         }
-        AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180 | AssemblerCpu::Ez80 => {
-            z80::parse(cpu, &source)
-        }
+        AssemblerCpu::Z80
+        | AssemblerCpu::R800
+        | AssemblerCpu::Z80N
+        | AssemblerCpu::Z180
+        | AssemblerCpu::Ez80 => z80::parse(cpu, &source),
         AssemblerCpu::Lr35902 => lr35902::parse(cpu, &source),
         AssemblerCpu::Avr => avr::parse(cpu, &source),
         AssemblerCpu::Dcpu => dcpu::parse(cpu, &source),

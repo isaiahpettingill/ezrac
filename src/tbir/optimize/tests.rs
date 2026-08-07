@@ -3,12 +3,111 @@ use std::path::Path;
 use crate::{
     asm::AssemblyOptions,
     hir::HirProgram,
+    optimization::{OptimizationOptions, OptimizationPass},
     parser::parse_program,
     target::{Address24, CpuFamily},
     tbir::{TbirDeclaration, TbirProgram},
 };
 
 use super::*;
+
+#[test]
+fn optimization_levels_and_overrides_control_separable_passes() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn same(value: u8) -> u8 { return value | value }",
+    )
+    .unwrap();
+
+    let (unoptimized, report) = optimize_program_with_options(
+        &program,
+        CpuFamily::Ez80,
+        &OptimizationOptions::new(0).unwrap(),
+    );
+    assert!(matches!(
+        function_named(&unoptimized, "same").body.last(),
+        Some(Stmt::Return(Some(Expr::Binary {
+            op: BinaryOp::BitOr,
+            ..
+        })))
+    ));
+    assert_eq!(report.algebraic_simplifications, 0);
+
+    let (optimized, report) = optimize_program_with_options(
+        &program,
+        CpuFamily::Ez80,
+        &OptimizationOptions::new(2).unwrap(),
+    );
+    assert!(matches!(
+        function_named(&optimized, "same").body.last(),
+        Some(Stmt::Return(Some(Expr::Ident(name)))) if name == "value"
+    ));
+    assert_eq!(report.algebraic_simplifications, 1);
+
+    let mut options = OptimizationOptions::new(2).unwrap();
+    options.disable(OptimizationPass::IdempotentOperations);
+    let (disabled, _) = optimize_program_with_options(&program, CpuFamily::Ez80, &options);
+    assert!(matches!(
+        function_named(&disabled, "same").body.last(),
+        Some(Stmt::Return(Some(Expr::Binary {
+            op: BinaryOp::BitOr,
+            ..
+        })))
+    ));
+
+    let mut options = OptimizationOptions::new(0).unwrap();
+    options.enable(OptimizationPass::IdempotentOperations);
+    let (enabled, _) = optimize_program_with_options(&program, CpuFamily::Ez80, &options);
+    assert!(matches!(
+        function_named(&enabled, "same").body.last(),
+        Some(Stmt::Return(Some(Expr::Ident(name)))) if name == "value"
+    ));
+}
+
+#[test]
+fn dead_code_elimination_runs_at_level_zero_unless_explicitly_disabled() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn value() -> u8 { return 1 test.fail(1) }",
+    )
+    .unwrap();
+    let options = OptimizationOptions::new(0).unwrap();
+    let (optimized, report) = optimize_program_with_options(&program, CpuFamily::Ez80, &options);
+
+    assert_eq!(function_named(&optimized, "value").body.len(), 1);
+    assert_eq!(report.dead_statements_marked, 1);
+    assert_eq!(report.constant_folds, 0);
+
+    let mut options = OptimizationOptions::new(0).unwrap();
+    options.disable(OptimizationPass::DeadCodeElimination);
+    let (unpruned, report) = optimize_program_with_options(&program, CpuFamily::Ez80, &options);
+
+    assert_eq!(function_named(&unpruned, "value").body.len(), 2);
+    assert_eq!(report.dead_statements_marked, 0);
+}
+
+#[test]
+fn idempotent_operations_do_not_duplicate_or_remove_effectful_expressions() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "fn read() -> u8 { return 1 } fn same() -> u8 { return read() | read() }",
+    )
+    .unwrap();
+    let (optimized, report) = optimize_program_with_options(
+        &program,
+        CpuFamily::Ez80,
+        &OptimizationOptions::new(2).unwrap(),
+    );
+
+    assert!(matches!(
+        function_named(&optimized, "same").body.last(),
+        Some(Stmt::Return(Some(Expr::Binary {
+            op: BinaryOp::BitOr,
+            ..
+        })))
+    ));
+    assert_eq!(report.algebraic_simplifications, 0);
+}
 
 #[test]
 fn folds_simplifies_and_removes_dead_statements() {

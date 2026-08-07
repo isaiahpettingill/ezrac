@@ -65,7 +65,14 @@ pub fn emit_lr35902_assembly_with_options(
     Emitter::new(model, options.gameboy_banking, banked_layout)
         .emit(&lowered_program)
         .map(|asm| {
-            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Lr35902);
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+            {
+                strip_unreachable_generated_routines(&asm, RoutineProfile::Lr35902)
+            } else {
+                asm
+            };
             with_readability_comments(asm, program, &options, "lr35902", &source_comments)
         })
 }

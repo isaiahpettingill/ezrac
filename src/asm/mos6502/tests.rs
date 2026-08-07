@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn enc(text: &str, variant: Mos6502Variant) -> Vec<u8> {

@@ -28,6 +28,7 @@ pub const HEADER_SIZE: u16 = 0x0040;
 pub enum CpuFamily {
     Ez80,
     Z80,
+    R800,
     Z80N,
     Z180,
     M68k,
@@ -52,6 +53,7 @@ pub enum AssemblerCpu {
     I8085,
     I8086,
     Z80,
+    R800,
     Z80N,
     Z180,
     Ez80,
@@ -75,6 +77,7 @@ impl AssemblerCpu {
             "i8085" | "8085" => Self::I8085,
             "i8086" | "8086" => Self::I8086,
             "z80" => Self::Z80,
+            "r800" => Self::R800,
             "z80n" => Self::Z80N,
             "z180" => Self::Z180,
             "ez80" => Self::Ez80,
@@ -91,7 +94,7 @@ impl AssemblerCpu {
             "dcpu" | "dcpu16" | "dcpu-16" => Self::Dcpu,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m6809, m68k, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m6809, m68k, or avr"
                 ));
             }
         };
@@ -110,7 +113,9 @@ impl AssemblerCpu {
         match self {
             Self::I8080 | Self::I8085 => cfg!(feature = "intel"),
             Self::I8086 => cfg!(feature = "i8086"),
-            Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80 => cfg!(feature = "z80"),
+            Self::Z80 | Self::R800 | Self::Z80N | Self::Z180 | Self::Ez80 => {
+                cfg!(feature = "z80")
+            }
             Self::Lr35902 => cfg!(feature = "lr35902"),
             Self::Avr => cfg!(feature = "avr"),
             Self::M6800 => cfg!(feature = "m6800"),
@@ -128,7 +133,7 @@ impl AssemblerCpu {
         match self {
             Self::I8080 | Self::I8085 => "intel",
             Self::I8086 => "i8086",
-            Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80 => "z80",
+            Self::Z80 | Self::R800 | Self::Z80N | Self::Z180 | Self::Ez80 => "z80",
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
             Self::M6800 => "m6800",
@@ -146,6 +151,7 @@ impl AssemblerCpu {
             Self::I8085 => "i8085",
             Self::I8086 => "i8086",
             Self::Z80 => "z80",
+            Self::R800 => "r800",
             Self::Z80N => "z80n",
             Self::Z180 => "z180",
             Self::Ez80 => "ez80",
@@ -165,8 +171,7 @@ impl AssemblerCpu {
 
     pub fn encoding_family(self) -> Option<CpuFamily> {
         match self {
-            Self::Z80 => Some(CpuFamily::Z80),
-            Self::Z80N => Some(CpuFamily::Z80),
+            Self::Z80 | Self::R800 | Self::Z80N => Some(CpuFamily::Z80),
             Self::Z180 => Some(CpuFamily::Z80),
             Self::Ez80 => Some(CpuFamily::Ez80),
             Self::I8080 | Self::I8085 | Self::I8086 => None,
@@ -185,7 +190,10 @@ impl AssemblerCpu {
     }
 
     pub fn supports_z80_syntax(self) -> bool {
-        matches!(self, Self::Z80 | Self::Z80N | Self::Z180 | Self::Ez80)
+        matches!(
+            self,
+            Self::Z80 | Self::R800 | Self::Z80N | Self::Z180 | Self::Ez80
+        )
     }
 
     pub fn supports_ez80_syntax(self) -> bool {
@@ -198,6 +206,7 @@ impl From<CpuFamily> for AssemblerCpu {
         match cpu {
             CpuFamily::Ez80 => Self::Ez80,
             CpuFamily::Z80 => Self::Z80,
+            CpuFamily::R800 => Self::R800,
             CpuFamily::Z80N => Self::Z80N,
             CpuFamily::Z180 => Self::Z180,
             CpuFamily::I8080 => Self::I8080,
@@ -248,14 +257,16 @@ impl CpuFamily {
                 prefer_code_size: true,
                 has_cache: false,
             },
-            Self::Z80 | Self::Z80N | Self::Z180 | Self::I8080 | Self::I8085 => TargetCapabilities {
-                name: self.as_str(),
-                memory: memory16,
-                native_int_widths: &[8, 16],
-                supports_port_io: true,
-                prefer_code_size: true,
-                has_cache: false,
-            },
+            Self::Z80 | Self::R800 | Self::Z80N | Self::Z180 | Self::I8080 | Self::I8085 => {
+                TargetCapabilities {
+                    name: self.as_str(),
+                    memory: memory16,
+                    native_int_widths: &[8, 16],
+                    supports_port_io: true,
+                    prefer_code_size: true,
+                    has_cache: false,
+                }
+            }
             Self::I8086 => TargetCapabilities {
                 name: self.as_str(),
                 memory: memory16,
@@ -295,6 +306,7 @@ impl CpuFamily {
         match self {
             Self::Ez80 => "ez80",
             Self::Z80 => "z80",
+            Self::R800 => "r800",
             Self::Z80N => "z80n",
             Self::Z180 => "z180",
             Self::M68k => "m68k",
@@ -568,6 +580,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
         .rev()
         .find_map(|part| match *part {
             "ez80" => Some(CpuFamily::Ez80),
+            "r800" => Some(CpuFamily::R800),
             "z180" => Some(CpuFamily::Z180),
             "z80n" => Some(CpuFamily::Z80N),
             "z80" => Some(CpuFamily::Z80),

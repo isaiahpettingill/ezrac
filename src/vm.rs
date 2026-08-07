@@ -250,8 +250,8 @@ mod runner {
 
     /// Extensible execution backend for target test images.
     ///
-    /// The built-in backend uses the `ez80` crate for eZ80, Z80, Z80N, Z180,
-    /// i8080, and i8085. Other CPU families can supply their own backend without
+    /// The built-in backend uses the `ez80` crate for eZ80, R800, Z80, Z80N,
+    /// Z180, i8080, and i8085. Other CPU families can supply their own backend without
     /// changing the compiler test command.
     pub trait EmulatorBackend: Send + Sync {
         fn supports(&self, cpu_family: CpuFamily) -> bool;
@@ -588,6 +588,7 @@ mod runner {
                 cpu_family,
                 CpuFamily::Ez80
                     | CpuFamily::Z80
+                    | CpuFamily::R800
                     | CpuFamily::Z80N
                     | CpuFamily::Z180
                     | CpuFamily::I8080
@@ -1384,6 +1385,7 @@ mod runner {
         match cpu {
             CpuFamily::Ez80 => CpuMode::EZ80,
             CpuFamily::Z80 => CpuMode::Z80,
+            CpuFamily::R800 => CpuMode::R800,
             CpuFamily::Z80N => CpuMode::Z80N,
             CpuFamily::Z180 => CpuMode::Z180,
             CpuFamily::I8080 => CpuMode::I8080,
@@ -3040,7 +3042,7 @@ fn emit_instruction(
 fn z80_imm16_load(cpu: AssemblerCpu, instruction: &AssemblyInstruction) -> Option<(u8, &str)> {
     if !matches!(
         cpu,
-        AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180
+        AssemblerCpu::Z80 | AssemblerCpu::R800 | AssemblerCpu::Z80N | AssemblerCpu::Z180
     ) || !instruction.mnemonic.eq_ignore_ascii_case("ld")
         || instruction.operands.len() != 2
     {

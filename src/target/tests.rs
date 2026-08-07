@@ -15,6 +15,11 @@ fn parses_target_triples_with_optional_versions() {
         CpuFamily::Z80
     );
     assert_eq!(
+        parse_target_triple("bare-r800").unwrap().cpu,
+        CpuFamily::R800
+    );
+    assert_eq!(AssemblerCpu::parse("r800").unwrap(), AssemblerCpu::R800);
+    assert_eq!(
         parse_target_triple("bare-z80n").unwrap().cpu,
         CpuFamily::Z80N
     );
@@ -117,6 +122,7 @@ fn cpu_capabilities_are_canonical_for_z80_family_targets() {
     for (cpu, name, width) in [
         (CpuFamily::Ez80, "ez80-adl", 24),
         (CpuFamily::Z80, "z80", 16),
+        (CpuFamily::R800, "r800", 16),
         (CpuFamily::Z80N, "z80n", 16),
         (CpuFamily::Z180, "z180", 16),
         (CpuFamily::I8080, "i8080", 16),
@@ -156,6 +162,19 @@ fn cpm_8085_targets_default_to_com_output() {
     assert_eq!(cpm.output_format, OutputFormat::CpmCom);
     assert_eq!(cpm.output_format.extension(), "com");
     assert_eq!(cpm.memory.address_width_bits, 16);
+}
+
+#[test]
+fn resolves_bare_r800_as_a_raw_16_bit_target() {
+    let target = resolve_target_profile(Some("bare-r800")).unwrap();
+
+    assert_eq!(target.triple.cpu, CpuFamily::R800);
+    assert_eq!(AssemblerCpu::from(target.triple.cpu), AssemblerCpu::R800);
+    assert_eq!(target.memory.pointer_width_bits, 16);
+    assert_eq!(target.memory.address_width_bits, 16);
+    assert_eq!(target.output_format, OutputFormat::RawBin);
+    assert!(!target.default_sdk_symbols);
+    assert!(target.supports_port_io());
 }
 
 #[test]

@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn parse(cpu: AssemblerCpu, mnemonic: &str, operands: &[&str]) -> ArchitectureInstruction {
@@ -19,6 +18,7 @@ fn parse(cpu: AssemblerCpu, mnemonic: &str, operands: &[&str]) -> ArchitectureIn
 fn z80_family_normalizes_indexed_addressing() {
     for cpu in [
         AssemblerCpu::Z80,
+        AssemblerCpu::R800,
         AssemblerCpu::Z80N,
         AssemblerCpu::Z180,
         AssemblerCpu::Ez80,

@@ -57,7 +57,14 @@ pub fn emit_i8086_assembly_with_options(
     Emitter::new(model, options.clone())?
         .emit(&tbir.lowered_program, program)
         .map(|asm| {
-            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::I8086);
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+            {
+                strip_unreachable_generated_routines(&asm, RoutineProfile::I8086)
+            } else {
+                asm
+            };
             let asm = relax_i8086_branches(&asm);
             with_readability_comments(asm, program, &options, "i8086", &tbir.source_comments)
         })
@@ -228,7 +235,22 @@ impl Emitter {
             self.line("    jmp near __ezra_exit");
         }
 
-        let emitted_functions = reachable_function_names(program, &self.model);
+        let emitted_functions = if self
+            .options
+            .optimization
+            .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+        {
+            reachable_function_names(program, &self.model)
+        } else {
+            program
+                .declarations
+                .iter()
+                .filter_map(|declaration| match declaration {
+                    Declaration::Function(function) => Some(function.name.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
         for declaration in &program.declarations {
             if let Declaration::Function(function) = declaration
                 && emitted_functions.contains(&function.name)

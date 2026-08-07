@@ -70,6 +70,10 @@ executable = "my-program"
 [test]
 target = "ezra-test-flat-ez80"
 
+[optimization]
+level = 2
+disable = ["function-inlining"]
+
 [layout]
 file = "layouts/custom.ezralayout"
 
@@ -84,6 +88,7 @@ mode = "application" # or "library" for an importable SDK/module project
 - `[build].output` selects the executable format. The current default is raw `bin`; cartridge layouts are explicit configuration.
 - `[build].executable` overrides the artifact basename. Without it, the source file stem is used.
 - `[test].target` selects the target used by project test discovery. `ezrac test` discovers `tests/**/*.ezra` in deterministic path order, builds artifacts under `target/<target>/`, and runs each test. CLI `--target` overrides `[test].target`, which overrides `[build].target`.
+- `[optimization].level` selects `0` through `3`; the default is `2`. `enable` and `disable` contain named pass overrides. Dead-code elimination remains enabled at level `0` unless `dead-code-elimination` is explicitly disabled. Source commands also accept `-O0` through `-O3`, `--enable-optimization <pass>`, and `--disable-optimization <pass>`.
 - `[layout].file` points at a custom layout file.
 - `[sdk].paths` adds project SDK source roots in addition to bundled target SDKs.
 - `[lsp].mode = "library"` checks the configured source and imports as a library module without requiring `fn main()`. Library mode supports LSP diagnostics and SDK imports, but `build` still creates executables only.

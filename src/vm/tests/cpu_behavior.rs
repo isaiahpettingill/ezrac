@@ -29,6 +29,61 @@ fn runs_i8080_and_i8085_programs_with_16_bit_state() {
 }
 
 #[test]
+fn runs_r800_multiply_instructions() {
+    let assembly = r#"
+        ld a, 12
+        ld b, 10
+        mulub a, b
+        ld a, h
+        or a
+        jp nz, fail
+        ld a, l
+        cp 120
+        jp nz, fail
+
+        ld hl, 1000
+        ld bc, 300
+        muluw hl, bc
+        ld a, d
+        or a
+        jp nz, fail
+        ld a, e
+        cp 4
+        jp nz, fail
+        ld a, h
+        cp 93h
+        jp nz, fail
+        ld a, l
+        cp E0h
+        jp nz, fail
+
+        xor a
+        out (0Dh), a
+        ld a, 1
+        out (0Eh), a
+    fail:
+        ld a, 1
+        out (0Dh), a
+    "#;
+    let run = run_assembly_test_with_cpu_options_at(
+        CpuFamily::R800,
+        assembly,
+        &TestRunOptions {
+            instruction_budget: 100,
+            initial_ports: Vec::new(),
+            initial_memory: Vec::new(),
+            stack_top: 0xFF00,
+        },
+        0x0100,
+    )
+    .unwrap();
+
+    assert!(run.halted, "{run:?}");
+    assert_eq!(run.result_code, 0, "{run:?}");
+    assert_eq!(run.failure, None, "{run:?}");
+}
+
+#[test]
 fn rejects_i8080_images_outside_the_16_bit_address_space() {
     let error = run_assembly_test_with_cpu_options_at(
         CpuFamily::I8080,

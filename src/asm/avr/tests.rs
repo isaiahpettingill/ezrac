@@ -1,4 +1,3 @@
-
 use super::{encode_instruction, instruction_len};
 use std::collections::HashMap;
 

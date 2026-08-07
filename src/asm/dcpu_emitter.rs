@@ -53,7 +53,14 @@ pub fn emit_dcpu_assembly_with_options(
         (tbir.lowered_program, tbir.source_comments)
     };
     Emitter::new().emit(&lowered_program).map(|assembly| {
-        let assembly = strip_unreachable_generated_routines(&assembly, RoutineProfile::Dcpu);
+        let assembly = if options
+            .optimization
+            .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+        {
+            strip_unreachable_generated_routines(&assembly, RoutineProfile::Dcpu)
+        } else {
+            assembly
+        };
         with_readability_comments(assembly, program, &options, "dcpu", &source_comments)
     })
 }

@@ -39,6 +39,9 @@ fn commands_report_source_locations_for_layout_errors() {
         default_sdk_symbols: true,
         layout_path: Some(parse_layout_path.clone()),
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
     assert!(
@@ -53,6 +56,9 @@ fn commands_report_source_locations_for_layout_errors() {
         default_sdk_symbols: true,
         layout_path: Some(invalid_layout_path.clone()),
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
     assert!(
@@ -100,6 +106,9 @@ fn commands_reject_custom_layouts_missing_required_sections() {
         default_sdk_symbols: true,
         layout_path: Some(layout_path.clone()),
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
     let prefix = format!("layout is invalid:\n{}:1:1:", layout_path.display());
@@ -132,6 +141,9 @@ fn zxspectrum_target_uses_spectrum_layout() {
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("zxspectrum-z80".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         },
         &source_path,
     )
@@ -190,6 +202,9 @@ fn ti_ce_targets_use_tice_layout_and_sdk() {
             default_sdk_symbols: false,
             layout_path: None,
             target: Some(target.to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap();
         let settings = resolve_build_settings(
@@ -199,6 +214,9 @@ fn ti_ce_targets_use_tice_layout_and_sdk() {
                 default_sdk_symbols: false,
                 layout_path: None,
                 target: Some(target.to_owned()),
+                optimization_level: None,
+                enable_optimizations: Vec::new(),
+                disable_optimizations: Vec::new(),
             },
             &source_path,
         )
@@ -257,6 +275,9 @@ fn ti_z80_targets_use_ti_layout_and_sdk() {
             default_sdk_symbols: false,
             layout_path: None,
             target: Some(target.to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap();
         let settings = resolve_build_settings(
@@ -266,6 +287,9 @@ fn ti_z80_targets_use_ti_layout_and_sdk() {
                 default_sdk_symbols: false,
                 layout_path: None,
                 target: Some(target.to_owned()),
+                optimization_level: None,
+                enable_optimizations: Vec::new(),
+                disable_optimizations: Vec::new(),
             },
             &source_path,
         )
@@ -308,6 +332,9 @@ fn cpm_z80_target_uses_com_layout() {
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         },
         &source_path,
     )
@@ -348,6 +375,9 @@ fn ez80_split_harness_target_uses_split_layout_and_memory() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-split-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -357,6 +387,9 @@ fn ez80_split_harness_target_uses_split_layout_and_memory() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("ezra-test-split-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let map = std::fs::read_to_string(outputs.map).unwrap();
@@ -417,6 +450,9 @@ fn z80_target_rejects_layout_addresses_above_16_bit_space() {
         default_sdk_symbols: true,
         layout_path: Some(layout_path.clone()),
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
 
@@ -492,6 +528,9 @@ fn test_command_can_use_custom_layout_file() {
         default_sdk_symbols: true,
         layout_path: Some(layout_path.clone()),
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -548,6 +587,9 @@ fn check_command_can_use_custom_layout_file() {
         default_sdk_symbols: true,
         layout_path: Some(layout_path.clone()),
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -653,6 +695,9 @@ fn build_can_use_custom_layout_file() {
         default_sdk_symbols: true,
         layout_path: Some(layout_path.clone()),
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -669,6 +714,9 @@ fn build_can_use_custom_layout_file() {
             default_sdk_symbols: true,
             layout_path: Some(layout_path.clone()),
             target: None,
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         },
         &source_path,
     )
@@ -744,6 +792,9 @@ fn emit_asm_can_use_custom_layout_file() {
         default_sdk_symbols: true,
         layout_path: Some(layout_path.clone()),
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -791,6 +842,9 @@ fn test_command_rejects_generated_code_that_does_not_fit_its_region() {
         default_sdk_symbols: true,
         layout_path: Some(layout_path.clone()),
         target: Some("bare-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
     assert!(

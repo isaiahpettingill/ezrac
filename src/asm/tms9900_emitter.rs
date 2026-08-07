@@ -57,7 +57,14 @@ pub fn emit_tms9900_assembly_with_options(
     Emitter::new(model, options.clone())
         .emit(&lowered_program)
         .map(|asm| {
-            let asm = strip_unreachable_generated_routines(&asm, RoutineProfile::Tms9900);
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+            {
+                strip_unreachable_generated_routines(&asm, RoutineProfile::Tms9900)
+            } else {
+                asm
+            };
             with_readability_comments(asm, program, &options, "tms9900", &source_comments)
         })
 }
@@ -134,7 +141,15 @@ impl Emitter {
                 _ => None,
             })
             .collect();
-        let mut reachable = reachable_function_names(program, &self.model);
+        let mut reachable = if self
+            .options
+            .optimization
+            .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+        {
+            reachable_function_names(program, &self.model)
+        } else {
+            self.functions.keys().cloned().collect()
+        };
         let referenced_functions = referenced_function_names(program, &self.model);
         reachable.extend(referenced_functions.iter().cloned());
         self.recursive_functions = recursive_function_names(program, &self.model);

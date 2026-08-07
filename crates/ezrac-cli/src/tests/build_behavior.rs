@@ -96,6 +96,9 @@ fn build_accepts_assembly_input_by_extension() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("cpm-2.2-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -129,6 +132,9 @@ fn agon_mos_assembly_build_emits_mos_wrapper() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("agonlight-mos-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let bin = std::fs::read(outputs.executable).unwrap();
@@ -179,6 +185,9 @@ fn agon_assembly_links_cross_section_symbols_and_preserves_sections() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("agonlight-mos-ez80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let bin = std::fs::read(outputs.executable).unwrap();
@@ -218,6 +227,9 @@ fn bare_z80_source_build_starts_at_zero_without_header() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let map = std::fs::read_to_string(&outputs.map).unwrap();
@@ -257,6 +269,9 @@ fn generic_6502_source_build_writes_raw_binary() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("generic-6502-bare".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let assembly = std::fs::read_to_string(outputs.asm).unwrap();
@@ -299,6 +314,9 @@ fn generic_m68k_source_build_writes_raw_binary_with_24_bit_layout() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("generic-m68k-bare".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let assembly = std::fs::read_to_string(outputs.asm).unwrap();
@@ -347,6 +365,9 @@ fn generic_m68k_build_accepts_dereference_assignment_from_call() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("generic-m68k-bare".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let assembly = std::fs::read_to_string(outputs.asm).unwrap();
@@ -384,6 +405,9 @@ fn bare_z80n_source_build_accepts_z80n_inline_asm() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-z80n".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let asm = std::fs::read_to_string(outputs.asm).unwrap();
@@ -420,6 +444,9 @@ fn z80_source_build_rejects_z80n_inline_asm() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
 
@@ -456,6 +483,9 @@ fn bare_z180_source_build_accepts_z180_inline_asm() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-z180".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let asm = std::fs::read_to_string(outputs.asm).unwrap();
@@ -493,6 +523,9 @@ fn z80_family_source_builds_reject_z180_only_inline_asm() {
             assembler_cpu: None,
             layout_path: None,
             target: Some(target.to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap_err();
 
@@ -520,6 +553,9 @@ fn bare_i8080_source_build_emits_intel_assembly() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-i8080".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let asm = std::fs::read_to_string(outputs.asm).unwrap();
@@ -567,6 +603,9 @@ fn bare_i8080_source_builds_core_language_program() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-i8080".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let asm = std::fs::read_to_string(outputs.asm).unwrap();
@@ -608,6 +647,9 @@ fn bare_i8085_source_build_accepts_i8085_inline_asm() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-i8085".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let asm = std::fs::read_to_string(outputs.asm).unwrap();
@@ -644,6 +686,9 @@ fn bare_i8080_source_build_rejects_i8085_inline_asm() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("bare-i8080".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
 
@@ -701,6 +746,9 @@ fn commands_report_source_locations_for_semantic_errors() {
         default_sdk_symbols: true,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
     assert!(
@@ -736,6 +784,9 @@ fn z80_source_check_accepts_16_bit_cfg() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -765,6 +816,9 @@ fn commands_can_disable_default_sdk_symbols() {
         default_sdk_symbols: false,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap_err();
     assert!(error.contains("unknown port `PAD1_LO`"), "{error}");
@@ -791,6 +845,9 @@ fn commands_can_disable_default_sdk_symbols() {
         default_sdk_symbols: false,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -819,6 +876,9 @@ fn z80_source_rejects_24bit_literals_before_assembly() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     };
     let error = test_source_with_command_options(&options).unwrap_err();
 
@@ -856,6 +916,9 @@ fn z80_source_emits_z80_assembly_without_ez80_adl_forms() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 

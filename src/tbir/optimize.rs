@@ -4,6 +4,7 @@ use crate::{
         Stmt, Type, UnaryOp,
     },
     compat::prelude::*,
+    optimization::{OptimizationOptions, OptimizationPass},
     target::CpuFamily,
 };
 
@@ -616,7 +617,20 @@ fn eval_binary_literals(left: &Expr, op: BinaryOp, right: &Expr) -> Result<Expr,
 }
 
 pub fn optimize_program(program: &Program, cpu: CpuFamily) -> (Program, TbirOptimizationReport) {
-    optimize_program_with_context(program, cpu, &OptimizationContext::default())
+    optimize_program_with_options(program, cpu, &OptimizationOptions::default())
+}
+
+pub fn optimize_program_with_options(
+    program: &Program,
+    cpu: CpuFamily,
+    options: &OptimizationOptions,
+) -> (Program, TbirOptimizationReport) {
+    optimize_program_with_context_and_options(
+        program,
+        cpu,
+        &OptimizationContext::default(),
+        options,
+    )
 }
 
 pub fn optimize_program_with_context(
@@ -624,22 +638,274 @@ pub fn optimize_program_with_context(
     cpu: CpuFamily,
     context: &OptimizationContext,
 ) -> (Program, TbirOptimizationReport) {
+    optimize_program_with_context_and_options(
+        program,
+        cpu,
+        context,
+        &OptimizationOptions::default(),
+    )
+}
+
+pub fn optimize_program_with_context_and_options(
+    program: &Program,
+    cpu: CpuFamily,
+    context: &OptimizationContext,
+    options: &OptimizationOptions,
+) -> (Program, TbirOptimizationReport) {
     let mut program = program.clone();
     let comptime = ComptimeContext::from_program(&program);
     let mut report = TbirOptimizationReport::default();
+    let scalar = options.is_enabled(OptimizationPass::ScalarSimplification);
+    let propagation = options.is_enabled(OptimizationPass::LocalPropagation);
+    let dead_code = options.is_enabled(OptimizationPass::DeadCodeElimination);
     // Keep the stage order visible: later passes rely on the safety facts and
     // normalized expressions produced by earlier stages.
-    scalar_simplify_program(&mut program, &mut report, true, &comptime);
-    hoist_pure_loop_invariants_program(&mut program, &mut report);
-    local_propagation_and_cse_program(&mut program, context, &mut report);
-    scalar_simplify_program(&mut program, &mut report, false, &comptime);
-    known_bits_program(&mut program);
-    hoist_named_memory_reads_program(&mut program, context, &mut report);
-    expand_inline_functions(&mut program, context, &mut report, &comptime);
-    demand::apply_program(&mut program);
-    remove_unused_pure_lets_program(&mut program);
-    run_tail_passes(&mut program, cpu, &mut report);
+    if scalar {
+        scalar_simplify_program(&mut program, &mut report, false, &comptime);
+    }
+    if options.is_enabled(OptimizationPass::LoopInvariantCodeMotion) {
+        hoist_pure_loop_invariants_program(&mut program, &mut report);
+    }
+    if propagation {
+        local_propagation_and_cse_program(&mut program, context, &mut report);
+    }
+    if scalar {
+        scalar_simplify_program(&mut program, &mut report, false, &comptime);
+    }
+    if options.is_enabled(OptimizationPass::KnownBits) {
+        known_bits_program(&mut program);
+    }
+    if options.is_enabled(OptimizationPass::MemoryReadLoopInvariantCodeMotion) {
+        hoist_named_memory_reads_program(&mut program, context, &mut report);
+    }
+    if options.is_enabled(OptimizationPass::FunctionInlining) {
+        expand_inline_functions(
+            &mut program,
+            context,
+            &mut report,
+            &comptime,
+            scalar,
+            propagation,
+        );
+    }
+    if dead_code {
+        eliminate_unreachable_statements_program(&mut program, &mut report);
+        demand::apply_program(&mut program);
+        remove_unused_pure_lets_program(&mut program);
+    }
+    run_tail_passes(
+        &mut program,
+        cpu,
+        &mut report,
+        options.is_enabled(OptimizationPass::TailCalls),
+        options.is_enabled(OptimizationPass::TailRecursion),
+    );
+    let idempotent = options.is_enabled(OptimizationPass::IdempotentOperations);
+    if idempotent {
+        simplify_idempotent_operations_program(&mut program, &mut report);
+    }
+    // Like MDL's multi-pass pattern optimizer, -O3 runs a second local sweep so
+    // rewrites exposed by inlining and loop passes can feed scalar cleanup.
+    if options.level >= 3 {
+        if propagation {
+            local_propagation_and_cse_program(&mut program, context, &mut report);
+        }
+        if scalar {
+            scalar_simplify_program(&mut program, &mut report, false, &comptime);
+        }
+        if idempotent {
+            simplify_idempotent_operations_program(&mut program, &mut report);
+        }
+        if dead_code {
+            eliminate_unreachable_statements_program(&mut program, &mut report);
+            demand::apply_program(&mut program);
+            remove_unused_pure_lets_program(&mut program);
+        }
+    }
     (program, report)
+}
+
+fn eliminate_unreachable_statements_program(
+    program: &mut Program,
+    report: &mut TbirOptimizationReport,
+) {
+    fn visit_declaration(declaration: &mut Declaration, report: &mut TbirOptimizationReport) {
+        match declaration {
+            Declaration::Cfg {
+                declaration: inner, ..
+            }
+            | Declaration::Bank {
+                declaration: inner, ..
+            } => visit_declaration(inner, report),
+            Declaration::Function(function) => eliminate(&mut function.body, report),
+            _ => {}
+        }
+    }
+
+    fn eliminate(stmts: &mut Vec<Stmt>, report: &mut TbirOptimizationReport) {
+        for stmt in stmts.iter_mut() {
+            match stmt {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    eliminate(then_body, report);
+                    eliminate(else_body, report);
+                }
+                Stmt::While { body, .. } | Stmt::Loop { body } => eliminate(body, report),
+                _ => {}
+            }
+        }
+        let mut output = Vec::with_capacity(stmts.len());
+        let mut terminated = false;
+        for stmt in core::mem::take(stmts) {
+            if terminated {
+                report.dead_statements_marked += 1;
+                continue;
+            }
+            terminated = terminates(&stmt);
+            output.push(stmt);
+        }
+        *stmts = output;
+    }
+
+    for declaration in &mut program.declarations {
+        visit_declaration(declaration, report);
+    }
+}
+
+fn simplify_idempotent_operations_program(
+    program: &mut Program,
+    report: &mut TbirOptimizationReport,
+) {
+    fn visit_declaration(declaration: &mut Declaration, report: &mut TbirOptimizationReport) {
+        match declaration {
+            Declaration::Cfg {
+                declaration: inner, ..
+            }
+            | Declaration::Bank {
+                declaration: inner, ..
+            } => visit_declaration(inner, report),
+            Declaration::Function(function) => statements(&mut function.body, report),
+            Declaration::Const(value) => expression(&mut value.value, report),
+            Declaration::Port(value) => expression(&mut value.value, report),
+            Declaration::Mmio(value) => expression(&mut value.value, report),
+            Declaration::Global(value) => expression(&mut value.value, report),
+            Declaration::Embed(_)
+            | Declaration::Import(_)
+            | Declaration::Alias(_)
+            | Declaration::Struct(_)
+            | Declaration::ExternAsmFunction(_) => {}
+        }
+    }
+
+    fn statements(stmts: &mut [Stmt], report: &mut TbirOptimizationReport) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let { value, .. }
+                | Stmt::LetTwo { value, .. }
+                | Stmt::Expr(value)
+                | Stmt::Out { value, .. } => expression(value, report),
+                Stmt::Assign { target, value, .. } => {
+                    place(target, report);
+                    expression(value, report);
+                }
+                Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    expression(condition, report);
+                    statements(then_body, report);
+                    statements(else_body, report);
+                }
+                Stmt::While { condition, body } => {
+                    expression(condition, report);
+                    statements(body, report);
+                }
+                Stmt::Loop { body } => statements(body, report),
+                Stmt::Return(value) => {
+                    if let Some(value) = value {
+                        expression(value, report);
+                    }
+                }
+                Stmt::ReturnTwo { first, second } => {
+                    expression(first, report);
+                    expression(second, report);
+                }
+                Stmt::Asm { .. } | Stmt::Break | Stmt::Continue => {}
+            }
+        }
+    }
+
+    fn place(place: &mut Place, report: &mut TbirOptimizationReport) {
+        match place {
+            Place::Index { index, .. } | Place::Deref(index) => expression(index, report),
+            Place::Access(path) => access(path, report),
+            Place::Ident(_) | Place::Field { .. } => {}
+        }
+    }
+
+    fn access(path: &mut AccessPath, report: &mut TbirOptimizationReport) {
+        for segment in &mut path.segments {
+            if let AccessSegment::Index(index) = segment {
+                expression(index, report);
+            }
+        }
+    }
+
+    fn expression(expr: &mut Expr, report: &mut TbirOptimizationReport) {
+        match expr {
+            Expr::Array(values) => {
+                for value in values {
+                    expression(value, report);
+                }
+            }
+            Expr::Index { index, .. }
+            | Expr::AddressOfIndex { index, .. }
+            | Expr::Deref(index)
+            | Expr::Cast { expr: index, .. }
+            | Expr::Unary { expr: index, .. } => expression(index, report),
+            Expr::Access(path) | Expr::AddressOfAccess(path) => access(path, report),
+            Expr::StructInit { fields, .. } => {
+                for (_, value) in fields {
+                    expression(value, report);
+                }
+            }
+            Expr::BankedPointer { pointer, .. } => expression(pointer, report),
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    expression(arg, report);
+                }
+            }
+            Expr::Binary { left, op, right } => {
+                expression(left, report);
+                expression(right, report);
+                if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr)
+                    && left == right
+                    && is_pure_scalar(left)
+                {
+                    report.algebraic_simplifications += 1;
+                    *expr = left.as_ref().clone();
+                }
+            }
+            Expr::Int(_)
+            | Expr::TypedInt(_, _)
+            | Expr::Bool(_)
+            | Expr::Char(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::In(_)
+            | Expr::Field { .. }
+            | Expr::AddressOfField { .. }
+            | Expr::AddressOf(_) => {}
+        }
+    }
+
+    for declaration in &mut program.declarations {
+        visit_declaration(declaration, report);
+    }
 }
 
 fn functions(program: &Program) -> Vec<&Function> {
@@ -672,6 +938,8 @@ fn expand_inline_functions(
     context: &OptimizationContext,
     report: &mut TbirOptimizationReport,
     comptime: &ComptimeContext,
+    scalar_cleanup: bool,
+    propagation_cleanup: bool,
 ) {
     let all_functions = functions(program);
     let mut graph = HashMap::new();
@@ -733,9 +1001,15 @@ fn expand_inline_functions(
 
     if expanded_any {
         let mut cleanup_report = TbirOptimizationReport::default();
-        scalar_simplify_program(program, &mut cleanup_report, false, comptime);
-        local_propagation_and_cse_program(program, context, &mut cleanup_report);
-        scalar_simplify_program(program, &mut cleanup_report, false, comptime);
+        if scalar_cleanup {
+            scalar_simplify_program(program, &mut cleanup_report, false, comptime);
+        }
+        if propagation_cleanup {
+            local_propagation_and_cse_program(program, context, &mut cleanup_report);
+        }
+        if scalar_cleanup {
+            scalar_simplify_program(program, &mut cleanup_report, false, comptime);
+        }
     }
 }
 
@@ -1313,7 +1587,13 @@ struct FunctionFacts {
     return_type: Option<Type>,
 }
 
-fn run_tail_passes(program: &mut Program, cpu: CpuFamily, report: &mut TbirOptimizationReport) {
+fn run_tail_passes(
+    program: &mut Program,
+    cpu: CpuFamily,
+    report: &mut TbirOptimizationReport,
+    tail_calls: bool,
+    tail_recursion: bool,
+) {
     let facts: HashMap<String, FunctionFacts> = functions(program)
         .into_iter()
         .map(|function| {
@@ -1327,7 +1607,14 @@ fn run_tail_passes(program: &mut Program, cpu: CpuFamily, report: &mut TbirOptim
             )
         })
         .collect();
-    decide_tail_calls_in_declarations(&mut program.declarations, cpu, &facts, report);
+    decide_tail_calls_in_declarations(
+        &mut program.declarations,
+        cpu,
+        &facts,
+        report,
+        tail_calls,
+        tail_recursion,
+    );
 }
 
 fn decide_tail_calls_in_declarations(
@@ -1335,6 +1622,8 @@ fn decide_tail_calls_in_declarations(
     cpu: CpuFamily,
     facts: &HashMap<String, FunctionFacts>,
     report: &mut TbirOptimizationReport,
+    tail_calls: bool,
+    tail_recursion: bool,
 ) {
     for declaration in declarations {
         match declaration {
@@ -1344,6 +1633,8 @@ fn decide_tail_calls_in_declarations(
                     cpu,
                     facts,
                     report,
+                    tail_calls,
+                    tail_recursion,
                 )
             }
             Declaration::Function(function) => {
@@ -1360,6 +1651,9 @@ fn decide_tail_calls_in_declarations(
                         continue;
                     }
                     if callee == function.name {
+                        if !tail_recursion {
+                            continue;
+                        }
                         let reason = tail_recursion_rejection(function);
                         decision(
                             report,
@@ -1372,6 +1666,9 @@ fn decide_tail_calls_in_declarations(
                             rewrite_tail_recursion(function);
                         }
                     } else {
+                        if !tail_calls {
+                            continue;
+                        }
                         let reason = sibling_tail_rejection(function, &callee, cpu, facts);
                         decision(
                             report,
@@ -1497,7 +1794,7 @@ fn sibling_tail_rejection(
 ) -> Option<&'static str> {
     if !matches!(
         cpu,
-        CpuFamily::Ez80 | CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180
+        CpuFamily::Ez80 | CpuFamily::Z80 | CpuFamily::R800 | CpuFamily::Z80N | CpuFamily::Z180
     ) {
         return Some("target does not support sibling tail calls");
     }
@@ -3697,10 +3994,8 @@ fn optimize_stmts(
     let mut output = Vec::with_capacity(stmts.len());
     let mut terminated = false;
     for stmt in stmts {
-        if terminated {
-            if count_dead_statements {
-                report.dead_statements_marked += 1;
-            }
+        if terminated && count_dead_statements {
+            report.dead_statements_marked += 1;
             continue;
         }
         let stmt = optimize_stmt(

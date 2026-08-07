@@ -20,6 +20,7 @@ use ezra::{
     disk::{DiskFile, DiskFormat, DiskRequest, create_disk_image},
     hir::HirProgram,
     layout::{Layout, parse_layout},
+    optimization::{OptimizationOptions, OptimizationPass},
     parser::parse_program,
     project::{
         ArduboyConfig, AssetConfig, BankingConfig, GameBoyConfig, GameBoyMapper, ZxSpectrumConfig,
@@ -402,6 +403,22 @@ impl SyntaxEditor {
     }
 }
 
+fn parse_optimization_level(value: &str) -> Result<u8, String> {
+    let level = value
+        .parse::<u8>()
+        .map_err(|_| format!("invalid optimization level `{value}`; expected 0, 1, 2, or 3"))?;
+    OptimizationOptions::new(level).map(|options| options.level)
+}
+
+fn parse_optimization_pass(value: &str) -> Result<OptimizationPass, String> {
+    OptimizationPass::parse(value).ok_or_else(|| {
+        format!(
+            "unknown optimization pass `{value}`; expected one of: {}",
+            OptimizationPass::names()
+        )
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildCommandOptions {
     path: Option<PathBuf>,
@@ -411,6 +428,9 @@ struct BuildCommandOptions {
     assembler_cpu: Option<AssemblerCpu>,
     layout_path: Option<PathBuf>,
     target: Option<String>,
+    optimization_level: Option<u8>,
+    enable_optimizations: Vec<OptimizationPass>,
+    disable_optimizations: Vec<OptimizationPass>,
 }
 
 impl BuildCommandOptions {
@@ -422,6 +442,9 @@ impl BuildCommandOptions {
         let mut assembler_cpu = None;
         let mut layout_path = None;
         let mut target = None;
+        let mut optimization_level = None;
+        let mut enable_optimizations = Vec::new();
+        let mut disable_optimizations = Vec::new();
         let mut iter = args.iter();
         while let Some(raw_arg) = iter.next() {
             let arg = raw_arg.as_ref();
@@ -442,6 +465,20 @@ impl BuildCommandOptions {
                 Some("--target") => {
                     target = Some(cli_text(iter.next().ok_or_else(usage)?)?);
                 }
+                Some("-O" | "--opt-level") => {
+                    optimization_level = Some(parse_optimization_level(&cli_text(
+                        iter.next().ok_or_else(usage)?,
+                    )?)?);
+                }
+                Some(value) if value.starts_with("-O") && value.len() == 3 => {
+                    optimization_level = Some(parse_optimization_level(&value[2..])?);
+                }
+                Some("--enable-optimization") => enable_optimizations.push(
+                    parse_optimization_pass(&cli_text(iter.next().ok_or_else(usage)?)?)?,
+                ),
+                Some("--disable-optimization") => disable_optimizations.push(
+                    parse_optimization_pass(&cli_text(iter.next().ok_or_else(usage)?)?)?,
+                ),
                 Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
                 None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
@@ -455,6 +492,9 @@ impl BuildCommandOptions {
             assembler_cpu,
             layout_path,
             target,
+            optimization_level,
+            enable_optimizations,
+            disable_optimizations,
         })
     }
 
@@ -468,6 +508,9 @@ impl BuildCommandOptions {
             assembler_cpu: None,
             layout_path: None,
             target: None,
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         }
     }
 }
@@ -478,6 +521,9 @@ trait BuildOptionsView {
     fn assembler_cpu(&self) -> Option<AssemblerCpu>;
     fn layout_path(&self) -> Option<&Path>;
     fn target(&self) -> Option<&String>;
+    fn optimization_level(&self) -> Option<u8>;
+    fn enabled_optimizations(&self) -> &[OptimizationPass];
+    fn disabled_optimizations(&self) -> &[OptimizationPass];
 }
 
 impl BuildOptionsView for BuildCommandOptions {
@@ -500,6 +546,18 @@ impl BuildOptionsView for BuildCommandOptions {
     fn target(&self) -> Option<&String> {
         self.target.as_ref()
     }
+
+    fn optimization_level(&self) -> Option<u8> {
+        self.optimization_level
+    }
+
+    fn enabled_optimizations(&self) -> &[OptimizationPass] {
+        &self.enable_optimizations
+    }
+
+    fn disabled_optimizations(&self) -> &[OptimizationPass] {
+        &self.disable_optimizations
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -509,6 +567,9 @@ struct CommandOptions {
     default_sdk_symbols: bool,
     layout_path: Option<PathBuf>,
     target: Option<String>,
+    optimization_level: Option<u8>,
+    enable_optimizations: Vec<OptimizationPass>,
+    disable_optimizations: Vec<OptimizationPass>,
 }
 
 impl CommandOptions {
@@ -518,6 +579,9 @@ impl CommandOptions {
         let mut default_sdk_symbols = true;
         let mut layout_path = None;
         let mut target = None;
+        let mut optimization_level = None;
+        let mut enable_optimizations = Vec::new();
+        let mut disable_optimizations = Vec::new();
         let mut iter = args.iter();
         while let Some(raw_arg) = iter.next() {
             let arg = raw_arg.as_ref();
@@ -528,6 +592,20 @@ impl CommandOptions {
                     layout_path = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()))
                 }
                 Some("--target") => target = Some(cli_text(iter.next().ok_or_else(usage)?)?),
+                Some("-O" | "--opt-level") => {
+                    optimization_level = Some(parse_optimization_level(&cli_text(
+                        iter.next().ok_or_else(usage)?,
+                    )?)?);
+                }
+                Some(value) if value.starts_with("-O") && value.len() == 3 => {
+                    optimization_level = Some(parse_optimization_level(&value[2..])?);
+                }
+                Some("--enable-optimization") => enable_optimizations.push(
+                    parse_optimization_pass(&cli_text(iter.next().ok_or_else(usage)?)?)?,
+                ),
+                Some("--disable-optimization") => disable_optimizations.push(
+                    parse_optimization_pass(&cli_text(iter.next().ok_or_else(usage)?)?)?,
+                ),
                 Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
                 None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
@@ -539,6 +617,9 @@ impl CommandOptions {
             default_sdk_symbols,
             layout_path,
             target,
+            optimization_level,
+            enable_optimizations,
+            disable_optimizations,
         })
     }
 }
@@ -550,6 +631,9 @@ struct TestCommandOptions {
     default_sdk_symbols: bool,
     layout_path: Option<PathBuf>,
     target: Option<String>,
+    optimization_level: Option<u8>,
+    enable_optimizations: Vec<OptimizationPass>,
+    disable_optimizations: Vec<OptimizationPass>,
 }
 
 impl TestCommandOptions {
@@ -559,6 +643,9 @@ impl TestCommandOptions {
         let mut default_sdk_symbols = true;
         let mut layout_path = None;
         let mut target = None;
+        let mut optimization_level = None;
+        let mut enable_optimizations = Vec::new();
+        let mut disable_optimizations = Vec::new();
         let mut iter = args.iter();
         while let Some(raw_arg) = iter.next() {
             let arg = raw_arg.as_ref();
@@ -569,6 +656,20 @@ impl TestCommandOptions {
                     layout_path = Some(PathBuf::from(iter.next().ok_or_else(usage)?.as_ref()))
                 }
                 Some("--target") => target = Some(cli_text(iter.next().ok_or_else(usage)?)?),
+                Some("-O" | "--opt-level") => {
+                    optimization_level = Some(parse_optimization_level(&cli_text(
+                        iter.next().ok_or_else(usage)?,
+                    )?)?);
+                }
+                Some(value) if value.starts_with("-O") && value.len() == 3 => {
+                    optimization_level = Some(parse_optimization_level(&value[2..])?);
+                }
+                Some("--enable-optimization") => enable_optimizations.push(
+                    parse_optimization_pass(&cli_text(iter.next().ok_or_else(usage)?)?)?,
+                ),
+                Some("--disable-optimization") => disable_optimizations.push(
+                    parse_optimization_pass(&cli_text(iter.next().ok_or_else(usage)?)?)?,
+                ),
                 Some(_) if path.is_none() => path = Some(PathBuf::from(arg)),
                 None if path.is_none() => path = Some(PathBuf::from(arg)),
                 _ => return Err(usage()),
@@ -580,6 +681,9 @@ impl TestCommandOptions {
             default_sdk_symbols,
             layout_path,
             target,
+            optimization_level,
+            enable_optimizations,
+            disable_optimizations,
         })
     }
 
@@ -590,6 +694,9 @@ impl TestCommandOptions {
             default_sdk_symbols: self.default_sdk_symbols,
             layout_path: self.layout_path.clone(),
             target: self.target.clone(),
+            optimization_level: self.optimization_level,
+            enable_optimizations: self.enable_optimizations.clone(),
+            disable_optimizations: self.disable_optimizations.clone(),
         }
     }
 }
@@ -613,6 +720,18 @@ impl BuildOptionsView for CommandOptions {
 
     fn target(&self) -> Option<&String> {
         self.target.as_ref()
+    }
+
+    fn optimization_level(&self) -> Option<u8> {
+        self.optimization_level
+    }
+
+    fn enabled_optimizations(&self) -> &[OptimizationPass] {
+        &self.enable_optimizations
+    }
+
+    fn disabled_optimizations(&self) -> &[OptimizationPass] {
+        &self.disable_optimizations
     }
 }
 
@@ -768,6 +887,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         arduboy: None,
         zxspectrum: None,
         default_sdk_symbols: true,
+        optimization: OptimizationOptions::default(),
         output_root: source_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
@@ -857,9 +977,29 @@ struct BuildSettings {
     arduboy: Option<ArduboyConfig>,
     zxspectrum: Option<ZxSpectrumConfig>,
     default_sdk_symbols: bool,
+    optimization: OptimizationOptions,
     output_root: PathBuf,
     executable_name: Option<String>,
     size_budgets: ezra::api::SizeBudgets,
+}
+
+fn configured_assembly_options(
+    settings: &BuildSettings,
+    program: &Program,
+    debug_comments: bool,
+) -> Result<AssemblyOptions, String> {
+    let mut options = ezra::api::assembly_options_for_layout_and_program(
+        &settings.layout,
+        program,
+        settings.target.triple.cpu,
+        &settings.target.triple.value,
+        debug_comments,
+        settings.default_sdk_symbols,
+        settings.gameboy_banking,
+    )
+    .map_err(|error| error.to_string())?;
+    options.optimization = settings.optimization.clone();
+    Ok(options)
 }
 
 fn shared_build_request(
@@ -1022,6 +1162,19 @@ fn resolve_build_settings_with_budgets(
         None => default_layout_for_target(&target.triple.value),
     };
     let default_sdk_symbols = options.default_sdk_symbols() && target.default_sdk_symbols;
+    let mut optimization = project
+        .as_ref()
+        .map(|project| project.optimization.clone())
+        .unwrap_or_default();
+    if let Some(level) = options.optimization_level() {
+        optimization.level = level;
+    }
+    for pass in options.enabled_optimizations() {
+        optimization.enable(*pass);
+    }
+    for pass in options.disabled_optimizations() {
+        optimization.disable(*pass);
+    }
     let sdk = SdkResolver {
         target: Some(target.triple.value.clone()),
         sdk_roots: project
@@ -1111,6 +1264,7 @@ fn resolve_build_settings_with_budgets(
         arduboy,
         zxspectrum,
         default_sdk_symbols,
+        optimization,
         output_root,
         executable_name,
         size_budgets: size_budgets.clone(),
@@ -1125,6 +1279,7 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
         settings.target.triple.cpu,
         CpuFamily::Ez80
             | CpuFamily::Z80
+            | CpuFamily::R800
             | CpuFamily::Z80N
             | CpuFamily::Z180
             | CpuFamily::I8080
@@ -1453,6 +1608,9 @@ fn build_source_with_command_options(options: &CommandOptions) -> Result<BuildOu
         assembler_cpu: None,
         layout_path: options.layout_path.clone(),
         target: options.target.clone(),
+        optimization_level: options.optimization_level,
+        enable_optimizations: options.enable_optimizations.clone(),
+        disable_optimizations: options.disable_optimizations.clone(),
     })
 }
 
@@ -1545,16 +1703,7 @@ fn build_ezra_source(
     ensure_source_codegen_supported(settings)?;
     let assembly = emit_source_assembly(
         &program,
-        ezra::api::assembly_options_for_layout_and_program(
-            &settings.layout,
-            &program,
-            settings.target.triple.cpu,
-            &settings.target.triple.value,
-            options.debug_comments,
-            settings.default_sdk_symbols,
-            settings.gameboy_banking,
-        )
-        .map_err(|error| error.to_string())?,
+        configured_assembly_options(settings, &program, options.debug_comments)?,
     )
     .map_err(|error| command_diagnostic(error, source_path, &source, &source_location))?;
 
@@ -1735,6 +1884,9 @@ fn test_source(path: &str) -> Result<(), String> {
         default_sdk_symbols: true,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
 }
 
@@ -1766,6 +1918,9 @@ fn test_project_with_command_options(options: &TestCommandOptions) -> Result<(),
             default_sdk_symbols: options.default_sdk_symbols,
             layout_path: options.layout_path.clone(),
             target,
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         };
         let build_options = BuildCommandOptions {
             path: Some(command.path.clone()),
@@ -1775,6 +1930,9 @@ fn test_project_with_command_options(options: &TestCommandOptions) -> Result<(),
             assembler_cpu: None,
             layout_path: command.layout_path.clone(),
             target: command.target.clone(),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         };
         let name = source
             .strip_prefix(&tests_root)
@@ -1885,16 +2043,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
     ensure_source_codegen_supported(&settings)?;
     let assembly = emit_source_assembly(
         &program,
-        ezra::api::assembly_options_for_layout_and_program(
-            &settings.layout,
-            &program,
-            settings.target.triple.cpu,
-            &settings.target.triple.value,
-            options.debug_comments,
-            settings.default_sdk_symbols,
-            settings.gameboy_banking,
-        )
-        .map_err(|error| error.to_string())?,
+        configured_assembly_options(&settings, &program, options.debug_comments)?,
     )
     .map_err(|error| {
         error
@@ -2051,16 +2200,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
             let tbir = TbirProgram::lower(
                 &hir,
                 &program,
-                &ezra::api::assembly_options_for_layout_and_program(
-                    &settings.layout,
-                    &program,
-                    settings.target.triple.cpu,
-                    &settings.target.triple.value,
-                    options.command.debug_comments,
-                    settings.default_sdk_symbols,
-                    settings.gameboy_banking,
-                )
-                .map_err(|error| error.to_string())?,
+                &configured_assembly_options(&settings, &program, options.command.debug_comments)?,
             )
             .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
             print!("{}", tbir.dump_text());
@@ -2089,16 +2229,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
     ensure_source_codegen_supported(&settings)?;
     let assembly = emit_source_assembly(
         &program,
-        ezra::api::assembly_options_for_layout_and_program(
-            &settings.layout,
-            &program,
-            settings.target.triple.cpu,
-            &settings.target.triple.value,
-            options.debug_comments,
-            settings.default_sdk_symbols,
-            settings.gameboy_banking,
-        )
-        .map_err(|error| error.to_string())?,
+        configured_assembly_options(&settings, &program, options.debug_comments)?,
     )
     .map_err(|error| command_diagnostic(error, &source_path, &source, &source_location))?;
     validate_generated_assembly_for_command(&source_path, &source_location, &settings, &assembly)?;
@@ -2168,16 +2299,7 @@ fn check_source_with_layout(
     ensure_source_codegen_supported(&settings)?;
     let assembly = emit_source_assembly(
         &program,
-        ezra::api::assembly_options_for_layout_and_program(
-            &settings.layout,
-            &program,
-            settings.target.triple.cpu,
-            &settings.target.triple.value,
-            options.debug_comments,
-            settings.default_sdk_symbols,
-            settings.gameboy_banking,
-        )
-        .map_err(|error| error.to_string())?,
+        configured_assembly_options(&settings, &program, options.debug_comments)?,
     )
     .map_err(|error| command_diagnostic(error, source_path, source, &source_location))?;
     validate_generated_assembly_for_command(source_path, &source_location, &settings, &assembly)?;
@@ -2900,6 +3022,14 @@ fn print_targets() {
             status: "bare assembly/source scaffold",
         },
         TargetRow {
+            triple: "bare-r800",
+            cpu: "r800",
+            address_width_bits: 16,
+            output: "bin",
+            sdk: "none",
+            status: "bare R800 assembly/source target with VM execution",
+        },
+        TargetRow {
             triple: "bare-z80n",
             cpu: "z80n",
             address_width_bits: 16,
@@ -3045,7 +3175,7 @@ fn print_targets() {
 fn usage() -> String {
     "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--size-budget NAME=BYTES]... [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, .size, and target executable artifacts\n  disk [--format <format>] [--label <label>] --output <image> [--file [NAME=]PATH]...
                                        create an emulator-ready disk image with named files
-  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
+  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\nsource optimization options:\n  -O0|-O1|-O2|-O3                    select an optimization level (default: -O2)\n  --enable-optimization <pass>        enable one named optimization pass\n  --disable-optimization <pass>       disable one named optimization pass\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
 }
 
 #[cfg(all(test, feature = "i8086"))]
@@ -3078,6 +3208,9 @@ mod i8086_review_tests {
             assembler_cpu: None,
             layout_path: None,
             target: Some("msdos-com-i8086".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap();
         let assembly = std::fs::read_to_string(&outputs.asm).unwrap();
@@ -3111,6 +3244,9 @@ mod i8086_review_tests {
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("custom-board-i8086".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         };
         let settings = resolve_build_settings(&options, &source_path).unwrap();
 
@@ -3137,6 +3273,9 @@ mod i8086_review_tests {
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("bare-i8086".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap_err();
 
@@ -3156,6 +3295,9 @@ mod i8086_review_tests {
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("bare-i8086".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap_err();
 
@@ -3210,6 +3352,9 @@ mod i8086_review_tests {
             default_sdk_symbols: true,
             layout_path: Some(layout_path.clone()),
             target: Some("bare-i8086".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap_err();
 

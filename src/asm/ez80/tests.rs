@@ -272,6 +272,60 @@ fn generated_instruction_metadata_encodes_all_in0_out0_register_forms() {
 }
 
 #[test]
+fn generated_instruction_metadata_encodes_all_r800_multiply_forms() {
+    let cases = [
+        ("mulub a,b", vec![0xED, 0xC1]),
+        ("mulub a,c", vec![0xED, 0xC9]),
+        ("mulub a,d", vec![0xED, 0xD1]),
+        ("mulub a,e", vec![0xED, 0xD9]),
+        ("mulub a,h", vec![0xED, 0xE1]),
+        ("mulub a,l", vec![0xED, 0xE9]),
+        ("mulub a,a", vec![0xED, 0xF9]),
+        ("muluw hl,bc", vec![0xED, 0xC3]),
+        ("muluw hl,de", vec![0xED, 0xD3]),
+        ("muluw hl,hl", vec![0xED, 0xE3]),
+        ("muluw hl,sp", vec![0xED, 0xF3]),
+    ];
+
+    for (syntax, bytes) in cases {
+        assert_eq!(
+            encode_generated_instruction(AssemblerCpu::R800, syntax).unwrap(),
+            Some(bytes.clone()),
+            "{syntax}"
+        );
+        assert_eq!(
+            generated_instruction_len(AssemblerCpu::R800, syntax).unwrap(),
+            Some(2),
+            "{syntax}"
+        );
+        for cpu in [
+            AssemblerCpu::Z80,
+            AssemblerCpu::Z80N,
+            AssemblerCpu::Z180,
+            AssemblerCpu::Ez80,
+        ] {
+            assert_eq!(
+                encode_generated_instruction(cpu, syntax).unwrap(),
+                None,
+                "{cpu:?} accepted {syntax}"
+            );
+        }
+    }
+}
+
+#[test]
+fn r800_multiply_effects_report_results_and_flags() {
+    let byte = instruction_effects("mulub a, c");
+    assert!(byte.modified_registers.contains(&"hl"));
+    assert!(byte.changes_flags);
+
+    let word = instruction_effects("muluw hl, bc");
+    assert!(word.modified_registers.contains(&"hl"));
+    assert!(word.modified_registers.contains(&"de"));
+    assert!(word.changes_flags);
+}
+
+#[test]
 fn generated_instruction_metadata_encodes_z80n_extensions() {
     let cases = [
         ("swapnib", vec![0xED, 0x23]),
@@ -631,6 +685,7 @@ fn machine_readable_coverage_agrees_with_encoding_and_vm_sizing() {
         AssemblerCpu::I8080,
         AssemblerCpu::I8085,
         AssemblerCpu::Z80,
+        AssemblerCpu::R800,
         AssemblerCpu::Z80N,
         AssemblerCpu::Z180,
         AssemblerCpu::Ez80,
@@ -656,6 +711,7 @@ fn every_documented_cpu_family_form_assembles_through_the_standalone_path() {
         AssemblerCpu::I8080,
         AssemblerCpu::I8085,
         AssemblerCpu::Z80,
+        AssemblerCpu::R800,
         AssemblerCpu::Z80N,
         AssemblerCpu::Z180,
         AssemblerCpu::Ez80,

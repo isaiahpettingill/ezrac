@@ -1043,6 +1043,27 @@ fn omits_unreferenced_functions_regardless_of_visibility() {
 }
 
 #[test]
+fn explicit_dead_code_disable_keeps_unreferenced_functions() {
+    let source = r#"
+            fn unused() -> u8 {
+                return 42
+            }
+
+            fn main() {
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("game.ezra"), source).unwrap();
+    let mut options = AssemblyOptions::default();
+    options
+        .optimization
+        .disable(crate::optimization::OptimizationPass::DeadCodeElimination);
+    let asm = emit_ez80_assembly_with_options(&program, options).unwrap();
+
+    assert!(asm.contains("_unused:"), "{asm}");
+}
+
+#[test]
 fn validates_calls_in_unused_private_functions_before_omitting_them() {
     let source = r#"
             fn unused_private() {

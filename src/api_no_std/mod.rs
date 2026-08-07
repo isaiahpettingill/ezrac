@@ -42,6 +42,8 @@ pub struct CompileRequest {
     pub debug_comments: bool,
     /// Enable target SDK symbols built into the code generator.
     pub default_sdk_symbols: bool,
+    /// Optimization level and per-pass overrides.
+    pub optimization: crate::optimization::OptimizationOptions,
 }
 
 impl CompileRequest {
@@ -52,6 +54,7 @@ impl CompileRequest {
             sdk_paths: Vec::new(),
             debug_comments: false,
             default_sdk_symbols: true,
+            optimization: crate::optimization::OptimizationOptions::default(),
         }
     }
 
@@ -201,6 +204,7 @@ fn compile_workspace_to_assembly_with_resolved_request(
         target.triple.cpu,
         CpuFamily::Ez80
             | CpuFamily::Z80
+            | CpuFamily::R800
             | CpuFamily::Z80N
             | CpuFamily::Z180
             | CpuFamily::I8080
@@ -213,7 +217,7 @@ fn compile_workspace_to_assembly_with_resolved_request(
             | CpuFamily::Ricoh2A03
     ) {
         return Err(Diagnostic::new(format!(
-            "no-std source code generation is currently available only for eZ80/Z80, i8086, AVR, and MOS 6502-family targets, not `{}`",
+            "no-std source code generation is currently available only for eZ80/Z80/R800, i8086, AVR, and MOS 6502-family targets, not `{}`",
             target.triple.cpu.as_str()
         )));
     }
@@ -246,13 +250,14 @@ fn compile_workspace_to_assembly_with_resolved_request(
         declarations: program.declarations.len(),
         has_main,
     };
-    let options = assembly_options_for_layout(
+    let mut options = assembly_options_for_layout(
         layout,
         target.triple.cpu,
         &request.target,
         request.debug_comments,
         request.default_sdk_symbols,
     );
+    options.optimization = request.optimization.clone();
     let assembly = match target.triple.cpu {
         CpuFamily::I8086 => {
             #[cfg(feature = "i8086")]
@@ -759,6 +764,7 @@ pub fn assembly_options_for_layout(
             || target.starts_with("ti83premiumce-ez80"),
         arduboy_executable: target.starts_with("arduboy-"),
         gameboy_banking: None,
+        optimization: defaults.optimization.clone(),
         load_addr: symbol("EZRA_LOAD_ADDR").unwrap_or(layout.load),
         entry_addr: symbol("EZRA_ENTRY_ADDR").unwrap_or(layout.entry),
         code_base: symbol("EZRA_CODE_BASE").unwrap_or(layout.entry),

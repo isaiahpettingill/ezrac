@@ -114,6 +114,9 @@ fn game_boy_targets_compile_ezra_source_with_embedded_assets() {
             assembler_cpu: None,
             layout_path: None,
             target: Some(target.to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap();
         let rom = std::fs::read(outputs.executable).unwrap();
@@ -185,6 +188,9 @@ fn game_boy_explicit_banking_packages_banked_embed_and_emits_bank_zero_runtime()
         assembler_cpu: None,
         layout_path: None,
         target: None,
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     let assembly = std::fs::read_to_string(outputs.asm).unwrap();
@@ -224,6 +230,9 @@ fn game_boy_source_examples_build_as_roms() {
                 assembler_cpu: None,
                 layout_path: None,
                 target: Some(target.to_owned()),
+                optimization_level: None,
+                enable_optimizations: Vec::new(),
+                disable_optimizations: Vec::new(),
             })
             .unwrap_or_else(|error| {
                 panic!("failed to build Game Boy example `{name}` for `{target}`: {error}")
@@ -262,6 +271,9 @@ fn commodore64_source_example_builds_as_prg() {
         assembler_cpu: None,
         layout_path: None,
         target: Some("commodore64-6502".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
     assert_eq!(
@@ -402,6 +414,9 @@ fn zxspectrum_source_build_uses_sdk_and_writes_loadable_tape() {
         default_sdk_symbols: false,
         layout_path: None,
         target: Some("zxspectrum-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -581,6 +596,9 @@ fn spectrum_tap_preserves_a_custom_load_address() {
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("zxspectrum-z80".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         },
         Path::new("game.ezra"),
     )
@@ -774,6 +792,9 @@ fn cpm_z80_source_build_writes_com_binary() {
         default_sdk_symbols: true,
         layout_path: None,
         target: Some("cpm-2.2-z80".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -803,6 +824,9 @@ fn cpm_z80_source_examples_use_sdk_and_write_com_binaries() {
             default_sdk_symbols: true,
             layout_path: None,
             target: Some("cpm-2.2-z80".to_owned()),
+            optimization_level: None,
+            enable_optimizations: Vec::new(),
+            disable_optimizations: Vec::new(),
         })
         .unwrap_or_else(|error| panic!("failed to build CP/M example `{name}`: {error}"));
 
@@ -844,6 +868,9 @@ fn cpm_8080_source_build_uses_sdk_and_writes_com_binary() {
         default_sdk_symbols: false,
         layout_path: None,
         target: Some("cpm-2.2-i8080".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 
@@ -890,6 +917,9 @@ fn cpm_8085_source_build_uses_sdk_and_writes_com_binary() {
         default_sdk_symbols: false,
         layout_path: None,
         target: Some("cpm-2.2-i8085".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
     })
     .unwrap();
 

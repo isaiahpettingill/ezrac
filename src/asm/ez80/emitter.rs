@@ -156,6 +156,8 @@ pub struct AssemblyOptions {
     pub arduboy_executable: bool,
     /// Game Boy-only explicit ROM banking configuration.
     pub gameboy_banking: Option<GameBoyBankingOptions>,
+    /// Optimization level and per-pass overrides used while lowering TBIR.
+    pub optimization: crate::optimization::OptimizationOptions,
     pub load_addr: Address24,
     pub entry_addr: Address24,
     pub code_base: Address24,
@@ -180,6 +182,7 @@ impl Default for AssemblyOptions {
             ti_os_executable: false,
             arduboy_executable: false,
             gameboy_banking: None,
+            optimization: crate::optimization::OptimizationOptions::default(),
             load_addr: EZRA_LOAD_ADDR,
             entry_addr: EZRA_ENTRY_ADDR,
             code_base: EZRA_CODE_BASE,
@@ -368,7 +371,21 @@ pub fn emit_ez80_assembly_from_checked(
     validate_main_signature(main)?;
     validate_all_function_calls(program, &analysis_symbols.functions)?;
     let recursive_call_edges = recursive_call_edges(program, &analysis_symbols.functions);
-    let mut emitted_functions = reachable_function_names(program, &analysis_symbols);
+    let dead_code = options
+        .optimization
+        .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination);
+    let mut emitted_functions = if dead_code {
+        reachable_function_names(program, &analysis_symbols)
+    } else {
+        program
+            .declarations
+            .iter()
+            .filter_map(|declaration| match unwrapped_declaration(declaration) {
+                Declaration::Function(function) => Some(function.name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
     let mut function_references = Vec::new();
     for declaration in &program.declarations {
         match unwrapped_declaration(declaration) {
@@ -431,7 +448,13 @@ pub fn emit_ez80_assembly_from_checked(
     }
     emitter.emit_function_pointer_trampolines(program, &emitted_functions)?;
     emitter.emit_required_sections();
-    let assembly = peephole_cleanup_with_ranges(&emitter.out, &emitter.cacheable_ranges);
+    let assembly = peephole_cleanup_with_ranges(
+        &emitter.out,
+        &emitter.cacheable_ranges,
+        options
+            .optimization
+            .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies),
+    );
     translate_assembly_for_cpu(cpu, &assembly).map(|asm| {
         let profile = if is_intel_8080_family(cpu) {
             RoutineProfile::Z80
@@ -471,9 +494,16 @@ pub fn emit_ez80_assembly_from_checked(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let asm =
-            strip_unreachable_generated_routines_with_roots(&asm, profile, &assembly_root_refs);
-        let asm = cleanup_lowered_cfg(&asm, &assembly_root_refs);
+        let asm = if dead_code {
+            strip_unreachable_generated_routines_with_roots(&asm, profile, &assembly_root_refs)
+        } else {
+            asm
+        };
+        let asm = if dead_code {
+            cleanup_lowered_cfg(&asm, &assembly_root_refs)
+        } else {
+            asm
+        };
         with_readability_comments(
             asm,
             original_program,
@@ -487,14 +517,19 @@ pub fn emit_ez80_assembly_from_checked(
 fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
     matches!(
         cpu,
-        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::I8080 | CpuFamily::I8085
+        CpuFamily::Z80
+            | CpuFamily::R800
+            | CpuFamily::Z80N
+            | CpuFamily::Z180
+            | CpuFamily::I8080
+            | CpuFamily::I8085
     )
 }
 
 fn supports_z80_bit_instructions(cpu: CpuFamily) -> bool {
     matches!(
         cpu,
-        CpuFamily::Z80 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::Ez80
+        CpuFamily::Z80 | CpuFamily::R800 | CpuFamily::Z80N | CpuFamily::Z180 | CpuFamily::Ez80
     )
 }
 
@@ -662,12 +697,17 @@ fn constant_mul_cost_model(cpu: CpuFamily) -> CostModel {
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn peephole_cleanup(assembly: &str) -> String {
-    peephole_cleanup_with_ranges(assembly, &[])
+    peephole_cleanup_with_ranges(assembly, &[], true)
 }
 
-fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)]) -> String {
+fn peephole_cleanup_with_ranges(
+    assembly: &str,
+    cacheable_ranges: &[(u32, u32)],
+    eliminate_redundant_register_copies: bool,
+) -> String {
     let mut out = String::new();
     let mut register_values = HashMap::<&'static str, String>::new();
+    let mut register_copies = HashMap::<&'static str, &'static str>::new();
     let mut cached_memory_loads = HashMap::<(u32, u32), &'static str>::new();
     let mut last_memory_transfer: Option<AbsoluteMemoryTransfer> = None;
     let mut in_inline_asm = false;
@@ -677,6 +717,7 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
         if trimmed == "; end asm" {
             in_inline_asm = false;
             register_values.clear();
+            register_copies.clear();
             cached_memory_loads.clear();
             last_memory_transfer = None;
             out.push_str(line);
@@ -686,17 +727,27 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
         if trimmed.starts_with("; asm") {
             in_inline_asm = true;
             register_values.clear();
+            register_copies.clear();
             cached_memory_loads.clear();
             last_memory_transfer = None;
             out.push_str(line);
             out.push('\n');
             continue;
         }
-        if !in_inline_asm && trimmed == "ld hl, hl" {
+        let register_copy = (!in_inline_asm && eliminate_redundant_register_copies)
+            .then(|| register_copy(trimmed))
+            .flatten();
+        if register_copy.is_some_and(|(target, source)| {
+            target == source
+                || register_copies
+                    .get(target)
+                    .is_some_and(|cached| *cached == source)
+        }) {
             continue;
         }
         if is_peephole_block_boundary(trimmed) {
             register_values.clear();
+            register_copies.clear();
             cached_memory_loads.clear();
             last_memory_transfer = None;
         }
@@ -753,12 +804,17 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
 
         if let Some((register, value)) = immediate_load {
             invalidate_register_value_aliases(&mut register_values, register);
+            invalidate_register_copy_aliases(&mut register_copies, register);
             register_values.insert(register, value.to_owned());
         } else if !trimmed.is_empty() && !trimmed.starts_with(';') {
             let effects = instruction_effects(trimmed);
             for register in effects.modified_registers {
                 invalidate_register_value_aliases(&mut register_values, register);
+                invalidate_register_copy_aliases(&mut register_copies, register);
                 cached_memory_loads.retain(|_, cached| !registers_overlap(cached, register));
+            }
+            if let Some((target, source)) = register_copy {
+                register_copies.insert(target, source);
             }
             if effects.uses_memory || effects.uses_ports || trimmed.starts_with("call ") {
                 cached_memory_loads.clear();
@@ -779,11 +835,13 @@ fn peephole_cleanup_with_ranges(assembly: &str, cacheable_ranges: &[(u32, u32)])
             // A memory access may be volatile. Do not reuse an immediate
             // address load across it, even when the instruction only changes A.
             register_values.clear();
+            register_copies.clear();
             cached_memory_loads.clear();
         }
 
         if is_peephole_block_terminator(trimmed) {
             register_values.clear();
+            register_copies.clear();
             last_memory_transfer = None;
         }
     }
@@ -808,6 +866,11 @@ fn immediate_register_load(line: &str) -> Option<(&'static str, &str)> {
         .then_some((target, value))
 }
 
+fn register_copy(line: &str) -> Option<(&'static str, &'static str)> {
+    let (target, source) = line.strip_prefix("ld ")?.split_once(',')?;
+    Some((register_name(target.trim())?, register_name(source.trim())?))
+}
+
 fn register_name(register: &str) -> Option<&'static str> {
     match register {
         "a" => Some("a"),
@@ -829,6 +892,15 @@ fn register_name(register: &str) -> Option<&'static str> {
 
 fn invalidate_register_value_aliases(values: &mut HashMap<&'static str, String>, modified: &str) {
     values.retain(|register, _| !registers_overlap(register, modified));
+}
+
+fn invalidate_register_copy_aliases(
+    copies: &mut HashMap<&'static str, &'static str>,
+    modified: &str,
+) {
+    copies.retain(|target, source| {
+        !registers_overlap(target, modified) && !registers_overlap(source, modified)
+    });
 }
 
 fn registers_overlap(left: &str, right: &str) -> bool {
@@ -1342,6 +1414,7 @@ impl Emitter {
         match self.cpu {
             CpuFamily::Ez80 => self.line("; target: eZ80 ADL mode"),
             CpuFamily::Z80 => self.line("; target: Z80"),
+            CpuFamily::R800 => self.line("; target: R800"),
             other => self.line(&format!("; target: {}", other.as_str())),
         }
         self.line("section .text");
@@ -1560,7 +1633,11 @@ impl Emitter {
             .contains(&RuntimeHelper::MulU8)
         {
             self.line("__ezra_mul_u8:");
-            if is_z80_family_16bit(self.cpu) {
+            if self.cpu == CpuFamily::R800 {
+                self.line("    mulub a, c");
+                self.line("    ld a, l");
+                self.line("    ret");
+            } else if is_z80_family_16bit(self.cpu) {
                 self.line("    ld b, a");
                 self.line("    xor a");
                 self.line(".L_mul_u8_loop:");
@@ -1584,7 +1661,10 @@ impl Emitter {
             .contains(&RuntimeHelper::MulU16)
         {
             self.line("__ezra_mul_u16:");
-            if is_z80_family_16bit(self.cpu) {
+            if self.cpu == CpuFamily::R800 {
+                self.line("    muluw hl, bc");
+                self.line("    ret");
+            } else if is_z80_family_16bit(self.cpu) {
                 self.line("    ld de, 0000h");
                 self.line(".L_mul_u16_loop:");
                 self.line("    ld a, b");
@@ -6397,12 +6477,15 @@ impl Emitter {
                 constant_mul_shift_add_cost(width, &naf_digits, negate),
             ),
         ];
-        if self.cpu == CpuFamily::Ez80 && width == ValueWidth::U8 {
+        if matches!(self.cpu, CpuFamily::Ez80 | CpuFamily::R800) && width == ValueWidth::U8 {
             forms.push(ConstantMulForm::NativeU8);
-            candidates.push(CostCandidate::new(
-                "native",
-                InstructionCost::new(6, 23, 0, FlagEffects::writes(FlagSet::ALL)),
-            ));
+            let native_cost = if self.cpu == CpuFamily::R800 {
+                // LD C,n + MULUB A,C + LD A,L. MULUB itself takes 14 R800 clocks.
+                InstructionCost::new(5, 16, 0, FlagEffects::writes(FlagSet::ALL))
+            } else {
+                InstructionCost::new(6, 23, 0, FlagEffects::writes(FlagSet::ALL))
+            };
+            candidates.push(CostCandidate::new("native", native_cost));
         }
         forms.push(ConstantMulForm::Helper);
         candidates.push(CostCandidate::new(
@@ -6427,10 +6510,16 @@ impl Emitter {
             }
             ConstantMulForm::NativeU8 => {
                 debug_assert_eq!(width, ValueWidth::U8);
-                self.line("    ld b, a");
-                self.line(&format!("    ld c, {:02X}h", raw & 0xFF));
-                self.line("    mlt bc");
-                self.line("    ld a, c");
+                if self.cpu == CpuFamily::R800 {
+                    self.line(&format!("    ld c, {:02X}h", raw & 0xFF));
+                    self.line("    mulub a, c");
+                    self.line("    ld a, l");
+                } else {
+                    self.line("    ld b, a");
+                    self.line(&format!("    ld c, {:02X}h", raw & 0xFF));
+                    self.line("    mlt bc");
+                    self.line("    ld a, c");
+                }
             }
             ConstantMulForm::Helper => match width {
                 ValueWidth::U8 => {

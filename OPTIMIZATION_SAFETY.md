@@ -8,12 +8,18 @@ behavior, and emulator-backed test behavior.
 ## Accepted
 
 - Constant folding for pure scalar expressions.
+- Idempotent bit-operation cleanup (`x & x` and `x | x` become `x`) only when
+  `x` is a pure scalar expression. Calls, memory reads, ports, pointers, and
+  inline assembly are not rewritten because evaluating them fewer times can
+  change behavior.
 - Dead branch elimination when the condition is a compile-time constant and the
   removed branch has no reachable side effects.
 - Unreachable statement elimination after terminators, provided removed
   statements are unreachable in source semantics.
-- Peephole cleanup for exact duplicate register loads with no intervening
-  memory, port, call, or inline-asm effects. The eZ80 pass may also reuse a
+- Peephole cleanup for exact duplicate register loads and register copies when
+  neither the source nor destination register changed. Self-copies are removed.
+  Memory, port, call, control-flow, and inline-assembly barriers invalidate tracked
+  state. The eZ80 pass may also reuse a
   cached load from a proven nonvolatile absolute local/global range across
   register-only instructions; stores, indirect memory, ports, calls, branches,
   and inline assembly invalidate the cache.

@@ -73,6 +73,8 @@ const GENERATED_COVERAGE_SEEDS: &[&str] = &[
     "in0 b, (12h)",
     "out0 (34h), a",
     "mlt bc",
+    "mulub a, b",
+    "muluw hl, bc",
     "nextreg 12h, a",
     "tstio 34h",
     "ld hl, 040000h",
@@ -329,6 +331,7 @@ pub fn is_unsupported_z80_family_instruction(
     }
     for candidate in [
         AssemblerCpu::Z80,
+        AssemblerCpu::R800,
         AssemblerCpu::Z80N,
         AssemblerCpu::Z180,
         AssemblerCpu::Ez80,
@@ -468,10 +471,12 @@ pub fn instruction_effects(line: &str) -> InstructionEffects {
 
 const Z80_PLUS: &[AssemblerCpu] = &[
     AssemblerCpu::Z80,
+    AssemblerCpu::R800,
     AssemblerCpu::Z80N,
     AssemblerCpu::Z180,
     AssemblerCpu::Ez80,
 ];
+const R800_ONLY: &[AssemblerCpu] = &[AssemblerCpu::R800];
 const Z80N_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Z80N];
 const Z180_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Z180];
 const Z180_PLUS: &[AssemblerCpu] = &[AssemblerCpu::Z180, AssemblerCpu::Ez80];
@@ -562,6 +567,17 @@ pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("otir", &[0xED, 0xB3]),
     z80_ez80("outd", &[0xED, 0xAB]),
     z80_ez80("otdr", &[0xED, 0xBB]),
+    r800("mulub a, b", &[0xED, 0xC1]),
+    r800("mulub a, c", &[0xED, 0xC9]),
+    r800("mulub a, d", &[0xED, 0xD1]),
+    r800("mulub a, e", &[0xED, 0xD9]),
+    r800("mulub a, h", &[0xED, 0xE1]),
+    r800("mulub a, l", &[0xED, 0xE9]),
+    r800("mulub a, a", &[0xED, 0xF9]),
+    r800("muluw hl, bc", &[0xED, 0xC3]),
+    r800("muluw hl, de", &[0xED, 0xD3]),
+    r800("muluw hl, hl", &[0xED, 0xE3]),
+    r800("muluw hl, sp", &[0xED, 0xF3]),
     z80n("swapnib", &[0xED, 0x23]),
     z80n("mirror a", &[0xED, 0x24]),
     z80n("bsla de, b", &[0xED, 0x28]),
@@ -619,6 +635,14 @@ const fn z80_ez80(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec
     InstructionSpec {
         syntax,
         cpus: Z80_PLUS,
+        bytes,
+    }
+}
+
+const fn r800(syntax: &'static str, bytes: &'static [u8]) -> InstructionSpec {
+    InstructionSpec {
+        syntax,
+        cpus: R800_ONLY,
         bytes,
     }
 }
@@ -797,7 +821,7 @@ fn encode_ld_direct16(
 ) -> Result<Option<Vec<u8>>, Diagnostic> {
     if !matches!(
         cpu,
-        AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180
+        AssemblerCpu::Z80 | AssemblerCpu::R800 | AssemblerCpu::Z80N | AssemblerCpu::Z180
     ) {
         return Ok(None);
     }
@@ -921,7 +945,7 @@ fn encode_ld_reg16_imm(
 ) -> Result<Option<Vec<u8>>, Diagnostic> {
     if !matches!(
         cpu,
-        AssemblerCpu::Z80 | AssemblerCpu::Z80N | AssemblerCpu::Z180
+        AssemblerCpu::Z80 | AssemblerCpu::R800 | AssemblerCpu::Z80N | AssemblerCpu::Z180
     ) {
         return Ok(None);
     }
@@ -1060,6 +1084,8 @@ fn asm_line_modified_registers(line: &str) -> Vec<&'static str> {
             vec!["bc", "hl"]
         }
         "mlt" => asm_operand_register(first).into_iter().collect(),
+        "mulub" => vec!["hl"],
+        "muluw" => vec!["hl", "de"],
         _ => Vec::new(),
     }
 }
@@ -1082,6 +1108,8 @@ fn asm_line_clobbers_flags(line: &str) -> bool {
             | "dec"
             | "inc"
             | "neg"
+            | "mulub"
+            | "muluw"
             | "or"
             | "rl"
             | "rla"

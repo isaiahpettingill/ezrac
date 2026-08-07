@@ -49,6 +49,50 @@ fn build_options_parse_input_kind() {
 }
 
 #[test]
+fn source_commands_parse_optimization_levels_and_pass_overrides() {
+    let build = BuildCommandOptions::parse(&[
+        "-O3".to_owned(),
+        "--disable-optimization".to_owned(),
+        "function-inlining".to_owned(),
+        "--enable-optimization".to_owned(),
+        "idempotent-operations".to_owned(),
+        "main.ezra".to_owned(),
+    ])
+    .unwrap();
+    assert_eq!(build.optimization_level, Some(3));
+    assert_eq!(
+        build.disable_optimizations,
+        [OptimizationPass::FunctionInlining]
+    );
+    assert_eq!(
+        build.enable_optimizations,
+        [OptimizationPass::IdempotentOperations]
+    );
+
+    let command = CommandOptions::parse(&[
+        "--opt-level".to_owned(),
+        "0".to_owned(),
+        "main.ezra".to_owned(),
+    ])
+    .unwrap();
+    assert_eq!(command.optimization_level, Some(0));
+}
+
+#[test]
+fn source_commands_reject_unknown_optimization_options() {
+    let level = CommandOptions::parse(&["-O9".to_owned(), "main.ezra".to_owned()]).unwrap_err();
+    assert!(level.contains("expected 0, 1, 2, or 3"), "{level}");
+
+    let pass = CommandOptions::parse(&[
+        "--enable-optimization".to_owned(),
+        "unknown".to_owned(),
+        "main.ezra".to_owned(),
+    ])
+    .unwrap_err();
+    assert!(pass.contains("scalar-simplification"), "{pass}");
+}
+
+#[test]
 fn size_budget_options_parse_target_sections_and_hex_counts() {
     let (remaining, budgets) = parse_size_budget_args(&[
         "--size-budget".to_owned(),
@@ -80,6 +124,15 @@ fn assemble_options_parse_cpu() {
 
     assert_eq!(options.path, PathBuf::from("main.asm"));
     assert_eq!(options.assembler_cpu, Some(AssemblerCpu::Z80N));
+}
+
+#[test]
+fn assemble_options_parse_r800_cpu() {
+    let options =
+        AssembleOptions::parse(&["--cpu".to_owned(), "r800".to_owned(), "main.asm".to_owned()])
+            .unwrap();
+
+    assert_eq!(options.assembler_cpu, Some(AssemblerCpu::R800));
 }
 
 #[test]

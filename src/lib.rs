@@ -27,6 +27,7 @@ pub mod disk;
 pub mod hir;
 pub mod intrinsics;
 pub mod layout;
+pub mod optimization;
 pub mod package;
 pub mod parser;
 #[cfg(feature = "std")]
