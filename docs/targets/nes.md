@@ -23,7 +23,7 @@ Hardware register sequences stay inside the SDK. Applications should use these f
 5. Enable background or sprite bits with `ppu.set_mask()`.
 6. Use `timing.wait_frame()` for simple frame loops. Larger games should enable NMI after installing an NMI-safe update path.
 
-Source-generated ROMs include one solid 8×8 tile in CHR tile 0. This gives minimal programs a visible tile without an external asset pipeline. Raw assembly ROMs continue to own their full CHR image.
+Source-generated ROMs reserve one solid 8×8 tile in CHR tile 0. Configured `.assets` embeds are packed into CHR-ROM as whole 16-byte tiles starting at tile 1. The indexed PNG pipeline can generate those bytes directly; see `examples/nes-2a03/png-assets`. Raw assembly ROMs continue to own their full CHR image.
 
 ## Source references
 
@@ -33,6 +33,6 @@ The existing `examples/nes-2a03/hello-world` assembly is based on Thomas Wesley 
 
 ## Current limits
 
-- Mapper 0, one 16 KiB PRG bank, and one 8 KiB CHR bank only.
+- Mapper 0, one 16 KiB PRG bank, and one 8 KiB CHR bank only. Source assets have 8,176 bytes available after reserved tile 0.
 - Generated reset, NMI, and IRQ vectors currently point to `$C000`; source programs should leave NMI disabled unless their startup path handles it.
 - No emulator-backed PPU or controller runner is included yet. Tests validate generated assembly and ROM structure.

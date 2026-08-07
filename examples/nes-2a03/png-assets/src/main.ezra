@@ -1,0 +1,21 @@
+import nes.audio
+import nes.palette
+import nes.ppu
+import nes.sprites
+import nes.timing
+
+// The indexed PNG is converted to NES 2bpp CHR tile 1.
+embed player: bytes = file("assets/player.png")
+
+fn main() {
+    ppu.disable_rendering()
+    audio.disable()
+    timing.wait_two_vblanks()
+
+    palette.set_background(palette.DARK_BLUE)
+    palette.set_sprite_color(0, 1, palette.WHITE)
+    sprites.set(0, 0x78, 0x70, 1, 0)
+
+    ppu.set_mask(ppu.MASK_SPRITES)
+    loop {}
+}

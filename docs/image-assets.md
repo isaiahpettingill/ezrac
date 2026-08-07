@@ -65,7 +65,7 @@ Targets or image kinds without a defined native layout are rejected. Bare and te
 Each supported graphics family has a buildable project under `examples`:
 
 - `examples/gameboy/png-assets`
-
+- `examples/nes-2a03/png-assets`
 - `examples/sega-master-system/png-assets`
 - `examples/sega-game-gear/png-assets`
 - `examples/commodore64/png-assets`
@@ -76,7 +76,7 @@ Each supported graphics family has a buildable project under `examples`:
 - `examples/ti84plusce/png-assets`
 - `examples/agon-mos/png-assets`
 
-The examples upload or draw the converted data through their platform SDK or graphics memory. NES CHR conversion is available through the library, but its source packager cannot place source embeds in CHR-ROM yet, so there is no NES example for now.
+The examples upload or draw the converted data through their platform SDK or graphics memory. NES source builds reserve CHR tile 0 and pack configured `.assets` into whole 16-byte tiles starting at tile 1.
 
 ## Library use
 

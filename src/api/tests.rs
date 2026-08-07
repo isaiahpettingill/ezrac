@@ -143,6 +143,26 @@ fn compiles_nes_source_with_the_ricoh_2a03_backend() {
     assert!(compilation.assembly.contains("__ezra_start:"));
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn packages_nes_source_assets_into_chr_rom() {
+    let files = [WorkspaceFile::text(
+        "main.ezra",
+        "embed tile: bytes = bytes [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] section .assets align 16\nfn main() {}",
+    )];
+    let build = build_workspace(
+        &Workspace::new(&files),
+        "main.ezra",
+        &CompileRequest::new("main.ezra", "nes-2a03"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        &build.executable[0x4020..0x4030],
+        &(1u8..=16).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn compiles_all_builtin_sms_sdk_modules() {
     let source = "import sms.system\nimport sms.vdp\nimport sms.video\nimport sms.palette\nimport sms.memory\nimport sms.input\nimport sms.bank\nfn main() { video.init_mode4(); palette.set_background(0, palette.BLUE); video.set_name_table_entry(0, 0); system.wait_vblank(); let player1: u8 = input.read_player1(); let player2: u8 = input.read_player2(); let status: u8 = vdp.read_status(); bank.select_slot2(3); let page: u8 = bank.current_slot2(); if (status | player1 | player2 | page) != 0 { video.enable_display() } }";

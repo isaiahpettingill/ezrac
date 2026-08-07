@@ -41,6 +41,40 @@ fn nes_source_builds_a_valid_nrom_image() {
 }
 
 #[test]
+fn nes_png_asset_builds_into_chr_rom_and_uses_tile_one() {
+    let root = repository_root();
+    let source = "examples/nes-2a03/png-assets/src/main.ezra";
+    let output = Command::new(env!("CARGO_BIN_EXE_ezrac"))
+        .current_dir(&root)
+        .args(["build", source])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to launch ezrac for `{source}`: {error}"));
+    assert!(
+        output.status.success(),
+        "failed to build `{source}`\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let image =
+        fs::read(root.join("examples/nes-2a03/png-assets/target/nes-2a03/png-assets.nes")).unwrap();
+    let png = fs::read(root.join("examples/nes-2a03/png-assets/assets/player.png")).unwrap();
+    let expected =
+        ezra::image::indexed_png_to_native_bytes(&png, "nes-2a03", ezra::image::ImageKind::Sprite)
+            .unwrap();
+
+    assert_eq!(image.len(), 0x6010);
+    assert!(image[0x4010..0x4018].iter().all(|byte| *byte == 0xFF));
+    assert!(image[0x4018..0x4020].iter().all(|byte| *byte == 0));
+    assert_eq!(&image[0x4020..0x4020 + expected.len()], expected.as_slice());
+    assert!(
+        image[0x4020 + expected.len()..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+}
+
+#[test]
 fn nes_hello_world_assembly_builds_a_valid_nrom_image() {
     let root = repository_root();
     let source = "examples/nes-2a03/hello-world/helloWorld.asm";

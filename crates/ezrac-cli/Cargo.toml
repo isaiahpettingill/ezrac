@@ -1,6 +1,6 @@
 [package]
 name = "ezrac-cli"
-version = "0.1.34"
+version = "0.1.35"
 edition = "2024"
 description = "Command-line compiler and language server for the EZRA language"
 license = "BSD-3-Clause"
@@ -12,7 +12,7 @@ path = "src/main.rs"
 required-features = ["std", "test-runner"]
 
 [dependencies]
-ezra = { package = "ezra-core", version = "0.1.34", path = "../..", default-features = false }
+ezra = { package = "ezra-core", version = "0.1.35", path = "../..", default-features = false }
 lsp = { version = "0.1.1", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.150", optional = true }

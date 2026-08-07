@@ -74,6 +74,7 @@ pub struct PackageContext {
     pub arduboy: Option<ArduboyPackageOptions>,
     pub ti8xp: Option<Ti8xpPackageOptions>,
     pub zx_spectrum: Option<ZxSpectrumPackageOptions>,
+    pub nes: Option<NesPackageOptions>,
     pub game_boy: Option<GameBoyPackageOptions>,
     pub sega: Option<SegaPackageOptions>,
 }
@@ -97,6 +98,7 @@ impl PackageContext {
             arduboy: None,
             ti8xp: None,
             zx_spectrum: None,
+            nes: None,
             game_boy: None,
             sega: None,
         }
@@ -113,6 +115,12 @@ pub struct ArduboyPackageOptions {
     pub date: Option<String>,
     pub genre: Option<String>,
     pub source_url: Option<String>,
+}
+
+/// Source-generated NES CHR-ROM data placed after the reserved tile 0.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NesPackageOptions {
+    pub chr_payload: Vec<u8>,
 }
 
 /// Optional TI-8xp variable-name override.
@@ -295,6 +303,24 @@ fn nes_rom_bytes(
         // The first bit plane selects palette color 1; the second remains zero.
         let chr_start = HEADER_SIZE + PRG_SIZE;
         image[chr_start..chr_start + 8].fill(0xFF);
+        if let Some(options) = &context.nes {
+            if options.chr_payload.len() % 16 != 0 {
+                return Err(PackageError::new(format!(
+                    "NES CHR payload must contain whole 16-byte tiles, got {} bytes",
+                    options.chr_payload.len()
+                )));
+            }
+            let available = CHR_SIZE - 16;
+            if options.chr_payload.len() > available {
+                return Err(PackageError::new(format!(
+                    "NES CHR payload exceeds {available} bytes after reserved tile 0, got {}",
+                    options.chr_payload.len()
+                )));
+            }
+            let payload_start = chr_start + 16;
+            image[payload_start..payload_start + options.chr_payload.len()]
+                .copy_from_slice(&options.chr_payload);
+        }
         return Ok(image);
     }
     if code.len() != IMAGE_SIZE {

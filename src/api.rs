@@ -19,8 +19,8 @@ use crate::{
     },
     ast::{Declaration, Program},
     cart::{
-        build_cartridge_map, collect_gameboy_banked_embeds, layout_section_bases,
-        source_section_sizes,
+        build_cartridge_map, collect_gameboy_banked_embeds, collect_nes_chr_assets,
+        layout_section_bases, source_section_sizes,
     },
     compile::{
         CompileOptions, CompileReport, SdkResolver, check_source_with_sdk_and_overrides,
@@ -764,6 +764,11 @@ fn package_generated_linked(
     let mut build = build.clone();
     let mut resident_code = machine_code;
     let has_game_boy_package = build.package_context.game_boy.is_some();
+    if build.target.triple.value.starts_with("nes-") {
+        build.package_context.nes = Some(crate::package::NesPackageOptions {
+            chr_payload: collect_nes_chr_assets(program)?,
+        });
+    }
     if let Some(options) = build.package_context.game_boy.as_mut() {
         let generated =
             game_boy_banked_code_payloads(&resident_code, &symbols, build.layout.entry.get())?;

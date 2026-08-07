@@ -49,7 +49,7 @@ checksum = "d346a8b540345c59ea68035118d2f63c5d930381de14555efce5c085afbf69ef"
 
 [[package]]
 name = "ezra-core"
-version = "0.1.34"
+version = "0.1.35"
 dependencies = [
  "dcpu16-core",
  "ez80",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "ezrac-cli"
-version = "0.1.34"
+version = "0.1.35"
 dependencies = [
  "ez80",
  "ezra-core",

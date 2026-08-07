@@ -1,0 +1,15 @@
+[project]
+name = "nes-png-assets"
+
+[build]
+input = "src/main.ezra"
+target = "nes-2a03"
+executable = "png-assets"
+
+[assets]
+section = ".assets"
+align = 16
+
+[[assets.images]]
+path = "assets/player.png"
+kind = "sprite"

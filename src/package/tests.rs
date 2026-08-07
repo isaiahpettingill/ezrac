@@ -35,6 +35,43 @@ fn packages_nes_entry_code_as_nrom_with_vectors_and_a_solid_tile() {
 }
 
 #[test]
+fn packages_source_nes_chr_tiles_after_reserved_tile_zero() {
+    let code = [0x78, 0xD8, 0x4C, 0x00, 0xC0];
+    let chr_payload = (0..32).collect::<Vec<_>>();
+    let mut context = PackageContext::new();
+    context.nes = Some(NesPackageOptions {
+        chr_payload: chr_payload.clone(),
+    });
+    let packaged = package_executable_with_context(
+        &PackageRequest::new("nes-2a03", OutputFormat::NesRom, 0xBFF0, 0xC000),
+        &context,
+        &code,
+    )
+    .unwrap();
+
+    assert!(packaged[0x4010..0x4018].iter().all(|byte| *byte == 0xFF));
+    assert!(packaged[0x4018..0x4020].iter().all(|byte| *byte == 0));
+    assert_eq!(&packaged[0x4020..0x4040], chr_payload.as_slice());
+    assert!(packaged[0x4040..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn rejects_invalid_source_nes_chr_payloads() {
+    let request = PackageRequest::new("nes-2a03", OutputFormat::NesRom, 0xBFF0, 0xC000);
+    for (payload, expected) in [
+        (vec![0; 15], "whole 16-byte tiles"),
+        (vec![0; 0x2000], "exceeds 8176 bytes"),
+    ] {
+        let mut context = PackageContext::new();
+        context.nes = Some(NesPackageOptions {
+            chr_payload: payload,
+        });
+        let error = package_executable_with_context(&request, &context, &[0x78]).unwrap_err();
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+}
+
+#[test]
 fn rejects_nes_images_with_the_wrong_mapper_or_size() {
     let mut image = vec![0; 0x6010];
     image[..8].copy_from_slice(b"NES\x1A\x01\x01\0\0");

@@ -394,7 +394,7 @@ Default layout reserves zero page and stack, loads code at `$080D`, uses `$4000.
 
 ## Nintendo Entertainment System
 
-The `nes-2a03` target compiles EZRA source with the Ricoh 2A03 backend. Source builds are packaged as mapper 0 NROM-128 images with a 16-byte iNES header, one 16 KiB PRG-ROM bank, reset/NMI/IRQ vectors pointing to the generated startup code, and one 8 KiB CHR-ROM bank containing a solid tile 0 for basic source-only graphics. See [`examples/nes-2a03/source-hello`](../examples/nes-2a03/source-hello).
+The `nes-2a03` target compiles EZRA source with the Ricoh 2A03 backend. Source builds are packaged as mapper 0 NROM-128 images with a 16-byte iNES header, one 16 KiB PRG-ROM bank, reset/NMI/IRQ vectors pointing to the generated startup code, and one 8 KiB CHR-ROM bank. Tile 0 is reserved as a solid fallback tile; configured `.assets` tiles are packed from tile 1. See [`examples/nes-2a03/source-hello`](../examples/nes-2a03/source-hello) and [`examples/nes-2a03/png-assets`](../examples/nes-2a03/png-assets).
 
 Raw assembly builds can still provide a complete iNES NROM-128 image, including their own header, PRG-ROM, vectors, and CHR-ROM. The packager validates the mapper and page layout. See [`examples/nes-2a03/hello-world`](../examples/nes-2a03/hello-world).
 

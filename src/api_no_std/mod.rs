@@ -13,7 +13,7 @@ use crate::asm::emit_mos6502_assembly_with_options;
 
 use crate::{
     asm::{AssemblyOptions, AssemblyProgram, emit_ez80_assembly_with_options},
-    ast::{CfgPredicate, Declaration, Program},
+    ast::{CfgPredicate, Declaration, EmbedSource, Expr, Program},
     diagnostic::Diagnostic,
     layout::{Layout, default_layout_for_target},
     package::{PackageContext, PackageRequest, package_executable_with_context},
@@ -360,7 +360,7 @@ pub fn build_workspace_with_request(
 pub fn link_generated_assembly(
     source_path: &str,
     assembly: &str,
-    _program: &Program,
+    program: &Program,
     build: &BuildRequest,
 ) -> Result<LinkedCompilation, Diagnostic> {
     validate_layout_for_cpu(
@@ -380,7 +380,15 @@ pub fn link_generated_assembly(
         &assembled.symbols,
         build.layout.entry.get(),
     )?;
-    package_linked(build, assembled.bytes, map, assembled.symbols)
+    if build.target.triple.value.starts_with("nes-") {
+        let mut build = build.clone();
+        build.package_context.nes = Some(crate::package::NesPackageOptions {
+            chr_payload: collect_nes_chr_assets(program)?,
+        });
+        package_linked(&build, assembled.bytes, map, assembled.symbols)
+    } else {
+        package_linked(build, assembled.bytes, map, assembled.symbols)
+    }
 }
 
 /// Link a preprocessed standalone assembly program at the layout load address.
@@ -428,6 +436,103 @@ pub fn link_assembly_program_at(
     )?;
     let map = flat_assembly_map_at(assembled.bytes.len(), &assembled.symbols, base_addr)?;
     package_linked(build, assembled.bytes, map, assembled.symbols)
+}
+
+fn collect_nes_chr_assets(program: &Program) -> Result<Vec<u8>, Diagnostic> {
+    fn visit(declarations: &[Declaration], output: &mut Vec<u8>) -> Result<(), Diagnostic> {
+        for declaration in declarations {
+            match declaration {
+                Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                    visit(core::slice::from_ref(declaration.as_ref()), output)?;
+                }
+                Declaration::Embed(embed)
+                    if embed.section.as_deref().unwrap_or(".assets") == ".assets" =>
+                {
+                    let align = match embed.align.as_ref() {
+                        None => 1usize,
+                        Some(Expr::Int(value)) if *value > 0 && (*value & (*value - 1)) == 0 => {
+                            usize::try_from(*value).map_err(|_| {
+                                Diagnostic::new("NES CHR asset alignment exceeds host range")
+                            })?
+                        }
+                        Some(_) => {
+                            return Err(Diagnostic::new(format!(
+                                "NES CHR asset `{}` alignment must be a constant power of two",
+                                embed.name
+                            )));
+                        }
+                    };
+                    let bytes = match &embed.source {
+                        EmbedSource::Bytes(values) => values
+                            .iter()
+                            .map(|value| match value {
+                                Expr::Int(value) => u8::try_from(*value).map_err(|_| {
+                                    Diagnostic::new(format!(
+                                        "NES CHR asset `{}` contains a byte outside u8 range",
+                                        embed.name
+                                    ))
+                                }),
+                                _ => Err(Diagnostic::new(format!(
+                                    "NES CHR asset `{}` must contain materialized constant bytes",
+                                    embed.name
+                                ))),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        EmbedSource::Text(text) => text.as_bytes().to_vec(),
+                        EmbedSource::CStr(text) => {
+                            let mut bytes = text.as_bytes().to_vec();
+                            bytes.push(0);
+                            bytes
+                        }
+                        EmbedSource::Repeat {
+                            value: Expr::Int(value),
+                            len: Expr::Int(len),
+                        } => {
+                            let value = u8::try_from(*value).map_err(|_| {
+                                Diagnostic::new(format!(
+                                    "NES CHR asset `{}` repeat byte is outside u8 range",
+                                    embed.name
+                                ))
+                            })?;
+                            let len = usize::try_from(*len).map_err(|_| {
+                                Diagnostic::new(format!(
+                                    "NES CHR asset `{}` repeat length is invalid",
+                                    embed.name
+                                ))
+                            })?;
+                            vec![value; len]
+                        }
+                        _ => {
+                            return Err(Diagnostic::new(format!(
+                                "NES CHR asset `{}` must be materialized before packaging",
+                                embed.name
+                            )));
+                        }
+                    };
+                    if bytes.len() % 16 != 0 {
+                        return Err(Diagnostic::new(format!(
+                            "NES CHR asset `{}` must contain whole 16-byte tiles, got {} bytes",
+                            embed.name,
+                            bytes.len()
+                        )));
+                    }
+                    let aligned = output
+                        .len()
+                        .checked_add(align - 1)
+                        .map(|value| value & !(align - 1))
+                        .ok_or_else(|| Diagnostic::new("NES CHR assets exceed host range"))?;
+                    output.resize(aligned, 0);
+                    output.extend_from_slice(&bytes);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = Vec::new();
+    visit(&program.declarations, &mut output)?;
+    Ok(output)
 }
 
 fn package_linked(

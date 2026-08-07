@@ -88,6 +88,26 @@ fn alloc_only_api_compiles_nes_source() {
     assert!(compilation.assembly.contains("target: MOS 6502"));
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn alloc_only_api_packages_nes_chr_assets() {
+    let files = [WorkspaceFile::text(
+        "main.ezra",
+        "embed tile: bytes = bytes [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] section .assets align 16\nfn main() {}",
+    )];
+    let build = build_workspace(
+        &Workspace::new(&files),
+        "main.ezra",
+        &CompileRequest::new("main.ezra", "nes-2a03"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        &build.executable[0x4020..0x4030],
+        &(1u8..=16).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn alloc_only_api_links_preprocessed_assembly_with_a_map() {
     let build = BuildRequest::for_target("bare-i8086").unwrap();

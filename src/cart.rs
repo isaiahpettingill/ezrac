@@ -910,6 +910,30 @@ fn global_initializer_is_zero(
     }
 }
 
+pub fn collect_nes_chr_assets(program: &Program) -> Result<Vec<u8>, Diagnostic> {
+    let mut payload = Vec::new();
+    for asset in collect_assets(program)?
+        .into_iter()
+        .filter(|asset| asset.section == ".assets")
+    {
+        if asset.bytes.len() % 16 != 0 {
+            return Err(Diagnostic::new(format!(
+                "NES CHR asset `{}` must contain whole 16-byte tiles, got {} bytes",
+                asset.name,
+                asset.bytes.len()
+            )));
+        }
+        let offset = u32::try_from(payload.len())
+            .map_err(|_| Diagnostic::new("NES CHR assets exceed host addressable memory"))?;
+        let aligned = align_addr(offset, asset.align)?;
+        let aligned = usize::try_from(aligned)
+            .map_err(|_| Diagnostic::new("NES CHR assets exceed host addressable memory"))?;
+        payload.resize(aligned, 0);
+        payload.extend_from_slice(&asset.bytes);
+    }
+    Ok(payload)
+}
+
 pub fn collect_gameboy_banked_embeds(
     program: &Program,
 ) -> Result<Vec<GameBoyBankedEmbed>, Diagnostic> {
