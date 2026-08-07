@@ -1,0 +1,30 @@
+import c64.memory
+import c64.vic
+
+const SPRITE_DATA: u16 = 0x0340
+const SPRITE_POINTER: u8 = 13
+
+embed sprite_image: bytes = file("assets/sprite.png")
+
+fn main() {
+    memory.map_roms_and_io()
+    vic.border(vic.BLUE)
+    vic.background(vic.BLACK)
+
+    let sprite_ram: ptr<u8> = cast<ptr<u8>>(cast<u24>(SPRITE_DATA))
+    let source: ptr<u8> = sprite_image.ptr
+    let index: u8 = 0
+    while index < 64 {
+        *(sprite_ram + index) = *(source + index)
+        index += 1
+    }
+
+    vic.sprite_pointer(0, SPRITE_POINTER)
+    vic.sprite_color(0, vic.CYAN)
+    vic.sprite_position(0, 160, 120)
+    vic.sprite_enable(0, 1)
+
+    loop {
+        vic.wait_raster(0)
+    }
+}

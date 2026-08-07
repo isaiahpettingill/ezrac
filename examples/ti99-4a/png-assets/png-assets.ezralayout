@@ -1,0 +1,36 @@
+layout ti99_png_assets {
+    load 0x6000;
+    entry 0x601A;
+    stack 0xCFFF;
+
+    region header 0x6000..0x6019 read;
+    region code 0x601A..0x6FFF read execute;
+    region rodata 0x7000..0x7FFF read;
+    region assets 0x8000..0x80FF read;
+    region scratch 0x8200..0x82FF read write;
+    region data 0xA000..0xA0FF read write;
+    region bss 0xA100..0xA1FF read write;
+    region ram 0xA200..0xCFFF read write;
+
+    section .header -> header align 1;
+    section .text -> code align 2;
+    section .rodata -> rodata align 1;
+    section .data -> data align 1;
+    section .bss -> bss align 1;
+    section .assets -> assets align 1;
+    section .scratch -> scratch align 1;
+
+    symbol EZRA_ENTRY_ADDR = 0x601A;
+        symbol EZRA_CODE_BASE = 0x601A;
+        symbol EZRA_RAM_BASE = 0xA000;
+    symbol EZRA_RODATA_BASE = 0x7000;
+    symbol EZRA_ASSET_BASE = 0x8000;
+    symbol TI99_WORKSPACE = 0x8300;
+    symbol TI99_SOUND = 0x8400;
+    symbol TI99_VDP_READ = 0x8800;
+    symbol TI99_VDP_STATUS = 0x8802;
+    symbol TI99_VDP_WRITE = 0x8C00;
+    symbol TI99_VDP_CONTROL = 0x8C02;
+    symbol TI99_GROM_READ = 0x9800;
+    symbol TI99_GROM_WRITE = 0x9C00;
+}

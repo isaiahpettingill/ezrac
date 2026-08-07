@@ -1,0 +1,15 @@
+[project]
+name = "c64-png-assets"
+
+[build]
+input = "src/main.ezra"
+target = "commodore64-6502"
+executable = "c64-png-assets"
+
+[assets]
+section = ".assets"
+align = 16
+
+[[assets.images]]
+path = "assets/sprite.png"
+kind = "sprite"

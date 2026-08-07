@@ -1,0 +1,17 @@
+import agon.sprites
+import agon.vdp
+
+const IMAGE_WIDTH: u16 = 8
+const IMAGE_HEIGHT: u16 = 8
+
+embed badge: bytes = file("assets/badge.png")
+
+fn main() {
+    vdp.mode_8()
+    sprites.enable_hardware_sprites()
+    sprites.load_bitmap_rgba8888(0, IMAGE_WIDTH, IMAGE_HEIGHT, badge.ptr, badge.len)
+    sprites.draw_bitmap(156, 116)
+
+    loop {
+    }
+}

@@ -410,3 +410,111 @@ fn assets_configuration_must_be_a_table() {
         "{error}"
     );
 }
+
+#[test]
+fn parses_indexed_png_asset_image_rules() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        r#"[assets]
+section = ".assets"
+
+[[assets.images]]
+path = "images/./tiles.png"
+kind = "tiles"
+
+[[assets.images]]
+path = 'sprites\..\sprites\hero.png'
+kind = "sprite"
+
+[[assets.images]]
+path = "bitmap.png"
+kind = "bitmap"
+
+[assets.targets."gameboy-*"]
+section = ".rodata"
+align = 32
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.assets.images,
+        vec![
+            AssetImageConfig {
+                path: Path::new("/project").join("images/tiles.png"),
+                relative_path: "images/tiles.png".to_owned(),
+                kind: AssetImageKind::Tiles,
+            },
+            AssetImageConfig {
+                path: Path::new("/project").join("sprites/hero.png"),
+                relative_path: "sprites/hero.png".to_owned(),
+                kind: AssetImageKind::Sprite,
+            },
+            AssetImageConfig {
+                path: Path::new("/project").join("bitmap.png"),
+                relative_path: "bitmap.png".to_owned(),
+                kind: AssetImageKind::Bitmap,
+            },
+        ]
+    );
+    assert_eq!(
+        config.assets.placement_for("gameboy-dmg-lr35902"),
+        AssetPlacement {
+            section: Some(".rodata".to_owned()),
+            align: Some(32),
+        }
+    );
+}
+
+#[test]
+fn rejects_invalid_indexed_png_asset_image_rules() {
+    for (source, expected) in [
+        (
+            "[assets]\nimages = {}\n",
+            "`assets.images` must be an array",
+        ),
+        (
+            "[[assets.images]]\nkind = \"tiles\"\n",
+            "assets.images[0].path",
+        ),
+        (
+            "[[assets.images]]\npath = 42\nkind = \"tiles\"\n",
+            "assets.images[0].path",
+        ),
+        (
+            "[[assets.images]]\npath = \"image.png\"\n",
+            "assets.images[0].kind",
+        ),
+        (
+            "[[assets.images]]\npath = \"image.png\"\nkind = 42\n",
+            "assets.images[0].kind",
+        ),
+        (
+            "[[assets.images]]\npath = \"image.png\"\nkind = \"font\"\n",
+            "tiles`, `sprite`, or `bitmap",
+        ),
+        (
+            "[[assets.images]]\npath = \"/outside.png\"\nkind = \"bitmap\"\n",
+            "project-relative path",
+        ),
+        (
+            "[[assets.images]]\npath = \"\"\nkind = \"bitmap\"\n",
+            "nonempty project-relative path",
+        ),
+        (
+            "[[assets.images]]\npath = \".\"\nkind = \"bitmap\"\n",
+            "nonempty project-relative path",
+        ),
+        (
+            "[[assets.images]]\npath = \"assets/../../outside.png\"\nkind = \"bitmap\"\n",
+            "escape the project root",
+        ),
+        (
+            "[[assets.images]]\npath = \"images/./sprite.png\"\nkind = \"sprite\"\n\n[[assets.images]]\npath = \"images/sprite.png\"\nkind = \"sprite\"\n",
+            "duplicates image path",
+        ),
+    ] {
+        let error = parse_project_config(Path::new("/project/Ezra.toml"), source).unwrap_err();
+        assert!(error.message.contains(expected), "{error}");
+    }
+}

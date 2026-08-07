@@ -124,6 +124,7 @@ fn check_diagnostics_with_sdk_and_overrides(
         &mut HashSet::new(),
         source_overrides,
         None,
+        None,
     ) {
         Ok(program) => program,
         Err(error) => return vec![locate_source_diagnostic(error, source, &options.source)],
@@ -472,6 +473,7 @@ pub fn check_source_with_sdk_and_overrides(
         &mut Vec::new(),
         &mut HashSet::new(),
         source_overrides,
+        None,
         None,
     )
     .map_err(|error| locate_source_diagnostic(error, source, &options.source))?;
@@ -1101,6 +1103,29 @@ pub fn load_program_with_sdk(path: &Path, sdk: &SdkResolver) -> Result<Program, 
     parse_and_resolve_imports_with_sdk(path, &source, sdk)
 }
 
+/// Resolves selected file embeds before imported modules are flattened.
+///
+/// Returning `Ok(None)` leaves the file embed unchanged for the normal backend
+/// file loader. This lets callers preprocess only configured asset types.
+pub trait EmbedFileResolver {
+    fn resolve(
+        &self,
+        source_path: &Path,
+        requested_path: &str,
+    ) -> Result<Option<Vec<u8>>, Diagnostic>;
+}
+
+pub fn load_program_with_sdk_and_embed_resolver(
+    path: &Path,
+    sdk: &SdkResolver,
+    resolver: &dyn EmbedFileResolver,
+) -> Result<Program, Diagnostic> {
+    let source = fs::read_to_string(path).map_err(|error| {
+        Diagnostic::new(format!("failed to read `{}`: {error}", path.display()))
+    })?;
+    parse_and_resolve_imports_with_sdk_and_embed_resolver(path, &source, sdk, resolver)
+}
+
 pub fn parse_and_resolve_imports(path: &Path, source: &str) -> Result<Program, Diagnostic> {
     parse_and_resolve_imports_with_sdk(path, source, &SdkResolver::default())
 }
@@ -1111,6 +1136,26 @@ pub fn parse_and_resolve_imports_with_sdk(
     sdk: &SdkResolver,
 ) -> Result<Program, Diagnostic> {
     parse_and_resolve_imports_with_sdk_and_overrides(path, source, sdk, &HashMap::new())
+}
+
+pub fn parse_and_resolve_imports_with_sdk_and_embed_resolver(
+    path: &Path,
+    source: &str,
+    sdk: &SdkResolver,
+    resolver: &dyn EmbedFileResolver,
+) -> Result<Program, Diagnostic> {
+    let root = parse_program(path, source)?;
+    let mut stack = Vec::new();
+    let mut seen = HashSet::new();
+    resolve_program_imports(
+        root,
+        sdk,
+        &mut stack,
+        &mut seen,
+        &HashMap::new(),
+        None,
+        Some(resolver),
+    )
 }
 
 /// Resolve imports using caller-provided source files before falling back to the host filesystem.
@@ -1125,7 +1170,15 @@ pub fn parse_and_resolve_imports_with_sdk_and_overrides(
     let root = parse_program(path, source)?;
     let mut stack = Vec::new();
     let mut seen = HashSet::new();
-    resolve_program_imports(root, sdk, &mut stack, &mut seen, source_overrides, None)
+    resolve_program_imports(
+        root,
+        sdk,
+        &mut stack,
+        &mut seen,
+        source_overrides,
+        None,
+        None,
+    )
 }
 
 pub fn parse_and_resolve_imports_with_sdk_and_workspace(
@@ -1145,6 +1198,7 @@ pub fn parse_and_resolve_imports_with_sdk_and_workspace(
         &mut seen,
         source_overrides,
         Some(workspace),
+        None,
     )
 }
 
@@ -1156,6 +1210,45 @@ pub fn resolve_import_source(
     read_import_source(importer, import, sdk)
 }
 
+fn materialize_resolved_embeds(
+    program: &mut Program,
+    resolver: &dyn EmbedFileResolver,
+) -> Result<(), Diagnostic> {
+    fn materialize_declaration(
+        declaration: &mut Declaration,
+        source_path: &Path,
+        resolver: &dyn EmbedFileResolver,
+    ) -> Result<(), Diagnostic> {
+        match declaration {
+            Declaration::Cfg { declaration, .. } | Declaration::Bank { declaration, .. } => {
+                materialize_declaration(declaration, source_path, resolver)
+            }
+            Declaration::Embed(embed) => {
+                let EmbedSource::File(requested_path) = &embed.source else {
+                    return Ok(());
+                };
+                let requested_path = requested_path.clone();
+                let Some(bytes) = resolver.resolve(source_path, &requested_path)? else {
+                    return Ok(());
+                };
+                embed.source = EmbedSource::Bytes(
+                    bytes
+                        .into_iter()
+                        .map(|byte| Expr::Int(i64::from(byte)))
+                        .collect(),
+                );
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    for declaration in &mut program.declarations {
+        materialize_declaration(declaration, &program.source_path, resolver)?;
+    }
+    Ok(())
+}
+
 fn resolve_program_imports(
     mut program: Program,
     sdk: &SdkResolver,
@@ -1163,6 +1256,7 @@ fn resolve_program_imports(
     seen: &mut HashSet<PathBuf>,
     source_overrides: &HashMap<PathBuf, String>,
     workspace: Option<&Workspace<'_>>,
+    embed_resolver: Option<&dyn EmbedFileResolver>,
 ) -> Result<Program, Diagnostic> {
     let path = normalize_path(&program.source_path);
     if stack.contains(&path) {
@@ -1188,6 +1282,9 @@ fn resolve_program_imports(
     program.declarations = active_declarations(program.declarations, sdk)?;
     if let Some(workspace) = workspace {
         materialize_workspace_embeds(&mut program, workspace)?;
+    }
+    if let Some(resolver) = embed_resolver {
+        materialize_resolved_embeds(&mut program, resolver)?;
     }
 
     validate_private_import_access(&program, sdk, source_overrides)?;
@@ -1215,6 +1312,9 @@ fn resolve_program_imports(
         if let Some(workspace) = workspace {
             materialize_workspace_embeds(&mut imported, workspace)?;
         }
+        if let Some(resolver) = embed_resolver {
+            materialize_resolved_embeds(&mut imported, resolver)?;
+        }
         let short_module = import.rsplit('.').next().unwrap_or(import);
         let include_short_aliases = short_module_counts
             .get(short_module)
@@ -1223,8 +1323,15 @@ fn resolve_program_imports(
             <= 1;
         let module_aliases =
             module_alias_declarations(import, &imported.declarations, include_short_aliases);
-        let imported =
-            resolve_program_imports(imported, sdk, stack, seen, source_overrides, workspace)?;
+        let imported = resolve_program_imports(
+            imported,
+            sdk,
+            stack,
+            seen,
+            source_overrides,
+            workspace,
+            embed_resolver,
+        )?;
         source_units.extend(imported.source_units.iter().cloned());
         let imported_declarations = imported
             .declarations

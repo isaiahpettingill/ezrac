@@ -1,0 +1,15 @@
+[project]
+name = "game-gear-png-assets"
+
+[build]
+input = "src/main.ezra"
+target = "sega-game-gear-z80"
+executable = "png-assets"
+
+[assets]
+section = ".assets"
+align = 16
+
+[[assets.images]]
+path = "assets/tile.png"
+kind = "tiles"

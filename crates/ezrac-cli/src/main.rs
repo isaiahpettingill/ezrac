@@ -15,7 +15,7 @@ use ezra::{
     },
     ast::Program,
     cart::CartridgeHeader,
-    compile::{SdkResolver, load_program_with_sdk},
+    compile::{SdkResolver, load_program_with_sdk_and_embed_resolver},
     diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
     disk::{DiskFile, DiskFormat, DiskRequest, create_disk_image},
     hir::HirProgram,
@@ -49,6 +49,7 @@ use ezra::asm::emit_m6809_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use ezra::asm::emit_tms9900_assembly_with_options;
 
+mod asset_pipeline;
 #[cfg(feature = "lsp")]
 mod lsp_server;
 
@@ -882,6 +883,10 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         layout,
         layout_path,
         asset_config: AssetConfig::default(),
+        project_root: source_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
         gameboy: None,
         sega: None,
         gameboy_banking: None,
@@ -973,6 +978,7 @@ struct BuildSettings {
     layout: Layout,
     layout_path: Option<PathBuf>,
     asset_config: AssetConfig,
+    project_root: PathBuf,
     gameboy: Option<GameBoyConfig>,
     sega: Option<SegaConfig>,
     gameboy_banking: Option<GameBoyBankingOptions>,
@@ -1202,15 +1208,16 @@ fn resolve_build_settings_with_budgets(
             .map(|project| project.sdk_paths.clone())
             .unwrap_or_default(),
     };
-    let output_root = project
+    let project_root = project
         .as_ref()
-        .map(|project| project.root.join("target"))
+        .map(|project| project.root.clone())
         .unwrap_or_else(|| {
             source_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
-                .join("target")
+                .to_path_buf()
         });
+    let output_root = project_root.join("target");
     let executable_name = project
         .as_ref()
         .and_then(|project| project.executable.clone());
@@ -1290,6 +1297,7 @@ fn resolve_build_settings_with_budgets(
         layout,
         layout_path,
         asset_config,
+        project_root,
         gameboy,
         sega,
         gameboy_banking,
@@ -1351,6 +1359,18 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
         settings.target.triple.value,
         settings.target.triple.cpu.as_str()
     ))
+}
+
+fn load_program_for_cli(
+    source_path: &Path,
+    settings: &BuildSettings,
+) -> Result<Program, Diagnostic> {
+    let resolver = asset_pipeline::ConfiguredImageResolver::new(
+        &settings.project_root,
+        &settings.target.triple.value,
+        &settings.asset_config,
+    );
+    load_program_with_sdk_and_embed_resolver(source_path, &settings.sdk, &resolver)
 }
 
 fn apply_asset_configuration(program: &mut Program, settings: &BuildSettings) {
@@ -1726,7 +1746,7 @@ fn build_ezra_source(
 ) -> Result<BuildOutputs, String> {
     let source = fs::read_to_string(source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
-    let mut program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_for_cli(source_path, settings).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
@@ -2061,7 +2081,7 @@ fn run_source_with_command_options(options: &CommandOptions) -> Result<ezra::vm:
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let metadata = parse_test_metadata(&source)?;
     let settings = resolve_build_settings(options, &source_path)?;
-    let mut program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_for_cli(&source_path, &settings).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
@@ -2210,7 +2230,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
     let source_path = options.command.path.clone();
     let source_location = command_source_start_location(&source_path);
     let settings = resolve_build_settings(&options.command, &source_path)?;
-    let program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
+    let program = load_program_for_cli(&source_path, &settings).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
@@ -2247,7 +2267,7 @@ fn emit_assembly_with_command_options(options: &CommandOptions) -> Result<String
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
     let source_location = command_source_start_location(&source_path);
     let settings = resolve_build_settings(options, &source_path)?;
-    let mut program = load_program_with_sdk(&source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_for_cli(&source_path, &settings).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()
@@ -2317,7 +2337,7 @@ fn check_source_with_layout(
         .filter(|decl| matches!(decl, ezra::ast::Declaration::Import(_)))
         .count();
     let settings = resolve_build_settings(options, source_path)?;
-    let mut program = load_program_with_sdk(source_path, &settings.sdk).map_err(|error| {
+    let mut program = load_program_for_cli(source_path, &settings).map_err(|error| {
         error
             .with_location_if_missing(source_location.clone())
             .to_string()

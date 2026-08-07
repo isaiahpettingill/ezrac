@@ -1,0 +1,31 @@
+import sms.palette
+import sms.system
+import sms.video
+
+// The indexed PNG is converted to a native SMS mode-4 tile.
+embed tile: bytes = file("assets/tile.png")
+
+fn main() {
+    video.init_mode4()
+    video.upload_tile(1, &tile)
+
+    palette.set_background(0, palette.BLACK)
+    palette.set_background(1, palette.WHITE)
+    palette.set_background(2, palette.BLUE)
+    palette.set_background(3, palette.YELLOW)
+
+    let y: u16 = 0
+    while y < 24 {
+        let x: u16 = 0
+        while x < 32 {
+            video.set_name_table_entry(y * 32 + x, 1)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    video.enable_display()
+    loop {
+        system.wait_vblank()
+    }
+}

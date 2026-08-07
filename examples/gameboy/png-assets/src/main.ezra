@@ -1,0 +1,14 @@
+import gb.video
+import gb.sprites
+
+// The indexed PNG is converted to native Game Boy 2bpp sprite bytes.
+embed player_sprite: bytes = file("assets/player.png")
+
+fn main() {
+    video.begin_update()
+    sprites.clear_background_tile()
+    sprites.upload_tile1(&player_sprite)
+    video.clear_background()
+    sprites.show_centered_tile1()
+    video.enable_background_and_sprites()
+}

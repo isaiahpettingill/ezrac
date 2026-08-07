@@ -1,0 +1,30 @@
+import zx.screen
+
+embed tile_sheet: bytes = file("assets/tiles.png")
+
+fn draw_tile(x: u8, y: u8, source: ptr<u8>) {
+    let row: u8 = 0
+    while row < 8 {
+        screen.set_pixel_byte(x, (y << 3) + row, *(source + row))
+        row += 1
+    }
+}
+
+fn main() {
+    screen.border(screen.BLUE)
+    screen.clear_screen(0, screen.attr(screen.WHITE, screen.BLUE, screen.BRIGHT))
+
+    let source: ptr<u8> = &tile_sheet
+    draw_tile(14, 9, source)
+    draw_tile(15, 9, source + 8)
+    draw_tile(14, 10, source + 16)
+    draw_tile(15, 10, source + 24)
+
+    let colour: u8 = screen.attr(screen.YELLOW, screen.BLUE, screen.BRIGHT)
+    screen.set_attr(14, 9, colour)
+    screen.set_attr(15, 9, colour)
+    screen.set_attr(14, 10, colour)
+    screen.set_attr(15, 10, colour)
+
+    loop {}
+}

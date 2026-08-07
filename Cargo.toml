@@ -25,8 +25,10 @@ hashbrown = { version = "0.15.5", default-features = false, features = ["default
 pest = { version = "2.8.7", default-features = false }
 pest_derive = { version = "2.8.7", default-features = false }
 toml = { version = "1.1.2", optional = true }
+miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-alloc"] }
 
 [dev-dependencies]
+png = "0.18.1"
 libre99-core = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
 libre99-asm = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
 

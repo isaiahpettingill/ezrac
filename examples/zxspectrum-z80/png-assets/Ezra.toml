@@ -1,0 +1,15 @@
+[project]
+name = "zx-png-assets"
+
+[build]
+input = "src/main.ezra"
+target = "zxspectrum-z80"
+executable = "zx-png-assets"
+
+[assets]
+section = ".assets"
+align = 16
+
+[[assets.images]]
+path = "assets/tiles.png"
+kind = "tiles"

@@ -1,0 +1,18 @@
+[project]
+name = "ti99-png-assets"
+
+[build]
+input = "src/main.ezra"
+target = "ti99-4a-tms9900"
+executable = "ti99-png-assets"
+
+[layout]
+file = "png-assets.ezralayout"
+
+[assets]
+section = ".assets"
+align = 16
+
+[[assets.images]]
+path = "assets/tiles.png"
+kind = "tiles"

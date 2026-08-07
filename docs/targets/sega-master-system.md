@@ -270,7 +270,7 @@ Use this default mode-4 VRAM layout:
 
 A mode-4 tile is 32 bytes: 8 rows × 4 bitplanes. A name-table entry is a little-endian `u16`: tile number in bits 0-8, horizontal flip in bit 9, vertical flip in bit 10, palette in bit 11, and priority in bit 12. Background palettes use color indices 0-15 and sprite palettes use 16-31; SMS color bytes are `--BBGGRR`.
 
-The asset pipeline should convert source art outside the compiler and store generated binary files under the project `assets/` directory:
+The CLI can convert configured indexed PNG tile and sprite sheets directly to mode-4 bytes. See [`../image-assets.md`](../image-assets.md). Other source formats should be converted outside the compiler and stored as generated binary files under the project `assets/` directory:
 
 ```text
 assets/
@@ -281,7 +281,7 @@ assets/
   sfx/*.psg
 ```
 
-Generated assets are not source files. Project conversion scripts own PNG/TMX/Furnace input and should create reproducible files in `target/` or another ignored build directory. `embed` metadata associates a generated file with a placement class and emits a `BankedRef` when it is not fixed.
+Generated assets are not source files. Project conversion scripts still own TMX, Furnace, palette, map, and other custom input and should create reproducible files in `target/` or another ignored build directory. `embed` metadata associates a generated file with a placement class and emits a `BankedRef` when it is not fixed.
 
 Uploads larger than the VBlank budget must be split across frames. The SDK must expose the queue cost in bytes so games can avoid VDP overrun. Sprite rendering uses the RAM shadow table and one VBlank commit, not piecemeal writes to `$3F00` while the display is active.
 

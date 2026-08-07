@@ -1,0 +1,14 @@
+import ti99.sprites
+
+embed tile_sheet: bytes = file("assets/tiles.png")
+
+fn main() {
+    sprites.enable_graphics()
+    sprites.upload_sprite_patterns(&tile_sheet, 16)
+
+    loop {
+        sprites.place(0, 80, 120, 0, 15)
+        sprites.place(1, 80, 136, 1, 9)
+        sprites.wait(1)
+    }
+}

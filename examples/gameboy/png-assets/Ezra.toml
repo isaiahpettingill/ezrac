@@ -1,0 +1,15 @@
+[project]
+name = "gameboy-png-assets"
+
+[build]
+input = "src/main.ezra"
+target = "gameboy-dmg-lr35902"
+executable = "png-assets"
+
+[assets]
+section = ".assets"
+align = 16
+
+[[assets.images]]
+path = "assets/player.png"
+kind = "sprite"

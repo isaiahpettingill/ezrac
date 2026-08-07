@@ -129,6 +129,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
+- `docs/image-assets.md` describes indexed PNG conversion to native sprite, tile, and bitmap formats.
 - `docs/real-core-tests.md` explains how to run the opt-in `play96` example suites against real libretro cores.
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
@@ -163,7 +164,7 @@ assert_eq!(build.executable_extension, "com");
 
 `build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, section-aware standalone assembly, or explicit-base flat assembly, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, `link_assembly_program`, or `link_assembly_program_at` from `ezra::api`. Explicit layouts drive both source code generation and final linking. The CLI `build` and `assemble` commands resolve host configuration and files into these same library pipelines; they do not own separate compiler, linker, or packager implementations.
 
-`ezra::api`, `diagnostic`, `disk`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
+`ezra::api`, `diagnostic`, `disk`, `image`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
 
 Both std and alloc-only builds validate the selected layout, strictly validate generated target assembly, and ensure the assembled `.text` bytes fit the region assigned by the layout before packaging. Source parsing, import resolution, code generation, assembly, linking, maps, explicit layouts, and packaging work under `no_std + alloc` for every compiler backend. Select only the backends an embedded consumer needs:
 
@@ -174,7 +175,7 @@ cargo check -p ezra-core --lib --no-default-features --features no-std,i8086
 cargo check -p ezra-core --lib --no-default-features --features no-std,avr,m6800,m6809,m68k,tms9900,dcpu,lr35902
 ```
 
-No-std builds never access host paths: all imported SDK source and binary assets must be included in `Workspace`. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
+No-std builds never access host paths: all imported SDK source and binary assets must be included in `Workspace`. The full in-memory indexed PNG pipeline works with `no_std + alloc` through `ezra::image::decode_indexed_png` and `indexed_png_to_native_bytes`; embedded callers supply the PNG bytes and then add the converted bytes to their workspace. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
 
 ## Development
 

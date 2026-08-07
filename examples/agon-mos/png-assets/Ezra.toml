@@ -1,0 +1,12 @@
+[project]
+name = "Agon MOS PNG Assets"
+
+[build]
+target = "agonlight-mos-ez80"
+output = "bin"
+executable = "png-assets"
+input = "src/main.ezra"
+
+[[assets.images]]
+path = "assets/badge.png"
+kind = "sprite"

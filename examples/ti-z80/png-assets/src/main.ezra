@@ -1,0 +1,55 @@
+import ti.lcd
+import ti.os
+
+const IMAGE_HEIGHT: u8 = 8
+const BYTES_PER_ROW: u8 = 2
+const SCREEN_ROW_BYTES: u8 = 12
+
+embed badge: bytes = file("assets/badge.png")
+
+fn draw_badge(byte_x: u8, y: u8) {
+    let source: ptr<u8> = badge.ptr
+    let destination: ptr<u8> = cast<ptr<u8>>(lcd.PLOTSSCREEN)
+
+    let row: u8 = 0
+    while row < y {
+        let skip: u8 = 0
+        while skip < SCREEN_ROW_BYTES {
+            destination = destination + 1
+            skip += 1
+        }
+        row += 1
+    }
+
+    let column: u8 = 0
+    while column < byte_x {
+        destination = destination + 1
+        column += 1
+    }
+
+    row = 0
+    while row < IMAGE_HEIGHT {
+        let byte_column: u8 = 0
+        while byte_column < BYTES_PER_ROW {
+            *destination = *source
+            destination = destination + 1
+            source = source + 1
+            byte_column += 1
+        }
+
+        let padding: u8 = 0
+        while padding < SCREEN_ROW_BYTES - BYTES_PER_ROW {
+            destination = destination + 1
+            padding += 1
+        }
+        row += 1
+    }
+}
+
+fn main() {
+    ti.lcd.clear()
+    draw_badge(40, 28)
+    loop {
+        ti.os.idle()
+    }
+}

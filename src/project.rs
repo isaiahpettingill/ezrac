@@ -111,6 +111,21 @@ pub struct BankingConfig {
 pub struct AssetConfig {
     pub default: AssetPlacement,
     pub targets: Vec<(String, AssetPlacement)>,
+    pub images: Vec<AssetImageConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssetImageKind {
+    Tiles,
+    Sprite,
+    Bitmap,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetImageConfig {
+    pub path: PathBuf,
+    pub relative_path: String,
+    pub kind: AssetImageKind,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -255,7 +270,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
     let arduboy = parse_arduboy_config(&value, output.as_deref() == Some("arduboy"))?;
     let zxspectrum = parse_zxspectrum_config(&value, &root)?;
     let banking = parse_banking_config(&value)?;
-    let assets = parse_asset_config(&value)?;
+    let assets = parse_asset_config(&value, &root)?;
 
     let sdk_paths = match value.get("sdk").and_then(|sdk| sdk.get("paths")) {
         Some(toml::Value::Array(paths)) => paths
@@ -644,7 +659,7 @@ fn parse_banking_config(value: &toml::Value) -> Result<BankingConfig, Diagnostic
     Ok(BankingConfig { enabled })
 }
 
-fn parse_asset_config(value: &toml::Value) -> Result<AssetConfig, Diagnostic> {
+fn parse_asset_config(value: &toml::Value, root: &Path) -> Result<AssetConfig, Diagnostic> {
     let Some(assets) = value.get("assets") else {
         return Ok(AssetConfig::default());
     };
@@ -664,7 +679,110 @@ fn parse_asset_config(value: &toml::Value) -> Result<AssetConfig, Diagnostic> {
             ));
         }
     }
-    Ok(AssetConfig { default, targets })
+    let images = parse_asset_images(assets, root)?;
+    Ok(AssetConfig {
+        default,
+        targets,
+        images,
+    })
+}
+
+fn parse_asset_images(
+    assets: &toml::Value,
+    root: &Path,
+) -> Result<Vec<AssetImageConfig>, Diagnostic> {
+    let Some(images) = assets.get("images") else {
+        return Ok(Vec::new());
+    };
+    let images = images.as_array().ok_or_else(|| {
+        Diagnostic::new("project field `assets.images` must be an array of image tables")
+    })?;
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut parsed_images = Vec::with_capacity(images.len());
+
+    for (index, image) in images.iter().enumerate() {
+        let field = |name: &str| format!("assets.images[{index}].{name}");
+        let image = image.as_table().ok_or_else(|| {
+            Diagnostic::new(format!(
+                "project field `assets.images[{index}]` must be a table"
+            ))
+        })?;
+        let path_field = field("path");
+        let path = image
+            .get("path")
+            .ok_or_else(|| Diagnostic::new(format!("project field `{path_field}` is required")))?
+            .as_str()
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "project field `{path_field}` must be a project-relative path string"
+                ))
+            })?;
+        let relative_path = normalize_project_relative_path(path, &path_field)?;
+        if !seen_paths.insert(relative_path.clone()) {
+            return Err(Diagnostic::new(format!(
+                "project field `{path_field}` duplicates image path `{relative_path}`"
+            )));
+        }
+
+        let kind_field = field("kind");
+        let kind = image
+            .get("kind")
+            .ok_or_else(|| Diagnostic::new(format!("project field `{kind_field}` is required")))?
+            .as_str()
+            .ok_or_else(|| {
+                Diagnostic::new(format!("project field `{kind_field}` must be a string"))
+            })?;
+        let kind = match kind {
+            "tiles" => AssetImageKind::Tiles,
+            "sprite" => AssetImageKind::Sprite,
+            "bitmap" => AssetImageKind::Bitmap,
+            _ => {
+                return Err(Diagnostic::new(format!(
+                    "project field `{kind_field}` must be `tiles`, `sprite`, or `bitmap`, got `{kind}`"
+                )));
+            }
+        };
+
+        parsed_images.push(AssetImageConfig {
+            path: root.join(&relative_path),
+            relative_path,
+            kind,
+        });
+    }
+
+    Ok(parsed_images)
+}
+
+fn normalize_project_relative_path(path: &str, field: &str) -> Result<String, Diagnostic> {
+    let path = path.replace('\\', "/");
+    let bytes = path.as_bytes();
+    let has_drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if path.starts_with('/') || has_drive_prefix {
+        return Err(Diagnostic::new(format!(
+            "project field `{field}` must be a project-relative path"
+        )));
+    }
+
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(Diagnostic::new(format!(
+                        "project field `{field}` must not escape the project root via `..`"
+                    )));
+                }
+            }
+            component => components.push(component),
+        }
+    }
+    if components.is_empty() {
+        return Err(Diagnostic::new(format!(
+            "project field `{field}` must be a nonempty project-relative path"
+        )));
+    }
+    Ok(components.join("/"))
 }
 
 fn parse_asset_placement(

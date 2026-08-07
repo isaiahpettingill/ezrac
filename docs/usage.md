@@ -330,6 +330,14 @@ file = "layouts/custom.ezralayout"
 
 [sdk]
 paths = ["sdk", "../shared-sdk"]
+
+[assets]
+section = ".assets"
+align = 16
+
+[[assets.images]]
+path = "assets/player.png"
+kind = "sprite"
 ```
 
 Supported fields:
@@ -346,6 +354,10 @@ Supported fields:
 [optimization].disable  pass names disabled after level and enable processing
 [layout].file           custom .ezralayout file
 [sdk].paths             additional SDK source roots
+[assets].section        default section for embeds without an explicit section
+[assets].align          default power-of-two alignment for embeds
+[[assets.images]].path  project-relative indexed PNG path
+[[assets.images]].kind  native conversion role: tiles, sprite, or bitmap
 [lsp].mode              application (default) or library
 [arduboy].title          required when output is arduboy
 [arduboy].author         required when output is arduboy
@@ -361,6 +373,8 @@ Optimization pass names are the same in `Ezra.toml`, the CLI, and the Rust API's
 `[lsp].mode = "library"` makes the language server type-check the configured source and its SDK imports without requiring `fn main()`. It does not add shared-library output; `build` remains executable-only.
 
 The parser also accepts a `[cartridge]` table with `layout` and optional `manifest`, but cartridge packaging is still evolving.
+
+Configured indexed PNGs are converted to the selected target's native sprite, tile, or bitmap bytes before compilation. See [Indexed PNG image assets](image-assets.md) for the supported targets, byte layouts, and image limits.
 
 ## Build Artifacts
 

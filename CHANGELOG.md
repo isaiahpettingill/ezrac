@@ -2,6 +2,7 @@
 
 ## 0.1.34
 
+- Added a shared indexed-image encoder and CLI pipeline that converts configured indexed PNG assets into native Game Boy, NES, Sega, C64, TI, ZX Spectrum, Arduboy, and Agon sprite, tile, or bitmap bytes.
 - Added built-in `ezra.bits`, `ezra.int`, and `ezra.mem` intrinsic catalogs with width-aware bit operations, defined integer helpers, overlap-aware memory operations, explicit-endian access, and volatile/MMIO restrictions.
 - Added zero-, one-, and two-result function syntax (`-> T, U`, two-place `let`, and `return a, b`) without introducing tuples or aggregate returns. Target-specific widths and ABIs reject unsupported combinations.
 - Added `-O0` through `-O3`, named optimization-pass overrides in the CLI, `Ezra.toml`, and library API, plus safe idempotent bit-operation cleanup, cross-target redundant register-copy removal, and an `-O3` second pass informed by MDL's pattern optimizer. Dead-code elimination remains enabled at `-O0` unless explicitly disabled.

@@ -1,0 +1,12 @@
+[project]
+name = "TI Z80 PNG Assets"
+
+[build]
+target = "ti84plus-z80"
+output = "8xp"
+executable = "EZRATI"
+input = "src/main.ezra"
+
+[[assets.images]]
+path = "assets/badge.png"
+kind = "bitmap"

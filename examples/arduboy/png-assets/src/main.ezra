@@ -1,0 +1,18 @@
+import arduboy.core
+import arduboy.graphics
+import arduboy.oled
+import arduboy.timing
+
+embed ship: bytes = file("assets/ship.png")
+
+fn main() {
+    core.initialize()
+    oled.initialize_display()
+
+    loop {
+        graphics.clear_framebuffer()
+        graphics.draw_sprite(56, 28, ship.ptr, 16)
+        graphics.present()
+        timing.wait_frame()
+    }
+}

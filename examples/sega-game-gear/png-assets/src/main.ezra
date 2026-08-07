@@ -1,0 +1,32 @@
+import gg.palette
+import gg.viewport
+import sms.system
+import sms.video
+
+// The indexed PNG is converted to a native Game Gear mode-4 tile.
+embed tile: bytes = file("assets/tile.png")
+
+fn main() {
+    video.init_mode4()
+    video.upload_tile(1, &tile)
+
+    palette.set_background(0, palette.BLACK)
+    palette.set_background(1, palette.WHITE)
+    palette.set_background(2, palette.BLUE)
+    palette.set_background(3, palette.YELLOW)
+
+    let y: u8 = 0
+    while y < viewport.VIEWPORT_HEIGHT_TILES {
+        let x: u8 = 0
+        while x < viewport.VIEWPORT_WIDTH_TILES {
+            video.set_name_table_entry(viewport.name_table_index(x, y), 1)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    video.enable_display()
+    loop {
+        system.wait_vblank()
+    }
+}

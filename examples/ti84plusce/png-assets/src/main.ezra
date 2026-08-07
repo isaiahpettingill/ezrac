@@ -1,0 +1,29 @@
+import tice.lcd
+import tice.os
+
+const IMAGE_WIDTH: u16 = 8
+const IMAGE_HEIGHT: u16 = 8
+
+embed badge: bytes = file("assets/badge.png")
+
+fn draw_badge(x: u16, y: u16) {
+    let row: u16 = 0
+    while row < IMAGE_HEIGHT {
+        let column: u16 = 0
+        while column < IMAGE_WIDTH {
+            let offset: u16 = (row * IMAGE_WIDTH + column) * 2
+            let low: u8 = *(badge.ptr + offset)
+            let high: u8 = *(badge.ptr + offset + 1)
+            let color: u16 = cast<u16>(low) | (cast<u16>(high) << 8)
+            lcd.set_pixel(x + column, y + row, color)
+            column += 1
+        }
+        row += 1
+    }
+}
+
+fn main() {
+    lcd.fill(lcd.BLACK)
+    draw_badge(156, 116)
+    let key: u8 = os.wait_key()
+}

@@ -1,0 +1,12 @@
+[project]
+name = "Arduboy PNG Assets"
+
+[build]
+target = "arduboy-avr"
+output = "hex"
+executable = "PNGASSET"
+input = "src/main.ezra"
+
+[[assets.images]]
+path = "assets/ship.png"
+kind = "sprite"

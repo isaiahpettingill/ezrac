@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn build_converts_imported_indexed_png_to_native_tiles() {
+    let root = temp_root("indexed-png-assets");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(
+        root.join("Ezra.toml"),
+        r#"
+            [build]
+            input = "src/main.ezra"
+            target = "gameboy-dmg-lr35902"
+
+            [[assets.images]]
+            path = "assets/player.png"
+            kind = "tiles"
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main.ezra"),
+        "import media\nimport gb.sprites\nfn main() { sprites.upload_tile1(&player) }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/media.ezra"),
+        "pub embed player: bytes = file(\"../assets/player.png\")\n",
+    )
+    .unwrap();
+
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, 8, 8);
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::One);
+        encoder.set_palette(vec![0, 0, 0, 255, 255, 255]);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[0xFF; 8]).unwrap();
+    }
+    std::fs::write(root.join("assets/player.png"), png_bytes).unwrap();
+
+    let outputs = build_source(root.join("src/main.ezra").to_str().unwrap()).unwrap();
+    let size = std::fs::read_to_string(outputs.size).unwrap();
+    assert!(size.contains("assets=16"), "{size}");
+    assert!(size.contains("section:.assets=16"), "{size}");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn build_writes_artifacts() {
     let root = temp_root("build");
     std::fs::create_dir_all(&root).unwrap();

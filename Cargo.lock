@@ -59,9 +59,11 @@ dependencies = [
  "m6800",
  "m68000",
  "mc6809-core",
+ "miniz_oxide",
  "mos6502",
  "pest",
  "pest_derive",
+ "png",
  "toml",
 ]
 
@@ -75,6 +77,7 @@ dependencies = [
  "libre99-core",
  "lsp",
  "play96",
+ "png",
  "serde",
  "serde_json",
 ]

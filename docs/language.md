@@ -327,6 +327,23 @@ packagers then decide what those sections mean: cartridge ROM for Game Boy,
 tape/image sections for ZX Spectrum, or dedicated asset memory for Agon and
 other mapped targets. The source-facing symbols remain stable across targets.
 
+The CLI can preprocess selected indexed PNG file embeds into target-native
+image bytes. The declaration remains an immutable byte embed:
+
+```toml
+[[assets.images]]
+path = "assets/player.png"
+kind = "sprite"
+```
+
+```ezra
+embed player: bytes = file("assets/player.png")
+```
+
+See [Indexed PNG image assets](image-assets.md) for formats and limits. This is
+project preprocessing, not new language syntax. Unconfigured files are embedded
+unchanged.
+
 ## Structs
 
 Structs group named fields.

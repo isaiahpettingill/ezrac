@@ -25,6 +25,7 @@ mod declaration;
 pub mod diagnostic;
 pub mod disk;
 pub mod hir;
+pub mod image;
 pub mod intrinsics;
 pub mod layout;
 pub mod optimization;
