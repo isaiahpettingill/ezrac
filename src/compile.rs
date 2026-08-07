@@ -1707,6 +1707,14 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/tice-ez80/sdk/tice/lcd.ezra"),
                 "tice.lcd",
             )),
+            "tice.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/tice-ez80/sdk/tice/input.ezra"),
+                "tice.input",
+            )),
+            "tice.vars" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/tice-ez80/sdk/tice/vars.ezra"),
+                "tice.vars",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("ti99-4a-tms9900")) {
@@ -1750,6 +1758,14 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             "ti.lcd" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/ti-z80/sdk/ti/lcd.ezra"),
                 "ti.lcd",
+            )),
+            "ti.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti-z80/sdk/ti/input.ezra"),
+                "ti.input",
+            )),
+            "ti.vars" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/ti-z80/sdk/ti/vars.ezra"),
+                "ti.vars",
             )),
             _ => None,
         }

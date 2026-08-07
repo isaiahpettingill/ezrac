@@ -1,0 +1,86 @@
+// Direct keypad access. A key is encoded as (group << 8) | bit mask.
+// ON is outside the keypad matrix and uses group zero.
+pub const KEY_ON: u16 = 0x0001
+pub const KEY_GRAPH: u16 = 0x0101
+pub const KEY_TRACE: u16 = 0x0102
+pub const KEY_ZOOM: u16 = 0x0104
+pub const KEY_WINDOW: u16 = 0x0108
+pub const KEY_YEQU: u16 = 0x0110
+pub const KEY_2ND: u16 = 0x0120
+pub const KEY_MODE: u16 = 0x0140
+pub const KEY_DEL: u16 = 0x0180
+pub const KEY_STO: u16 = 0x0202
+pub const KEY_LN: u16 = 0x0204
+pub const KEY_LOG: u16 = 0x0208
+pub const KEY_SQUARE: u16 = 0x0210
+pub const KEY_RECIP: u16 = 0x0220
+pub const KEY_MATH: u16 = 0x0240
+pub const KEY_ALPHA: u16 = 0x0280
+pub const KEY_0: u16 = 0x0301
+pub const KEY_1: u16 = 0x0302
+pub const KEY_4: u16 = 0x0304
+pub const KEY_7: u16 = 0x0308
+pub const KEY_COMMA: u16 = 0x0310
+pub const KEY_SIN: u16 = 0x0320
+pub const KEY_APPS: u16 = 0x0340
+pub const KEY_GRAPHVAR: u16 = 0x0380
+pub const KEY_DECIMAL: u16 = 0x0401
+pub const KEY_2: u16 = 0x0402
+pub const KEY_5: u16 = 0x0404
+pub const KEY_8: u16 = 0x0408
+pub const KEY_LPAREN: u16 = 0x0410
+pub const KEY_COS: u16 = 0x0420
+pub const KEY_PRGM: u16 = 0x0440
+pub const KEY_STAT: u16 = 0x0480
+pub const KEY_NEGATE: u16 = 0x0501
+pub const KEY_3: u16 = 0x0502
+pub const KEY_6: u16 = 0x0504
+pub const KEY_9: u16 = 0x0508
+pub const KEY_RPAREN: u16 = 0x0510
+pub const KEY_TAN: u16 = 0x0520
+pub const KEY_VARS: u16 = 0x0540
+pub const KEY_ENTER: u16 = 0x0601
+pub const KEY_ADD: u16 = 0x0602
+pub const KEY_SUB: u16 = 0x0604
+pub const KEY_MUL: u16 = 0x0608
+pub const KEY_DIV: u16 = 0x0610
+pub const KEY_POWER: u16 = 0x0620
+pub const KEY_CLEAR: u16 = 0x0640
+pub const KEY_DOWN: u16 = 0x0701
+pub const KEY_LEFT: u16 = 0x0702
+pub const KEY_RIGHT: u16 = 0x0704
+pub const KEY_UP: u16 = 0x0708
+
+pub const KEYPAD_CONFIG: u24 = 0xF50000
+pub const KEYPAD_DATA: u24 = 0xF50012
+pub const ON_KEY: u24 = 0xF00020
+
+pub fn scan() {
+    *(cast<ptr<u8>>(KEYPAD_CONFIG)) = 2
+    while (*(cast<ptr<u8>>(KEYPAD_CONFIG)) & 3) != 0 {}
+}
+
+pub fn group(index: u8) -> u8 {
+    if index < 1 || index > 7 { return 0 }
+    return *(cast<ptr<u8>>(KEYPAD_DATA) + cast<u24>(index - 1) * 2)
+}
+
+pub fn is_down(key: u16) -> bool {
+    let key_group: u8 = cast<u8>(key >> 8)
+    let mask: u8 = cast<u8>(key)
+    if key_group == 0 { return on_down() }
+    return (group(key_group) & mask) != 0
+}
+
+pub fn any_down() -> bool {
+    let index: u8 = 1
+    while index <= 7 {
+        if group(index) != 0 { return true }
+        index += 1
+    }
+    return on_down()
+}
+
+pub fn on_down() -> bool {
+    return (*(cast<ptr<u8>>(ON_KEY)) & 1) != 0
+}

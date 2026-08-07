@@ -1,0 +1,51 @@
+// Helpers for programs that operate on scalar values and in-memory tables.
+pub fn read_u8(address: ptr<u8>) -> u8 { return *address }
+pub fn write_u8(address: ptr<u8>, value: u8) { *address = value }
+pub fn read_u16(address: ptr<u16>) -> u16 { return *address }
+pub fn write_u16(address: ptr<u16>, value: u16) { *address = value }
+
+pub fn fill_u8(table: ptr<u8>, length: u24, value: u8) {
+    let index: u24 = 0
+    while index < length { *(table + index) = value index += 1 }
+}
+
+pub fn copy_u8(source: ptr<u8>, destination: ptr<u8>, length: u24) {
+    let index: u24 = 0
+    while index < length { *(destination + index) = *(source + index) index += 1 }
+}
+
+pub fn sum_u8(table: ptr<u8>, length: u24) -> u24 {
+    let total: u24 = 0
+    let index: u24 = 0
+    while index < length { total += cast<u24>(*(table + index)) index += 1 }
+    return total
+}
+
+pub fn min_u8(table: ptr<u8>, length: u24) -> u8 {
+    if length == 0 { return 0 }
+    let result: u8 = *table
+    let index: u24 = 1
+    while index < length { let value: u8 = *(table + index) if value < result { result = value } index += 1 }
+    return result
+}
+
+pub fn max_u8(table: ptr<u8>, length: u24) -> u8 {
+    if length == 0 { return 0 }
+    let result: u8 = *table
+    let index: u24 = 1
+    while index < length { let value: u8 = *(table + index) if value > result { result = value } index += 1 }
+    return result
+}
+
+pub fn find_u8(table: ptr<u8>, length: u24, wanted: u8) -> u24 {
+    let index: u24 = 0
+    while index < length { if *(table + index) == wanted { return index } index += 1 }
+    return length
+}
+
+pub fn count_u8(table: ptr<u8>, length: u24, wanted: u8) -> u24 {
+    let count: u24 = 0
+    let index: u24 = 0
+    while index < length { if *(table + index) == wanted { count += 1 } index += 1 }
+    return count
+}

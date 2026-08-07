@@ -1,6 +1,54 @@
-pub const PLOTSSCREEN: u16 = 0x9340
+pub const PLOTSSCREEN: u24 = 0x9340
 pub const WIDTH: u8 = 96
 pub const HEIGHT: u8 = 64
+
+pub fn clear() {
+    let screen: ptr<u8> = cast<ptr<u8>>(PLOTSSCREEN)
+    let index: u16 = 0
+    while index < 768 { *(screen + index) = 0 index += 1 }
+}
+
+pub fn fill(value: u8) {
+    let screen: ptr<u8> = cast<ptr<u8>>(PLOTSSCREEN)
+    let index: u16 = 0
+    while index < 768 { *(screen + index) = value index += 1 }
+}
+
+pub fn set_pixel(x: u8, y: u8, lit: bool) {
+    if x >= WIDTH || y >= HEIGHT { return }
+    let address: ptr<u8> = cast<ptr<u8>>(PLOTSSCREEN) + cast<u16>(y) * 12 + cast<u16>(x >> 3)
+    let mask: u8 = 0x80 >> (x & 7)
+    if lit { *address = *address | mask } else { *address = *address & ~mask }
+}
+
+pub fn get_pixel(x: u8, y: u8) -> bool {
+    if x >= WIDTH || y >= HEIGHT { return false }
+    let address: ptr<u8> = cast<ptr<u8>>(PLOTSSCREEN) + cast<u16>(y) * 12 + cast<u16>(x >> 3)
+    return (*address & (0x80 >> (x & 7))) != 0
+}
+
+pub fn hline(x: u8, y: u8, length: u8, lit: bool) {
+    let offset: u8 = 0
+    while offset < length && x + offset < WIDTH { set_pixel(x + offset, y, lit) offset += 1 }
+}
+
+pub fn vline(x: u8, y: u8, length: u8, lit: bool) {
+    let offset: u8 = 0
+    while offset < length && y + offset < HEIGHT { set_pixel(x, y + offset, lit) offset += 1 }
+}
+
+pub fn rect(x: u8, y: u8, width: u8, height: u8, lit: bool) {
+    if width == 0 || height == 0 { return }
+    hline(x, y, width, lit)
+    hline(x, y + height - 1, width, lit)
+    vline(x, y, height, lit)
+    vline(x + width - 1, y, height, lit)
+}
+
+pub fn fill_rect(x: u8, y: u8, width: u8, height: u8, lit: bool) {
+    let row: u8 = 0
+    while row < height && y + row < HEIGHT { hline(x, y + row, width, lit) row += 1 }
+}
 
 pub fn set_first_byte(value: u8) {
     asm volatile(in value: u8 as reg8, clobber a, clobber memory) {
