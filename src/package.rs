@@ -223,7 +223,8 @@ pub fn package_executable_with_context(
         OutputFormat::Commodore64Prg => commodore64_prg_bytes(request, code),
         OutputFormat::Commodore64Crt => commodore64_crt_bytes(request, code),
         OutputFormat::NesRom => nes_rom_bytes(request, context, code),
-        OutputFormat::SmsRom => sms_rom_bytes(request, code),
+        OutputFormat::SmsRom => sega_8bit_rom_bytes(request, code, false),
+        OutputFormat::GameGearRom => sega_8bit_rom_bytes(request, code, true),
         OutputFormat::Ti8ek | OutputFormat::Ti8xk => Err(PackageError::new(format!(
             "TI flash application output `.{}` is not implemented; use `.8xp` protected-program output",
             request.output_format.extension()
@@ -308,25 +309,39 @@ fn nes_rom_bytes(
     Ok(code.to_vec())
 }
 
-fn sms_rom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
+fn sega_8bit_rom_bytes(
+    request: &PackageRequest,
+    code: &[u8],
+    game_gear: bool,
+) -> Result<Vec<u8>, PackageError> {
     const IMAGE_SIZE: usize = 0x8000;
     const ENTRY_OFFSET: usize = 0x0069;
     const HEADER_OFFSET: usize = 0x7FF0;
 
-    if request.target != "sega-master-system-z80" {
+    let expected_target = if game_gear {
+        "sega-game-gear-z80"
+    } else {
+        "sega-master-system-z80"
+    };
+    if request.target != expected_target {
+        let format = if game_gear {
+            "Game Gear `.gg`"
+        } else {
+            "Master System `.sms`"
+        };
         return Err(PackageError::new(format!(
-            "target `{}` does not support Sega Master System `.sms` output",
+            "target `{}` does not support {format} output",
             request.target
         )));
     }
     if request.load_addr != 0 || request.entry_addr != ENTRY_OFFSET as u32 {
         return Err(PackageError::new(
-            "Sega Master System ROM layouts must load at 0x0000 and enter at 0x0069",
+            "Sega 8-bit ROM layouts must load at 0x0000 and enter at 0x0069",
         ));
     }
     if code.len() > HEADER_OFFSET - ENTRY_OFFSET {
         return Err(PackageError::new(format!(
-            "Sega Master System program code must fit in {} bytes before the ROM header, got {}",
+            "Sega 8-bit program code must fit in {} bytes before the ROM header, got {}",
             HEADER_OFFSET - ENTRY_OFFSET,
             code.len()
         )));
@@ -345,7 +360,8 @@ fn sms_rom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, Packa
     image[HEADER_OFFSET + 8..HEADER_OFFSET + 10].copy_from_slice(&[0xFF, 0xFF]);
     image[HEADER_OFFSET + 10..HEADER_OFFSET + 12].copy_from_slice(&checksum.to_le_bytes());
     image[HEADER_OFFSET + 12..HEADER_OFFSET + 15].fill(0);
-    image[HEADER_OFFSET + 15] = 0x4C; // Export SMS, 32 KiB ROM.
+    // Region/system nibble 7 identifies an export Game Gear cartridge; 4 is export SMS.
+    image[HEADER_OFFSET + 15] = if game_gear { 0x7C } else { 0x4C };
     Ok(image)
 }
 

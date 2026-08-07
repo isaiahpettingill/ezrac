@@ -200,6 +200,19 @@ fn resolves_sega_master_system_z80_target_profile() {
     assert_eq!(parse_output_format("sms"), Ok(OutputFormat::SmsRom));
 }
 
+#[test]
+fn resolves_sega_game_gear_z80_target_profile() {
+    let profile = resolve_target_profile(Some("sega-game-gear-z80")).unwrap();
+
+    assert_eq!(profile.triple.cpu, CpuFamily::Z80);
+    assert_eq!(profile.output_format, OutputFormat::GameGearRom);
+    assert_eq!(profile.output_format.extension(), "gg");
+    assert_eq!(profile.memory.pointer_width_bits, 16);
+    assert_eq!(profile.memory.address_width_bits, 16);
+    assert!(profile.default_sdk_symbols);
+    assert_eq!(parse_output_format("gg"), Ok(OutputFormat::GameGearRom));
+}
+
 #[cfg(feature = "mos6502")]
 #[test]
 fn resolves_nes_2a03_target_profile() {
@@ -322,10 +335,12 @@ fn parses_output_formats() {
     assert_eq!(parse_output_format("prg"), Ok(OutputFormat::Commodore64Prg));
     assert_eq!(parse_output_format("crt"), Ok(OutputFormat::Commodore64Crt));
     assert_eq!(parse_output_format("nes"), Ok(OutputFormat::NesRom));
+    assert_eq!(parse_output_format("sms"), Ok(OutputFormat::SmsRom));
+    assert_eq!(parse_output_format("gg"), Ok(OutputFormat::GameGearRom));
     let error = parse_output_format("bad").unwrap_err();
     assert!(
         error.contains(
-            "expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `8xp`, `8ek`, or `8xk`"
+            "expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `sms`, `gg`, `8xp`, `8ek`, or `8xk`"
         ),
         "{error}"
     );

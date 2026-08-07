@@ -1,6 +1,6 @@
 # Sega Master System target design
 
-**Status: first pass implemented.** `sega-master-system-z80` builds fixed 32 KiB export-SMS ROMs. It includes a standard header, reset/VBlank/NMI vector stubs, and a small polling-based `sms.*` SDK. Mapper support, VBlank interrupts, SRAM, and Game Gear support remain proposed.
+**Status: first pass implemented.** `sega-master-system-z80` builds fixed 32 KiB export-SMS ROMs. It includes a standard header, reset/VBlank/NMI vector stubs, and a small polling-based `sms.*` SDK. `sega-game-gear-z80` reuses the common layout and SDK code, emits `.gg` ROMs, and adds Game Gear palette, Start button, viewport, and stereo helpers. Mapper support, VBlank interrupts, and SRAM remain proposed.
 
 ## Implemented first pass
 
@@ -9,7 +9,7 @@
 - The bundled SDK provides `sms.vdp`, `sms.video`, `sms.palette`, `sms.system`, `sms.memory`, and `sms.input`.
 - `sms.input` supports two standard SMS pads. `read_player1()` and `read_player2()` return active-high `UP`, `DOWN`, `LEFT`, `RIGHT`, `BUTTON_1`, and `BUTTON_2` masks.
 - `sms.system.wait_vblank()` polls VDP status. `halt_until_frame()` is an alias and does not execute the Z80 `HALT` instruction.
-- See [`examples/sega-master-system/source-hello`](../../examples/sega-master-system/source-hello).
+- See [`examples/sega-master-system/source-hello`](../../examples/sega-master-system/source-hello) and [`examples/sega-game-gear/source-hello`](../../examples/sega-game-gear/source-hello).
 
 ## Scope
 
@@ -22,7 +22,7 @@ The completed target design supports stock Sega Master System hardware with:
 - Two standard SMS controllers and the console Pause button.
 - ROMs from 32 KiB through 256 KiB. 512 KiB and 1 MiB are a packager extension once the baseline is tested.
 
-The implemented first pass is limited to fixed 32 KiB ROMs. It excludes cartridge SRAM, FM sound, light guns, paddles, 3-D glasses, Codemasters mappers, Game Gear output, and mapper control. These features need explicit implementation rather than silently producing an incompatible ROM.
+The implemented first pass is limited to fixed 32 KiB ROMs. It excludes cartridge SRAM, FM sound, light guns, paddles, 3-D glasses, Codemasters mappers, and mapper control. Game Gear output is supported by the separate `sega-game-gear-z80` target. These other features need explicit implementation rather than silently producing an incompatible ROM.
 
 ## Target and project configuration
 

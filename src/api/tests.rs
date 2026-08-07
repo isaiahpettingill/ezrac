@@ -159,6 +159,21 @@ fn compiles_all_builtin_sms_sdk_modules() {
     assert!(compilation.assembly.contains("ld sp, DFF0h"));
 }
 
+#[test]
+fn compiles_shared_sms_and_game_gear_sdk_modules() {
+    let source = "import sms.system\nimport sms.video\nimport gg.palette\nimport gg.input\nimport gg.viewport\nimport gg.audio\nfn main() { video.init_mode4(); palette.set_background(0, palette.BLUE); let index: u16 = viewport.name_table_index(0, 0); let buttons: u8 = input.read_buttons(); audio.set_stereo(audio.STEREO_ALL); if input.start_pressed() || buttons != 0 || index != 0 { video.enable_display() } system.wait_vblank() }";
+    let compilation = compile_source_to_assembly(
+        source,
+        &CompileRequest::new("memory.ezra", "sega-game-gear-z80"),
+    )
+    .unwrap();
+
+    assert!(compilation.assembly.contains("out (06h), a"));
+    assert!(compilation.assembly.contains("in a, (00h)"));
+    assert!(compilation.assembly.contains("in a, (DCh)"));
+    assert!(compilation.assembly.contains("ld sp, DFF0h"));
+}
+
 #[cfg(feature = "mos6502")]
 #[test]
 fn compiles_all_builtin_nes_sdk_modules() {

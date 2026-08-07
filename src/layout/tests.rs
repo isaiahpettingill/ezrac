@@ -126,6 +126,20 @@ fn sega_master_system_layout_reserves_header_and_work_ram() {
 }
 
 #[test]
+fn sega_game_gear_layout_reuses_sega_8bit_memory_map() {
+    let layout = default_layout_for_target("sega-game-gear-z80");
+
+    layout.validate().unwrap();
+    assert_eq!(layout.name, "sega_game_gear_z80");
+    assert_eq!(layout.load.get(), 0x0000);
+    assert_eq!(layout.entry.get(), 0x0069);
+    assert_eq!(layout.stack.get(), 0xDFF0);
+    assert!(layout.regions.iter().any(|region| {
+        region.name == "header" && region.start.get() == 0x7FF0 && region.end.get() == 0x7FFF
+    }));
+}
+
+#[test]
 fn bare_6502_layout_reserves_zero_page_and_hardware_stack() {
     let layout = Layout::bare_6502();
     layout.validate().unwrap();

@@ -1,0 +1,21 @@
+// Each stereo register bit enables one PSG channel on one speaker.
+pub port STEREO: u8 = 0x06
+pub port PSG: u8 = 0x7F
+
+pub const RIGHT_TONE_0: u8 = 0x01
+pub const RIGHT_TONE_1: u8 = 0x02
+pub const RIGHT_TONE_2: u8 = 0x04
+pub const RIGHT_NOISE: u8 = 0x08
+pub const LEFT_TONE_0: u8 = 0x10
+pub const LEFT_TONE_1: u8 = 0x20
+pub const LEFT_TONE_2: u8 = 0x40
+pub const LEFT_NOISE: u8 = 0x80
+pub const STEREO_ALL: u8 = 0xFF
+
+pub fn set_stereo(channels: u8) {
+    out STEREO, channels
+}
+
+pub fn write_psg(value: u8) {
+    out PSG, value
+}

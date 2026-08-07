@@ -1,0 +1,29 @@
+import sms.vdp
+
+// Game Gear CRAM colors use 12-bit 0x0BGR values, written low byte first.
+pub const BLACK: u16 = 0x000
+pub const WHITE: u16 = 0xFFF
+pub const RED: u16 = 0x00F
+pub const GREEN: u16 = 0x0F0
+pub const BLUE: u16 = 0xF00
+pub const YELLOW: u16 = 0x0FF
+pub const CYAN: u16 = 0xFF0
+pub const MAGENTA: u16 = 0xF0F
+
+pub fn rgb(red: u8, green: u8, blue: u8) -> u16 {
+    return cast<u16>(red & 0x0F) | (cast<u16>(green & 0x0F) << 4) | (cast<u16>(blue & 0x0F) << 8)
+}
+
+pub fn set_color(index: u8, color: u16) {
+    vdp.set_cram_write_address((index & 0x1F) << 1)
+    vdp.write_data(cast<u8>(color))
+    vdp.write_data(cast<u8>(color >> 8) & 0x0F)
+}
+
+pub fn set_background(index: u8, color: u16) {
+    set_color(index & 0x0F, color)
+}
+
+pub fn set_sprite(index: u8, color: u16) {
+    set_color(0x10 | (index & 0x0F), color)
+}

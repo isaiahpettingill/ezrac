@@ -1,0 +1,23 @@
+import gg.audio
+import gg.input
+import gg.palette
+import gg.viewport
+import sms.system
+import sms.video
+
+fn main() {
+    video.init_mode4()
+    palette.set_background(0, palette.BLUE)
+    audio.set_stereo(audio.STEREO_ALL)
+    video.enable_display()
+
+    loop {
+        system.halt_until_frame()
+
+        if input.start_pressed() {
+            palette.set_background(0, palette.RED)
+        } else {
+            palette.set_background(0, palette.BLUE)
+        }
+    }
+}

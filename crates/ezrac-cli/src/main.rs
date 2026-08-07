@@ -3103,6 +3103,14 @@ fn print_targets() {
             sdk: "sms.*",
             status: "fixed 32 KiB export-SMS source target",
         },
+        TargetRow {
+            triple: "sega-game-gear-z80",
+            cpu: "z80",
+            address_width_bits: 16,
+            output: "gg",
+            sdk: "sms.* + gg.*",
+            status: "fixed 32 KiB export-Game-Gear source target",
+        },
         #[cfg(feature = "tms9900")]
         TargetRow {
             triple: "ti99-4a-tms9900",

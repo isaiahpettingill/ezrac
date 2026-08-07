@@ -1753,7 +1753,9 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
-    } else if target.is_some_and(|target| target == "sega-master-system-z80") {
+    } else if target
+        .is_some_and(|target| target == "sega-master-system-z80" || target == "sega-game-gear-z80")
+    {
         match import {
             "sms.system" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/system.ezra"),
@@ -1778,6 +1780,22 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             "sms.input" => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/input.ezra"),
                 "sms.input",
+            )),
+            "gg.palette" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/palette.ezra"),
+                "gg.palette",
+            )),
+            "gg.input" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/input.ezra"),
+                "gg.input",
+            )),
+            "gg.viewport" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/viewport.ezra"),
+                "gg.viewport",
+            )),
+            "gg.audio" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/audio.ezra"),
+                "gg.audio",
             )),
             _ => None,
         }

@@ -92,6 +92,24 @@ fn packages_sms_code_as_a_padded_32k_rom_with_standard_header() {
 }
 
 #[test]
+fn packages_game_gear_code_with_game_gear_header() {
+    let code = [0xF3, 0x31, 0xF0, 0xDF];
+    let image = package_executable(
+        &PackageRequest::new("sega-game-gear-z80", OutputFormat::GameGearRom, 0, 0x0069),
+        &code,
+    )
+    .unwrap();
+
+    assert_eq!(image.len(), 0x8000);
+    assert_eq!(&image[0x7FF0..0x7FF8], b"TMR SEGA");
+    assert_eq!(image[0x7FFF], 0x7C);
+    let checksum = image[..0x7FF0]
+        .iter()
+        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
+    assert_eq!(u16::from_le_bytes([image[0x7FFA], image[0x7FFB]]), checksum);
+}
+
+#[test]
 fn rejects_sms_code_that_overlaps_the_rom_header() {
     let error = package_executable(
         &PackageRequest::new("sega-master-system-z80", OutputFormat::SmsRom, 0, 0x0069),

@@ -1,0 +1,7 @@
+[project]
+name = "gg-source-hello"
+
+[build]
+input = "src/main.ezra"
+target = "sega-game-gear-z80"
+executable = "source-hello"

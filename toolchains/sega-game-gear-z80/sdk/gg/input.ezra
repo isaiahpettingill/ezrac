@@ -1,0 +1,14 @@
+import sms.input
+
+// Port 0 bit 7 is active-low when the Game Gear Start button is held.
+pub port START_PORT: u8 = 0x00
+pub const START: u8 = 0x80
+
+pub fn read_buttons() -> u8 {
+    return input.read_player1()
+}
+
+pub fn start_pressed() -> bool {
+    let raw: u8 = in START_PORT
+    return (raw & START) == 0
+}

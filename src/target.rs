@@ -370,6 +370,7 @@ pub enum OutputFormat {
     Commodore64Crt,
     NesRom,
     SmsRom,
+    GameGearRom,
 }
 
 impl OutputFormat {
@@ -390,6 +391,7 @@ impl OutputFormat {
             Self::Commodore64Crt => "crt",
             Self::NesRom => "nes",
             Self::SmsRom => "sms",
+            Self::GameGearRom => "gg",
         }
     }
 }
@@ -398,6 +400,7 @@ pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
 pub const MSDOS_COM_I8086_TARGET: &str = "msdos-com-i8086";
 pub const NES_2A03_TARGET: &str = "nes-2a03";
 pub const SEGA_MASTER_SYSTEM_Z80_TARGET: &str = "sega-master-system-z80";
+pub const SEGA_GAME_GEAR_Z80_TARGET: &str = "sega-game-gear-z80";
 
 pub fn is_msdos_i8086_target(target: &str) -> bool {
     target == MSDOS_COM_I8086_TARGET
@@ -473,7 +476,7 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
         Some(&[CpuFamily::Mos6502][..])
     } else if target.starts_with("nes-") {
         Some(&[CpuFamily::Ricoh2A03][..])
-    } else if target.starts_with("sega-master-system-") {
+    } else if target.starts_with("sega-master-system-") || target.starts_with("sega-game-gear-") {
         Some(&[CpuFamily::Z80][..])
     } else if target.starts_with("arduboy-") {
         Some(&[CpuFamily::Avr][..])
@@ -535,6 +538,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::NesRom
     } else if triple.value == SEGA_MASTER_SYSTEM_Z80_TARGET {
         OutputFormat::SmsRom
+    } else if triple.value == SEGA_GAME_GEAR_Z80_TARGET {
+        OutputFormat::GameGearRom
     } else {
         OutputFormat::RawBin
     }
@@ -569,8 +574,9 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "crt" | "commodore64-crt" => Ok(OutputFormat::Commodore64Crt),
         "nes" | "nes-rom" => Ok(OutputFormat::NesRom),
         "sms" | "sega-master-system" => Ok(OutputFormat::SmsRom),
+        "gg" | "game-gear" | "sega-game-gear" => Ok(OutputFormat::GameGearRom),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `sms`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `sms`, `gg`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }

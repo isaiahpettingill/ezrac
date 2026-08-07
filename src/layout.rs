@@ -1,7 +1,8 @@
 use crate::target::{
     Address24, AssemblerCpu, EZRA_ASSET_BASE, EZRA_AUDIO_BASE, EZRA_CODE_BASE, EZRA_ENTRY_ADDR,
     EZRA_LOAD_ADDR, EZRA_RAM_BASE, EZRA_RODATA_BASE, EZRA_STACK_TOP, EZRA_VRAM_BASE,
-    SEGA_MASTER_SYSTEM_Z80_TARGET, ez180n_cpu_id, is_ez180n_target, is_msdos_i8086_target,
+    SEGA_GAME_GEAR_Z80_TARGET, SEGA_MASTER_SYSTEM_Z80_TARGET, ez180n_cpu_id, is_ez180n_target,
+    is_msdos_i8086_target,
 };
 use crate::{compat::prelude::*, diagnostic::Diagnostic};
 use pest::{Parser, iterators::Pair};
@@ -106,6 +107,10 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::nes_2a03()
     } else if target == SEGA_MASTER_SYSTEM_Z80_TARGET {
         Layout::sega_master_system_z80()
+    } else if target == SEGA_GAME_GEAR_Z80_TARGET {
+        let mut layout = Layout::sega_master_system_z80();
+        layout.name = "sega_game_gear_z80".to_owned();
+        layout
     } else if target.starts_with("ti99-4a-tms9900") {
         Layout::ti99_4a_tms9900()
     } else if target.starts_with("arduboy-") {

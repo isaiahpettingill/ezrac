@@ -57,6 +57,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
 | `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | `nes.*` | Optional `mos6502` feature; EZRA source, bundled SDK, and raw assembly NROM-128 target |
 | `sega-master-system-z80` | 3 | Z80 | 16 | `.sms` | `sms.*` | Fixed 32 KiB export-SMS source target; mapper and interrupt runtime pending |
+| `sega-game-gear-z80` | 3 | Z80 | 16 | `.gg` | `sms.*`, `gg.*` | Fixed 32 KiB export-Game-Gear target with shared SMS VDP code and Game Gear hardware helpers |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
@@ -415,7 +416,17 @@ Run the resulting `target/nes-2a03/helloWorld.nes` in an NES emulator. The targe
 cargo run -- build examples/sega-master-system/source-hello/src/main.ezra
 ```
 
-Mapper control, frame interrupts, sprites, input, PSG, SRAM, Game Gear, and emulator-backed runtime testing are not implemented. See [`targets/sega-master-system.md`](targets/sega-master-system.md).
+Mapper control, frame interrupts, sprites, a higher-level input state API, a full PSG API, SRAM, and emulator-backed runtime testing are not implemented. See [`targets/sega-master-system.md`](targets/sega-master-system.md).
+
+## Sega Game Gear
+
+`sega-game-gear-z80` shares the SMS CPU layout and `sms.system`, `sms.vdp`, `sms.video`, `sms.memory`, and `sms.input` modules. It builds a fixed 32 KiB export-Game-Gear `.gg` ROM with region/system nibble `$7`. Game Gear-only `gg.*` modules provide 12-bit CRAM colors, the Start button, the centered 160×144 viewport, and PSG stereo routing. Build [`examples/sega-game-gear/source-hello`](../examples/sega-game-gear/source-hello) with:
+
+```sh
+cargo run -- build examples/sega-game-gear/source-hello/src/main.ezra
+```
+
+The target does not yet support mappers, cartridge SRAM, interrupts, or emulator-backed runtime tests.
 
 ## Nintendo Game Boy
 

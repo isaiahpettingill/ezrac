@@ -1,0 +1,13 @@
+// The Game Gear displays a centered 160x144 viewport from the mode-4 plane.
+pub const VIEWPORT_WIDTH_PIXELS: u16 = 160
+pub const VIEWPORT_HEIGHT_PIXELS: u16 = 144
+pub const VIEWPORT_WIDTH_TILES: u8 = 20
+pub const VIEWPORT_HEIGHT_TILES: u8 = 18
+pub const VIEWPORT_X_PIXELS: u8 = 48
+pub const VIEWPORT_Y_PIXELS: u8 = 24
+pub const VIEWPORT_X_TILES: u8 = 6
+pub const VIEWPORT_Y_TILES: u8 = 3
+
+pub fn name_table_index(x: u8, y: u8) -> u16 {
+    return cast<u16>(y + VIEWPORT_Y_TILES) * 32 + cast<u16>(x + VIEWPORT_X_TILES)
+}
