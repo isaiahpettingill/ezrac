@@ -93,7 +93,15 @@ pub fn emit_mos6502_assembly_with_options(
                 .collect::<Vec<_>>();
             strip_unreachable_generated_routines_with_roots(&asm, RoutineProfile::Mos6502, &roots)
         })
-        .and_then(|asm| cleanup_assembly(&asm, options.cpu))
+        .and_then(|asm| {
+            cleanup_assembly(
+                &asm,
+                options.cpu,
+                options
+                    .optimization
+                    .is_enabled(crate::optimization::OptimizationPass::Mos6502Peepholes),
+            )
+        })
         .map(|asm| with_readability_comments(asm, program, &options, "mos6502", &source_comments))
 }
 
@@ -166,6 +174,7 @@ struct Emitter {
     c64_executable: bool,
     cpu: CpuFamily,
     dead_code_elimination: bool,
+    mos6502_peepholes: bool,
 }
 
 impl Emitter {
@@ -200,6 +209,9 @@ impl Emitter {
             dead_code_elimination: options
                 .optimization
                 .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination),
+            mos6502_peepholes: options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::Mos6502Peepholes),
         }
     }
 
@@ -3435,6 +3447,14 @@ impl Emitter {
         let byte_count = count / 8;
         let bit_count = count % 8;
 
+        if self.mos6502_peepholes && width == 1 && right && signed && count == 1 {
+            self.lda(self.r0.address);
+            self.line("    cmp #$80");
+            self.line("    ror a");
+            self.sta(self.r0.address);
+            return;
+        }
+
         // A byte-boundary move and its remaining carry chain are equivalent
         // to the full carry chain, but are not always cheaper for narrow
         // values. Keep the selection costed instead of assuming that every
@@ -4663,7 +4683,11 @@ fn stmt_terminates(stmt: &Stmt) -> bool {
     }
 }
 
-fn cleanup_assembly(assembly: &str, cpu: CpuFamily) -> Result<String, Diagnostic> {
+fn cleanup_assembly(
+    assembly: &str,
+    cpu: CpuFamily,
+    mos6502_peepholes: bool,
+) -> Result<String, Diagnostic> {
     let variant = match cpu {
         CpuFamily::Mos6502 => crate::asm::mos6502::Mos6502Variant::Nmos6502,
         CpuFamily::Cmos65C02 => crate::asm::mos6502::Mos6502Variant::Cmos65C02,
@@ -4747,11 +4771,36 @@ fn cleanup_assembly(assembly: &str, cpu: CpuFamily) -> Result<String, Diagnostic
     }
 
     reuse_compare_at_bne_target(&mut lines);
+    if mos6502_peepholes {
+        replace_tail_jsr_with_jmp(&mut lines);
+    }
     let mut output = lines.join("\n");
     if assembly.ends_with('\n') {
         output.push('\n');
     }
     Ok(output)
+}
+
+fn replace_tail_jsr_with_jmp(lines: &mut [String]) {
+    for index in 0..lines.len() {
+        let Some((mnemonic, target)) = instruction_parts(&lines[index]) else {
+            continue;
+        };
+        if !mnemonic.eq_ignore_ascii_case("jsr") {
+            continue;
+        }
+        let Some(next) = (index + 1..lines.len())
+            .find(|next| !lines[*next].trim().is_empty() && !lines[*next].trim().starts_with(';'))
+        else {
+            continue;
+        };
+        if instruction_parts(&lines[next]).is_some_and(|(mnemonic, operands)| {
+            mnemonic.eq_ignore_ascii_case("rts") && operands.is_empty()
+        }) {
+            lines[index] = format!("    jmp {}", target.trim());
+            lines[next].clear();
+        }
+    }
 }
 
 fn assembly_offsets(
@@ -6014,6 +6063,27 @@ mod structural_tests {
         emit_for_cpu_result(source, cpu).unwrap()
     }
 
+    fn emit_with_optimization(
+        source: &str,
+        cpu: CpuFamily,
+        optimization: crate::optimization::OptimizationOptions,
+    ) -> String {
+        let program = parse_program(Path::new("test.ezra"), source).unwrap();
+        emit_mos6502_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu,
+                ram_base: crate::target::Address24::new(0xA000),
+                rodata_base: crate::target::Address24::new(0x8000),
+                asset_base: crate::target::Address24::new(0xC000),
+                default_sdk_symbols: false,
+                optimization,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
     fn emit(source: &str) -> String {
         emit_for_cpu(source, CpuFamily::Mos6502)
     }
@@ -6471,11 +6541,42 @@ mod structural_tests {
     }
 
     #[test]
+    fn mos6502_peepholes_optimize_arithmetic_shift_and_tail_call_chains() {
+        let source = "fn next(value: i8) -> i8 { return value } fn shift(value: i8) -> i8 { return value >> 1 } fn main() { shift(1) }";
+        let optimized = emit_for_cpu(source, CpuFamily::Mos6502);
+        assert!(optimized.contains("    cmp #$80\n    ror a"), "{optimized}");
+
+        let mut disabled = crate::optimization::OptimizationOptions::default();
+        disabled.disable(crate::optimization::OptimizationPass::Mos6502Peepholes);
+        let unoptimized = emit_with_optimization(source, CpuFamily::Mos6502, disabled);
+        assert!(
+            !unoptimized.contains("    cmp #$80\n    ror a"),
+            "{unoptimized}"
+        );
+
+        let chain = "entry:\n    jsr _next\n    rts\n";
+        let optimized_chain = cleanup_assembly(chain, CpuFamily::Mos6502, true).unwrap();
+        assert!(
+            optimized_chain.contains("    jmp _next"),
+            "{optimized_chain}"
+        );
+        assert!(
+            !optimized_chain.contains("    jsr _next"),
+            "{optimized_chain}"
+        );
+        let unoptimized_chain = cleanup_assembly(chain, CpuFamily::Mos6502, false).unwrap();
+        assert!(
+            unoptimized_chain.contains("    jsr _next\n    rts"),
+            "{unoptimized_chain}"
+        );
+    }
+
+    #[test]
     fn cleans_fallthrough_jumps_and_relaxes_only_in_range_long_branches() {
         let mut near = String::from(
             "start:\n    beq .L_branch_skip_0\n    jmp .L_target\n.L_branch_skip_0:\n    nop\n    jmp .L_next\n.L_next:\n    rts\n.L_target:\n    rts\n",
         );
-        let cleaned = cleanup_assembly(&near, CpuFamily::Mos6502).unwrap();
+        let cleaned = cleanup_assembly(&near, CpuFamily::Mos6502, true).unwrap();
         assert!(cleaned.contains("    bne .L_target"), "{cleaned}");
         assert!(!cleaned.contains("jmp .L_target"), "{cleaned}");
         assert!(!cleaned.contains("jmp .L_next"), "{cleaned}");
@@ -6486,7 +6587,7 @@ mod structural_tests {
             near.push_str("    nop\n");
         }
         near.push_str(".L_far:\n    rts\n");
-        let far = cleanup_assembly(&near, CpuFamily::Cmos65C02).unwrap();
+        let far = cleanup_assembly(&near, CpuFamily::Cmos65C02, true).unwrap();
         assert!(far.contains("    beq .L_branch_skip_0"), "{far}");
         assert!(far.contains("    jmp .L_far"), "{far}");
     }

@@ -16,10 +16,11 @@ pub enum OptimizationPass {
     TailRecursion,
     IdempotentOperations,
     RedundantRegisterCopies,
+    Mos6502Peepholes,
 }
 
 impl OptimizationPass {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::ScalarSimplification,
         Self::LocalPropagation,
         Self::LoopInvariantCodeMotion,
@@ -31,6 +32,7 @@ impl OptimizationPass {
         Self::TailRecursion,
         Self::IdempotentOperations,
         Self::RedundantRegisterCopies,
+        Self::Mos6502Peepholes,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -46,6 +48,7 @@ impl OptimizationPass {
             Self::TailRecursion => "tail-recursion",
             Self::IdempotentOperations => "idempotent-operations",
             Self::RedundantRegisterCopies => "redundant-register-copies",
+            Self::Mos6502Peepholes => "mos6502-peepholes",
         }
     }
 
@@ -72,6 +75,7 @@ impl OptimizationPass {
             | Self::TailRecursion
             | Self::IdempotentOperations => level >= 2,
             Self::RedundantRegisterCopies => level >= 1,
+            Self::Mos6502Peepholes => level >= 2,
         }
     }
 }
