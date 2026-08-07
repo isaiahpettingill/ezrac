@@ -55,6 +55,56 @@ fn emits_and_runs_scalar_integer_intrinsics() {
 }
 
 #[test]
+fn r800_integer_intrinsics_use_native_full_multiply_results() {
+    let source = r#"
+            fn main() {
+                test.assert_eq_u16(ezra.int.widening_mul(0xFFu8, 0xFFu8), 0xFE01, 1)
+                test.assert_eq_u8(ezra.int.mul_high(0xFFu8, 0xFFu8), 0xFE, 2)
+                test.assert_eq_u16(ezra.int.mul_high(0xFFFFu16, 0xFFFFu16), 0xFFFE, 3)
+                let low8: u8, high8: u8 = ezra.int.full_mul(0xF0u8, 0x10u8)
+                test.assert_eq_u8(low8, 0, 4)
+                test.assert_eq_u8(high8, 0x0F, 5)
+                let low16: u16, high16: u16 = ezra.int.full_mul(0xFFFFu16, 0xFFFFu16)
+                test.assert_eq_u16(low16, 1, 6)
+                test.assert_eq_u16(high16, 0xFFFE, 7)
+                test.assert_eq_u16(cast<u16>(ezra.int.widening_mul((-2i8), 3i8)), 0xFFFA, 8)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("r800-intrinsics.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::R800,
+            default_sdk_symbols: true,
+            ram_base: Address24::new(0x2000),
+            stack_top: Address24::new(0xF000),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(asm.matches("    mulub a, c").count() >= 4, "{asm}");
+    assert!(asm.matches("    muluw hl, bc").count() >= 2, "{asm}");
+    crate::vm::assemble_subset_with_symbols_at(AssemblerCpu::R800, &asm, 0x0100)
+        .unwrap_or_else(|error| panic!("R800 intrinsic code did not assemble: {error}\n{asm}"));
+    let run = crate::vm::run_assembly_test_with_cpu_options_at(
+        CpuFamily::R800,
+        &asm,
+        &TestRunOptions {
+            instruction_budget: 100_000,
+            initial_ports: Vec::new(),
+            initial_memory: Vec::new(),
+            stack_top: 0xF000,
+        },
+        0x0100,
+    )
+    .unwrap();
+    assert!(run.halted, "{run:?}\n{asm}");
+    assert_eq!(run.result_code, 0, "{run:?}\n{asm}");
+}
+
+#[test]
 fn emits_and_runs_two_result_intrinsics() {
     let source = r#"
             global bytes: [u8; 4] = [1, 2, 3, 4]

@@ -17,9 +17,10 @@ behavior, and emulator-backed test behavior.
 - Unreachable statement elimination after terminators, provided removed
   statements are unreachable in source semantics.
 - Peephole cleanup for exact duplicate register loads and register copies when
-  neither the source nor destination register changed. Self-copies are removed.
-  Memory, port, call, control-flow, and inline-assembly barriers invalidate tracked
-  state. The eZ80 pass may also reuse a
+  neither the source nor destination register changed. Non-Z80 backends remove
+  only adjacent duplicate register copies and self-copies whose instruction does
+  not change flags. Memory operands and inline assembly are excluded. The eZ80
+  pass tracks register state across safe generated instructions and may also reuse a
   cached load from a proven nonvolatile absolute local/global range across
   register-only instructions; stores, indirect memory, ports, calls, branches,
   and inline assembly invalidate the cache.

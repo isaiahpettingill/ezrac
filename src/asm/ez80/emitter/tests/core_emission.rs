@@ -390,6 +390,17 @@ _main:
 
     assert_eq!(asm.matches("    ld a, (040000h)").count(), 2, "{asm}");
     assert_eq!(asm.matches("    ld a, (040001h)").count(), 1, "{asm}");
+
+    let invalidated = peephole_cleanup_with_ranges(
+        "    ld a, (040000h)\n    ld a, 7Fh\n    ld a, (040000h)\n",
+        &[(0x040000, 1)],
+        true,
+    );
+    assert_eq!(
+        invalidated.matches("    ld a, (040000h)").count(),
+        2,
+        "{invalidated}"
+    );
 }
 
 #[test]

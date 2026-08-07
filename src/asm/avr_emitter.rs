@@ -57,6 +57,14 @@ pub fn emit_avr_assembly_with_options(
         .map(|asm| {
             let asm = if options
                 .optimization
+                .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies)
+            {
+                crate::asm::copy_cleanup::remove_redundant_register_copies(&asm, options.cpu)
+            } else {
+                asm
+            };
+            let asm = if options
+                .optimization
                 .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
             {
                 strip_unreachable_generated_routines(&asm, RoutineProfile::Avr)
@@ -3728,6 +3736,7 @@ fn translate_avr_line(line: &str) -> String {
         "cmp" => two("cp", arg),
         "asl" if arg == "a" => "    lsl r16".to_owned(),
         "rol" | "ror" if arg == "r16" => line.to_owned(),
+        "inc" | "dec" if arg.starts_with('r') => line.to_owned(),
         "inc" | "dec" | "rol" | "ror" | "asl" => format!("    lds r16, {}\n    {} r16\n    sts {}, r16", direct(arg), if op == "asl" { "lsl" } else { op }, direct(arg)),
         "beq" => format!("{indent}breq {arg}"),
         "bne" => format!("{indent}brne {arg}"),

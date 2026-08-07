@@ -61,6 +61,14 @@ pub fn emit_m6800_assembly_with_options(
         .map(|asm| {
             let asm = if options
                 .optimization
+                .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies)
+            {
+                crate::asm::copy_cleanup::remove_redundant_register_copies(&asm, options.cpu)
+            } else {
+                asm
+            };
+            let asm = if options
+                .optimization
                 .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
             {
                 strip_unreachable_generated_routines(&asm, RoutineProfile::M6800)
@@ -103,6 +111,14 @@ pub fn emit_m6809_assembly_with_options(
     Emitter::new(model, CpuFamily::M6809)?
         .emit(&lowered_program)
         .map(|asm| {
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies)
+            {
+                crate::asm::copy_cleanup::remove_redundant_register_copies(&asm, options.cpu)
+            } else {
+                asm
+            };
             let asm = if options
                 .optimization
                 .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)

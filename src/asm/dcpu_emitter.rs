@@ -55,6 +55,14 @@ pub fn emit_dcpu_assembly_with_options(
     Emitter::new().emit(&lowered_program).map(|assembly| {
         let assembly = if options
             .optimization
+            .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies)
+        {
+            crate::asm::copy_cleanup::remove_redundant_register_copies(&assembly, options.cpu)
+        } else {
+            assembly
+        };
+        let assembly = if options
+            .optimization
             .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
         {
             strip_unreachable_generated_routines(&assembly, RoutineProfile::Dcpu)

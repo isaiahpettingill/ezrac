@@ -6,6 +6,8 @@ pub mod avr;
 #[cfg(feature = "avr")]
 pub mod avr_emitter;
 mod comments;
+#[allow(dead_code)]
+mod copy_cleanup;
 pub(crate) mod data;
 pub mod frontend;
 pub(crate) mod grammar;

@@ -805,6 +805,7 @@ fn peephole_cleanup_with_ranges(
         if let Some((register, value)) = immediate_load {
             invalidate_register_value_aliases(&mut register_values, register);
             invalidate_register_copy_aliases(&mut register_copies, register);
+            cached_memory_loads.retain(|_, cached| !registers_overlap(cached, register));
             register_values.insert(register, value.to_owned());
         } else if !trimmed.is_empty() && !trimmed.starts_with(';') {
             let effects = instruction_effects(trimmed);
@@ -1401,7 +1402,9 @@ impl Emitter {
             ti_os_executable: options.ti_os_executable,
             stack_top: options.stack_top,
             rodata_base: options.rodata_base,
-            eliminate_dead_code: true,
+            eliminate_dead_code: options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination),
         }
     }
 
@@ -9410,22 +9413,26 @@ impl Emitter {
             self.emit_abs_signed_variable(first, Some(negative), None);
             self.emit_abs_signed_variable(second, Some(negative), None);
         }
-        let multiplicand = self.alloc_var(product.size);
-        let multiplier = self.alloc_var(second.size);
-        self.emit_zero_bytes(multiplicand);
-        self.emit_copy_bytes(first, 0, multiplicand, 0, first.size);
-        self.emit_copy_bytes(second, 0, multiplier, 0, second.size);
-        self.emit_zero_bytes(product);
+        if self.cpu == CpuFamily::R800 && first.size == second.size && matches!(first.size, 1 | 2) {
+            self.emit_r800_full_product(first, second, product);
+        } else {
+            let multiplicand = self.alloc_var(product.size);
+            let multiplier = self.alloc_var(second.size);
+            self.emit_zero_bytes(multiplicand);
+            self.emit_copy_bytes(first, 0, multiplicand, 0, first.size);
+            self.emit_copy_bytes(second, 0, multiplier, 0, second.size);
+            self.emit_zero_bytes(product);
 
-        for _ in 0..u32::from(second.size) * 8 {
-            let skip = self.next_label("intrinsic_mul_skip");
-            self.line(&format!("    ld a, ({:06X}h)", multiplier.addr));
-            self.line("    and 01h");
-            self.line(&format!("    jp z, {skip}"));
-            self.emit_add_memory(product, multiplicand);
-            self.line(&format!("{skip}:"));
-            self.emit_shift_memory_left_once(multiplicand);
-            self.emit_shift_memory_right_once(multiplier, false);
+            for _ in 0..u32::from(second.size) * 8 {
+                let skip = self.next_label("intrinsic_mul_skip");
+                self.line(&format!("    ld a, ({:06X}h)", multiplier.addr));
+                self.line("    and 01h");
+                self.line(&format!("    jp z, {skip}"));
+                self.emit_add_memory(product, multiplicand);
+                self.line(&format!("{skip}:"));
+                self.emit_shift_memory_left_once(multiplicand);
+                self.emit_shift_memory_right_once(multiplier, false);
+            }
         }
         if signed {
             let done = self.next_label("intrinsic_mul_signed_done");
@@ -9434,6 +9441,44 @@ impl Emitter {
             self.line(&format!("    jp z, {done}"));
             self.emit_negate_memory(product);
             self.line(&format!("{done}:"));
+        }
+    }
+
+    fn emit_r800_full_product(&mut self, first: Variable, second: Variable, product: Variable) {
+        match first.size {
+            1 => {
+                debug_assert_eq!(product.size, 2);
+                self.emit_load_a(second);
+                self.line("    ld c, a");
+                self.emit_load_a(first);
+                self.line("    mulub a, c");
+                self.line("    ld a, l");
+                self.line(&format!("    ld ({:06X}h), a", product.addr));
+                self.line("    ld a, h");
+                self.line(&format!("    ld ({:06X}h), a", product.addr + 1));
+            }
+            2 => {
+                debug_assert_eq!(product.size, 4);
+                self.emit_load_hl16(second);
+                self.line("    ld b, h");
+                self.line("    ld c, l");
+                self.emit_load_hl16(first);
+                self.line("    muluw hl, bc");
+                self.emit_store_hl16(Variable {
+                    addr: product.addr,
+                    size: 2,
+                    element_size: None,
+                    len: None,
+                });
+                self.line("    ex de, hl");
+                self.emit_store_hl16(Variable {
+                    addr: product.addr + 2,
+                    size: 2,
+                    element_size: None,
+                    len: None,
+                });
+            }
+            _ => unreachable!("R800 full multiply accepts only one- or two-byte operands"),
         }
     }
 

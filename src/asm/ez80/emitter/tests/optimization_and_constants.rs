@@ -1047,6 +1047,7 @@ fn explicit_dead_code_disable_keeps_unreferenced_functions() {
     let source = r#"
             fn unused() -> u8 {
                 return 42
+                test.fail(9)
             }
 
             fn main() {
@@ -1054,13 +1055,17 @@ fn explicit_dead_code_disable_keeps_unreferenced_functions() {
             }
         "#;
     let program = parse_program(Path::new("game.ezra"), source).unwrap();
-    let mut options = AssemblyOptions::default();
+    let mut options = AssemblyOptions {
+        debug_comments: true,
+        ..AssemblyOptions::default()
+    };
     options
         .optimization
         .disable(crate::optimization::OptimizationPass::DeadCodeElimination);
     let asm = emit_ez80_assembly_with_options(&program, options).unwrap();
 
     assert!(asm.contains("_unused:"), "{asm}");
+    assert!(asm.contains("; source: test.fail(9)"), "{asm}");
 }
 
 #[test]

@@ -30,7 +30,7 @@ muluw hl, sp
 
 `MULUB A,r` multiplies two unsigned 8-bit values and writes the 16-bit result to `HL`. `MULUW HL,rr` multiplies two unsigned 16-bit values and writes the 32-bit result to `DE:HL`.
 
-EZRA source multiplication uses these instructions on the R800 target. An 8-bit result keeps the low byte from `L`; a 16-bit result keeps the low word in `HL`, matching the language's wrapping integer rules.
+EZRA source multiplication uses these instructions on the R800 target. An 8-bit result keeps the low byte from `L`; a 16-bit result keeps the low word in `HL`, matching the language's wrapping integer rules. Equal-width 8- and 16-bit `ezra.int.widening_mul`, `mul_high`, and `full_mul` operations also use the native full results in `HL` or `DE:HL`. Signed forms use the same unsigned instructions after taking absolute values, then apply two's-complement sign correction to the full product.
 
 ## Execution
 

@@ -72,6 +72,14 @@ pub fn emit_mos6502_assembly_with_options(
     Emitter::new(model, options.clone())
         .emit(&lowered_program)
         .map(|asm| {
+            let asm = if options
+                .optimization
+                .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies)
+            {
+                crate::asm::copy_cleanup::remove_redundant_register_copies(&asm, options.cpu)
+            } else {
+                asm
+            };
             if !options
                 .optimization
                 .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)

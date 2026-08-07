@@ -59,6 +59,14 @@ pub fn emit_i8086_assembly_with_options(
         .map(|asm| {
             let asm = if options
                 .optimization
+                .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies)
+            {
+                crate::asm::copy_cleanup::remove_redundant_register_copies(&asm, options.cpu)
+            } else {
+                asm
+            };
+            let asm = if options
+                .optimization
                 .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
             {
                 strip_unreachable_generated_routines(&asm, RoutineProfile::I8086)
