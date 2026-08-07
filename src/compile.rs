@@ -1775,6 +1775,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/memory.ezra"),
                 "sms.memory",
             )),
+            "sms.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/input.ezra"),
+                "sms.input",
+            )),
             _ => None,
         }
     } else if target.is_some_and(|target| target.starts_with("nes-")) {
@@ -1967,6 +1971,7 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "sms.video",
         "sms.palette",
         "sms.memory",
+        "sms.input",
         "agon.buffers",
         "agon.console",
         "agon.mos",

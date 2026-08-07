@@ -1,3 +1,4 @@
+import sms.input
 import sms.palette
 import sms.system
 import sms.video
@@ -9,5 +10,11 @@ fn main() {
 
     loop {
         system.halt_until_frame()
+
+        if (input.read_player1() & input.BUTTON_1) != 0 {
+            palette.set_background(0, palette.RED)
+        } else {
+            palette.set_background(0, palette.BLUE)
+        }
     }
 }

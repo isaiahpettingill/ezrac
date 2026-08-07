@@ -409,7 +409,7 @@ Run the resulting `target/nes-2a03/helloWorld.nes` in an NES emulator. The targe
 
 ## Sega Master System
 
-`sega-master-system-z80` builds a fixed 32 KiB export-SMS `.sms` ROM. The packager writes the standard header at `$7FF0`, pads unused ROM with `$FF`, and installs reset, IM 1, and NMI return stubs before source-generated code at `$0069`. Bundled `sms.*` modules provide polling VBlank, VDP, mode-4 video, palette, and memory constants. Build [`examples/sega-master-system/source-hello`](../examples/sega-master-system/source-hello) with:
+`sega-master-system-z80` builds a fixed 32 KiB export-SMS `.sms` ROM. The packager writes the standard header at `$7FF0`, pads unused ROM with `$FF`, and installs reset, IM 1, and NMI return stubs before source-generated code at `$0069`. Bundled `sms.*` modules provide polling VBlank, VDP, mode-4 video, palette, memory constants, and two standard-controller reads. Build [`examples/sega-master-system/source-hello`](../examples/sega-master-system/source-hello) with:
 
 ```sh
 cargo run -- build examples/sega-master-system/source-hello/src/main.ezra

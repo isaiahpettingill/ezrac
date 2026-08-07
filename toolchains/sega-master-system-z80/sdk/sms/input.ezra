@@ -1,0 +1,25 @@
+// Standard SMS controller ports. Hardware button bits are active-low.
+pub port CONTROLLER_A: u8 = 0xDC
+pub port CONTROLLER_B: u8 = 0xDD
+
+pub const UP: u8 = 0x01
+pub const DOWN: u8 = 0x02
+pub const LEFT: u8 = 0x04
+pub const RIGHT: u8 = 0x08
+pub const BUTTON_1: u8 = 0x10
+pub const BUTTON_2: u8 = 0x20
+
+// Returns active-high masks for player 1: Up, Down, Left, Right, Button 1, Button 2.
+pub fn read_player1() -> u8 {
+    let raw: u8 = in CONTROLLER_A
+    return (~raw) & 0x3F
+}
+
+// Returns active-high masks for player 2 in the same order as read_player1().
+pub fn read_player2() -> u8 {
+    let raw_a: u8 = in CONTROLLER_A
+    let raw_b: u8 = in CONTROLLER_B
+    let vertical: u8 = ((~raw_a) >> 6) & 0x03
+    let horizontal_and_buttons: u8 = ((~raw_b) & 0x0F) << 2
+    return vertical | horizontal_and_buttons
+}

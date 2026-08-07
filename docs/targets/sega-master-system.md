@@ -6,7 +6,8 @@
 
 - The `.sms` packager emits exactly 32 KiB, pads unused ROM with `$FF`, writes `TMR SEGA` at `$7FF0`, and calculates the standard checksum.
 - Reset at `$0000` jumps to generated code at `$0069`. `$0038` contains `RETI` and `$0066` contains `RETN`; VBlank interrupts stay disabled.
-- The bundled SDK provides `sms.vdp`, `sms.video`, `sms.palette`, `sms.system`, and `sms.memory`.
+- The bundled SDK provides `sms.vdp`, `sms.video`, `sms.palette`, `sms.system`, `sms.memory`, and `sms.input`.
+- `sms.input` supports two standard SMS pads. `read_player1()` and `read_player2()` return active-high `UP`, `DOWN`, `LEFT`, `RIGHT`, `BUTTON_1`, and `BUTTON_2` masks.
 - `sms.system.wait_vblank()` polls VDP status. `halt_until_frame()` is an alias and does not execute the Z80 `HALT` instruction.
 - See [`examples/sega-master-system/source-hello`](../../examples/sega-master-system/source-hello).
 
@@ -87,6 +88,15 @@ The mapper register addresses are:
 | `$FFFF` | Slot 2 page | Managed by `sms.bank` |
 
 The first 1 KiB of the CPU map has special mapper behavior on real SMS hardware. The runtime never remaps slot 0, so reset and interrupt code remain reachable and applications never need to rely on that exception.
+
+### Controllers
+
+The SMS has two standard controller ports. Inputs are active-low in hardware and are read through `$DC` and `$DD`; `sms.input` inverts them and returns active-high masks. The console Pause button is not a pad input: it invokes the NMI vector at `$0066`.
+
+| Player | `$DC` bits | `$DD` bits |
+| --- | --- | --- |
+| 1 | 0-5: Up, Down, Left, Right, Button 1, Button 2 | — |
+| 2 | 6-7: Up, Down | 0-3: Left, Right, Button 1, Button 2 |
 
 ### I/O ports
 
