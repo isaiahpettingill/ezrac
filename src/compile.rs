@@ -1781,6 +1781,10 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
                 include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/input.ezra"),
                 "sms.input",
             )),
+            "sms.bank" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/bank.ezra"),
+                "sms.bank",
+            )),
             "gg.palette" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
                 include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/palette.ezra"),
                 "gg.palette",

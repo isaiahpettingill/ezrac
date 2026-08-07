@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn parses_sega_rom_banking_config() {
+    let config = parse_project_config(
+        Path::new("/project/Ezra.toml"),
+        r#"[build]
+target = "sega-master-system-z80"
+
+[sega]
+rom_size_kib = 128
+bank_files = ["assets/page2.bin", "assets/page3.bin"]
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.sega,
+        Some(SegaConfig {
+            rom_size_kib: 128,
+            bank_files: vec![
+                PathBuf::from("/project/assets/page2.bin"),
+                PathBuf::from("/project/assets/page3.bin"),
+            ],
+        })
+    );
+}
+
+#[test]
 fn parses_project_target_layout_and_sdk_paths() {
     let path = Path::new("/project/Ezra.toml");
     let config = parse_project_config(

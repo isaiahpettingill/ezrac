@@ -23,8 +23,8 @@ use ezra::{
     optimization::{OptimizationOptions, OptimizationPass},
     parser::parse_program,
     project::{
-        ArduboyConfig, AssetConfig, BankingConfig, GameBoyConfig, GameBoyMapper, ZxSpectrumConfig,
-        load_nearest_project_config, load_project_config,
+        ArduboyConfig, AssetConfig, BankingConfig, GameBoyConfig, GameBoyMapper, SegaConfig,
+        ZxSpectrumConfig, load_nearest_project_config, load_project_config,
     },
     target::{
         Address24, AssemblerCpu, CpuFamily, OutputFormat, TargetProfile, parse_output_format,
@@ -883,6 +883,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         layout_path,
         asset_config: AssetConfig::default(),
         gameboy: None,
+        sega: None,
         gameboy_banking: None,
         arduboy: None,
         zxspectrum: None,
@@ -973,6 +974,7 @@ struct BuildSettings {
     layout_path: Option<PathBuf>,
     asset_config: AssetConfig,
     gameboy: Option<GameBoyConfig>,
+    sega: Option<SegaConfig>,
     gameboy_banking: Option<GameBoyBankingOptions>,
     arduboy: Option<ArduboyConfig>,
     zxspectrum: Option<ZxSpectrumConfig>,
@@ -1023,6 +1025,24 @@ fn shared_build_request(
             date: config.date.clone(),
             genre: config.genre.clone(),
             source_url: config.source_url.clone(),
+        });
+    }
+    if let Some(config) = &settings.sega {
+        let bank_payloads = config
+            .bank_files
+            .iter()
+            .map(|path| {
+                fs::read(path).map_err(|error| {
+                    format!(
+                        "failed to read Sega ROM bank file `{}`: {error}",
+                        path.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        package_context.sega = Some(ezra::package::SegaPackageOptions {
+            rom_size_kib: config.rom_size_kib,
+            bank_payloads,
         });
     }
     if let Some(config) = &settings.gameboy {
@@ -1199,6 +1219,17 @@ fn resolve_build_settings_with_budgets(
         .map(|project| project.assets.clone())
         .unwrap_or_default();
     let gameboy = project.as_ref().and_then(|project| project.gameboy.clone());
+    let sega = project.as_ref().and_then(|project| project.sega.clone());
+    let is_sega_8bit = matches!(
+        target.triple.value.as_str(),
+        "sega-master-system-z80" | "sega-game-gear-z80"
+    );
+    if sega.is_some() && !is_sega_8bit {
+        return Err(
+            "project `[sega]` configuration requires `sega-master-system-z80` or `sega-game-gear-z80`"
+                .to_owned(),
+        );
+    }
     if gameboy.is_some() && !target.triple.value.starts_with("gameboy-") {
         return Err("project `[gameboy]` configuration requires a `gameboy-*` target".to_owned());
     }
@@ -1260,6 +1291,7 @@ fn resolve_build_settings_with_budgets(
         layout_path,
         asset_config,
         gameboy,
+        sega,
         gameboy_banking,
         arduboy,
         zxspectrum,

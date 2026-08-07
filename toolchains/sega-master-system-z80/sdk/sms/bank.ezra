@@ -1,0 +1,30 @@
+pub const SLOT2_START: u16 = 0x8000
+pub const SLOT2_END: u16 = 0xBFFF
+pub const PAGE_SIZE: u16 = 0x4000
+const BANK_MAPPER_SLOT2: u16 = 0xFFFF
+
+// The reset mapping places ROM page 2 in slot 2.
+global current_slot2_page: u8 = 2
+
+pub fn select_slot2(page: u8) {
+    *(cast<ptr<u8>>(cast<u24>(BANK_MAPPER_SLOT2))) = page
+    current_slot2_page = page
+}
+
+pub fn current_slot2() -> u8 {
+    return current_slot2_page
+}
+
+pub fn copy_from_slot2(page: u8, offset: u16, destination: ptr<u8>, count: u16) {
+    let previous: u8 = current_slot2_page
+    select_slot2(page)
+
+    let index: u16 = 0
+    let source: ptr<u8> = cast<ptr<u8>>(cast<u24>(SLOT2_START + offset))
+    while index < count {
+        *(destination + index) = *(source + index)
+        index = index + 1
+    }
+
+    select_slot2(previous)
+}

@@ -1,10 +1,11 @@
 # Sega Master System target design
 
-**Status: first pass implemented.** `sega-master-system-z80` builds fixed 32 KiB export-SMS ROMs. It includes a standard header, reset/VBlank/NMI vector stubs, and a small polling-based `sms.*` SDK. `sega-game-gear-z80` reuses the common layout and SDK code, emits `.gg` ROMs, and adds Game Gear palette, Start button, viewport, and stereo helpers. Mapper support, VBlank interrupts, and SRAM remain proposed.
+**Status: mapper-capable data banking implemented.** `sega-master-system-z80` builds 32, 48, 64, 128, or 256 KiB export-SMS ROMs. It includes a standard header, reset/VBlank/NMI vector stubs, and a small polling-based `sms.*` SDK. `sega-game-gear-z80` reuses the common layout and SDK code, emits `.gg` ROMs, and adds Game Gear palette, Start button, viewport, and stereo helpers. Banked executable code, VBlank interrupts, and SRAM remain proposed.
 
 ## Implemented first pass
 
-- The `.sms` packager emits exactly 32 KiB, pads unused ROM with `$FF`, writes `TMR SEGA` at `$7FF0`, and calculates the standard checksum.
+- The `.sms` packager emits the configured 32, 48, 64, 128, or 256 KiB capacity, pads unused ROM with `$FF`, writes `TMR SEGA` at `$7FF0`, and calculates the standard checksum across all ROM pages outside the header.
+- `[sega] bank_files` place ordered 16 KiB payloads in ROM pages 2 and later. The shared `sms.bank` module selects pages in slot 2 and supports copy-with-restore.
 - Reset at `$0000` jumps to generated code at `$0069`. `$0038` contains `RETI` and `$0066` contains `RETN`; VBlank interrupts stay disabled.
 - The bundled SDK provides `sms.vdp`, `sms.video`, `sms.palette`, `sms.system`, `sms.memory`, and `sms.input`.
 - `sms.input` supports two standard SMS pads. `read_player1()` and `read_player2()` return active-high `UP`, `DOWN`, `LEFT`, `RIGHT`, `BUTTON_1`, and `BUTTON_2` masks.
@@ -22,7 +23,7 @@ The completed target design supports stock Sega Master System hardware with:
 - Two standard SMS controllers and the console Pause button.
 - ROMs from 32 KiB through 256 KiB. 512 KiB and 1 MiB are a packager extension once the baseline is tested.
 
-The implemented first pass is limited to fixed 32 KiB ROMs. It excludes cartridge SRAM, FM sound, light guns, paddles, 3-D glasses, Codemasters mappers, and mapper control. Game Gear output is supported by the separate `sega-game-gear-z80` target. These other features need explicit implementation rather than silently producing an incompatible ROM.
+Generated executable code remains fixed below the header, while explicit data files can use Sega mapper pages. It excludes cartridge SRAM, FM sound, light guns, paddles, 3-D glasses, Codemasters mappers, and banked executable code. Game Gear output is supported by the separate `sega-game-gear-z80` target. These other features need explicit implementation rather than silently producing an incompatible ROM.
 
 ## Target and project configuration
 
@@ -32,9 +33,9 @@ Use this triple:
 sega-master-system-z80
 ```
 
-The target uses the existing Z80 assembler and source backend. The first pass provides a target layout, a fixed-ROM packager, and small SDK modules.
+The target uses the existing Z80 assembler and source backend. The target provides a shared CPU layout, mapper-capable ROM packager, and small SDK modules.
 
-The following configuration is proposed for the mapper-capable follow-up; `[sms]` fields are not parsed by the first pass:
+ROM capacity and ordered bank files use the shared `[sega]` table on both SMS and Game Gear targets:
 
 ```toml
 [build]
@@ -42,7 +43,7 @@ target = "sega-master-system-z80"
 output = "sms"
 ```
 
-A future project file:
+Example project configuration:
 
 ```toml
 [project]
@@ -53,17 +54,15 @@ target = "sega-master-system-z80"
 output = "sms"
 executable = "my-sms-game"
 
-[sms]
-region = "export"       # export, japan
-rom_size_kib = 64        # 32, 48, 64, 128, 256
-product_code = "00000"  # five BCD digits
-version = 0
+[sega]
+rom_size_kib = 64
+bank_files = ["assets/page2.bin", "assets/page3.bin"]
 
 [optimization]
 level = 2
 ```
 
-Defaults should be `export`, 32 KiB, product code `00000`, and version `0`. `rom_size_kib` is an explicit capacity, not a request to infer the smallest file. The packager rejects an image that exceeds it, fills unused bytes with `$FF`, and always emits exactly the configured size.
+The default capacity is 32 KiB. `rom_size_kib` is an explicit capacity, not a request to infer the smallest file. The packager rejects an image that exceeds it, fills unused bytes with `$FF`, and always emits exactly the configured size.
 
 ## Hardware map
 
@@ -125,7 +124,7 @@ Bundled modules use the `sms.*` namespace.
 | `sms.sprite` | a RAM shadow sprite table, hide/clear, sprite entries, and VBlank commit |
 | `sms.input` | active-low controller polling, held/pressed/released state, and Player 1/2 button masks |
 | `sms.psg` | SN76489 tone/noise/volume writes and mute |
-| `sms.bank` | safe page selection, banked-data copies, and banked callback dispatch |
+| `sms.bank` | slot-2 page selection and banked-data copies that restore the prior page |
 | `sms.memory` | work-RAM ranges, clear helpers, and runtime-reserved areas |
 | `sms.assets` | asset descriptors and VBlank-safe VRAM upload queueing |
 
@@ -310,7 +309,7 @@ Reference material used for hardware behavior:
 2. Add `toolchains/sega-master-system-z80/` with reset, IM 1/NMI vectors, RAM clear, VDP setup, and the `sms.system`, `sms.vdp`, `sms.video`, and `sms.memory` modules.
 3. Add a 32 KiB hello-world example that uploads a palette, tiles, and name-table data and runs on an SMS emulator/core.
 4. Add `sms.input`, `sms.sprite`, and `sms.psg`, then test an interrupt-driven frame loop.
-5. Add 48/64/128/256 KiB packing and `sms.bank` slot-2 asset streaming, with page-boundary and restore tests.
+5. ~~Add 48/64/128/256 KiB packing and `sms.bank` slot-2 asset streaming.~~ Implemented for ordered bank files and copy-with-restore; emulator mapper testing remains.
 6. Add an asset converter contract and a scrolling/tilemap example.
 7. Add optional cartridge SRAM, Game Gear, FM sound, and alternate mappers only behind explicit project configuration.
 

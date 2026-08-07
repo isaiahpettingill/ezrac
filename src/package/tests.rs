@@ -110,6 +110,49 @@ fn packages_game_gear_code_with_game_gear_header() {
 }
 
 #[test]
+fn packages_banked_sms_and_game_gear_roms() {
+    for (target, format, system_nibble) in [
+        ("sega-master-system-z80", OutputFormat::SmsRom, 0x40),
+        ("sega-game-gear-z80", OutputFormat::GameGearRom, 0x70),
+    ] {
+        let request = PackageRequest::new(target, format, 0, 0x0069);
+        let mut context = PackageContext::new();
+        context.sega = Some(SegaPackageOptions {
+            rom_size_kib: 64,
+            bank_payloads: vec![vec![0x22, 0x23], vec![0x33]],
+        });
+        let image = package_executable_with_context(&request, &context, &[0x00]).unwrap();
+
+        assert_eq!(image.len(), 0x10000);
+        assert_eq!(&image[0x8000..0x8002], &[0x22, 0x23]);
+        assert_eq!(image[0xC000], 0x33);
+        assert_eq!(image[0x7FFF], system_nibble | 0x0E);
+        let checksum = image[..0x7FF0]
+            .iter()
+            .chain(image[0x8000..].iter())
+            .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
+        assert_eq!(u16::from_le_bytes([image[0x7FFA], image[0x7FFB]]), checksum);
+    }
+}
+
+#[test]
+fn rejects_sega_bank_payload_larger_than_16k() {
+    let request = PackageRequest::new("sega-master-system-z80", OutputFormat::SmsRom, 0, 0x0069);
+    let mut context = PackageContext::new();
+    context.sega = Some(SegaPackageOptions {
+        rom_size_kib: 48,
+        bank_payloads: vec![vec![0; 0x4001]],
+    });
+
+    let error = package_executable_with_context(&request, &context, &[0]).unwrap_err();
+    assert!(
+        error.message.contains("must fit in 16384 bytes"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn rejects_sms_code_that_overlaps_the_rom_header() {
     let error = package_executable(
         &PackageRequest::new("sega-master-system-z80", OutputFormat::SmsRom, 0, 0x0069),

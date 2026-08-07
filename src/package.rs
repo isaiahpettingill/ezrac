@@ -75,6 +75,7 @@ pub struct PackageContext {
     pub ti8xp: Option<Ti8xpPackageOptions>,
     pub zx_spectrum: Option<ZxSpectrumPackageOptions>,
     pub game_boy: Option<GameBoyPackageOptions>,
+    pub sega: Option<SegaPackageOptions>,
 }
 
 /// Describes the address represented by the first byte provided to a packager.
@@ -97,6 +98,7 @@ impl PackageContext {
             ti8xp: None,
             zx_spectrum: None,
             game_boy: None,
+            sega: None,
         }
     }
 }
@@ -131,6 +133,24 @@ pub struct ZxSpectrumBankPayload {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ZxSpectrumPackageOptions {
     pub banks: Vec<ZxSpectrumBankPayload>,
+}
+
+/// Resolved options for Sega Master System and Game Gear ROM banking.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SegaPackageOptions {
+    /// Total cartridge capacity. Supported values are 32, 48, 64, 128, and 256 KiB.
+    pub rom_size_kib: u16,
+    /// One 16 KiB payload per ROM page, starting at page 2.
+    pub bank_payloads: Vec<Vec<u8>>,
+}
+
+impl Default for SegaPackageOptions {
+    fn default() -> Self {
+        Self {
+            rom_size_kib: 32,
+            bank_payloads: Vec::new(),
+        }
+    }
 }
 
 /// Game Boy cartridge mapper selection.
@@ -223,8 +243,8 @@ pub fn package_executable_with_context(
         OutputFormat::Commodore64Prg => commodore64_prg_bytes(request, code),
         OutputFormat::Commodore64Crt => commodore64_crt_bytes(request, code),
         OutputFormat::NesRom => nes_rom_bytes(request, context, code),
-        OutputFormat::SmsRom => sega_8bit_rom_bytes(request, code, false),
-        OutputFormat::GameGearRom => sega_8bit_rom_bytes(request, code, true),
+        OutputFormat::SmsRom => sega_8bit_rom_bytes(request, context, code, false),
+        OutputFormat::GameGearRom => sega_8bit_rom_bytes(request, context, code, true),
         OutputFormat::Ti8ek | OutputFormat::Ti8xk => Err(PackageError::new(format!(
             "TI flash application output `.{}` is not implemented; use `.8xp` protected-program output",
             request.output_format.extension()
@@ -311,10 +331,11 @@ fn nes_rom_bytes(
 
 fn sega_8bit_rom_bytes(
     request: &PackageRequest,
+    context: &PackageContext,
     code: &[u8],
     game_gear: bool,
 ) -> Result<Vec<u8>, PackageError> {
-    const IMAGE_SIZE: usize = 0x8000;
+    const BANK_SIZE: usize = 0x4000;
     const ENTRY_OFFSET: usize = 0x0069;
     const HEADER_OFFSET: usize = 0x7FF0;
 
@@ -347,13 +368,46 @@ fn sega_8bit_rom_bytes(
         )));
     }
 
-    let mut image = vec![0xFF; IMAGE_SIZE];
+    let options = context.sega.clone().unwrap_or_default();
+    let (image_size, size_nibble) = match options.rom_size_kib {
+        32 => (0x8000, 0x0C),
+        48 => (0xC000, 0x0D),
+        64 => (0x10000, 0x0E),
+        128 => (0x20000, 0x0F),
+        256 => (0x40000, 0x00),
+        size => {
+            return Err(PackageError::new(format!(
+                "Sega ROM size must be 32, 48, 64, 128, or 256 KiB, got {size}"
+            )));
+        }
+    };
+    let available_banks = image_size / BANK_SIZE - 2;
+    if options.bank_payloads.len() > available_banks {
+        return Err(PackageError::new(format!(
+            "Sega {} KiB ROM has room for {available_banks} bank payloads starting at page 2, got {}",
+            options.rom_size_kib,
+            options.bank_payloads.len()
+        )));
+    }
+    let mut image = vec![0xFF; image_size];
     image[..3].copy_from_slice(&[0xC3, 0x69, 0x00]); // JP $0069
     image[0x0038..0x003A].copy_from_slice(&[0xED, 0x4D]); // RETI
     image[0x0066..0x0068].copy_from_slice(&[0xED, 0x45]); // RETN
     image[ENTRY_OFFSET..ENTRY_OFFSET + code.len()].copy_from_slice(code);
+    for (index, payload) in options.bank_payloads.iter().enumerate() {
+        if payload.len() > BANK_SIZE {
+            return Err(PackageError::new(format!(
+                "Sega ROM page {} payload must fit in 16384 bytes, got {}",
+                index + 2,
+                payload.len()
+            )));
+        }
+        let start = (index + 2) * BANK_SIZE;
+        image[start..start + payload.len()].copy_from_slice(payload);
+    }
     let checksum = image[..HEADER_OFFSET]
         .iter()
+        .chain(image[HEADER_OFFSET + 16..].iter())
         .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
 
     image[HEADER_OFFSET..HEADER_OFFSET + 8].copy_from_slice(b"TMR SEGA");
@@ -361,7 +415,8 @@ fn sega_8bit_rom_bytes(
     image[HEADER_OFFSET + 10..HEADER_OFFSET + 12].copy_from_slice(&checksum.to_le_bytes());
     image[HEADER_OFFSET + 12..HEADER_OFFSET + 15].fill(0);
     // Region/system nibble 7 identifies an export Game Gear cartridge; 4 is export SMS.
-    image[HEADER_OFFSET + 15] = if game_gear { 0x7C } else { 0x4C };
+    let system_nibble = if game_gear { 0x70 } else { 0x40 };
+    image[HEADER_OFFSET + 15] = system_nibble | size_nibble;
     Ok(image)
 }
 

@@ -30,6 +30,7 @@ pub struct ProjectConfig {
     pub layout_file: Option<PathBuf>,
     pub cartridge: Option<CartridgeConfig>,
     pub gameboy: Option<GameBoyConfig>,
+    pub sega: Option<SegaConfig>,
     pub arduboy: Option<ArduboyConfig>,
     pub zxspectrum: Option<ZxSpectrumConfig>,
     pub banking: BankingConfig,
@@ -71,6 +72,22 @@ pub struct GameBoyConfig {
     pub rumble: bool,
     /// One 16 KiB payload per switchable ROM bank, starting at bank 2.
     pub bank_files: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SegaConfig {
+    pub rom_size_kib: u16,
+    /// One 16 KiB payload per ROM page, starting at page 2.
+    pub bank_files: Vec<PathBuf>,
+}
+
+impl Default for SegaConfig {
+    fn default() -> Self {
+        Self {
+            rom_size_kib: 32,
+            bank_files: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -234,6 +251,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
 
     let cartridge = parse_cartridge_config(&value, &root)?;
     let gameboy = parse_gameboy_config(&value, &root)?;
+    let sega = parse_sega_config(&value, &root)?;
     let arduboy = parse_arduboy_config(&value, output.as_deref() == Some("arduboy"))?;
     let zxspectrum = parse_zxspectrum_config(&value, &root)?;
     let banking = parse_banking_config(&value)?;
@@ -271,6 +289,7 @@ pub fn parse_project_config(path: &Path, source: &str) -> Result<ProjectConfig, 
         layout_file,
         cartridge,
         gameboy,
+        sega,
         arduboy,
         zxspectrum,
         banking,
@@ -465,6 +484,46 @@ fn parse_gameboy_config(
         ram_banks,
         battery,
         rumble,
+        bank_files,
+    }))
+}
+
+fn parse_sega_config(value: &toml::Value, root: &Path) -> Result<Option<SegaConfig>, Diagnostic> {
+    let Some(sega) = value.get("sega") else {
+        return Ok(None);
+    };
+    let rom_size_kib = sega
+        .get("rom_size_kib")
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| matches!(*value, 32 | 48 | 64 | 128 | 256))
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        "project field `sega.rom_size_kib` must be 32, 48, 64, 128, or 256",
+                    )
+                })
+        })
+        .transpose()?
+        .unwrap_or(32);
+    let bank_files = match sega.get("bank_files") {
+        Some(toml::Value::Array(files)) => files
+            .iter()
+            .map(required_string("sega.bank_files"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|file| root.join(file))
+            .collect(),
+        Some(_) => {
+            return Err(Diagnostic::new(
+                "project field `sega.bank_files` must be an array of paths",
+            ));
+        }
+        None => Vec::new(),
+    };
+    Ok(Some(SegaConfig {
+        rom_size_kib,
         bank_files,
     }))
 }

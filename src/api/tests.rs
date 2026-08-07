@@ -145,7 +145,7 @@ fn compiles_nes_source_with_the_ricoh_2a03_backend() {
 
 #[test]
 fn compiles_all_builtin_sms_sdk_modules() {
-    let source = "import sms.system\nimport sms.vdp\nimport sms.video\nimport sms.palette\nimport sms.memory\nimport sms.input\nfn main() { video.init_mode4(); palette.set_background(0, palette.BLUE); video.set_name_table_entry(0, 0); system.wait_vblank(); let player1: u8 = input.read_player1(); let player2: u8 = input.read_player2(); let status: u8 = vdp.read_status(); if (status | player1 | player2) != 0 { video.enable_display() } }";
+    let source = "import sms.system\nimport sms.vdp\nimport sms.video\nimport sms.palette\nimport sms.memory\nimport sms.input\nimport sms.bank\nfn main() { video.init_mode4(); palette.set_background(0, palette.BLUE); video.set_name_table_entry(0, 0); system.wait_vblank(); let player1: u8 = input.read_player1(); let player2: u8 = input.read_player2(); let status: u8 = vdp.read_status(); bank.select_slot2(3); let page: u8 = bank.current_slot2(); if (status | player1 | player2 | page) != 0 { video.enable_display() } }";
     let compilation = compile_source_to_assembly(
         source,
         &CompileRequest::new("memory.ezra", "sega-master-system-z80"),

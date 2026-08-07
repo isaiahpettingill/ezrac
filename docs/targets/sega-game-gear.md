@@ -1,6 +1,6 @@
 # Sega Game Gear target
 
-`sega-game-gear-z80` builds fixed 32 KiB export-Game-Gear ROMs with the `.gg` extension.
+`sega-game-gear-z80` builds 32, 48, 64, 128, or 256 KiB export-Game-Gear ROMs with the `.gg` extension.
 
 The Game Gear CPU, memory map, VDP command interface, tile format, and controller direction/action bits are compatible with the Master System target. The compiler therefore reuses the SMS layout, packager core, and these SDK modules:
 
@@ -9,6 +9,7 @@ The Game Gear CPU, memory map, VDP command interface, tile format, and controlle
 - `sms.video`
 - `sms.memory`
 - `sms.input`
+- `sms.bank`
 
 Game Gear-only code lives in `gg.*`:
 
@@ -22,9 +23,13 @@ Use:
 ```toml
 [build]
 target = "sega-game-gear-z80"
+
+[sega]
+rom_size_kib = 64
+bank_files = ["assets/page2.bin", "assets/page3.bin"]
 ```
 
-The packager emits a 32 KiB ROM, writes `TMR SEGA` at `$7FF0`, calculates the checksum, and uses header byte `$7C` for an export Game Gear with a 32 KiB capacity.
+The packager emits the configured ROM capacity, places each bank file in a 16 KiB page starting at page 2, writes `TMR SEGA` at `$7FF0`, calculates the checksum across all pages outside the header, and writes the matching export-Game-Gear system and ROM-size nibbles. For example, 32 KiB uses `$7C` and 64 KiB uses `$7E`.
 
 Build the example with:
 
@@ -32,4 +37,4 @@ Build the example with:
 cargo run -- build examples/sega-game-gear/source-hello/src/main.ezra
 ```
 
-Mapper control, larger ROMs, cartridge SRAM, interrupt callbacks, and emulator-backed runtime tests are not implemented yet.
+Generated executable code remains fixed below `$7FF0`; banked executable functions are not supported. Cartridge SRAM, interrupt callbacks, and emulator-backed mapper tests are not implemented yet.
