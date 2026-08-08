@@ -1,0 +1,9 @@
+(comment) @comment
+(label) @label
+(directive) @keyword
+(instruction) @function
+(number) @number
+(string) @string
+(character) @string.special
+(identifier) @variable
+(punctuation) @operator

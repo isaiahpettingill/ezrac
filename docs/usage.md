@@ -298,7 +298,7 @@ Nano         ~/.nano/ezra.nanorc and an include line in ~/.nanorc
 Micro        $MICRO_CONFIG_HOME/syntax/ezra.yaml, $XDG_CONFIG_HOME/micro/syntax/ezra.yaml, or ~/.config/micro/syntax/ezra.yaml
 Helix        ~/.config/helix/languages.toml and runtime/queries/ezra/highlights.scm
 VS Code      ~/.vscode/extensions/ezra-language
-Zed          ~/.config/zed/extensions/ezra
+Zed          ~/.local/share/zed/extensions/installed/ezra (or $ZED_DATA_DIR/extensions/installed/ezra)
 Notepad++    %APPDATA%/Notepad++/userDefineLangs/ezra.xml, or ~/.config/Notepad++ on non-Windows
 ```
 

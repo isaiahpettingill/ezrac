@@ -34,6 +34,7 @@
 [
   "pub"
   "inline"
+  "@inline"
   "@comptime"
   "@no-comptime"
   "@extern"

@@ -2701,6 +2701,22 @@ fn appdata_home() -> Result<PathBuf, String> {
     Ok(config_home()?.join(".config"))
 }
 
+fn zed_data_home() -> Result<PathBuf, String> {
+    if let Some(path) = environment_path("ZED_DATA_DIR") {
+        return Ok(path);
+    }
+    #[cfg(windows)]
+    if let Some(path) = environment_path("LOCALAPPDATA") {
+        return Ok(path.join("Zed"));
+    }
+    #[cfg(target_os = "macos")]
+    return Ok(config_home()?.join("Library/Application Support/Zed"));
+    if let Some(path) = environment_path("XDG_DATA_HOME") {
+        return Ok(path.join("zed"));
+    }
+    Ok(config_home()?.join(".local/share/zed"))
+}
+
 fn install_vim_syntax(root: PathBuf, dry_run: bool) -> Result<Vec<PathBuf>, String> {
     let files = [
         (
@@ -2765,7 +2781,13 @@ fn install_helix_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
             include_str!("../assets/editors/helix/queries/highlights.scm"),
         ),
     ];
-    write_syntax_files(root, &files, dry_run)
+    let mut paths = write_syntax_files(root.clone(), &files, dry_run)?;
+    let assembly_files = [(
+        "runtime/queries/ezra-asm/highlights.scm",
+        include_str!("../assets/editors/helix/queries/ezra-asm/highlights.scm"),
+    )];
+    paths.extend(write_syntax_files(root, &assembly_files, dry_run)?);
+    Ok(paths)
 }
 
 fn install_vscode_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
@@ -2788,7 +2810,7 @@ fn install_vscode_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
 }
 
 fn install_zed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
-    let root = config_home()?.join(".config/zed/extensions/ezra");
+    let root = zed_data_home()?.join("extensions/installed/ezra");
     let files = [
         (
             "extension.toml",
@@ -2827,7 +2849,23 @@ fn install_zed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
             include_str!("editor_assets/zed/languages/ezra-asm/highlights.scm"),
         ),
     ];
-    write_syntax_files(root, &files, dry_run)
+    let mut paths = write_syntax_files(root.clone(), &files, dry_run)?;
+    let binary_files = [
+        (
+            "extension.wasm",
+            include_bytes!("editor_assets/zed/extension.wasm").as_slice(),
+        ),
+        (
+            "grammars/ezra.wasm",
+            include_bytes!("editor_assets/zed/grammars/ezra.wasm").as_slice(),
+        ),
+        (
+            "grammars/ezra_asm.wasm",
+            include_bytes!("editor_assets/zed/grammars/ezra_asm.wasm").as_slice(),
+        ),
+    ];
+    paths.extend(write_syntax_binary_files(root, &binary_files, dry_run)?);
+    Ok(paths)
 }
 
 fn install_notepadpp_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
@@ -2859,6 +2897,27 @@ fn write_syntax_files(
         let path = root.join(relative);
         if !dry_run {
             write_syntax_file(&path, contents)?;
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn write_syntax_binary_files(
+    root: PathBuf,
+    files: &[(&str, &[u8])],
+    dry_run: bool,
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for (relative, contents) in files {
+        let path = root.join(relative);
+        if !dry_run {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+            }
+            fs::write(&path, contents)
+                .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
         }
         paths.push(path);
     }

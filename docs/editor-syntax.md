@@ -9,10 +9,10 @@ cargo install --path /path/to/ezrac/crates/ezrac-cli --features lsp
 ## Editors
 
 - VS Code: run `npm install` in `editors/vscode`, then open it as an extension folder or package it with `vsce`. The extension starts `ezrac lsp` by default; override `ezra.languageServer.command` or `ezra.languageServer.args` if needed.
-- Zed: install `editors/zed` as a development extension. It uses the local `editors/tree-sitter-ezra` grammar and starts `ezrac lsp` through the Rust extension.
+- Zed: run `ezrac install-syntax --editor zed` to install the complete extension package under Zed's data directory, then restart Zed. For development, use `zed: install dev extension` and select `editors/zed`; it includes both Ezra and Ezra Assembly grammars and starts `ezrac lsp` through the Rust extension.
 - Notepad++: import `editors/notepad++/ezra.xml` through Language > User Defined Language > Import.
 - Micro: copy `editors/micro/ezra.yaml` to the `syntax` directory under `$MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, or `~/.config/micro`, in that order. For LSP, install Micro's official `lsp` plugin with `micro -plugin install lsp`, then add `"lsp.server": "ezra=ezrac lsp"` to `settings.json` or set `MICRO_LSP='ezra=ezrac lsp'`.
-- Helix: merge `editors/helix/languages.toml` into your Helix config and copy `editors/helix/queries/highlights.scm` to the Ezra query directory after building the grammar. The bundled language config starts `ezrac lsp`.
+- Helix: run `ezrac install-syntax --editor helix`, then run `hx --grammar fetch` and `hx --grammar build` to compile both the Ezra and Ezra Assembly grammars. The installer registers `.ezra`, `.ezralayout`, and `.asm` files and installs their highlight queries. The bundled language config starts `ezrac lsp` for Ezra sources.
 - Nano: include `editors/nano/ezra.nanorc` from `~/.nanorc`.
 - Vim: put `editors/vim` on `runtimepath` or copy its `ftdetect`, `ftplugin`, and `syntax` directories into a Vim package. For LSP, use an LSP client such as `vim-lsp` and register `ezrac lsp` for filetype `ezra`.
 - Neovim: use the Vim runtime files; see `editors/neovim/README.md` for a built-in LSP setup snippet.

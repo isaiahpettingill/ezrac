@@ -8,12 +8,12 @@ repository = "https://github.com/isaiahpettingill/ezrac"
 
 [grammars.ezra]
 repository = "https://github.com/isaiahpettingill/ezrac"
-rev = "0c06c384db3c2a156eeca42348109534a25b62ae"
+rev = "af76af767ef0227d93fe714d8771b02c730f7b27"
 path = "editors/tree-sitter-ezra"
 
 [grammars.ezra_asm]
 repository = "https://github.com/isaiahpettingill/ezrac"
-rev = "9cd1797f9253d11ef4606c303b48b4ad3d70666c"
+rev = "af76af767ef0227d93fe714d8771b02c730f7b27"
 path = "editors/tree-sitter-ezra-asm"
 
 [language_servers.ezra-lsp]
