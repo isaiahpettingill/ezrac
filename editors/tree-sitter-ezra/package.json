@@ -10,5 +10,11 @@
   "license": "MIT",
   "devDependencies": {
     "tree-sitter-cli": "^0.22.6"
-  }
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.ezra",
+      "file-types": ["ezra", "ezralayout"]
+    }
+  ]
 }
