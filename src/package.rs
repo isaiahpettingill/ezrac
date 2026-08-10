@@ -11,6 +11,14 @@ use core::fmt;
 
 use crate::target::{Address24, CART_MAGIC, OutputFormat, ez180n_cpu_id};
 
+const ELF32_HEADER_SIZE: usize = 52;
+const ELF32_PROGRAM_HEADER_SIZE: usize = 32;
+const ELF32_SECTION_HEADER_SIZE: usize = 40;
+const ELF32_CODE_OFFSET: u32 = 0x1000;
+const EM_MSP430: u16 = 105;
+const EF_MSP430_MACH_MSP430X: u32 = 0x10;
+const EF_MSP430_MACH_MSP430XV2: u32 = 0x20;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageError {
     pub message: String,
@@ -244,6 +252,7 @@ pub fn package_executable_with_context(
             };
             intel_hex_bytes(base_addr, code)
         }
+        OutputFormat::Elf32 => elf32_bytes(request, context, code),
         OutputFormat::Arduboy => arduboy_package_bytes(request, context, code),
         OutputFormat::Ti8xp => ti8xp_bytes(request, context, code),
         OutputFormat::ZxSpectrumTap => zx_spectrum_tap_bytes(request, context, code),
@@ -259,6 +268,131 @@ pub fn package_executable_with_context(
             request.output_format.extension()
         ))),
     }
+}
+
+fn elf32_bytes(
+    request: &PackageRequest,
+    context: &PackageContext,
+    code: &[u8],
+) -> Result<Vec<u8>, PackageError> {
+    let machine_flags = if request
+        .target
+        .split('-')
+        .any(|part| matches!(part, "msp430x2" | "msp430xv2"))
+    {
+        EF_MSP430_MACH_MSP430XV2
+    } else if request.target.split('-').any(|part| part == "msp430x") {
+        EF_MSP430_MACH_MSP430X
+    } else if request.target.split('-').any(|part| part == "msp430") {
+        0
+    } else {
+        return Err(PackageError::new(format!(
+            "target `{}` does not support MSP430 ELF32 output",
+            request.target
+        )));
+    };
+
+    let base_addr = match context.image_kind {
+        PackageImageKind::EntryCode => request.entry_addr,
+        PackageImageKind::LoadImage => request.load_addr,
+    };
+    let code_size = u32::try_from(code.len())
+        .map_err(|_| PackageError::new("ELF32 code payload exceeds 32-bit size"))?;
+    base_addr
+        .checked_add(code_size)
+        .ok_or_else(|| PackageError::new("ELF32 code payload exceeds the 32-bit address space"))?;
+
+    let code_offset = ELF32_CODE_OFFSET
+        .checked_add(base_addr & 0xFFF)
+        .ok_or_else(|| PackageError::new("ELF32 code offset exceeds 32-bit range"))?;
+    let code_offset_usize = usize::try_from(code_offset)
+        .map_err(|_| PackageError::new("ELF32 code offset exceeds host addressable memory"))?;
+    let string_table = b"\0.text\0.shstrtab\0";
+    let string_table_offset = align_usize(
+        code_offset_usize
+            .checked_add(code.len())
+            .ok_or_else(|| PackageError::new("ELF32 output exceeds host addressable memory"))?,
+        4,
+    )?;
+    let section_header_offset = align_usize(
+        string_table_offset
+            .checked_add(string_table.len())
+            .ok_or_else(|| PackageError::new("ELF32 output exceeds host addressable memory"))?,
+        4,
+    )?;
+    let section_count = 3usize;
+    let section_headers_size = ELF32_SECTION_HEADER_SIZE
+        .checked_mul(section_count)
+        .ok_or_else(|| PackageError::new("ELF32 section table is too large"))?;
+    let output_size = section_header_offset
+        .checked_add(section_headers_size)
+        .ok_or_else(|| PackageError::new("ELF32 output exceeds host addressable memory"))?;
+
+    let mut output = vec![0; output_size];
+    output[0..16].copy_from_slice(&[0x7F, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    write_u16(&mut output, 16, 2); // ET_EXEC
+    write_u16(&mut output, 18, EM_MSP430);
+    write_u32(&mut output, 20, 1);
+    write_u32(&mut output, 24, request.entry_addr);
+    write_u32(&mut output, 28, ELF32_HEADER_SIZE as u32);
+    write_u32(&mut output, 32, section_header_offset as u32);
+    write_u32(&mut output, 36, machine_flags);
+    write_u16(&mut output, 40, ELF32_HEADER_SIZE as u16);
+    write_u16(&mut output, 42, ELF32_PROGRAM_HEADER_SIZE as u16);
+    write_u16(&mut output, 44, 1);
+    write_u16(&mut output, 46, ELF32_SECTION_HEADER_SIZE as u16);
+    write_u16(&mut output, 48, section_count as u16);
+    write_u16(&mut output, 50, 2); // .shstrtab
+
+    // One read/execute segment covers the linked text payload. The file and
+    // virtual offsets share their low page bits, as required by ELF loaders.
+    let program_header = ELF32_HEADER_SIZE;
+    write_u32(&mut output, program_header, 1); // PT_LOAD
+    write_u32(&mut output, program_header + 4, code_offset);
+    write_u32(&mut output, program_header + 8, base_addr);
+    write_u32(&mut output, program_header + 12, base_addr);
+    write_u32(&mut output, program_header + 16, code_size);
+    write_u32(&mut output, program_header + 20, code_size);
+    write_u32(&mut output, program_header + 24, 5); // PF_R | PF_X
+    write_u32(&mut output, program_header + 28, 0x1000);
+
+    output[code_offset_usize..code_offset_usize + code.len()].copy_from_slice(code);
+    output[string_table_offset..string_table_offset + string_table.len()]
+        .copy_from_slice(string_table);
+
+    let text_header = section_header_offset + ELF32_SECTION_HEADER_SIZE;
+    write_u32(&mut output, text_header, 1); // .text
+    write_u32(&mut output, text_header + 4, 1); // SHT_PROGBITS
+    write_u32(&mut output, text_header + 8, 0x6); // SHF_ALLOC | SHF_EXECINSTR
+    write_u32(&mut output, text_header + 12, base_addr);
+    write_u32(&mut output, text_header + 16, code_offset);
+    write_u32(&mut output, text_header + 20, code_size);
+    write_u32(&mut output, text_header + 32, 2);
+
+    let string_header = text_header + ELF32_SECTION_HEADER_SIZE;
+    write_u32(&mut output, string_header, 7); // .shstrtab
+    write_u32(&mut output, string_header + 4, 3); // SHT_STRTAB
+    write_u32(&mut output, string_header + 16, string_table_offset as u32);
+    write_u32(&mut output, string_header + 20, string_table.len() as u32);
+    write_u32(&mut output, string_header + 32, 1);
+
+    Ok(output)
+}
+
+fn align_usize(value: usize, alignment: usize) -> Result<usize, PackageError> {
+    debug_assert!(alignment.is_power_of_two());
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| PackageError::new("ELF32 output exceeds host addressable memory"))
+}
+
+fn write_u16(output: &mut [u8], offset: usize, value: u16) {
+    output[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(output: &mut [u8], offset: usize, value: u32) {
+    output[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 fn snes_lorom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {

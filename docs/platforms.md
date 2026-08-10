@@ -64,6 +64,8 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `sega-game-gear-z80` | 3 | Z80 | 16 | `.gg` | `sms.*`, `gg.*` | 32-256 KiB Game Gear target with shared slot-2 data banking and Game Gear hardware helpers |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |
 | `bare-tms9900` | 3 | TMS9900 | 16 | `.bin` | none | Optional `tms9900` feature; bare scalar source/assembly target |
+| `msp430-none-elf` | 3 | MSP430 | 16 | ELF32 `.elf` | none | Optional `msp430` feature; little-endian ELF32 source/assembly target |
+| `msp430x-none-elf` | 3 | MSP430X | 20 | ELF32 `.elf` | none | Optional `msp430` feature; extended-address ELF32 source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
 | `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
 | `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
@@ -576,7 +578,7 @@ target = "ti84plusce-ez80"
 output = "8xp"
 ```
 
-Recognized output formats are `bin`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output and Commodore 64 `.prg`/`.crt` output are target-checked. TI `.8xp` protected programs are implemented; `.8ek` and `.8xk` are reserved but currently rejected because flash application packaging is not implemented.
+Recognized output formats are `bin`, `elf`, `elf32`, `com`, `gaem`, `hex`, `tap`, `gb`, `prg`, `crt`, `8xp`, `8ek`, and `8xk`. Game Boy `.gb` output and Commodore 64 `.prg`/`.crt` output are target-checked. TI `.8xp` protected programs are implemented; `.8ek` and `.8xk` are reserved but currently rejected because flash application packaging is not implemented.
 
 ## Adding A New Platform
 

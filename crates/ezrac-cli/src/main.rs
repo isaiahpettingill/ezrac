@@ -46,6 +46,8 @@ use ezra::asm::emit_m68k_assembly_with_options;
 use ezra::asm::emit_m6800_assembly_with_options;
 #[cfg(feature = "m6809")]
 use ezra::asm::emit_m6809_assembly_with_options;
+#[cfg(feature = "msp430")]
+use ezra::asm::emit_msp430_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use ezra::asm::emit_tms9900_assembly_with_options;
 
@@ -1347,6 +1349,13 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
     if settings.target.triple.cpu == CpuFamily::Tms9900 {
         return Ok(());
     }
+    #[cfg(feature = "msp430")]
+    if matches!(
+        settings.target.triple.cpu,
+        CpuFamily::Msp430 | CpuFamily::Msp430X | CpuFamily::Msp430X2
+    ) {
+        return Ok(());
+    }
     #[cfg(feature = "dcpu")]
     if settings.target.triple.cpu == CpuFamily::Dcpu {
         return Ok(());
@@ -1459,6 +1468,18 @@ fn emit_source_assembly(
         #[cfg(not(feature = "tms9900"))]
         {
             unreachable!("TMS9900 targets require the tms9900 Cargo feature")
+        }
+    } else if matches!(
+        options.cpu,
+        CpuFamily::Msp430 | CpuFamily::Msp430X | CpuFamily::Msp430X2
+    ) {
+        #[cfg(feature = "msp430")]
+        {
+            emit_msp430_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "msp430"))]
+        {
+            unreachable!("MSP430 targets require the msp430 Cargo feature")
         }
     } else if options.cpu == CpuFamily::M68k {
         #[cfg(feature = "m68k")]
@@ -2494,7 +2515,7 @@ fn init_project(options: &InitOptions) -> Result<(), String> {
     write_scaffold_file(
         &gitignore_path,
         options.force,
-        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.tap\n*.gb\n*.prg\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
+        "target/\n*.bin\n*.com\n*.gaem\n*.hex\n*.elf\n*.tap\n*.gb\n*.prg\n*.8xp\n*.8ek\n*.8xk\n*.map\n*.asm\n",
     )?;
     write_scaffold_file(
         &project_path,
@@ -3248,6 +3269,24 @@ fn print_targets() {
             output: "bin",
             sdk: "none",
             status: "bare TMS9900 source/assembly target",
+        },
+        #[cfg(feature = "msp430")]
+        TargetRow {
+            triple: "msp430-none-elf",
+            cpu: "msp430",
+            address_width_bits: 16,
+            output: "elf",
+            sdk: "none",
+            status: "MSP430 ELF32 source/assembly target",
+        },
+        #[cfg(feature = "msp430")]
+        TargetRow {
+            triple: "msp430x-none-elf",
+            cpu: "msp430x",
+            address_width_bits: 20,
+            output: "elf",
+            sdk: "none",
+            status: "MSP430X ELF32 source/assembly target",
         },
         #[cfg(feature = "dcpu")]
         TargetRow {

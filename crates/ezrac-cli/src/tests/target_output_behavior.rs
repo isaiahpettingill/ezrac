@@ -336,6 +336,36 @@ fn commodore64_crt_build_writes_a_standard_autostart_cartridge() {
 }
 
 #[test]
+fn msp430_source_build_writes_elf32_by_default() {
+    let root = temp_root("msp430_elf_output");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("main.ezra");
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    let outputs = build_source_with_command_options(&CommandOptions {
+        path: source_path.clone(),
+        debug_comments: false,
+        default_sdk_symbols: true,
+        layout_path: None,
+        target: Some("msp430-none-elf".to_owned()),
+        optimization_level: None,
+        enable_optimizations: Vec::new(),
+        disable_optimizations: Vec::new(),
+    })
+    .unwrap();
+    let elf = std::fs::read(&outputs.executable).unwrap();
+    assert_eq!(
+        outputs.executable.extension().and_then(|ext| ext.to_str()),
+        Some("elf")
+    );
+    assert_eq!(&elf[..4], b"\x7FELF");
+    assert_eq!(elf[4], 1);
+    assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 105);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn bare_source_build_can_emit_com_and_intel_hex() {
     for (name, output, extension, prefix) in [
         ("bare_z80_source_com", "com", "com", ""),

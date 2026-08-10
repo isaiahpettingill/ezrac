@@ -30,6 +30,7 @@ default = [
     "m6809",
     "m68k",
     "mos6502",
+    "msp430",
     "tms9900",
     "dcpu",
 ]
@@ -46,6 +47,7 @@ m6809 = ["ezra/m6809"]
 m68k = ["ezra/m68k"]
 mos6502 = ["ezra/mos6502"]
 mos6502-emulator = ["mos6502", "test-runner", "ezra/mos6502-emulator"]
+msp430 = ["ezra/msp430"]
 tms9900 = ["ezra/tms9900"]
 dcpu = ["ezra/dcpu"]
 lsp = ["std", "ezra/lsp", "dep:lsp", "dep:serde", "dep:serde_json"]

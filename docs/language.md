@@ -176,7 +176,7 @@ fn main() {
 }
 ```
 
-The target controls pointer width. eZ80, WDC 65C816, and the generic M68k target use 24-bit pointers. Z80-family, 8080/8085, LR35902, MOS 6502, TMS9900, and AVR targets use 16-bit pointers. Integer widths and pointer widths are separate: a target may accept a source type but reject an intrinsic combination that its ABI or emitter cannot lower.
+The target controls pointer width. eZ80, WDC 65C816, and the generic M68k target use 24-bit pointers. MSP430X targets use 20-bit pointers; Z80-family, 8080/8085, LR35902, MOS 6502, base MSP430, TMS9900, and AVR targets use 16-bit pointers. Integer widths and pointer widths are separate: a target may accept a source type but reject an intrinsic combination that its ABI or emitter cannot lower.
 
 ## Literals
 

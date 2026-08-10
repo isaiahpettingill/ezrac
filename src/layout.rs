@@ -118,6 +118,10 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::ti99_4a_tms9900()
     } else if target.starts_with("arduboy-") {
         Layout::arduboy_atmega32u4()
+    } else if target.starts_with("msp430x") {
+        Layout::msp430x_elf()
+    } else if target.starts_with("msp430") {
+        Layout::msp430_elf()
     } else if is_ti_ce_target(target) {
         Layout::ti_ce_ez80(target)
     } else if is_ti_z80_target(target) {
@@ -626,6 +630,95 @@ impl Layout {
                 symbol("EZRA_CODE_BASE", Address24::new(0)),
                 symbol("EZRA_RAM_BASE", Address24::new(0x0104)),
                 symbol("EZRA_STACK_TOP", Address24::new(0x0AFF)),
+            ],
+        }
+    }
+
+    pub fn msp430_elf() -> Self {
+        Self::msp430_elf_layout(false)
+    }
+
+    pub fn msp430x_elf() -> Self {
+        Self::msp430_elf_layout(true)
+    }
+
+    fn msp430_elf_layout(extended: bool) -> Self {
+        let (name, stack, flash_end, vector_start) = if extended {
+            ("msp430x_elf", 0x1FFF, 0x0F_FFFF, 0x0F_FF80)
+        } else {
+            ("msp430_elf", 0x09FF, 0x00_FF7F, 0x00_FF80)
+        };
+        Self {
+            name: name.to_owned(),
+            load: Address24::new(0xC000),
+            entry: Address24::new(0xC000),
+            stack: Address24::new(stack),
+            regions: if extended {
+                vec![
+                    region("peripheral", 0x000000, 0x0001FF, &[RegionFlags::RESERVED]),
+                    region(
+                        "ram",
+                        0x000200,
+                        0x001FFF,
+                        &[RegionFlags::READ, RegionFlags::WRITE],
+                    ),
+                    region(
+                        "flash",
+                        0x00C000,
+                        flash_end,
+                        &[RegionFlags::READ, RegionFlags::EXECUTE],
+                    ),
+                ]
+            } else {
+                vec![
+                    region("peripheral", 0x000000, 0x0001FF, &[RegionFlags::RESERVED]),
+                    region(
+                        "ram",
+                        0x000200,
+                        0x0009FF,
+                        &[RegionFlags::READ, RegionFlags::WRITE],
+                    ),
+                    region(
+                        "info",
+                        0x001000,
+                        0x0010FF,
+                        &[RegionFlags::READ, RegionFlags::RESERVED],
+                    ),
+                    region(
+                        "flash",
+                        0x00C000,
+                        flash_end,
+                        &[RegionFlags::READ, RegionFlags::EXECUTE],
+                    ),
+                    region(
+                        "vectors",
+                        vector_start,
+                        0x00_FFFF,
+                        &[
+                            RegionFlags::READ,
+                            RegionFlags::EXECUTE,
+                            RegionFlags::RESERVED,
+                        ],
+                    ),
+                ]
+            },
+            sections: vec![
+                section(".header", "flash", 2),
+                section(".text", "flash", 2),
+                section(".rodata", "flash", 2),
+                section(".data", "ram", 2),
+                section(".bss", "ram", 2),
+                section(".assets", "flash", 2),
+                section(".scratch", "ram", 2),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0xC000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0xC000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0xC000)),
+                symbol("EZRA_STACK_TOP", Address24::new(stack)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x0200)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0xC000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
             ],
         }
     }

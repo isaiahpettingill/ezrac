@@ -373,6 +373,62 @@ fn packages_game_boy_with_resolved_bank_payloads() {
 }
 
 #[test]
+fn packages_msp430_as_little_endian_elf32() {
+    let request = PackageRequest::new("msp430-none-elf", OutputFormat::Elf32, 0xC000, 0xC004);
+    let context = PackageContext {
+        image_kind: PackageImageKind::LoadImage,
+        ..PackageContext::new()
+    };
+    let image =
+        package_executable_with_context(&request, &context, &[0x30, 0x40, 0x02, 0x43]).unwrap();
+
+    assert_eq!(&image[..4], b"\x7FELF");
+    assert_eq!(image[4], 1); // ELFCLASS32
+    assert_eq!(image[5], 1); // ELFDATA2LSB
+    assert_eq!(u16::from_le_bytes([image[16], image[17]]), 2); // ET_EXEC
+    assert_eq!(u16::from_le_bytes([image[18], image[19]]), 105); // EM_MSP430
+    assert_eq!(
+        u32::from_le_bytes(image[24..28].try_into().unwrap()),
+        0xC004
+    );
+    assert_eq!(u16::from_le_bytes([image[44], image[45]]), 1);
+    let code_offset = u32::from_le_bytes(image[52 + 4..52 + 8].try_into().unwrap()) as usize;
+    let code_size = u32::from_le_bytes(image[52 + 16..52 + 20].try_into().unwrap()) as usize;
+    assert_eq!(code_offset, 0x1000);
+    assert_eq!(code_size, 4);
+    assert_eq!(
+        &image[code_offset..code_offset + code_size],
+        &[0x30, 0x40, 0x02, 0x43]
+    );
+    assert!(
+        image
+            .windows(b".text".len())
+            .any(|window| window == b".text")
+    );
+}
+
+#[test]
+fn packages_msp430x_elf32_with_machine_flags() {
+    let request = PackageRequest::new("msp430x2-none-elf", OutputFormat::Elf32, 0xC000, 0xC000);
+    let image = package_executable(&request, &[0x30, 0x40]).unwrap();
+    assert_eq!(u32::from_le_bytes(image[36..40].try_into().unwrap()), 0x20);
+}
+
+#[test]
+fn rejects_elf32_output_for_non_msp430_targets() {
+    let error = package_executable(
+        &PackageRequest::new("bare-z80", OutputFormat::Elf32, 0, 0),
+        &[0],
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("does not support MSP430 ELF32 output")
+    );
+}
+
+#[test]
 fn rejects_hex_output_for_agon_mos() {
     let error = package_executable(
         &PackageRequest::new(

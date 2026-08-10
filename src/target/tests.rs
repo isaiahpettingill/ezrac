@@ -136,6 +136,40 @@ fn cpu_capabilities_are_canonical_for_z80_family_targets() {
     }
 }
 
+#[cfg(feature = "msp430")]
+#[test]
+fn msp430_elf_targets_default_to_elf32_output() {
+    for target_name in ["msp430-none-elf", "msp430-elf"] {
+        let target = resolve_target_profile(Some(target_name)).unwrap();
+        assert_eq!(target.triple.cpu, CpuFamily::Msp430);
+        assert_eq!(target.memory.pointer_width_bits, 16);
+        assert_eq!(target.memory.address_width_bits, 16);
+        assert_eq!(target.output_format, OutputFormat::Elf32);
+        assert_eq!(target.output_format.extension(), "elf");
+        assert!(target.default_sdk_symbols);
+    }
+    let layout = default_layout_for_target("msp430-none-elf");
+    assert_eq!(layout.name, "msp430_elf");
+    assert_eq!(layout.load.get(), 0xC000);
+    assert_eq!(layout.entry.get(), 0xC000);
+    assert_eq!(layout.stack.get(), 0x09FF);
+    assert_eq!(layout.validate(), Ok(()));
+}
+
+#[cfg(feature = "msp430")]
+#[test]
+fn msp430x_elf_targets_keep_the_extended_address_model() {
+    let target = resolve_target_profile(Some("msp430x-none-elf")).unwrap();
+    assert_eq!(target.triple.cpu, CpuFamily::Msp430X);
+    assert_eq!(target.memory.pointer_width_bits, 20);
+    assert_eq!(target.memory.address_width_bits, 20);
+    assert_eq!(target.output_format, OutputFormat::Elf32);
+    let layout = default_layout_for_target("msp430x-none-elf");
+    assert_eq!(layout.name, "msp430x_elf");
+    assert_eq!(layout.stack.get(), 0x1FFF);
+    assert_eq!(layout.validate(), Ok(()));
+}
+
 #[test]
 fn cpm_z80_targets_default_to_com_output() {
     let cpm = resolve_target_profile(Some("cpm-2.2-z80")).unwrap();
@@ -363,6 +397,8 @@ fn parses_output_formats() {
     assert_eq!(parse_output_format("com"), Ok(OutputFormat::CpmCom));
     assert_eq!(parse_output_format("gaem"), Ok(OutputFormat::Ez180nGaem));
     assert_eq!(parse_output_format("hex"), Ok(OutputFormat::IntelHex));
+    assert_eq!(parse_output_format("elf"), Ok(OutputFormat::Elf32));
+    assert_eq!(parse_output_format("elf32"), Ok(OutputFormat::Elf32));
     assert_eq!(parse_output_format("arduboy"), Ok(OutputFormat::Arduboy));
     assert_eq!(parse_output_format("8xp"), Ok(OutputFormat::Ti8xp));
     assert_eq!(parse_output_format("8ek"), Ok(OutputFormat::Ti8ek));
@@ -377,7 +413,7 @@ fn parses_output_formats() {
     let error = parse_output_format("bad").unwrap_err();
     assert!(
         error.contains(
-            "expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `sms`, `gg`, `8xp`, `8ek`, or `8xk`"
+            "expected `bin`, `com`, `gaem`, `hex`, `elf`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `sms`, `gg`, `8xp`, `8ek`, or `8xk`"
         ),
         "{error}"
     );

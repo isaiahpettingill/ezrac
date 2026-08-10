@@ -46,7 +46,7 @@ cargo run -- layout
 cargo run -- header
 ```
 
-`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, NES `.nes`, CP/M and MS-DOS `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
+`build` writes `.asm`, `.map`, and a target executable under a Rust-like `target` directory. If the source belongs to a project with `Ezra.toml`, artifacts go under `<project>/target/<target>/...`. Otherwise they go under a `target` directory next to the source. Output formats include raw `.bin`, MSP430 ELF32 `.elf`, NES `.nes`, CP/M and MS-DOS `.com`, Intel HEX, ZX Spectrum tape, Game Boy ROM, Commodore 64 PRG, and TI calculator formats; see `docs/usage.md`.
 
 `disk` creates M35FD images for DCPU-16, FAT12 floppy images for CP/M through IS-DOS, MOS, and DOS, and D64 images for C64. Each image can contain multiple named files. See `docs/disk-images.md`.
 
@@ -136,7 +136,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
-- The main source target is Agon Light MOS on eZ80 ADL. Default builds include every compiler backend: Intel 8080/8085/8086, eZ80/Z80-family, LR35902, AVR, MOS 6502-family, M6800/M6809, M68k, TMS9900, and DCPU-16. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The i8086 backend provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, a complete strict 8086 assembler, and the `msdos-com-i8086` target with bundled `dos.*` SDK; aggregate parameters and returns must be passed by pointer. Target profiles remain at varying maturity levels; see `docs/platforms.md`.
+- The main source target is Agon Light MOS on eZ80 ADL. Default builds include every compiler backend: Intel 8080/8085/8086, eZ80/Z80-family, LR35902, AVR, MOS 6502-family, M6800/M6809, M68k, TMS9900, MSP430, and DCPU-16. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The i8086 backend provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, a complete strict 8086 assembler, and the `msdos-com-i8086` target with bundled `dos.*` SDK; aggregate parameters and returns must be passed by pointer. Target profiles remain at varying maturity levels; see `docs/platforms.md`.
 - Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.
@@ -164,7 +164,7 @@ assert_eq!(build.executable_extension, "com");
 // are all caller-owned in-memory artifacts.
 ```
 
-`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, section-aware standalone assembly, or explicit-base flat assembly, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, `link_assembly_program`, or `link_assembly_program_at` from `ezra::api`. Explicit layouts drive both source code generation and final linking. The CLI `build` and `assemble` commands resolve host configuration and files into these same library pipelines; they do not own separate compiler, linker, or packager implementations.
+`build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, MSP430 ELF32, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, section-aware standalone assembly, or explicit-base flat assembly, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, `link_assembly_program`, or `link_assembly_program_at` from `ezra::api`. Explicit layouts drive both source code generation and final linking. The CLI `build` and `assemble` commands resolve host configuration and files into these same library pipelines; they do not own separate compiler, linker, or packager implementations.
 
 `ezra::api`, `diagnostic`, `disk`, `image`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
 

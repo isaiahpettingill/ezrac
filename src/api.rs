@@ -1413,7 +1413,7 @@ fn build_output_map(
 fn uses_flat_output_map(build: &BuildRequest) -> bool {
     matches!(
         build.output_format,
-        OutputFormat::CpmCom | OutputFormat::Ez180nGaem
+        OutputFormat::CpmCom | OutputFormat::Ez180nGaem | OutputFormat::Elf32
     ) || (build.target.triple.cpu == CpuFamily::I8086
         && build.output_format == OutputFormat::RawBin)
         || bare_target_cpu(&build.target.triple.value).is_some()

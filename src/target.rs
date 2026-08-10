@@ -401,6 +401,7 @@ pub enum OutputFormat {
     CpmCom,
     Ez180nGaem,
     IntelHex,
+    Elf32,
     RawBin,
     Ti8ek,
     Ti8xp,
@@ -423,6 +424,7 @@ impl OutputFormat {
             Self::CpmCom => "com",
             Self::Ez180nGaem => "gaem",
             Self::IntelHex => "hex",
+            Self::Elf32 => "elf",
             Self::RawBin => "bin",
             Self::Ti8ek => "8ek",
             Self::Ti8xp => "8xp",
@@ -442,6 +444,7 @@ impl OutputFormat {
 }
 
 pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
+pub const MSP430_ELF_TARGET: &str = "msp430-none-elf";
 pub const MSDOS_COM_I8086_TARGET: &str = "msdos-com-i8086";
 pub const NES_2A03_TARGET: &str = "nes-2a03";
 pub const SNES_5A22_TARGET: &str = "snes-5a22";
@@ -590,6 +593,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::SmsRom
     } else if triple.value == SEGA_GAME_GEAR_Z80_TARGET {
         OutputFormat::GameGearRom
+    } else if triple.value.starts_with("msp430") {
+        OutputFormat::Elf32
     } else {
         OutputFormat::RawBin
     }
@@ -614,6 +619,7 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "com" => Ok(OutputFormat::CpmCom),
         "gaem" => Ok(OutputFormat::Ez180nGaem),
         "hex" | "ihex" | "intel-hex" => Ok(OutputFormat::IntelHex),
+        "elf" | "elf32" => Ok(OutputFormat::Elf32),
         "8ek" | "ti8ek" => Ok(OutputFormat::Ti8ek),
         "8xp" | "ti8xp" => Ok(OutputFormat::Ti8xp),
         "8xk" | "ti8xk" => Ok(OutputFormat::Ti8xk),
@@ -627,7 +633,7 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "sms" | "sega-master-system" => Ok(OutputFormat::SmsRom),
         "gg" | "game-gear" | "sega-game-gear" => Ok(OutputFormat::GameGearRom),
         _ => Err(format!(
-            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `sms`, `gg`, `8xp`, `8ek`, or `8xk`"
+            "unsupported output format `{value}`; expected `bin`, `com`, `gaem`, `hex`, `elf`, `arduboy`, `tap`, `gb`, `prg`, `crt`, `nes`, `sms`, `gg`, `8xp`, `8ek`, or `8xk`"
         )),
     }
 }
