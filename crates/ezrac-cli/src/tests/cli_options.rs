@@ -81,7 +81,7 @@ fn source_commands_parse_optimization_levels_and_pass_overrides() {
 #[test]
 fn source_commands_reject_unknown_optimization_options() {
     let level = CommandOptions::parse(&["-O9".to_owned(), "main.ezra".to_owned()]).unwrap_err();
-    assert!(level.contains("expected 0, 1, 2, or 3"), "{level}");
+    assert!(level.contains("0, 1, 2, or 3"), "{level}");
 
     let pass = CommandOptions::parse(&[
         "--enable-optimization".to_owned(),

@@ -40,6 +40,23 @@ use crate::asm::m6800;
 use crate::asm::m6809;
 #[cfg(any(feature = "std", feature = "mos6502"))]
 use crate::asm::mos6502::{Mos6502Variant, Mos65816Widths};
+
+#[cfg(not(any(feature = "std", feature = "mos6502")))]
+#[derive(Clone, Copy, Debug)]
+struct Mos65816Widths {
+    accumulator: u8,
+    index: u8,
+}
+
+#[cfg(not(any(feature = "std", feature = "mos6502")))]
+impl Default for Mos65816Widths {
+    fn default() -> Self {
+        Self {
+            accumulator: 8,
+            index: 8,
+        }
+    }
+}
 #[cfg(feature = "msp430")]
 use crate::asm::msp430;
 #[cfg(feature = "tms9900")]
@@ -2894,6 +2911,8 @@ fn instruction_len_with_widths(
     diagnostic_text: &str,
     widths: Mos65816Widths,
 ) -> Result<usize, Diagnostic> {
+    #[cfg(not(any(feature = "std", feature = "mos6502")))]
+    let _ = widths;
     #[cfg(any(feature = "std", feature = "mos6502"))]
     if cpu == AssemblerCpu::Wdc65C816 {
         return crate::asm::mos6502::instruction_len_for_variant_with_widths(
@@ -2984,6 +3003,8 @@ fn emit_instruction_with_widths(
     bytes: &mut Vec<u8>,
     widths: Mos65816Widths,
 ) -> Result<(), Diagnostic> {
+    #[cfg(not(any(feature = "std", feature = "mos6502")))]
+    let _ = widths;
     #[cfg(any(feature = "std", feature = "mos6502"))]
     if cpu == AssemblerCpu::Wdc65C816 {
         bytes.extend(
