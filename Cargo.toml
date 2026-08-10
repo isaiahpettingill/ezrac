@@ -31,6 +31,7 @@ miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-a
 png = "0.18.1"
 libre99-core = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
 libre99-asm = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
+mspsim = { package = "mspsim-rs", git = "https://github.com/isaiahpettingill/mspsim-rs.git", rev = "f9ade22" }
 w65c816 = "0.1.17"
 
 [features]

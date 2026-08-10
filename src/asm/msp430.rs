@@ -128,7 +128,9 @@ fn parse_source(
     }
     if let Some(immediate) = text.strip_prefix('#') {
         let v = value_for_cpu(cpu, immediate, labels, resolve)?;
-        if let Some((reg, mode)) = constant_generator(v) {
+        let known_without_resolution =
+            labels.contains_key(immediate.trim()) || is_numeric_value(immediate) || resolve;
+        if known_without_resolution && let Some((reg, mode)) = constant_generator(v) {
             return Ok(Operand {
                 reg,
                 mode,
@@ -252,6 +254,14 @@ fn jump_opcode(m: &str) -> Option<u16> {
         _ => return None,
     })
 }
+fn is_numeric_value(text: &str) -> bool {
+    let text = text.trim();
+    text.strip_prefix("0x")
+        .or_else(|| text.strip_prefix('$'))
+        .is_some_and(|digits| u32::from_str_radix(digits, 16).is_ok())
+        || text.parse::<u32>().is_ok()
+}
+
 fn constant_generator(v: u32) -> Option<(u8, u8)> {
     Some(match v {
         0 => (3, 0),
@@ -302,9 +312,6 @@ fn no_operands(text: &str, m: &str) -> Result<(), Diagnostic> {
     }
 }
 fn value(text: &str, labels: &HashMap<String, u32>, resolve: bool) -> Result<u32, Diagnostic> {
-    if !resolve {
-        return Ok(0);
-    }
     let t = text.trim();
     if let Some(v) = labels.get(t) {
         return Ok(*v);
@@ -313,8 +320,15 @@ fn value(text: &str, labels: &HashMap<String, u32>, resolve: bool) -> Result<u32
         return u32::from_str_radix(h, 16)
             .map_err(|_| Diagnostic::new(format!("invalid MSP430 value `{text}`")));
     }
-    t.parse()
-        .map_err(|_| Diagnostic::new(format!("unknown MSP430 symbol or value `{text}`")))
+    if let Ok(value) = t.parse() {
+        return Ok(value);
+    }
+    if !resolve {
+        return Ok(0);
+    }
+    Err(Diagnostic::new(format!(
+        "unknown MSP430 symbol or value `{text}`"
+    )))
 }
 
 fn value_for_cpu(

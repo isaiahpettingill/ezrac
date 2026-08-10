@@ -61,6 +61,7 @@ dependencies = [
  "mc6809-core",
  "miniz_oxide",
  "mos6502",
+ "mspsim-rs",
  "pest",
  "pest_derive",
  "png",
@@ -222,6 +223,11 @@ dependencies = [
  "bitflags",
  "log",
 ]
+
+[[package]]
+name = "mspsim-rs"
+version = "0.1.0"
+source = "git+https://github.com/isaiahpettingill/mspsim-rs.git?rev=f9ade22#f9ade2280d8a5b469e8ae28a8ec55e83cde6cc82"
 
 [[package]]
 name = "percent-encoding"

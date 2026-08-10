@@ -25,6 +25,18 @@ fn encodes_relative_jumps_and_aliases() {
 }
 
 #[test]
+fn sizes_literal_and_symbol_immediates_with_extension_words() {
+    assert_eq!(
+        instruction_len(AssemblerCpu::Msp430, "mov #0x1234,r4").unwrap(),
+        4
+    );
+    assert_eq!(
+        instruction_len(AssemblerCpu::Msp430, "call #_main").unwrap(),
+        4
+    );
+}
+
+#[test]
 fn rejects_invalid_msp430_forms() {
     let error = encode_instruction(AssemblerCpu::Msp430, "mov #0x10000,r4", &HashMap::new(), 0)
         .unwrap_err();
