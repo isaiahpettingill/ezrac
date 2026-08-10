@@ -2,7 +2,11 @@ use super::*;
 use crate::target::AssemblerCpu;
 
 fn encode(text: &str) -> Vec<u8> {
-    encode_instruction(AssemblerCpu::Msp430, text, &HashMap::new(), 0).unwrap()
+    encode_cpu(AssemblerCpu::Msp430, text)
+}
+
+fn encode_cpu(cpu: AssemblerCpu, text: &str) -> Vec<u8> {
+    encode_instruction(cpu, text, &HashMap::new(), 0).unwrap()
 }
 
 #[test]
@@ -33,6 +37,46 @@ fn sizes_literal_and_symbol_immediates_with_extension_words() {
     assert_eq!(
         instruction_len(AssemblerCpu::Msp430, "call #_main").unwrap(),
         4
+    );
+}
+
+#[test]
+fn encodes_msp430x_address_and_extended_alu_forms() {
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "mov.a #0x12345,r5"),
+        vec![0x85, 0x01, 0x45, 0x23]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "mov.a r5,&0x23456"),
+        vec![0x62, 0x05, 0x56, 0x34]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X2, "mov.a &0x23456,r5"),
+        vec![0x25, 0x02, 0x56, 0x34]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "mov.a 0(r10),r5"),
+        vec![0x35, 0x0A, 0x00, 0x00]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "mov.a @r0,r0"),
+        vec![0x00, 0x00]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "add.a #4,r10"),
+        vec![0xAA, 0x00, 0x04, 0x00]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "cmp.a r5,r4"),
+        vec![0xD4, 0x05]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "and.a #0xFFFFF,r0"),
+        vec![0x80, 0x1F, 0x30, 0xF0, 0xFF, 0xFF]
+    );
+    assert_eq!(
+        encode_cpu(AssemblerCpu::Msp430X, "calla r0"),
+        vec![0x40, 0x13]
     );
 }
 

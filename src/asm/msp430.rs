@@ -33,6 +33,12 @@ fn encode(
             "MSP430 address instructions require MSP430X or MSP430X2",
         ));
     }
+    if mnemonic == "calla" {
+        return encode_calla(cpu, operands, labels, pc, resolve);
+    }
+    if address {
+        return encode_address_instruction(cpu, mnemonic, operands, labels, pc, resolve);
+    }
 
     match mnemonic {
         "ret" => return encode(cpu, "mov @r1+,r0", labels, pc, resolve),
@@ -95,6 +101,187 @@ struct Operand {
     reg: u8,
     mode: u8,
     extra: Vec<u16>,
+}
+
+fn encode_address_instruction(
+    cpu: AssemblerCpu,
+    mnemonic: &str,
+    operands: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+) -> Result<Vec<u8>, Diagnostic> {
+    if matches!(mnemonic, "mov" | "add" | "sub" | "cmp") {
+        return encode_extended_address_double(cpu, mnemonic, operands, labels, pc, resolve);
+    }
+
+    let (source, destination) = split_operands(operands).unwrap_or((operands.trim(), ""));
+    let source_high = extended_operand_high(cpu, source, labels, resolve)?;
+    let destination_high = if destination.is_empty() {
+        0
+    } else {
+        extended_operand_high(cpu, destination, labels, resolve)?
+    };
+    let extension = 0x1800 | (source_high << 7) | destination_high;
+    let base = if destination.is_empty() {
+        mnemonic.to_owned()
+    } else {
+        format!("{mnemonic} {source},{destination}")
+    };
+    let mut encoded = words(&[extension]);
+    encoded.extend(encode(cpu, &base, labels, pc + 2, resolve)?);
+    Ok(encoded)
+}
+
+fn encode_extended_address_double(
+    cpu: AssemblerCpu,
+    mnemonic: &str,
+    operands: &str,
+    labels: &HashMap<String, u32>,
+    _pc: u32,
+    resolve: bool,
+) -> Result<Vec<u8>, Diagnostic> {
+    let (source, destination_text) = split_operands(operands)?;
+    let opcode = match mnemonic {
+        "mov" => 0x0080,
+        "cmp" => 0x0090,
+        "add" => 0x00a0,
+        "sub" => 0x00b0,
+        _ => unreachable!(),
+    };
+
+    if let Some(value) = source.strip_prefix('#') {
+        let value = value_for_cpu(cpu, value, labels, resolve)?;
+        let destination = register(destination_text)?;
+        return Ok(words(&[
+            opcode | ((value >> 16) as u16 & 0x000f) << 8 | u16::from(destination),
+            low_word(value),
+        ]));
+    }
+    if let Some(source) = source.strip_prefix('@') {
+        if mnemonic != "mov" {
+            return Err(Diagnostic::new(format!(
+                "MSP430X `{mnemonic}.a` does not support an indirect source"
+            )));
+        }
+        let (source, autoincrement) = source
+            .strip_suffix('+')
+            .map_or((source, false), |source| (source, true));
+        let source = register(source)?;
+        let destination = register(destination_text)?;
+        let opcode = if autoincrement { 0x0010 } else { 0x0000 };
+        return Ok(words(&[opcode
+            | u16::from(source) << 8
+            | u16::from(destination)]));
+    }
+    if let Ok(source) = register(source) {
+        if mnemonic == "mov" {
+            if let Some(absolute) = destination_text.strip_prefix('&') {
+                let value = value_for_cpu(cpu, absolute, labels, resolve)?;
+                return Ok(words(&[
+                    0x0060 | u16::from(source) << 8 | ((value >> 16) as u16 & 0x000f),
+                    low_word(value),
+                ]));
+            }
+            if let Some((offset, destination)) = indexed(destination_text) {
+                let destination = register(destination)?;
+                let offset = value_for_cpu(cpu, offset, labels, resolve)?;
+                if offset > u32::from(u16::MAX) {
+                    return Err(Diagnostic::new(
+                        "MSP430X indexed address offset is outside 16 bits",
+                    ));
+                }
+                return Ok(words(&[
+                    0x0070 | u16::from(source) << 8 | u16::from(destination),
+                    low_word(offset),
+                ]));
+            }
+        }
+        let destination = register(destination_text)?;
+        let opcode = if mnemonic == "mov" {
+            0x00c0
+        } else if mnemonic == "cmp" {
+            0x00d0
+        } else if mnemonic == "add" {
+            0x00e0
+        } else {
+            0x00f0
+        };
+        return Ok(words(&[opcode
+            | u16::from(source) << 8
+            | u16::from(destination)]));
+    }
+    if let Some(absolute) = source.strip_prefix('&') {
+        if mnemonic != "mov" {
+            return Err(Diagnostic::new(format!(
+                "MSP430X `{mnemonic}.a` does not support an absolute source"
+            )));
+        }
+        let destination = register(destination_text)?;
+        let value = value_for_cpu(cpu, absolute, labels, resolve)?;
+        return Ok(words(&[
+            0x0020 | ((value >> 16) as u16 & 0x000f) << 8 | u16::from(destination),
+            low_word(value),
+        ]));
+    }
+    if let Some((offset, source)) = indexed(source) {
+        if mnemonic != "mov" {
+            return Err(Diagnostic::new(format!(
+                "MSP430X `{mnemonic}.a` does not support an indexed source"
+            )));
+        }
+        let source = register(source)?;
+        let destination = register(destination_text)?;
+        let offset = value_for_cpu(cpu, offset, labels, resolve)?;
+        if offset > u32::from(u16::MAX) {
+            return Err(Diagnostic::new(
+                "MSP430X indexed address offset is outside 16 bits",
+            ));
+        }
+        return Ok(words(&[
+            0x0030 | u16::from(source) << 8 | u16::from(destination),
+            low_word(offset),
+        ]));
+    }
+    Err(Diagnostic::new(format!(
+        "unsupported MSP430X `{mnemonic}.a` operand form `{operands}`"
+    )))
+}
+
+fn extended_operand_high(
+    cpu: AssemblerCpu,
+    text: &str,
+    labels: &HashMap<String, u32>,
+    resolve: bool,
+) -> Result<u16, Diagnostic> {
+    let text = text.trim();
+    let value = text
+        .strip_prefix('#')
+        .or_else(|| text.strip_prefix('&'))
+        .or_else(|| indexed(text).map(|(offset, _)| offset));
+    value
+        .map(|value| value_for_cpu(cpu, value, labels, resolve))
+        .transpose()
+        .map(|value| value.map_or(0, |value| ((value >> 16) as u16) & 0x000f))
+}
+
+fn encode_calla(
+    cpu: AssemblerCpu,
+    operands: &str,
+    _labels: &HashMap<String, u32>,
+    pc: u32,
+    _resolve: bool,
+) -> Result<Vec<u8>, Diagnostic> {
+    if cpu == AssemblerCpu::Msp430 {
+        return Err(Diagnostic::new("MSP430 calla requires MSP430X or MSP430X2"));
+    }
+    let operands = operands.trim();
+    if let Ok(register) = register(operands) {
+        return Ok(words(&[0x1340 | u16::from(register)]));
+    }
+    Err(Diagnostic::new(format!(
+        "unsupported MSP430X calla operand `{operands}` at 0x{pc:X}"
+    )))
 }
 
 fn parse_source(

@@ -96,13 +96,20 @@ impl SemanticModel {
         asset_base: u32,
         native_int_widths: &[u8],
     ) -> Result<Self, Diagnostic> {
-        let pointer_bytes = u8::try_from(pointer_width_bits.div_ceil(8))
-            .map_err(|_| Diagnostic::new("invalid target pointer width"))?;
-        if !matches!(pointer_bytes, 2 | 3) {
-            return Err(Diagnostic::new(format!(
-                "unsupported target pointer width {pointer_width_bits}"
-            )));
-        }
+        let pointer_bytes = match pointer_width_bits {
+            16 => 2,
+            20 => {
+                // MSP430X stores a 20-bit pointer in a four-byte MOVA value;
+                // the high nibble is reserved rather than omitted from the ABI.
+                4
+            }
+            24 => 3,
+            _ => {
+                return Err(Diagnostic::new(format!(
+                    "unsupported target pointer width {pointer_width_bits}"
+                )));
+            }
+        };
         let max_address = (1u32 << pointer_width_bits.min(24)) - 1;
         let mut model = Self {
             native_int_widths: native_int_widths.to_vec(),

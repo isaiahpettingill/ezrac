@@ -52,7 +52,7 @@ pub fn emit_msp430_assembly_with_options(
     };
     let model = SemanticModel::from_program_with_native_int_widths(
         &lowered_program,
-        16,
+        options.cpu.capabilities().memory.pointer_width_bits,
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
@@ -449,20 +449,23 @@ impl Emitter {
         self.line("    mov r10, r9");
         self.adjust_stack(-i32::from(frame.local_bytes));
 
-        for (index, param) in function.params.iter().enumerate() {
+        let mut offset = 4i16;
+        for param in &function.params {
             let ty = self.model.resolved_type(&param.ty)?;
-            let offset = 4i16
-                .checked_add(i16::try_from(index * 2).map_err(|_| {
-                    Diagnostic::new("TMS9900 function parameter frame is too large")
-                })?)
-                .ok_or_else(|| Diagnostic::new("TMS9900 function parameter frame is too large"))?;
             self.bind(
                 param.name.clone(),
                 Binding {
                     location: BindingLocation::Frame(offset),
-                    ty,
+                    ty: ty.clone(),
                 },
             )?;
+            offset = offset
+                .checked_add(
+                    i16::try_from(abi_slot_bytes(&self.model, &ty)?).map_err(|_| {
+                        Diagnostic::new("TMS9900 function parameter frame is too large")
+                    })?,
+                )
+                .ok_or_else(|| Diagnostic::new("TMS9900 function parameter frame is too large"))?;
         }
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
@@ -693,7 +696,7 @@ impl Emitter {
                     .get(value)
                     .copied()
                     .ok_or_else(|| Diagnostic::new("missing TMS9900 string storage"))?;
-                self.load_immediate(i64::from(storage.address))?;
+                self.load_immediate_typed(i64::from(storage.address), ty)?;
             }
             Expr::Ident(name) => self.load_ident(name, ty)?,
             Expr::AddressOf(name) => {
@@ -703,17 +706,17 @@ impl Emitter {
                             "TMS9900 function pointer cannot reference two-result function `{name}`"
                         )));
                     }
-                    self.line(&format!("    li r0, {}", function_label(name)));
+                    self.load_address_label(&function_label(name), ty);
                 } else if let Some(binding) = self.binding(name) {
                     let BindingLocation::Frame(offset) = binding.location else {
                         return Err(Diagnostic::new(format!(
                             "address-taken local `{name}` was allocated to a register"
                         )));
                     };
-                    self.line("    mov r9, r0");
-                    self.line(&format!("    ai r0, >{:04X}", offset as u16));
+                    self.move_value(9, 0, ty);
+                    self.line_typed(&format!("    ai r0, >{:04X}", offset as u16), ty);
                 } else if self.is_ti_cartridge() && self.model.embeds.contains_key(name) {
-                    self.line(&format!("    li r0, {}", embed_label(name)));
+                    self.load_address_label(&embed_label(name), ty);
                 } else {
                     let storage = self
                         .model
@@ -726,7 +729,7 @@ impl Emitter {
                                 "TMS9900 backend can only take the address of a global or embed, not `{name}`"
                             ))
                         })?;
-                    self.line(&format!("    li r0, >{:04X}", storage.address));
+                    self.load_immediate_typed(i64::from(storage.address), ty)?;
                 }
             }
             Expr::Deref(pointer) => {
@@ -1878,28 +1881,41 @@ impl Emitter {
                 args.len()
             )));
         }
-        let argument_bytes = i32::try_from(args.len() * 2)
-            .map_err(|_| Diagnostic::new("TMS9900 argument frame is too large"))?;
+        let argument_bytes = signature
+            .params
+            .iter()
+            .map(|ty| abi_slot_bytes(&self.model, ty))
+            .try_fold(0i32, |total, bytes| {
+                let bytes = i32::from(bytes?);
+                total
+                    .checked_add(bytes)
+                    .ok_or_else(|| Diagnostic::new("TMS9900 argument frame is too large"))
+            })?;
         self.line("    dect r10");
         self.line("    mov r1, *r10");
         self.adjust_stack(-argument_bytes);
-        for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
+        let mut offset = 0u16;
+        for (arg, ty) in args.iter().zip(&signature.params) {
             self.emit_expr(arg, ty)?;
-            let offset = u16::try_from(index * 2)
-                .map_err(|_| Diagnostic::new("TMS9900 argument frame is too large"))?;
-            self.line(&format!("    mov r0, @>{offset:04X}(r10)"));
+            self.store_argument_r0(offset, ty)?;
+            offset = offset
+                .checked_add(abi_slot_bytes(&self.model, ty)?)
+                .ok_or_else(|| Diagnostic::new("TMS9900 argument frame is too large"))?;
         }
         // Compiled functions read arguments from their stack frame. Mirroring
         // the first nine values in R0..R8 preserves the naked SDK wrapper ABI.
-        for index in 0..args.len() {
-            let offset = u16::try_from(index * 2)
-                .map_err(|_| Diagnostic::new("TMS9900 argument frame is too large"))?;
-            self.line(&format!("    mov @>{offset:04X}(r10), r{index}"));
+        let mut offset = 0u16;
+        for (index, ty) in signature.params.iter().enumerate() {
+            self.load_argument_r0(offset, ty)?;
+            self.move_value(0, index as u8, ty);
+            offset = offset
+                .checked_add(abi_slot_bytes(&self.model, ty)?)
+                .ok_or_else(|| Diagnostic::new("TMS9900 argument frame is too large"))?;
         }
         if indirect {
             let pointer_type = self.named_type(name)?;
             self.emit_expr(&Expr::Ident(name.to_owned()), &pointer_type)?;
-            self.line("    bl *r0");
+            self.line("    call r0");
         } else {
             self.line(&format!("    bl @{}", function_label(name)));
         }
@@ -2363,10 +2379,7 @@ impl Emitter {
                 self.move_value(0, 1, ty);
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
                 match scalar_width(&self.model, ty)? {
-                    1 => {
-                        self.line("    swpb r1");
-                        self.line("    movb r1, *r0");
-                    }
+                    1 => self.line("    movb r1, *r0"),
                     2 => self.line("    mov r1, *r0"),
                     4 if self.uses_native_20(ty) => self.line("    mov.a r1,*r0"),
                     _ => unreachable!("unsupported MSP430 scalar width"),
@@ -2510,7 +2523,8 @@ impl Emitter {
     fn load_indirect_r0(&mut self, ty: &Type) -> Result<(), Diagnostic> {
         match scalar_width(&self.model, ty)? {
             1 => {
-                self.line("    mov r0, r1");
+                let pointer = Type::Ptr(Box::new(ty.clone()));
+                self.move_value(0, 1, &pointer);
                 self.line("    clr r0");
                 self.line("    movb *r1, r0");
             }
@@ -2551,6 +2565,25 @@ impl Emitter {
             self.line(&format!("    mov @>{:04X}(r9), r0", offset as u16));
         }
         self.mask_value(ty);
+        Ok(())
+    }
+
+    fn load_argument_r0(&mut self, offset: u16, ty: &Type) -> Result<(), Diagnostic> {
+        if self.uses_native_20(ty) {
+            self.line(&format!("    mov.a @>{offset:04X}(r10),r0"));
+        } else {
+            self.line(&format!("    mov @>{offset:04X}(r10),r0"));
+        }
+        self.mask_value(ty);
+        Ok(())
+    }
+
+    fn store_argument_r0(&mut self, offset: u16, ty: &Type) -> Result<(), Diagnostic> {
+        if self.uses_native_20(ty) {
+            self.line(&format!("    mov.a r0,@>{offset:04X}(r10)"));
+        } else {
+            self.line(&format!("    mov r0,@>{offset:04X}(r10)"));
+        }
         Ok(())
     }
 
@@ -2711,11 +2744,18 @@ impl Emitter {
     }
 
     fn is_20_type(&self, ty: &Type) -> bool {
-        matches!(ty, Type::Named(name) if name == "u20" || name == "i20")
+        matches!(
+            self.model.resolved_type(ty).ok(),
+            Some(Type::Named(name)) if name == "u20" || name == "i20"
+        )
+    }
+
+    fn is_pointer_type(&self, ty: &Type) -> bool {
+        matches!(self.model.resolved_type(ty).ok(), Some(Type::Ptr(_)))
     }
 
     fn uses_native_20(&self, ty: &Type) -> bool {
-        self.native_20() && self.is_20_type(ty)
+        self.native_20() && (self.is_20_type(ty) || self.is_pointer_type(ty))
     }
 
     fn move_value(&mut self, source: u8, destination: u8, ty: &Type) {
@@ -2764,6 +2804,14 @@ impl Emitter {
             ))
         } else {
             self.load_immediate(value)
+        }
+    }
+
+    fn load_address_label(&mut self, label: &str, ty: &Type) {
+        if self.uses_native_20(ty) {
+            self.line(&format!("    mov.a #{label},r0"));
+        } else {
+            self.line(&format!("    mov #{label},r0"));
         }
     }
 
@@ -3137,8 +3185,8 @@ fn collect_frame_locals(
                         .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?
                         .max(2)
                 } else {
-                    scalar_width(model, &ty)?;
-                    2
+                    let width = scalar_width(model, &ty)?;
+                    if width == 4 { 4 } else { 2 }
                 };
                 if local_types.insert(name.clone(), ty).is_some() {
                     return Err(Diagnostic::new(format!("duplicate local `{name}`")));
@@ -3698,6 +3746,10 @@ fn scalar_width(model: &SemanticModel, ty: &Type) -> Result<u8, Diagnostic> {
         1..=4 => model.type_width(ty),
         _ => Err(Diagnostic::new("MSP430 source values must fit in 32 bits")),
     }
+}
+
+fn abi_slot_bytes(model: &SemanticModel, ty: &Type) -> Result<u16, Diagnostic> {
+    Ok(if scalar_width(model, ty)? == 4 { 4 } else { 2 })
 }
 
 fn type_is_signed(ty: &Type) -> bool {
