@@ -2199,9 +2199,11 @@ fn cast_layout_named_type(value: i128, name: &str) -> Result<i128, Diagnostic> {
         "bool" => Ok(i128::from(value != 0)),
         "u8" => Ok(wrap_layout_unsigned(value, 8)),
         "u16" => Ok(wrap_layout_unsigned(value, 16)),
+        "u20" => Ok(wrap_layout_unsigned(value, 20)),
         "u24" | "ptr" => Ok(wrap_layout_unsigned(value, 24)),
         "i8" => Ok(wrap_layout_signed(value, 8)),
         "i16" => Ok(wrap_layout_signed(value, 16)),
+        "i20" => Ok(wrap_layout_signed(value, 20)),
         "i24" => Ok(wrap_layout_signed(value, 24)),
         other => Err(Diagnostic::new(format!(
             "unknown layout cast type `{other}`"
@@ -2274,6 +2276,8 @@ fn parse_u32(pair: Pair<'_, Rule>) -> Result<u32, Diagnostic> {
         .trim_end_matches("i8")
         .trim_end_matches("u16")
         .trim_end_matches("i16")
+        .trim_end_matches("u20")
+        .trim_end_matches("i20")
         .trim_end_matches("u24")
         .trim_end_matches("i24");
     let parsed = if let Some(hex) = value.strip_prefix("0x") {
@@ -2293,6 +2297,8 @@ fn parse_i128(pair: Pair<'_, Rule>) -> Result<i128, Diagnostic> {
         .trim_end_matches("i8")
         .trim_end_matches("u16")
         .trim_end_matches("i16")
+        .trim_end_matches("u20")
+        .trim_end_matches("i20")
         .trim_end_matches("u24")
         .trim_end_matches("i24");
     let parsed = if let Some(hex) = value.strip_prefix("0x") {

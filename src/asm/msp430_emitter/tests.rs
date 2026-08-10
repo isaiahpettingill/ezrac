@@ -115,6 +115,17 @@ fn accepts_msp430x_source_options() {
 }
 
 #[test]
+fn emits_native_twenty_bit_values_on_msp430x() {
+    let assembly = emit(
+        "global value: u20 = 0 fn main() { value = 0xABCDEu20; value = value + 1u20 }",
+        CpuFamily::Msp430X,
+    );
+    assert!(assembly.contains("and.a #0xFFFFF"), "{assembly}");
+    assemble_subset_with_symbols_at(AssemblerCpu::Msp430X, &assembly, 0x1000)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+}
+
+#[test]
 fn rejects_non_msp430_targets() {
     let program = parse_program(Path::new("msp430-error.ezra"), "fn main() {}").unwrap();
     let error =

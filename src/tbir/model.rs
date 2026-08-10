@@ -53,6 +53,7 @@ pub struct EmbedObject {
 #[derive(Clone, Debug)]
 pub struct SemanticModel {
     pointer_bytes: u8,
+    native_int_widths: Vec<u8>,
     max_address: u32,
     next_ram: u32,
     next_rodata: u32,
@@ -77,7 +78,25 @@ impl SemanticModel {
         rodata_base: u32,
         asset_base: u32,
     ) -> Result<Self, Diagnostic> {
-        let pointer_bytes = u8::try_from(pointer_width_bits / 8)
+        Self::from_program_with_native_int_widths(
+            program,
+            pointer_width_bits,
+            ram_base,
+            rodata_base,
+            asset_base,
+            &[],
+        )
+    }
+
+    pub fn from_program_with_native_int_widths(
+        program: &Program,
+        pointer_width_bits: u16,
+        ram_base: u32,
+        rodata_base: u32,
+        asset_base: u32,
+        native_int_widths: &[u8],
+    ) -> Result<Self, Diagnostic> {
+        let pointer_bytes = u8::try_from(pointer_width_bits.div_ceil(8))
             .map_err(|_| Diagnostic::new("invalid target pointer width"))?;
         if !matches!(pointer_bytes, 2 | 3) {
             return Err(Diagnostic::new(format!(
@@ -86,6 +105,7 @@ impl SemanticModel {
         }
         let max_address = (1u32 << pointer_width_bits.min(24)) - 1;
         let mut model = Self {
+            native_int_widths: native_int_widths.to_vec(),
             pointer_bytes,
             max_address,
             next_ram: ram_base,
@@ -167,6 +187,13 @@ impl SemanticModel {
         match self.resolved_type(ty)? {
             Type::Named(name) if matches!(name.as_str(), "u8" | "i8" | "bool") => Ok(1),
             Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Ok(2),
+            Type::Named(name) if matches!(name.as_str(), "u20" | "i20") => Ok(
+                if self.native_int_widths.contains(&20) || self.native_int_widths.contains(&32) {
+                    4
+                } else {
+                    3
+                },
+            ),
             Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Ok(3),
             Type::Named(name) if name == "ptr" => Ok(self.pointer_bytes),
             Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Ok(4),

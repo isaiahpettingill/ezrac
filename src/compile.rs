@@ -223,13 +223,16 @@ fn inefficient_integer_warnings(program: &Program, cpu: CpuFamily) -> Vec<Diagno
             | CpuFamily::M6809
             | CpuFamily::Tms9900
     );
+    let warn_20 = !cpu.capabilities().native_int_widths.contains(&20);
     let warn_24 = matches!(cpu, CpuFamily::Mos6502 | CpuFamily::Ricoh2A03);
     let mut warnings = Vec::new();
 
     for unit in &program.source_units {
-        for (width, names, enabled) in
-            [(32, ["u32", "i32"], warn_32), (24, ["u24", "i24"], warn_24)]
-        {
+        for (width, names, enabled) in [
+            (32, ["u32", "i32"], warn_32),
+            (24, ["u24", "i24"], warn_24),
+            (20, ["u20", "i20"], warn_20),
+        ] {
             if !enabled {
                 continue;
             }

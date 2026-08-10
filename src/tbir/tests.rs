@@ -510,6 +510,46 @@ fn semantic_model_uses_target_pointer_width() {
 }
 
 #[test]
+fn semantic_model_uses_target_storage_for_twenty_bit_integers() {
+    let program = parse_program(
+        Path::new("test.ezra"),
+        "global value: u20 = 0\nfn main() {}",
+    )
+    .unwrap();
+    let msp430x = model::SemanticModel::from_program_with_native_int_widths(
+        &program,
+        20,
+        0x1000,
+        0x2000,
+        0x3000,
+        &[8, 16, 20],
+    )
+    .unwrap();
+    let generic = model::SemanticModel::from_program_with_native_int_widths(
+        &program,
+        16,
+        0x1000,
+        0x2000,
+        0x3000,
+        &[8, 16],
+    )
+    .unwrap();
+    let m68k = model::SemanticModel::from_program_with_native_int_widths(
+        &program,
+        24,
+        0x1000,
+        0x2000,
+        0x3000,
+        &[8, 16, 24, 32],
+    )
+    .unwrap();
+
+    assert_eq!(msp430x.globals["value"].size, 4);
+    assert_eq!(generic.globals["value"].size, 3);
+    assert_eq!(m68k.globals["value"].size, 4);
+}
+
+#[test]
 fn semantic_model_layouts_aggregates_and_function_slots() {
     let program = parse_program(
         Path::new("test.ezra"),

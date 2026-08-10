@@ -22,12 +22,13 @@ pub fn lower(
     let memory = memory_model(options)?;
     let capabilities = options.cpu.capabilities();
     let pointer_width_bits = capabilities.memory.pointer_width_bits as u8;
-    let semantic = SemanticModel::from_program(
+    let semantic = SemanticModel::from_program_with_native_int_widths(
         lowered_program,
         u16::from(pointer_width_bits),
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
+        capabilities.native_int_widths,
     )?;
     validate_constant_array_indices(&semantic, lowered_program)?;
     let objects = provenance::memory_objects(lowered_program, &semantic, &memory);

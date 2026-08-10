@@ -50,12 +50,13 @@ pub fn emit_msp430_assembly_with_options(
         let tbir = TbirProgram::lower(&hir, program, &options)?;
         (tbir.lowered_program, tbir.source_comments)
     };
-    let model = SemanticModel::from_program(
+    let model = SemanticModel::from_program_with_native_int_widths(
         &lowered_program,
         16,
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
+        options.cpu.capabilities().native_int_widths,
     )?;
     Emitter::new(model, options.clone())
         .emit(&lowered_program)
@@ -538,10 +539,9 @@ impl Emitter {
                     self.emit_expr(value, &ty)?;
                 } else {
                     self.load_place(target, &ty)?;
-                    self.line("    dect r10");
-                    self.line("    mov r0, *r10");
+                    self.push_value(&ty);
                     self.emit_expr(value, &ty)?;
-                    self.line("    mov *r10+, r1");
+                    self.pop_value_to(1, &ty);
                     self.emit_binary(assign_binary(*op), &ty)?;
                 }
                 self.store_place(target, &ty)?;
@@ -684,7 +684,7 @@ impl Emitter {
 
     fn emit_expr(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
         match expr {
-            Expr::Int(value) | Expr::TypedInt(value, _) => self.load_immediate(*value)?,
+            Expr::Int(value) | Expr::TypedInt(value, _) => self.load_immediate_typed(*value, ty)?,
             Expr::Bool(value) => self.load_immediate(i64::from(*value))?,
             Expr::Char(value) => self.load_immediate(i64::from(*value))?,
             Expr::String(value) => {
@@ -739,8 +739,8 @@ impl Emitter {
             Expr::Unary { op, expr } => {
                 self.emit_expr(expr, ty)?;
                 match op {
-                    UnaryOp::Neg => self.line("    neg r0"),
-                    UnaryOp::BitNot => self.line("    inv r0"),
+                    UnaryOp::Neg => self.line_typed("    neg r0", ty),
+                    UnaryOp::BitNot => self.line_typed("    inv r0", ty),
                     UnaryOp::Not => {
                         let yes = self.next_label("not_true");
                         let done = self.next_label("not_done");
@@ -772,16 +772,15 @@ impl Emitter {
                         ty.clone()
                     };
                     self.emit_expr(left, &operand_ty)?;
-                    self.line("    mov r0, r1");
+                    self.move_value(0, 1, &operand_ty);
                     if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
                         && let Some(count) = constant_shift_count(right)?
                     {
                         self.emit_shift(*op, &operand_ty, Some(count))?;
                     } else {
-                        self.line("    dect r10");
-                        self.line("    mov r0, *r10");
+                        self.push_value(&operand_ty);
                         self.emit_expr(right, &operand_ty)?;
-                        self.line("    mov *r10+, r1");
+                        self.pop_value_to(1, &operand_ty);
                         self.emit_binary(*op, &operand_ty)?;
                     }
                 }
@@ -1436,7 +1435,7 @@ impl Emitter {
         self.line("    mov r0, r3");
         self.line("    mov r1, r0");
         self.line("    mov r3, r1");
-        self.emit_software_divide();
+        self.emit_software_divide(bits, ty);
         self.line("    mov r2, r0");
         if signed {
             self.line("    andi r4, >0001");
@@ -1966,25 +1965,25 @@ impl Emitter {
     fn emit_binary(&mut self, op: BinaryOp, ty: &Type) -> Result<(), Diagnostic> {
         match op {
             BinaryOp::Add => {
-                self.line("    a r0, r1");
-                self.line("    mov r1, r0");
+                self.line_typed("    a r0, r1", ty);
+                self.move_value(1, 0, ty);
             }
             BinaryOp::Sub => {
-                self.line("    s r0, r1");
-                self.line("    mov r1, r0");
+                self.line_typed("    s r0, r1", ty);
+                self.move_value(1, 0, ty);
             }
             BinaryOp::BitAnd => {
-                self.line("    inv r0");
-                self.line("    szc r0, r1");
-                self.line("    mov r1, r0");
+                self.line_typed("    inv r0", ty);
+                self.line_typed("    szc r0, r1", ty);
+                self.move_value(1, 0, ty);
             }
             BinaryOp::BitOr => {
-                self.line("    soc r0, r1");
-                self.line("    mov r1, r0");
+                self.line_typed("    soc r0, r1", ty);
+                self.move_value(1, 0, ty);
             }
             BinaryOp::BitXor => {
-                self.line("    xor r0, r1");
-                self.line("    mov r1, r0");
+                self.line_typed("    xor r0, r1", ty);
+                self.move_value(1, 0, ty);
             }
             BinaryOp::Shl | BinaryOp::Shr => self.emit_shift(op, ty, None)?,
             BinaryOp::Eq
@@ -1993,7 +1992,7 @@ impl Emitter {
             | BinaryOp::Le
             | BinaryOp::Gt
             | BinaryOp::Ge => {
-                self.line("    c r1, r0");
+                self.line_typed("    c r1, r0", ty);
                 let signed = type_is_signed(ty);
                 match (op, signed) {
                     (BinaryOp::Eq, _) => self.emit_boolean_from_jump("jeq"),
@@ -2012,16 +2011,15 @@ impl Emitter {
             BinaryOp::And | BinaryOp::Or => {
                 unreachable!("logical expressions are emitted before evaluating the right operand")
             }
-            BinaryOp::Mul => self.multiply(type_is_signed(ty)),
+            BinaryOp::Mul => self.multiply(type_is_signed(ty), ty),
             BinaryOp::Div | BinaryOp::Mod => self.divide(
                 op == BinaryOp::Mod,
                 type_is_signed(ty),
                 scalar_width(&self.model, ty)? == 1,
+                ty,
             ),
         }
-        if scalar_width(&self.model, ty)? == 1 {
-            self.line("    andi r0, >00FF");
-        }
+        self.mask_value(ty);
         Ok(())
     }
 
@@ -2034,6 +2032,7 @@ impl Emitter {
         let right = op == BinaryOp::Shr;
         let signed = type_is_signed(ty);
         let byte = scalar_width(&self.model, ty)? == 1;
+        let bits = if self.uses_native_20(ty) { 20 } else { 16 };
 
         if right && signed && byte {
             self.line("    sla r1, 8");
@@ -2042,8 +2041,8 @@ impl Emitter {
 
         if let Some(count) = constant_count {
             if count == 0 {
-                self.line("    mov r1, r0");
-            } else if count < 16 {
+                self.move_value(1, 0, ty);
+            } else if count < bits {
                 let mnemonic = if right && signed {
                     "sra"
                 } else if right {
@@ -2051,11 +2050,11 @@ impl Emitter {
                 } else {
                     "sla"
                 };
-                self.line(&format!("    {mnemonic} r1, {count}"));
-                self.line("    mov r1, r0");
+                self.line_typed(&format!("    {mnemonic} r1, {count}"), ty);
+                self.move_value(1, 0, ty);
             } else if right && signed {
-                self.line("    sra r1, 15");
-                self.line("    mov r1, r0");
+                self.line_typed(&format!("    sra r1, {}", bits - 1), ty);
+                self.move_value(1, 0, ty);
             } else {
                 self.line("    clr r0");
             }
@@ -2067,7 +2066,7 @@ impl Emitter {
         let done = self.next_label("shift_done");
         self.line("    ci r0, 0");
         self.line(&format!("    jeq {zero}"));
-        self.line("    ci r0, 15");
+        self.line(&format!("    ci r0, {}", bits - 1));
         self.line(&format!("    jh {overflow}"));
         // Per the TI TMS9900 Programmer's Guide, a zero instruction count takes
         // the count from the low four bits of R0. Expression evaluation already
@@ -2079,27 +2078,29 @@ impl Emitter {
         } else {
             "sla"
         };
-        self.line(&format!("    {mnemonic} r1, 0"));
-        self.line("    mov r1, r0");
+        self.line_typed(&format!("    {mnemonic} r1, 0"), ty);
+        self.move_value(1, 0, ty);
         self.line(&format!("    b @{done}"));
         self.line(&format!("{zero}:"));
-        self.line("    mov r1, r0");
+        self.move_value(1, 0, ty);
         self.line(&format!("    b @{done}"));
         self.line(&format!("{overflow}:"));
         if right && signed {
-            self.line("    sra r1, 15");
-            self.line("    mov r1, r0");
+            self.line_typed(&format!("    sra r1, {}", bits - 1), ty);
+            self.move_value(1, 0, ty);
         } else {
             self.line("    clr r0");
         }
         self.line(&format!("{done}:"));
+        self.mask_value(ty);
         Ok(())
     }
 
-    fn multiply(&mut self, signed: bool) {
+    fn multiply(&mut self, signed: bool, ty: &Type) {
         // MSP430 has no core multiply instruction. Normalize signed operands,
-        // then use a 16-iteration shift/add loop. The low word is returned in
+        // then use a width-sized shift/add loop. The low value is returned in
         // R0; the source-shaped registers R3..R6 map to MSP430 scratch R7..R10.
+        let bits = if self.uses_native_20(ty) { 20 } else { 16 };
         let product_nonnegative = self.next_label("mul_product_nonnegative");
         let done = self.next_label("mul_done");
         if signed {
@@ -2117,56 +2118,62 @@ impl Emitter {
             self.line("    ai r3, 1");
             self.line(&format!("{right_nonnegative}:"));
         }
-        self.line("    mov r1, r4");
-        self.line("    mov r0, r5");
-        self.line("    clr r2");
-        self.line("    li r6, 16");
+        self.move_value(1, 4, ty);
+        self.move_value(0, 5, ty);
+        if self.uses_native_20(ty) {
+            self.line("    mov.a #0,r2");
+        } else {
+            self.line("    clr r2");
+        }
+        self.line(&format!("    li r6, {bits}"));
         let loop_label = self.next_label("mul_loop");
         let no_add = self.next_label("mul_no_add");
         self.line(&format!("{loop_label}:"));
-        self.line("    bit #1,r4");
+        self.line_typed("    bit #1,r4", ty);
         self.line(&format!("    jeq {no_add}"));
-        self.line("    a r5, r2");
+        self.line_typed("    a r5, r2", ty);
         self.line(&format!("{no_add}:"));
-        self.line("    sla r5, 1");
-        self.line("    srl r4, 1");
+        self.line_typed("    sla r5, 1", ty);
+        self.line_typed("    srl r4, 1", ty);
         self.line("    dec r6");
         self.line(&format!("    jne {loop_label}"));
         if signed {
             self.line("    andi r3, 1");
             self.line(&format!("    jeq {product_nonnegative}"));
-            self.line("    neg r2");
+            self.line_typed("    neg r2", ty);
             self.line(&format!("    b @{done}"));
             self.line(&format!("{product_nonnegative}:"));
         }
         self.line(&format!("{done}:"));
-        self.line("    mov r2, r0");
+        self.move_value(2, 0, ty);
+        self.mask_value(ty);
     }
 
-    fn emit_software_divide(&mut self) {
+    fn emit_software_divide(&mut self, bits: u16, ty: &Type) {
         // Unsigned restoring division. R1 is the dividend, R0 the divisor,
         // R2 receives the quotient, and R3 receives the remainder.
         let loop_label = self.next_label("div_loop");
         let no_subtract = self.next_label("div_no_subtract");
         self.line("    clr r2");
         self.line("    clr r3");
-        self.line("    li r6, 16");
+        self.line(&format!("    li r6, {bits}"));
         self.line(&format!("{loop_label}:"));
-        self.line("    sla r1, 1");
-        self.line("    addc r3, r3");
-        self.line("    c r0, r3");
+        self.line_typed("    sla r1, 1", ty);
+        self.line_typed("    addc r3, r3", ty);
+        self.line_typed("    c r0, r3", ty);
         self.line(&format!("    jl {no_subtract}"));
-        self.line("    s r0, r3");
-        self.line("    ori r2, 1");
+        self.line_typed("    s r0, r3", ty);
+        self.line_typed("    ori r2, 1", ty);
         self.line(&format!("{no_subtract}:"));
         self.line("    dec r6");
         self.line(&format!("    jne {loop_label}"));
     }
 
-    fn divide(&mut self, remainder: bool, signed: bool, byte: bool) {
+    fn divide(&mut self, remainder: bool, signed: bool, byte: bool, ty: &Type) {
         // DIV divides the unsigned R2:R3 dividend by its source, leaving the
         // quotient in R2 and remainder in R3. Expressions arrive as left in R1
         // and right in R0, so form a zero-extended 32-bit dividend first.
+        let bits = if self.uses_native_20(ty) { 20 } else { 16 };
         let zero = self.next_label("div_zero");
         let done = self.next_label("div_done");
         self.line("    ci r0, 0");
@@ -2197,7 +2204,7 @@ impl Emitter {
             self.line("    neg r0");
             self.line("    ai r4, 1");
             self.line(&format!("{right_nonnegative}:"));
-            self.emit_software_divide();
+            self.emit_software_divide(bits, ty);
 
             if remainder {
                 self.line("    ci r5, 0");
@@ -2214,7 +2221,7 @@ impl Emitter {
                 self.line("    mov r2, r0");
             }
         } else {
-            self.emit_software_divide();
+            self.emit_software_divide(bits, ty);
             self.line(if remainder {
                 "    mov r3, r0"
             } else {
@@ -2225,6 +2232,7 @@ impl Emitter {
         self.line(&format!("{zero}:"));
         self.line("    clr r0");
         self.line(&format!("{done}:"));
+        self.mask_value(ty);
     }
 
     fn emit_boolean_from_jump(&mut self, jump: &str) {
@@ -2352,7 +2360,7 @@ impl Emitter {
                 )))
             }
             Place::Deref(pointer) => {
-                self.line("    mov r0, r1");
+                self.move_value(0, 1, ty);
                 self.emit_expr(pointer, &Type::Ptr(Box::new(ty.clone())))?;
                 match scalar_width(&self.model, ty)? {
                     1 => {
@@ -2360,7 +2368,8 @@ impl Emitter {
                         self.line("    movb r1, *r0");
                     }
                     2 => self.line("    mov r1, *r0"),
-                    _ => unreachable!("scalar_width accepts only one or two bytes"),
+                    4 if self.uses_native_20(ty) => self.line("    mov.a r1,*r0"),
+                    _ => unreachable!("unsupported MSP430 scalar width"),
                 }
                 Ok(())
             }
@@ -2506,8 +2515,10 @@ impl Emitter {
                 self.line("    movb *r1, r0");
             }
             2 => self.line("    mov *r0, r0"),
-            _ => unreachable!("scalar_width accepts only one or two bytes"),
+            4 if self.uses_native_20(ty) => self.line("    mov.a @r0,r0"),
+            _ => unreachable!("unsupported MSP430 scalar width"),
         }
+        self.mask_value(ty);
         Ok(())
     }
 
@@ -2515,10 +2526,8 @@ impl Emitter {
         match binding.location {
             BindingLocation::Frame(offset) => self.load_frame_r0(offset, &binding.ty),
             BindingLocation::Register(register) => {
-                self.line(&format!("    mov r{register}, r0"));
-                if scalar_width(&self.model, &binding.ty)? == 1 {
-                    self.line("    andi r0, >00FF");
-                }
+                self.move_value(register, 0, &binding.ty);
+                self.mask_value(&binding.ty);
                 Ok(())
             }
         }
@@ -2528,28 +2537,30 @@ impl Emitter {
         match binding.location {
             BindingLocation::Frame(offset) => self.store_frame_r0(offset, &binding.ty),
             BindingLocation::Register(register) => {
-                if scalar_width(&self.model, &binding.ty)? == 1 {
-                    self.line("    andi r0, >00FF");
-                }
-                self.line(&format!("    mov r0, r{register}"));
+                self.mask_value(&binding.ty);
+                self.move_value(0, register, &binding.ty);
                 Ok(())
             }
         }
     }
 
     fn load_frame_r0(&mut self, offset: i16, ty: &Type) -> Result<(), Diagnostic> {
-        self.line(&format!("    mov @>{:04X}(r9), r0", offset as u16));
-        if scalar_width(&self.model, ty)? == 1 {
-            self.line("    andi r0, >00FF");
+        if self.uses_native_20(ty) {
+            self.line(&format!("    mov.a @>{:04X}(r9),r0", offset as u16));
+        } else {
+            self.line(&format!("    mov @>{:04X}(r9), r0", offset as u16));
         }
+        self.mask_value(ty);
         Ok(())
     }
 
     fn store_frame_r0(&mut self, offset: i16, ty: &Type) -> Result<(), Diagnostic> {
-        if scalar_width(&self.model, ty)? == 1 {
-            self.line("    andi r0, >00FF");
+        self.mask_value(ty);
+        if self.uses_native_20(ty) {
+            self.line(&format!("    mov.a r0,@>{:04X}(r9)", offset as u16));
+        } else {
+            self.line(&format!("    mov r0, @>{:04X}(r9)", offset as u16));
         }
-        self.line(&format!("    mov r0, @>{:04X}(r9)", offset as u16));
         Ok(())
     }
 
@@ -2589,7 +2600,14 @@ impl Emitter {
                 self.line(&format!("    movb @>{address:04X}, {register}"));
             }
             2 => self.line(&format!("    mov @>{address:04X}, {register}")),
-            _ => return Err(Diagnostic::new("TMS9900 source values must fit in 16 bits")),
+            4 if self.uses_native_20(ty) => {
+                self.line(&format!("    mov.a @>{address:05X},{register}"))
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "MSP430 source values must fit in the target width",
+                ));
+            }
         }
         Ok(())
     }
@@ -2602,7 +2620,12 @@ impl Emitter {
         match scalar_width(&self.model, ty)? {
             1 => self.line(&format!("    movb r0, @>{address:04X}")),
             2 => self.line(&format!("    mov r0, @>{address:04X}")),
-            _ => return Err(Diagnostic::new("TMS9900 source values must fit in 16 bits")),
+            4 if self.uses_native_20(ty) => self.line(&format!("    mov.a r0,@>{address:05X}")),
+            _ => {
+                return Err(Diagnostic::new(
+                    "MSP430 source values must fit in the target width",
+                ));
+            }
         }
         Ok(())
     }
@@ -2677,6 +2700,122 @@ impl Emitter {
         if !translated.ends_with('\n') {
             self.out.push('\n');
         }
+    }
+
+    fn native_20(&self) -> bool {
+        self.options
+            .cpu
+            .capabilities()
+            .native_int_widths
+            .contains(&20)
+    }
+
+    fn is_20_type(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Named(name) if name == "u20" || name == "i20")
+    }
+
+    fn uses_native_20(&self, ty: &Type) -> bool {
+        self.native_20() && self.is_20_type(ty)
+    }
+
+    fn move_value(&mut self, source: u8, destination: u8, ty: &Type) {
+        if self.uses_native_20(ty) {
+            self.line(&format!("    mov.a r{source}, r{destination}"));
+        } else {
+            self.line(&format!("    mov r{source}, r{destination}"));
+        }
+    }
+
+    fn push_value(&mut self, ty: &Type) {
+        if self.uses_native_20(ty) {
+            self.line("    add.a #0xFFFFC,r10");
+            self.line("    mov.a r0,0(r10)");
+        } else {
+            self.line("    dect r10");
+            self.line("    mov r0, *r10");
+        }
+    }
+
+    fn pop_value_to(&mut self, register: u8, ty: &Type) {
+        if self.uses_native_20(ty) {
+            self.line(&format!("    mov.a 0(r10),r{register}"));
+            self.line("    add.a #4,r10");
+        } else {
+            self.line(&format!("    mov *r10+, r{register}"));
+        }
+    }
+
+    fn mask_value(&mut self, ty: &Type) {
+        if self.uses_native_20(ty) {
+            self.line("    and.a #0xFFFFF,r0");
+        } else if scalar_width(&self.model, ty).ok() == Some(1) {
+            self.line("    andi r0, >00FF");
+        }
+    }
+
+    fn load_immediate_typed(&mut self, value: i64, ty: &Type) -> Result<(), Diagnostic> {
+        if self.uses_native_20(ty) {
+            let value = (value as i128 & 0x0F_FFFF) as u32;
+            self.line(&format!("    mov.a #0x{value:05X},r0"));
+            Ok(())
+        } else if self.is_20_type(ty) {
+            Err(Diagnostic::new(
+                "u20 and i20 values require an MSP430X or MSP430X2 target",
+            ))
+        } else {
+            self.load_immediate(value)
+        }
+    }
+
+    fn line_typed(&mut self, line: &str, ty: &Type) {
+        if !self.uses_native_20(ty) {
+            self.line(line);
+            return;
+        }
+        let trimmed = line.trim();
+        let Some((mnemonic, operands)) = trimmed.split_once(char::is_whitespace) else {
+            self.line(line);
+            return;
+        };
+        let mapped = match mnemonic {
+            "a" => "add.a",
+            "s" => "sub.a",
+            "c" | "ci" => "cmp.a",
+            "soc" => "bis.a",
+            "szc" => "bic.a",
+            "mov" => "mov.a",
+            "xor" => "xor.a",
+            "and" => "and.a",
+            "andi" => "and.a",
+            "ori" => "bis.a",
+            "inc" => "add.a",
+            "dec" => "sub.a",
+            "sra" => "rra.a",
+            "srl" => "rrc.a",
+            "sla" => "add.a",
+            "inv" => {
+                self.line("    xor.a #0xFFFFF,r0");
+                return;
+            }
+            "neg" => {
+                self.line("    xor.a #0xFFFFF,r0");
+                self.line("    add.a #1,r0");
+                return;
+            }
+            _ => {
+                self.line(line);
+                return;
+            }
+        };
+        let operands = if matches!(mnemonic, "ci" | "andi" | "ori" | "inc" | "dec") {
+            operands
+                .split_once(',')
+                .map(|(left, right)| format!("{},{}", right.trim(), left.trim()))
+                .unwrap_or_else(|| operands.trim().to_owned())
+        } else {
+            operands.trim().to_owned()
+        };
+        self.line(&format!("    {mapped} {operands}"));
     }
 }
 
@@ -3531,6 +3670,7 @@ fn tms_intrinsic_integer_bits(ty: &Type) -> Result<u16, Diagnostic> {
         Type::Named(name) => match name.as_str() {
             "u8" | "i8" => Ok(8),
             "u16" | "i16" => Ok(16),
+            "u20" | "i20" => Ok(20),
             _ => Err(Diagnostic::new(format!(
                 "intrinsic integer operation does not support type `{name}`"
             ))),
@@ -3542,11 +3682,11 @@ fn tms_intrinsic_integer_bits(ty: &Type) -> Result<u16, Diagnostic> {
 }
 
 fn tms_intrinsic_integer_signed(ty: &Type) -> bool {
-    matches!(ty, Type::Named(name) if name == "i8" || name == "i16")
+    matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i20"))
 }
 
 fn tms_intrinsic_integer_mask(bits: u16) -> u16 {
-    if bits == 16 {
+    if bits >= 16 {
         u16::MAX
     } else {
         (1u16 << bits) - 1
@@ -3555,13 +3695,13 @@ fn tms_intrinsic_integer_mask(bits: u16) -> u16 {
 
 fn scalar_width(model: &SemanticModel, ty: &Type) -> Result<u8, Diagnostic> {
     match model.type_width(ty)? {
-        1 | 2 => model.type_width(ty),
-        _ => Err(Diagnostic::new("TMS9900 source values must fit in 16 bits")),
+        1..=4 => model.type_width(ty),
+        _ => Err(Diagnostic::new("MSP430 source values must fit in 32 bits")),
     }
 }
 
 fn type_is_signed(ty: &Type) -> bool {
-    matches!(ty, Type::Named(name) if name == "i8" || name == "i16")
+    matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i20"))
 }
 
 fn constant_shift_count(expr: &Expr) -> Result<Option<u16>, Diagnostic> {

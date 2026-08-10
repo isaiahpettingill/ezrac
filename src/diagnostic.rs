@@ -222,6 +222,8 @@ fn source_integer_value(text: &str) -> Option<i64> {
         .or_else(|| text.strip_suffix("i32"))
         .or_else(|| text.strip_suffix("u24"))
         .or_else(|| text.strip_suffix("i24"))
+        .or_else(|| text.strip_suffix("u20"))
+        .or_else(|| text.strip_suffix("i20"))
         .or_else(|| text.strip_suffix("u16"))
         .or_else(|| text.strip_suffix("i16"))
         .or_else(|| text.strip_suffix("u8"))

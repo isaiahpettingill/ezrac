@@ -886,7 +886,7 @@ fn cart_type_size(
         Type::Named(name) => match name.as_str() {
             "bool" | "u8" | "i8" => Ok(1),
             "u16" | "i16" => Ok(2),
-            "u24" | "i24" | "ptr" => Ok(3),
+            "u20" | "i20" | "u24" | "i24" | "ptr" => Ok(3),
             "u32" | "i32" => Ok(4),
             _ => Err(Diagnostic::new(format!("unknown storage type `{name}`"))),
         },
@@ -1429,6 +1429,8 @@ fn wrap_embed_const_value(
                 "i8" => (8, true),
                 "u16" => (16, false),
                 "i16" => (16, true),
+                "u20" => (20, false),
+                "i20" => (20, true),
                 "u24" | "ptr" => (24, false),
                 "i24" => (24, true),
                 "u32" => (32, false),
@@ -1690,7 +1692,7 @@ fn embed_expr_is_signed(expr: &Expr, aliases: &HashMap<String, Type>) -> bool {
     match expr {
         Expr::TypedInt(_, ty) | Expr::Cast { ty, .. } => {
             resolve_embed_const_type(ty, aliases).is_ok_and(|ty| {
-                matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24" | "i32"))
+                matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i20" | "i24" | "i32"))
             })
         }
         Expr::Unary {

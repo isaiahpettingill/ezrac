@@ -306,7 +306,15 @@ impl CpuFamily {
                 prefer_code_size: true,
                 has_cache: false,
             },
-            Self::M68k | Self::Wdc65C816 => TargetCapabilities {
+            Self::M68k => TargetCapabilities {
+                name: self.as_str(),
+                memory: memory24,
+                native_int_widths: &[8, 16, 24, 32],
+                supports_port_io: false,
+                prefer_code_size: true,
+                has_cache: false,
+            },
+            Self::Wdc65C816 => TargetCapabilities {
                 name: self.as_str(),
                 memory: memory24,
                 native_int_widths: &[8, 16, 24],

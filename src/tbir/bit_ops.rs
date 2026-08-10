@@ -23,10 +23,12 @@ impl BitWidth {
     pub const W1: Self = Self(1);
     pub const W8: Self = Self(8);
     pub const W16: Self = Self(16);
+    pub const W20: Self = Self(20);
     pub const W24: Self = Self(24);
     pub const W32: Self = Self(32);
     pub const U8: Self = Self::W8;
     pub const U16: Self = Self::W16;
+    pub const U20: Self = Self::W20;
     pub const U24: Self = Self::W24;
     pub const U32: Self = Self::W32;
 
@@ -754,6 +756,8 @@ fn ast_bit_type(ty: &Type) -> Option<BitType> {
         "i8" => (BitWidth::W8, BitSignedness::Signed),
         "u16" => (BitWidth::W16, BitSignedness::Unsigned),
         "i16" => (BitWidth::W16, BitSignedness::Signed),
+        "u20" => (BitWidth::W20, BitSignedness::Unsigned),
+        "i20" => (BitWidth::W20, BitSignedness::Signed),
         "u24" => (BitWidth::W24, BitSignedness::Unsigned),
         "i24" => (BitWidth::W24, BitSignedness::Signed),
         "u32" => (BitWidth::W32, BitSignedness::Unsigned),

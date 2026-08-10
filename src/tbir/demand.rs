@@ -91,6 +91,7 @@ fn integer_width_bits(ty: &Type) -> Option<u8> {
     match ty {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => Some(8),
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Some(16),
+        Type::Named(name) if matches!(name.as_str(), "u20" | "i20") => Some(20),
         Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Some(24),
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Some(32),
         _ => None,
@@ -100,7 +101,7 @@ fn integer_width_bits(ty: &Type) -> Option<u8> {
 fn is_unsigned_integer(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::Named(name) if matches!(name.as_str(), "u8" | "u16" | "u24" | "u32")
+        Type::Named(name) if matches!(name.as_str(), "u8" | "u16" | "u20" | "u24" | "u32")
     )
 }
 

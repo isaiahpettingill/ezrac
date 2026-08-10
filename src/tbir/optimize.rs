@@ -505,7 +505,7 @@ fn zero_value(ty: &Type) -> Result<Expr, ComptimeFailure> {
         Type::Named(name)
             if matches!(
                 name.as_str(),
-                "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "u32" | "i32"
+                "u8" | "i8" | "u16" | "i16" | "u20" | "i20" | "u24" | "i24" | "u32" | "i32"
             ) =>
         {
             Ok(Expr::TypedInt(0, ty.clone()))
@@ -554,6 +554,7 @@ fn integer_bits(ty: &Type) -> Option<u32> {
     match ty {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => Some(8),
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Some(16),
+        Type::Named(name) if matches!(name.as_str(), "u20" | "i20") => Some(20),
         Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Some(24),
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Some(32),
         _ => None,
@@ -3871,6 +3872,7 @@ fn known_bits_mask(ty: &Type) -> Option<i64> {
     match ty {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => Some(0xff),
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => Some(0xffff),
+        Type::Named(name) if matches!(name.as_str(), "u20" | "i20") => Some(0x0f_ffff),
         Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Some(0xffffff),
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Some(0xffff_ffff),
         _ => None,
@@ -4632,13 +4634,14 @@ fn fold_unary(op: UnaryOp, expr: &Expr) -> Option<Expr> {
 }
 
 fn type_is_unsigned_integer(ty: &Type) -> bool {
-    matches!(ty, Type::Named(name) if matches!(name.as_str(), "u8" | "u16" | "u24" | "u32"))
+    matches!(ty, Type::Named(name) if matches!(name.as_str(), "u8" | "u16" | "u20" | "u24" | "u32"))
 }
 
 fn typed_integer_mask(ty: &Type) -> Option<i64> {
     let bits = match ty {
         Type::Named(name) if matches!(name.as_str(), "u8" | "i8") => 8,
         Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => 16,
+        Type::Named(name) if matches!(name.as_str(), "u20" | "i20") => 20,
         Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => 24,
         Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => 32,
         _ => return None,

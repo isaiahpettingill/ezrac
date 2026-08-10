@@ -12442,7 +12442,7 @@ fn const_access_name(path: &AccessPath) -> Result<String, Diagnostic> {
 }
 
 fn type_is_signed(ty: &Type) -> bool {
-    matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i24"))
+    matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i20" | "i24"))
 }
 
 fn struct_scalar_type<'a>(

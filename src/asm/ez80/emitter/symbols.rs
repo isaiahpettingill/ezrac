@@ -996,7 +996,9 @@ impl Symbols {
                 Ok(ValueWidth::U8)
             }
             Type::Named(name) if name == "u16" || name == "i16" => Ok(ValueWidth::U16),
-            Type::Named(name) if name == "u24" || name == "i24" => Ok(ValueWidth::U24),
+            Type::Named(name) if matches!(name.as_str(), "u20" | "i20" | "u24" | "i24") => {
+                Ok(ValueWidth::U24)
+            }
             Type::Named(name) if name == "ptr" => Ok(self.function_pointer_width),
             Type::Named(name) if matches!(name.as_str(), "u32" | "i32" | "u64" | "i64") => {
                 Err(Diagnostic::new(format!(
@@ -1025,7 +1027,7 @@ impl Symbols {
             Type::Named(name)
                 if matches!(
                     name.as_str(),
-                    "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "bool" | "ptr"
+                    "u8" | "i8" | "u16" | "i16" | "u20" | "i20" | "u24" | "i24" | "bool" | "ptr"
                 ) =>
             {
                 Ok(())

@@ -39,6 +39,28 @@ fn warns_for_costly_wide_integer_targets() {
 }
 
 #[test]
+fn warns_when_twenty_bit_integers_are_not_native() {
+    let program = parse_program(
+        Path::new("wide.ezra"),
+        "fn main() { let unsigned: u20 = 0xABCDEu20; let signed: i20 = -1i20 }",
+    )
+    .unwrap();
+
+    assert!(
+        inefficient_integer_warnings(&program, CpuFamily::Z80)
+            .iter()
+            .any(|warning| warning.message.contains("20-bit"))
+    );
+    assert!(
+        inefficient_integer_warnings(&program, CpuFamily::M68k)
+            .iter()
+            .any(|warning| warning.message.contains("20-bit"))
+    );
+    assert!(inefficient_integer_warnings(&program, CpuFamily::Msp430X).is_empty());
+    assert!(inefficient_integer_warnings(&program, CpuFamily::Msp430X2).is_empty());
+}
+
+#[test]
 fn reports_array_and_struct_function_returns_before_codegen() {
     let program = parse_program(
         Path::new("aggregate_return.ezra"),

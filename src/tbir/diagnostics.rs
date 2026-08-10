@@ -1051,7 +1051,17 @@ fn validate_user_multi_value_returns(program: &Program) -> Result<(), Diagnostic
             Type::Named(name)
                 if matches!(
                     name.as_str(),
-                    "u8" | "i8" | "u16" | "i16" | "u24" | "i24" | "u32" | "i32" | "bool" | "char"
+                    "u8" | "i8"
+                        | "u16"
+                        | "i16"
+                        | "u20"
+                        | "i20"
+                        | "u24"
+                        | "i24"
+                        | "u32"
+                        | "i32"
+                        | "bool"
+                        | "char"
                 ) =>
             {
                 Ok(())
@@ -1756,7 +1766,7 @@ fn validate_inline_asm_operand_classes(program: &crate::ast::Program) -> Result<
             Type::Named(name) if matches!(name.as_str(), "u16" | "i16") => {
                 matches!(class, "reg16" | "mem" | "imm")
             }
-            Type::Named(name) if matches!(name.as_str(), "u24" | "i24" | "ptr") => {
+            Type::Named(name) if matches!(name.as_str(), "u20" | "i20" | "u24" | "i24" | "ptr") => {
                 matches!(class, "reg24" | "mem" | "imm")
             }
             Type::Ptr(_) | Type::Function { .. } => {

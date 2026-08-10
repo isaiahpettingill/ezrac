@@ -464,6 +464,8 @@ fn scalar_type(ty: &Type) -> Option<ScalarType> {
         "i8" => (8, true),
         "u16" => (16, false),
         "i16" => (16, true),
+        "u20" => (20, false),
+        "i20" => (20, true),
         "u24" => (24, false),
         "i24" => (24, true),
         "u32" => (32, false),
