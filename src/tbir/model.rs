@@ -201,7 +201,13 @@ impl SemanticModel {
                     3
                 },
             ),
-            Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => Ok(3),
+            Type::Named(name) if matches!(name.as_str(), "u24" | "i24") => {
+                Ok(if self.native_int_widths.contains(&32) {
+                    4
+                } else {
+                    3
+                })
+            }
             Type::Named(name) if name == "ptr" => Ok(self.pointer_bytes),
             Type::Named(name) if matches!(name.as_str(), "u32" | "i32") => Ok(4),
             Type::Ptr(_) | Type::Function { .. } => Ok(self.pointer_bytes),

@@ -42,7 +42,7 @@ fn warns_for_costly_wide_integer_targets() {
 fn warns_when_twenty_bit_integers_are_not_native() {
     let program = parse_program(
         Path::new("wide.ezra"),
-        "fn main() { let unsigned: u20 = 0xABCDEu20; let signed: i20 = -1i20 }",
+        "fn main() { let unsigned: u20 = 0xABCDEu20; let signed: i20 = -1i20; let medium: u24 = 1u24 }",
     )
     .unwrap();
 
@@ -51,10 +51,14 @@ fn warns_when_twenty_bit_integers_are_not_native() {
             .iter()
             .any(|warning| warning.message.contains("20-bit"))
     );
+    let m68k = inefficient_integer_warnings(&program, CpuFamily::M68k);
     assert!(
-        inefficient_integer_warnings(&program, CpuFamily::M68k)
-            .iter()
-            .any(|warning| warning.message.contains("20-bit"))
+        m68k.iter().any(|warning| warning.message.contains("20-bit")
+            && warning.message.contains("masked 32-bit"))
+    );
+    assert!(
+        m68k.iter().any(|warning| warning.message.contains("24-bit")
+            && warning.message.contains("masked 32-bit"))
     );
     assert!(inefficient_integer_warnings(&program, CpuFamily::Msp430X).is_empty());
     assert!(inefficient_integer_warnings(&program, CpuFamily::Msp430X2).is_empty());

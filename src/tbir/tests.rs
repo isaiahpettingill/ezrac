@@ -540,7 +540,7 @@ fn semantic_model_uses_four_byte_storage_for_msp430x_pointers() {
 fn semantic_model_uses_target_storage_for_twenty_bit_integers() {
     let program = parse_program(
         Path::new("test.ezra"),
-        "global value: u20 = 0\nfn main() {}",
+        "global value: u20 = 0\nglobal medium: u24 = 0\nfn main() {}",
     )
     .unwrap();
     let msp430x = model::SemanticModel::from_program_with_native_int_widths(
@@ -572,8 +572,11 @@ fn semantic_model_uses_target_storage_for_twenty_bit_integers() {
     .unwrap();
 
     assert_eq!(msp430x.globals["value"].size, 4);
+    assert_eq!(msp430x.globals["medium"].size, 3);
     assert_eq!(generic.globals["value"].size, 3);
+    assert_eq!(generic.globals["medium"].size, 3);
     assert_eq!(m68k.globals["value"].size, 4);
+    assert_eq!(m68k.globals["medium"].size, 4);
 }
 
 #[test]

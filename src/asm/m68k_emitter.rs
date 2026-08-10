@@ -46,12 +46,13 @@ pub fn emit_m68k_assembly_with_options(
         let tbir = TbirProgram::lower(&hir, program, &options)?;
         (tbir.lowered_program, tbir.source_comments)
     };
-    let model = SemanticModel::from_program(
+    let model = SemanticModel::from_program_with_native_int_widths(
         &lowered_program,
         24,
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
+        CpuFamily::M68k.capabilities().native_int_widths,
     )?;
     Emitter::new(model, options.clone())?
         .emit(&lowered_program)
