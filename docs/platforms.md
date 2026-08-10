@@ -23,6 +23,8 @@ Platform support is tiered by its strongest published evidence:
 
 Tier 1 is not a claim that every program or hardware feature works. It means the repository's representative examples passed the assertions listed in the [published real-core results](real-core-test-results.md). The current production-quality source path remains eZ80-oriented; use `assemble` when exact machine control is required.
 
+**Super alpha** marks a target whose output works for current examples but whose compiler ABI, package format, and SDK API may still change without compatibility support. NES, SNES, and Commodore 64 currently have this status regardless of their test tier.
+
 ## Target Summary
 
 | Target pattern | Tier | CPU | Address width | Default output | Built-in SDK | Status |
@@ -53,11 +55,11 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-i8086` | 3 | 8086 | 16 (single segment) | `.bin` | none | Optional `i8086` feature; generic source backend and complete strict assembler |
 | `msdos-com-i8086` | 3 | 8086 | 16 (single segment) | `.com` | `dos.*` | First-class DOS `.COM` startup, packaging, and SDK; emulator validation pending |
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
-| `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
+| `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | **Super alpha**; optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
 | `generic-65c816-bare` | 3 | WDC 65C816 | 24 | `.bin` | none | Native-mode byte ABI, 24-bit pointers, and bank-00 near calls |
-| `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | `nes.*` | Optional `mos6502` feature; EZRA source, bundled SDK, and raw assembly NROM-128 target |
-| `snes-5a22` | 3 | Ricoh 5A22 / 65C816 core | 24 | `.sfc` | `snes.*` | Native source and assembly, 32 KiB LoROM packaging, generated header/checksum/vectors |
+| `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | `nes.*` | **Super alpha**; optional `mos6502` feature; EZRA source, bundled SDK, and raw assembly NROM-128 target |
+| `snes-5a22` | 3 | Ricoh 5A22 / 65C816 core | 24 | `.sfc` | `snes.*` | **Super alpha**; native source and assembly, 32 KiB LoROM packaging, generated header/checksum/vectors |
 | `sega-master-system-z80` | 3 | Z80 | 16 | `.sms` | `sms.*` | 32-256 KiB export-SMS target with slot-2 data banking; interrupt runtime pending |
 | `sega-game-gear-z80` | 3 | Z80 | 16 | `.gg` | `sms.*`, `gg.*` | 32-256 KiB Game Gear target with shared slot-2 data banking and Game Gear hardware helpers |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |

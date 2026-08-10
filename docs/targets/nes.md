@@ -1,5 +1,7 @@
 # Nintendo Entertainment System
 
+> **Status: Super alpha.** The target, ROM format, compiler ABI, and `nes.*` SDK are early and may change without compatibility support. Test generated ROMs in an emulator before using them on hardware.
+
 The `nes-2a03` target compiles EZRA source for the Ricoh 2A03 and packages mapper-0 NROM-128 images. Import SDK modules with `import nes.<module>`.
 
 ## SDK modules

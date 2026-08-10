@@ -1,11 +1,13 @@
 # Super Nintendo Entertainment System
 
+> **Status: Super alpha.** The target, ROM format, compiler ABI, and `snes.*` SDK are early and may change without compatibility support. Test generated ROMs in an emulator before using them on hardware.
+
 The `snes-5a22` target uses the Ricoh 5A22, a 65C816-compatible CPU, with SNES-specific startup, PPU, DMA, controller, audio-port, timing, and LoROM behavior. The new SDK lives under `toolchains/snes-5a22/sdk/snes`; import modules with `import snes.<module>`.
 
 ## SDK modules
 
 - `snes.system`: CPU interrupt control, NMI and auto-joypad control, DMA/HDMA shutdown, and FastROM selection.
-- `snes.memory`: WRAM addresses, low-RAM access, and WRAM clear/fill helpers.
+- `snes.memory`: WRAM addresses, low-RAM access, and caller-bounded WRAM clear/fill helpers.
 - `snes.ppu`: forced blank, brightness, BG mode and screen masks, tile-map and character bases, scrolling, VRAM, CGRAM, and color math registers.
 - `snes.dma`: channel register setup, CPU DMA and HDMA masks, and helpers for VRAM, CGRAM, and OAM transfers.
 - `snes.input`: auto-read joypad registers and named 16-bit SNES button masks.

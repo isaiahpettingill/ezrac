@@ -1,5 +1,7 @@
 # Commodore 64
 
+> **Status: Super alpha.** The target, output formats, compiler ABI, and `c64.*` SDK are early and may change without compatibility support. Test generated programs in an emulator before using them on hardware.
+
 Use the `commodore64-6502` target to compile EZRA programs for a stock C64 with its MOS 6510 CPU (a 6502-compatible CPU with the C64 memory-mapping port).
 
 ```sh
