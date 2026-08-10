@@ -1,5 +1,4 @@
 import snes.system
-import snes.memory
 import snes.ppu
 import snes.dma
 import snes.input
@@ -10,7 +9,6 @@ fn main() {
     system.initialize()
     audio.clear_ports()
     ppu.force_blank()
-    memory.clear_low_ram()
 
     ppu.set_background_mode(1)
     ppu.set_cgram_address(0)

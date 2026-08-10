@@ -13,25 +13,19 @@ pub fn read(address: u24) -> u8 {
     return *(cast<ptr<u8>>(address))
 }
 
-pub fn clear_low_ram() {
-    let address: u16 = LOW_RAM_BASE
-    while address < LOW_RAM_END {
-        write(cast<u24>(address), 0)
-        address += 1
-    }
-}
-
-pub fn clear_wram() {
-    let address: u24 = WRAM_BASE
-    while address < WRAM_END {
+// Clear only memory owned by the caller. Do not include the active stack,
+// direct page, or compiler-managed variables in the range.
+pub fn clear_range(start: u24, end: u24) {
+    let address: u24 = start
+    while address < end {
         write(address, 0)
         address += 1
     }
 }
 
-pub fn fill_wram(value: u8) {
-    let address: u24 = WRAM_BASE
-    while address < WRAM_END {
+pub fn fill_range(start: u24, end: u24, value: u8) {
+    let address: u24 = start
+    while address < end {
         write(address, value)
         address += 1
     }
