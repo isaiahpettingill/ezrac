@@ -24,6 +24,7 @@ pub mod compile;
 mod declaration;
 pub mod diagnostic;
 pub mod disk;
+pub mod ezir;
 pub mod hir;
 pub mod image;
 pub mod intrinsics;

@@ -18,6 +18,7 @@ use ezra::{
     compile::{SdkResolver, load_program_with_sdk_and_embed_resolver},
     diagnostic::{Diagnostic, SourceLocation, diagnostic_span},
     disk::{DiskFile, DiskFormat, DiskRequest, create_disk_image},
+    ezir::{EzirModule, EzirTarget},
     hir::HirProgram,
     layout::{Layout, parse_layout},
     optimization::{OptimizationOptions, OptimizationPass},
@@ -86,6 +87,10 @@ fn run() -> Result<(), String> {
             let (build_args, size_budgets) = parse_size_budget_args(&args[1..])?;
             let options = BuildCommandOptions::parse(&build_args)?;
             build_with_size_budgets(&options, &size_budgets)
+        }
+        "build-ir" => {
+            let options = BuildCommandOptions::parse(&args[1..])?;
+            build_ir(&options)
         }
         "disk" => {
             let options = DiskCommandOptions::parse(&args[1..])?;
@@ -759,6 +764,7 @@ struct EmitIrOptions {
 enum IrStage {
     Hir,
     Tbir,
+    Ezir,
 }
 
 impl EmitIrOptions {
@@ -786,8 +792,9 @@ impl IrStage {
         match text {
             "hir" => Ok(Self::Hir),
             "tbir" => Ok(Self::Tbir),
+            "ezir" => Ok(Self::Ezir),
             _ => Err(format!(
-                "unknown IR stage `{text}`; expected `hir` or `tbir`"
+                "unknown IR stage `{text}`; expected `hir`, `tbir`, or `ezir`"
             )),
         }
     }
@@ -1631,6 +1638,85 @@ fn build(options: &BuildCommandOptions) -> Result<(), String> {
     build_with_size_budgets(options, &ezra::api::SizeBudgets::default())
 }
 
+fn build_ir(options: &BuildCommandOptions) -> Result<(), String> {
+    let source_path = resolve_build_source_path(options)?;
+    let source = fs::read_to_string(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+    let module = EzirModule::from_text(&source).map_err(|error| error.to_string())?;
+    let settings = resolve_build_settings_with_budgets(
+        options,
+        &source_path,
+        &ezra::api::SizeBudgets::default(),
+    )?;
+    validate_build_layout(&settings)?;
+    ensure_source_codegen_supported(&settings)?;
+    validate_ezir_target(&module.target, &settings.target)?;
+
+    let source_location = command_source_start_location(&source_path);
+    let program = module.into_program(source_path.clone()).map_err(|error| {
+        error
+            .with_location_if_missing(source_location.clone())
+            .to_string()
+    })?;
+    let assembly = emit_source_assembly(
+        &program,
+        configured_assembly_options(&settings, &program, options.debug_comments)?,
+    )
+    .map_err(|error| command_diagnostic(error, &source_path, &source, &source_location))?;
+    let outputs = write_build_artifacts(
+        &source_path,
+        source_location,
+        &settings,
+        &program,
+        &assembly,
+    )?;
+    println!("wrote {}", outputs.asm.display());
+    println!("wrote {}", outputs.map.display());
+    println!("wrote {}", outputs.size.display());
+    println!("wrote {}", outputs.executable.display());
+    Ok(())
+}
+
+fn validate_ezir_target(target: &EzirTarget, selected: &TargetProfile) -> Result<(), String> {
+    let capabilities = selected.triple.cpu.capabilities();
+    let memory = capabilities.memory;
+    let storage_width = if memory.pointer_width_bits == 20 {
+        32
+    } else {
+        memory.pointer_width_bits
+    };
+    if target.address_width_bits != memory.address_width_bits
+        || target.pointer_address_width_bits != memory.pointer_width_bits
+        || target.pointer_storage_width_bits != storage_width
+    {
+        return Err(format!(
+            "EZIR target requires address/pointer/storage widths {}/{}/{}, but `{}` provides {}/{}/{}",
+            target.address_width_bits,
+            target.pointer_address_width_bits,
+            target.pointer_storage_width_bits,
+            selected.triple.value,
+            memory.address_width_bits,
+            memory.pointer_width_bits,
+            storage_width,
+        ));
+    }
+    if target.supports_port_io && !capabilities.supports_port_io {
+        return Err(format!(
+            "EZIR module requires port I/O, but target `{}` does not support it",
+            selected.triple.value
+        ));
+    }
+    for width in &target.native_int_widths {
+        if !capabilities.native_int_widths.contains(&(*width as u8)) {
+            return Err(format!(
+                "EZIR module requires native {width}-bit integers, but target `{}` provides {:?}",
+                selected.triple.value, capabilities.native_int_widths
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn build_with_size_budgets(
     options: &BuildCommandOptions,
     size_budgets: &ezra::api::SizeBudgets,
@@ -2276,7 +2362,7 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
     })?;
     match options.stage {
         IrStage::Hir => print!("{}", hir.dump_text()),
-        IrStage::Tbir => {
+        IrStage::Tbir | IrStage::Ezir => {
             validate_layout_for_target(&settings)?;
             ensure_source_codegen_supported(&settings)?;
             let tbir = TbirProgram::lower(
@@ -2285,7 +2371,32 @@ fn emit_ir(options: &EmitIrOptions) -> Result<(), String> {
                 &configured_assembly_options(&settings, &program, options.command.debug_comments)?,
             )
             .map_err(|error| error.with_location_if_missing(source_location).to_string())?;
-            print!("{}", tbir.dump_text());
+            if options.stage == IrStage::Tbir {
+                print!("{}", tbir.dump_text());
+            } else {
+                let capabilities = settings.target.triple.cpu.capabilities();
+                let pointer_width = capabilities.memory.pointer_width_bits;
+                let module = EzirModule::from_program(
+                    &tbir.lowered_program,
+                    EzirTarget {
+                        address_width_bits: capabilities.memory.address_width_bits,
+                        pointer_address_width_bits: pointer_width,
+                        pointer_storage_width_bits: if pointer_width == 20 {
+                            32
+                        } else {
+                            pointer_width
+                        },
+                        native_int_widths: capabilities
+                            .native_int_widths
+                            .iter()
+                            .copied()
+                            .map(u16::from)
+                            .collect(),
+                        supports_port_io: capabilities.supports_port_io,
+                    },
+                );
+                print!("{}\n", module.to_text().map_err(|error| error.to_string())?);
+            }
         }
     }
     Ok(())
@@ -3348,9 +3459,9 @@ fn print_targets() {
 }
 
 fn usage() -> String {
-    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--size-budget NAME=BYTES]... [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, .size, and target executable artifacts\n  disk [--format <format>] [--label <label>] --output <image> [--file [NAME=]PATH]...
+    "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--size-budget NAME=BYTES]... [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, .size, and target executable artifacts\n  build-ir [--target <triple>] [--debug-comments] [--layout <file.ezralayout>] <file.ezir>\n                                       validate and compile an EZIR v1 module\n  disk [--format <format>] [--label <label>] --output <image> [--file [NAME=]PATH]...
                                        create an emulator-ready disk image with named files
-  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\nsource optimization options:\n  -O0|-O1|-O2|-O3                    select an optimization level (default: -O2)\n  --enable-optimization <pass>        enable one named optimization pass\n  --disable-optimization <pass>       disable one named optimization pass\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
+  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir|ezir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR/TBIR text or stable EZIR v1\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\nsource optimization options:\n  -O0|-O1|-O2|-O3                    select an optimization level (default: -O2)\n  --enable-optimization <pass>        enable one named optimization pass\n  --disable-optimization <pass>       disable one named optimization pass\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
 }
 
 #[cfg(all(test, feature = "i8086"))]

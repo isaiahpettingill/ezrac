@@ -15,7 +15,8 @@ After installation, run commands with `ezrac`:
 ```sh
 ezrac check <file.ezra>
 ezrac emit-asm <file.ezra>
-ezrac emit-ir [--stage hir|tbir] <file.ezra>
+ezrac emit-ir [--stage hir|tbir|ezir] <file.ezra>
+ezrac build-ir --target <triple> <file.ezir>
 ezrac build <file.ezra>
 ezrac disk --format <format> --output <image> [--file [NAME=]PATH]...
 ezrac test [<file.ezra>]
@@ -33,7 +34,8 @@ For local development, use Cargo:
 ```sh
 cargo run -- check <file.ezra>
 cargo run -- emit-asm <file.ezra>
-cargo run -- emit-ir [--stage hir|tbir] <file.ezra>
+cargo run -- emit-ir [--stage hir|tbir|ezir] <file.ezra>
+cargo run -- build-ir --target <triple> <file.ezir>
 cargo run -- build <file.ezra>
 cargo run -- disk --format <format> --output <image> [--file [NAME=]PATH]...
 cargo run -- test [<file.ezra>]

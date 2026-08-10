@@ -146,6 +146,14 @@ fn emit_ir_options_parse_stage() {
 
     assert_eq!(options.stage, IrStage::Hir);
     assert_eq!(options.command.path, PathBuf::from("game.ezra"));
+
+    let ezir = EmitIrOptions::parse(&[
+        "--stage".to_owned(),
+        "ezir".to_owned(),
+        "game.ezra".to_owned(),
+    ])
+    .unwrap();
+    assert_eq!(ezir.stage, IrStage::Ezir);
 }
 
 #[test]

@@ -65,6 +65,8 @@ dependencies = [
  "pest",
  "pest_derive",
  "png",
+ "serde",
+ "serde_json",
  "toml",
  "w65c816",
 ]
