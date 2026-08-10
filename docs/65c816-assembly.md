@@ -5,12 +5,13 @@ EZRA assembles the WDC 65C816 instruction set with `--assembler-cpu 65c816`.
 `65c816`.
 
 `generic-65c816-bare` and `generic-65816-bare` produce raw 24-bit-addressable
-binaries. Their default layout starts code at `$00:8000`. Direct page is
-`$00:0000-$00:00FF`, the native stack area is `$00:0100-$00:1FFF`, and the
-entry point is `$00:8000`. A raw binary has no header or reset vector. The
-loader must place it at that address, establish native mode if needed, set the
-stack, direct-page register, data-bank register, and then call or jump to the
-entry point.
+binaries. Their default layout places code in bank `$00` from `$00:8000` to
+`$00:FFFF`; the entry point is `$00:8000`. This keeps the initial source ABI's
+near `JSR`/`RTS` calls in one program bank. Direct page is `$00:0000-$00:00FF`
+and the native stack area is `$00:0100-$00:1FFF`. A raw binary has no header or
+reset vector. The generated startup enters native mode, initializes the stack
+to `$1FFF`, and uses an 8-bit A/X/Y byte ABI. A custom loader must place the
+binary at the entry address and transfer control there.
 
 ## Register-width state
 

@@ -22,6 +22,67 @@ fn materialized_embed_bytes(program: &Program, name: &str) -> Vec<u8> {
         .collect()
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn generic_65c816_source_uses_native_byte_abi_and_assembles() {
+    let compiled = compile_source_to_assembly(
+        "global result: u8 = 0\nfn bump(value: u8) -> u8 { return value + 1 }\nfn main() { result = bump(1); result += 1 }\n",
+        &CompileRequest::new("main.ezra", "generic-65c816-bare"),
+    )
+    .unwrap();
+
+    for line in [
+        "    clc",
+        "    xce",
+        "    rep #$10",
+        "    ldx #$1FFF",
+        "    txs",
+        "    sep #$10",
+        "    jsr _main",
+        "    jsr _bump",
+    ] {
+        assert!(
+            compiled.assembly.contains(line),
+            "missing `{line}`\n{}",
+            compiled.assembly
+        );
+    }
+    assert!(
+        compiled.assembly.contains("lda $600000"),
+        "{}",
+        compiled.assembly
+    );
+    let assembled = crate::vm::assemble_subset_with_symbols_at(
+        crate::target::AssemblerCpu::Wdc65C816,
+        &compiled.assembly,
+        0x008000,
+    )
+    .unwrap();
+    assert!(!assembled.bytes.is_empty());
+}
+
+#[cfg(feature = "mos6502")]
+#[test]
+fn generic_65c816_source_assembles_far_pointer_access() {
+    let compiled = compile_source_to_assembly(
+        "volatile mmio far: ptr<u8> = 0x123456\nfn main() { *far = 0x42 }\n",
+        &CompileRequest::new("main.ezra", "generic-65c816-bare"),
+    )
+    .unwrap();
+
+    assert!(
+        compiled.assembly.contains("sta $123456"),
+        "{}",
+        compiled.assembly
+    );
+    crate::vm::assemble_subset_with_symbols_at(
+        crate::target::AssemblerCpu::Wdc65C816,
+        &compiled.assembly,
+        0x008000,
+    )
+    .unwrap();
+}
+
 #[test]
 fn artifact_size_report_is_stable_and_separates_payload_from_address_gaps() {
     let report = ArtifactSizeReport::from_sections(

@@ -292,7 +292,7 @@ impl Layout {
                 region(
                     "code",
                     0x008000,
-                    0x3FFFFF,
+                    0x00FFFF,
                     &[RegionFlags::READ, RegionFlags::EXECUTE],
                 ),
                 region("rodata", 0x400000, 0x5FFFFF, &[RegionFlags::READ]),
@@ -300,6 +300,12 @@ impl Layout {
                     "ram",
                     0x600000,
                     0x7DFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "scratch",
+                    0x7E0000,
+                    0x7EFFFF,
                     &[RegionFlags::READ, RegionFlags::WRITE],
                 ),
                 region("assets", 0x800000, 0xEFFFFF, &[RegionFlags::READ]),
