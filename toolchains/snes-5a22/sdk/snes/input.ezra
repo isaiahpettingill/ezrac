@@ -1,0 +1,38 @@
+// Auto-read SNES joypad state. Enable auto-read with system.enable_auto_joypad().
+pub const JOY1L: u16 = 0x4218
+pub const JOY1H: u16 = 0x4219
+pub const JOY2L: u16 = 0x421A
+pub const JOY2H: u16 = 0x421B
+
+pub const B: u16 = 0x8000
+pub const Y: u16 = 0x4000
+pub const SELECT: u16 = 0x2000
+pub const START: u16 = 0x1000
+pub const UP: u16 = 0x0800
+pub const DOWN: u16 = 0x0400
+pub const LEFT: u16 = 0x0200
+pub const RIGHT: u16 = 0x0100
+pub const A: u16 = 0x0080
+pub const X: u16 = 0x0040
+pub const L: u16 = 0x0020
+pub const R: u16 = 0x0010
+
+fn read_register(address: u16) -> u8 {
+    return *(cast<ptr<u8>>(cast<u24>(address)))
+}
+
+pub fn read_controller1() -> u16 {
+    let low: u16 = cast<u16>(read_register(JOY1L))
+    let high: u16 = cast<u16>(read_register(JOY1H))
+    return low | (high << 8)
+}
+
+pub fn read_controller2() -> u16 {
+    let low: u16 = cast<u16>(read_register(JOY2L))
+    let high: u16 = cast<u16>(read_register(JOY2H))
+    return low | (high << 8)
+}
+
+pub fn button_down(state: u16, button: u16) -> bool {
+    return (state & button) != 0
+}

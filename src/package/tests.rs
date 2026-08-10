@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn packages_snes_5a22_entry_code_as_32k_lorom() {
+    let mut request = PackageRequest::new(
+        crate::target::SNES_5A22_TARGET,
+        OutputFormat::SnesRom,
+        0x008000,
+        0x008000,
+    );
+    request.executable_name = Some("EZRA SNES".to_owned());
+    let rom = package_executable(&request, &[0x18, 0xFB, 0x80, 0xFE]).unwrap();
+    assert_eq!(rom.len(), 0x8000);
+    assert_eq!(&rom[..4], &[0x18, 0xFB, 0x80, 0xFE]);
+    assert_eq!(&rom[0x7FC0..0x7FC9], b"EZRA SNES");
+    assert_eq!(rom[0x7FD5], 0x20);
+    assert_eq!(&rom[0x7FFC..0x7FFE], &[0x00, 0x80]);
+    let checksum = u16::from_le_bytes([rom[0x7FDE], rom[0x7FDF]]);
+    let complement = u16::from_le_bytes([rom[0x7FDC], rom[0x7FDD]]);
+    assert_eq!(checksum ^ complement, 0xFFFF);
+}
+
+#[test]
+fn rejects_snes_code_that_overwrites_the_internal_header() {
+    let error = package_executable(
+        &PackageRequest::new(
+            crate::target::SNES_5A22_TARGET,
+            OutputFormat::SnesRom,
+            0x008000,
+            0x008000,
+        ),
+        &vec![0; 0x7FC1],
+    )
+    .unwrap_err();
+    assert!(error.message.contains("internal header"));
+}
+
+#[test]
 fn packages_nes_nrom_image_without_adding_a_second_header() {
     let mut image = vec![0; 0x6010];
     image[..8].copy_from_slice(b"NES\x1A\x01\x01\0\0");

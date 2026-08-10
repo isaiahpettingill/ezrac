@@ -48,10 +48,10 @@ The directives emit no bytes. `.a8` and `.a16` select the accumulator width;
 
 The existing `jmp !$12:3456` and `jsr !$12:3456` spellings remain accepted.
 
-## SNES note
+## SNES Ricoh 5A22
 
-The SNES Ricoh 5A22 is not a generic 65C816 target. It shares 65C816 opcode
-encodings, but SNES startup, vectors, banks, timing, DMA, PPU/APU registers,
-and controller I/O are platform behavior. A later `snes-5a22` target will use
-the shared 65C816 encoder only where its instruction behavior matches and will
-provide its own layout, ROM packaging, and SDK.
+`snes-5a22` is a separate platform target over the shared 65C816 instruction
+encoder. It has its own LoROM layout, generated internal header and vectors,
+32 KiB `.sfc` packaging, and bundled `snes.*` SDK. SNES timing, DMA, PPU/APU
+registers, controller I/O, and WRAM remain target-specific; they are not part
+of the generic WDC target.

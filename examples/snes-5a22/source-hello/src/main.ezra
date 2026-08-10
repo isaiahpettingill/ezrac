@@ -1,0 +1,35 @@
+import snes.system
+import snes.memory
+import snes.ppu
+import snes.dma
+import snes.input
+import snes.audio
+import snes.timing
+
+fn main() {
+    system.initialize()
+    audio.clear_ports()
+    ppu.force_blank()
+    memory.clear_low_ram()
+
+    ppu.set_background_mode(1)
+    ppu.set_cgram_address(0)
+    ppu.write_cgram(0x00)
+    ppu.write_cgram(0x7C)
+    ppu.set_main_screen(ppu.SCREEN_BG1)
+    system.enable_auto_joypad()
+
+    timing.wait_vblank_start()
+    ppu.enable_display()
+
+    loop {
+        let buttons: u16 = input.read_controller1()
+        if (buttons & input.START) != 0 {
+            ppu.set_brightness(0x0F)
+        }
+        if (buttons & input.SELECT) != 0 {
+            ppu.set_brightness(0x00)
+        }
+        timing.wait_frame()
+    }
+}

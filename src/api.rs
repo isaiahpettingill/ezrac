@@ -1420,6 +1420,7 @@ fn uses_flat_output_map(build: &BuildRequest) -> bool {
         || build.target.triple.value.starts_with("arduboy-")
         || build.target.triple.value.starts_with("commodore64-6502")
         || build.target.triple.value.starts_with("nes-")
+        || build.target.triple.value.starts_with("snes-")
         || build.target.triple.value == "sega-master-system-z80"
         || build.target.triple.value == "sega-game-gear-z80"
         || build.target.triple.value.starts_with("ti84plusce-ez80")

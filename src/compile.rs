@@ -1926,6 +1926,38 @@ fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str
             )),
             _ => None,
         }
+    } else if target == Some(crate::target::SNES_5A22_TARGET) {
+        match import {
+            "snes.system" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/snes-5a22/sdk/snes/system.ezra"),
+                "snes.system",
+            )),
+            "snes.memory" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/snes-5a22/sdk/snes/memory.ezra"),
+                "snes.memory",
+            )),
+            "snes.ppu" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/snes-5a22/sdk/snes/ppu.ezra"),
+                "snes.ppu",
+            )),
+            "snes.dma" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/snes-5a22/sdk/snes/dma.ezra"),
+                "snes.dma",
+            )),
+            "snes.input" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/snes-5a22/sdk/snes/input.ezra"),
+                "snes.input",
+            )),
+            "snes.audio" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/snes-5a22/sdk/snes/audio.ezra"),
+                "snes.audio",
+            )),
+            "snes.timing" => Some(builtin_sdk_utf8(
+                include_bytes!("../toolchains/snes-5a22/sdk/snes/timing.ezra"),
+                "snes.timing",
+            )),
+            _ => None,
+        }
     } else if target.is_some_and(|target| target.starts_with("nes-")) {
         match import {
             "nes.ppu" => Some(builtin_sdk_utf8(
@@ -2111,6 +2143,13 @@ pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
         "nes.audio",
         "nes.timing",
         "nes.memory",
+        "snes.system",
+        "snes.memory",
+        "snes.ppu",
+        "snes.dma",
+        "snes.input",
+        "snes.audio",
+        "snes.timing",
         "sms.system",
         "sms.vdp",
         "sms.video",

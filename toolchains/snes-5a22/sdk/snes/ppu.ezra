@@ -1,0 +1,96 @@
+// SNES PPU register access and the common BG/VRAM/CGRAM controls.
+pub const INIDISP: u16 = 0x2100
+pub const OBJSEL: u16 = 0x2101
+pub const OAMADDL: u16 = 0x2102
+pub const OAMADDH: u16 = 0x2103
+pub const OAMDATA: u16 = 0x2104
+pub const BGMODE: u16 = 0x2105
+pub const BG1SC: u16 = 0x2107
+pub const BG2SC: u16 = 0x2108
+pub const BG3SC: u16 = 0x2109
+pub const BG4SC: u16 = 0x210A
+pub const BG12NBA: u16 = 0x210B
+pub const BG34NBA: u16 = 0x210C
+pub const BG1HOFS: u16 = 0x210D
+pub const BG1VOFS: u16 = 0x210E
+pub const VMAIN: u16 = 0x2115
+pub const VMADDL: u16 = 0x2116
+pub const VMADDH: u16 = 0x2117
+pub const VMDATAL: u16 = 0x2118
+pub const VMDATAH: u16 = 0x2119
+pub const CGADD: u16 = 0x2121
+pub const CGDATA: u16 = 0x2122
+pub const CGWSEL: u16 = 0x2130
+pub const COLDATA: u16 = 0x2132
+pub const SETINI: u16 = 0x2133
+pub const TM: u16 = 0x212C
+pub const TS: u16 = 0x212D
+
+pub const FORCE_BLANK: u8 = 0x80
+pub const SCREEN_BG1: u8 = 0x01
+pub const SCREEN_BG2: u8 = 0x02
+pub const SCREEN_BG3: u8 = 0x04
+pub const SCREEN_BG4: u8 = 0x08
+pub const SCREEN_OAM: u8 = 0x10
+pub const VRAM_INCREMENT_WORD: u8 = 0x80
+pub const VRAM_INCREMENT_HIGH: u8 = 0x80
+
+pub fn write_ppu_register(address: u16, value: u8) {
+    *(cast<ptr<u8>>(cast<u24>(address))) = value
+}
+
+pub fn read_ppu_register(address: u16) -> u8 {
+    return *(cast<ptr<u8>>(cast<u24>(address)))
+}
+
+pub fn force_blank() { write_ppu_register(INIDISP, FORCE_BLANK) }
+pub fn set_brightness(level: u8) { write_ppu_register(INIDISP, level & 0x0F) }
+pub fn enable_display() { set_brightness(0x0F) }
+pub fn set_background_mode(mode: u8) { write_ppu_register(BGMODE, mode & 7) }
+pub fn set_main_screen(mask: u8) { write_ppu_register(TM, mask) }
+pub fn set_sub_screen(mask: u8) { write_ppu_register(TS, mask) }
+pub fn set_vram_increment(value: u8) { write_ppu_register(VMAIN, value) }
+
+pub fn set_vram_address(address: u16) {
+    write_ppu_register(VMADDL, cast<u8>(address))
+    write_ppu_register(VMADDH, cast<u8>(address >> 8))
+}
+
+pub fn write_vram(value: u8) { write_ppu_register(VMDATAL, value) }
+pub fn write_vram_high(value: u8) { write_ppu_register(VMDATAH, value) }
+
+pub fn set_cgram_address(address: u8) { write_ppu_register(CGADD, address) }
+pub fn write_cgram(value: u8) { write_ppu_register(CGDATA, value) }
+pub fn set_color_math(value: u8) { write_ppu_register(CGWSEL, value) }
+pub fn set_fixed_color(value: u8) { write_ppu_register(COLDATA, value) }
+pub fn set_mode7(value: u8) { write_ppu_register(SETINI, value) }
+
+// `base` is the four-bit character-data base selected by BGNBA.
+pub fn set_character_base(bg: u8, base: u8) {
+    let address: u16 = BG12NBA
+    let register: u16 = address
+    if bg >= 2 { register = BG34NBA }
+    let shift: u8 = (bg & 1) * 4
+    let mask: u8 = 0x0F << shift
+    let value: u8 = read_ppu_register(register)
+    write_ppu_register(register, (value & ~mask) | ((base & 0x0F) << shift))
+}
+
+// `size` uses the hardware BGnSC size values: 0=32x32, 1=64x32,
+// 2=32x64, and 3=64x64 tiles.
+pub fn set_tilemap(bg: u8, address: u16, size: u8) {
+    let register: u16 = BG1SC + cast<u16>(bg & 3)
+    write_ppu_register(register, cast<u8>(address >> 8) | (size & 3))
+}
+
+pub fn set_scroll_x(bg: u8, value: u16) {
+    let register: u16 = BG1HOFS + cast<u16>(bg & 3) * 2
+    write_ppu_register(register, cast<u8>(value))
+    write_ppu_register(register, cast<u8>(value >> 8))
+}
+
+pub fn set_scroll_y(bg: u8, value: u16) {
+    let register: u16 = BG1VOFS + cast<u16>(bg & 3) * 2
+    write_ppu_register(register, cast<u8>(value))
+    write_ppu_register(register, cast<u8>(value >> 8))
+}

@@ -227,6 +227,23 @@ fn resolves_nes_2a03_target_profile() {
 
 #[cfg(feature = "mos6502")]
 #[test]
+fn resolves_snes_5a22_as_a_distinct_65c816_platform() {
+    let profile = resolve_target_profile(Some(SNES_5A22_TARGET)).unwrap();
+    assert_eq!(profile.triple.cpu, CpuFamily::Wdc65C816);
+    assert_eq!(
+        AssemblerCpu::from(profile.triple.cpu),
+        AssemblerCpu::Wdc65C816
+    );
+    assert_eq!(AssemblerCpu::parse("5a22"), Ok(AssemblerCpu::Wdc65C816));
+    assert_eq!(profile.memory.address_width_bits, 24);
+    assert_eq!(profile.output_format, OutputFormat::SnesRom);
+    assert_eq!(profile.output_format.extension(), "sfc");
+    assert!(profile.default_sdk_symbols);
+    assert_eq!(parse_output_format("snes"), Ok(OutputFormat::SnesRom));
+}
+
+#[cfg(feature = "mos6502")]
+#[test]
 fn resolves_generic_bare_6502_target() {
     let profile = resolve_target_profile(Some("generic-6502-bare")).unwrap();
 

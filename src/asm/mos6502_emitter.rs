@@ -255,6 +255,13 @@ impl Emitter {
             self.line("    ldx #$1FFF");
             self.line("    txs");
             self.line("    sep #$10");
+            self.line("    rep #$20");
+            self.line("    lda #$0000");
+            self.line("    tcd");
+            self.line("    sep #$20");
+            self.line("    lda #$00");
+            self.line("    pha");
+            self.line("    plb");
         } else {
             self.line("    ldx #$FF");
             self.line("    txs");
@@ -516,11 +523,29 @@ impl Emitter {
             self.copy_zp_to_storage(pointer, self.model.pointer_bytes());
         }
         if interrupt && !naked {
-            self.line("    pha");
-            self.line("    txa");
-            self.line("    pha");
-            self.line("    tya");
-            self.line("    pha");
+            if self.cpu == CpuFamily::Wdc65C816 {
+                self.line("    php");
+                self.line("    rep #$30");
+                self.line("    pha");
+                self.line("    phx");
+                self.line("    phy");
+                self.line("    phd");
+                self.line("    phb");
+                self.line("    sep #$30");
+                self.line("    rep #$20");
+                self.line("    lda #$0000");
+                self.line("    tcd");
+                self.line("    sep #$20");
+                self.line("    lda #$00");
+                self.line("    pha");
+                self.line("    plb");
+            } else {
+                self.line("    pha");
+                self.line("    txa");
+                self.line("    pha");
+                self.line("    tya");
+                self.line("    pha");
+            }
         }
         let signature = self
             .model
@@ -543,11 +568,21 @@ impl Emitter {
         self.line(&format!("{return_label}:"));
         if interrupt {
             if !naked {
-                self.line("    pla");
-                self.line("    tay");
-                self.line("    pla");
-                self.line("    tax");
-                self.line("    pla");
+                if self.cpu == CpuFamily::Wdc65C816 {
+                    self.line("    rep #$30");
+                    self.line("    plb");
+                    self.line("    pld");
+                    self.line("    ply");
+                    self.line("    plx");
+                    self.line("    pla");
+                    self.line("    plp");
+                } else {
+                    self.line("    pla");
+                    self.line("    tay");
+                    self.line("    pla");
+                    self.line("    tax");
+                    self.line("    pla");
+                }
             }
             self.line("    rti");
         } else if !naked {
@@ -1114,15 +1149,12 @@ impl Emitter {
         }
         match right {
             Expr::Ident(name) if !self.model.constants.contains_key(name) => {
-                self.line(&format!(
-                    "    ldx ${:04X}",
-                    self.binding(name)?.storage.address
-                ));
+                self.ldx_memory(self.binding(name)?.storage.address);
             }
             _ => {
                 let index = self.model.allocate(1)?;
                 self.emit_byte_expr_to(right, &Type::Named("u8".to_owned()), index.address)?;
-                self.line(&format!("    ldx ${:04X}", index.address));
+                self.ldx_memory(index.address);
             }
         }
         self.line(&format!("    lda ${base:04X},x"));
@@ -1540,13 +1572,14 @@ impl Emitter {
             }
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
-                let destination = self.model.allocate(2)?;
-                self.copy(self.r0, destination, 2);
+                let pointer_width = self.model.pointer_bytes();
+                let destination = self.model.allocate(u32::from(pointer_width))?;
+                self.copy(self.r0, destination, u32::from(pointer_width));
                 self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
                 self.set_zp_from_storage(POINTER_ZP, destination);
                 self.lda(self.r0.address);
                 self.line("    ldy #$00");
-                self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
+                self.line(&format!("    sta {}", self.indirect_indexed_y(POINTER_ZP)));
                 return Ok(());
             }
             "mem.memcpy" | "ezra.mem.memcpy" => {
@@ -1558,6 +1591,18 @@ impl Emitter {
                 return Ok(());
             }
             _ => {}
+        }
+        if let Some(resolved_name) = resolve_called_function(path, &self.model)
+            && self.functions.get(&resolved_name).is_some_and(|function| {
+                function
+                    .attrs
+                    .iter()
+                    .any(|attribute| attribute == "interrupt")
+            })
+        {
+            return Err(Diagnostic::new(format!(
+                "interrupt function `{resolved_name}` cannot be called as an ordinary function"
+            )));
         }
         if let Some(resolved_name) = resolve_called_function(path, &self.model)
             && args.is_empty()
@@ -2192,8 +2237,9 @@ impl Emitter {
     fn rotate_once(&mut self, width: u8, right: bool) {
         self.line("    clc");
         if right {
+            self.line("    clc");
             for offset in (0..u32::from(width)).rev() {
-                self.line(&format!("    ror ${:04X}", self.r0.address + offset));
+                self.memory_unary("ror", self.r0.address + offset);
             }
             let no_carry = self.next_label("rotate_no_carry");
             self.branch_long("bcc", &no_carry);
@@ -2227,7 +2273,12 @@ impl Emitter {
 
     fn emit_bit_test_branch(&mut self, source: Storage, bit: u32, target: &str, set: bool) {
         self.lda_imm(1_u8 << (bit % 8));
-        self.line(&format!("    bit ${:04X}", source.address + bit / 8));
+        let address = source.address + bit / 8;
+        if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
+            self.line(&format!("    and ${address:04X}"));
+        } else {
+            self.line(&format!("    bit ${address:04X}"));
+        }
         self.branch_long(if set { "bne" } else { "beq" }, target);
     }
 
@@ -2455,12 +2506,14 @@ impl Emitter {
     fn shift_storage_once(&mut self, storage: Storage, width: u8, right: bool) {
         self.line("    clc");
         if right {
+            self.line("    clc");
             for offset in (0..u32::from(width)).rev() {
-                self.line(&format!("    ror ${:04X}", storage.address + offset));
+                self.memory_unary("ror", storage.address + offset);
             }
         } else {
+            self.line("    clc");
             for offset in 0..u32::from(width) {
-                self.line(&format!("    rol ${:04X}", storage.address + offset));
+                self.memory_unary("rol", storage.address + offset);
             }
         }
     }
@@ -2626,7 +2679,11 @@ impl Emitter {
         let Ok(length) = u32::try_from(length) else {
             return Ok(false);
         };
-        if length == 0 || length > 0x1_0000 {
+        if length == 0
+            || length > 0x1_0000
+            || (source & 0xFFFF).saturating_add(length) > 0x1_0000
+            || (destination & 0xFFFF).saturating_add(length) > 0x1_0000
+        {
             return Ok(false);
         }
         let overlap = (source < destination && destination < source.saturating_add(length))
@@ -2647,6 +2704,7 @@ impl Emitter {
         } else {
             destination
         };
+        self.line("    phb");
         self.line("    rep #$30");
         self.line(&format!("    ldx #${:04X}", source_address & 0xFFFF));
         self.line(&format!("    ldy #${:04X}", destination_address & 0xFFFF));
@@ -2658,6 +2716,7 @@ impl Emitter {
             destination_address >> 16
         ));
         self.line("    sep #$30");
+        self.line("    plb");
         self.zero(self.r0);
         Ok(true)
     }
@@ -2999,26 +3058,30 @@ impl Emitter {
             return Err(Diagnostic::new("mem.memcpy requires three arguments"));
         }
         let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        let pointer_width = self.model.pointer_bytes();
         self.emit_expr(&args[0], &pointer)?;
-        let destination = self.model.allocate(2)?;
-        self.copy(self.r0, destination, 2);
+        let destination = self.model.allocate(u32::from(pointer_width))?;
+        self.copy(self.r0, destination, u32::from(pointer_width));
         self.emit_expr(&args[1], &pointer)?;
-        let source = self.model.allocate(2)?;
-        self.copy(self.r0, source, 2);
+        let source = self.model.allocate(u32::from(pointer_width))?;
+        self.copy(self.r0, source, u32::from(pointer_width));
         self.emit_expr(&args[2], &Type::Named("u16".to_owned()))?;
         let length = self.model.allocate(2)?;
         self.copy(self.r0, length, 2);
         let loop_label = self.next_label("memcpy_loop");
         let done = self.next_label("memcpy_done");
         self.set_zp_from_storage(POINTER_ZP, source);
-        self.set_zp_from_storage(POINTER_ZP + 2, destination);
+        self.set_zp_from_storage(POINTER_ZP + u32::from(pointer_width), destination);
         self.line(&format!("{loop_label}:"));
         self.jump_storage_zero(length, 2, &done);
         self.line("    ldy #$00");
-        self.line(&format!("    lda (${:02X}),y", POINTER_ZP));
-        self.line(&format!("    sta (${:02X}),y", POINTER_ZP + 2));
-        self.increment_zp(POINTER_ZP);
-        self.increment_zp(POINTER_ZP + 2);
+        self.line(&format!("    lda {}", self.indirect_indexed_y(POINTER_ZP)));
+        self.line(&format!(
+            "    sta {}",
+            self.indirect_indexed_y(POINTER_ZP + u32::from(pointer_width))
+        ));
+        self.increment_pointer_zp(POINTER_ZP, pointer_width);
+        self.increment_pointer_zp(POINTER_ZP + u32::from(pointer_width), pointer_width);
         self.decrement(length, 2);
         self.line(&format!("    jmp {loop_label}"));
         self.line(&format!("{done}:"));
@@ -3031,9 +3094,10 @@ impl Emitter {
             return Err(Diagnostic::new("mem.memset requires three arguments"));
         }
         let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
+        let pointer_width = self.model.pointer_bytes();
         self.emit_expr(&args[0], &pointer)?;
-        let destination = self.model.allocate(2)?;
-        self.copy(self.r0, destination, 2);
+        let destination = self.model.allocate(u32::from(pointer_width))?;
+        self.copy(self.r0, destination, u32::from(pointer_width));
         self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
         let value = self.model.allocate(1)?;
         self.copy(self.r0, value, 1);
@@ -3047,8 +3111,8 @@ impl Emitter {
         self.jump_storage_zero(length, 2, &done);
         self.lda(value.address);
         self.line("    ldy #$00");
-        self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
-        self.increment_zp(POINTER_ZP);
+        self.line(&format!("    sta {}", self.indirect_indexed_y(POINTER_ZP)));
+        self.increment_pointer_zp(POINTER_ZP, pointer_width);
         self.decrement(length, 2);
         self.line(&format!("    jmp {loop_label}"));
         self.line(&format!("{done}:"));
@@ -3558,19 +3622,16 @@ impl Emitter {
                 self.lda(self.r0.address + u32::from(width - 1));
                 self.line("    asl a");
             } else {
-                self.line(&format!(
-                    "    lsr ${:04X}",
-                    self.r0.address + u32::from(width - 1)
-                ));
+                self.memory_unary("lsr", self.r0.address + u32::from(width - 1));
             }
             let lower_bytes = if signed { width } else { width - 1 };
             for offset in (0..u32::from(lower_bytes)).rev() {
-                self.line(&format!("    ror ${:04X}", self.r0.address + offset));
+                self.memory_unary("ror", self.r0.address + offset);
             }
         } else {
             self.line("    clc");
             for offset in 0..u32::from(width) {
-                self.line(&format!("    rol ${:04X}", self.r0.address + offset));
+                self.memory_unary("rol", self.r0.address + offset);
             }
         }
     }
@@ -3581,7 +3642,7 @@ impl Emitter {
         self.line(&format!("{loop_label}:"));
         self.jump_if_zero(self.r1.address, &done);
         self.shift_once(width, right, signed);
-        self.line(&format!("    dec ${:04X}", self.r1.address));
+        self.memory_unary("dec", self.r1.address);
         self.line(&format!("    jmp {loop_label}"));
         self.line(&format!("{done}:"));
     }
@@ -3725,7 +3786,7 @@ impl Emitter {
                 for offset in 0..u32::from(width) {
                     self.lda(saved.address + offset);
                     self.line(&format!("    ldy #${offset:02X}"));
-                    self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
+                    self.line(&format!("    sta {}", self.indirect_indexed_y(POINTER_ZP)));
                 }
             }
         }
@@ -3747,6 +3808,9 @@ impl Emitter {
         let Some(address) = self.direct_place_address(place)? else {
             return Ok(false);
         };
+        if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
+            return Ok(false);
+        }
         for offset in 0..u32::from(width) {
             self.line(&format!("    stz ${:04X}", address + offset));
         }
@@ -3772,6 +3836,9 @@ impl Emitter {
         let Some(address) = self.direct_place_address(place)? else {
             return Ok(false);
         };
+        if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
+            return Ok(false);
+        }
         for offset in 0..u32::from(width) {
             let byte = (raw_value as u64 >> (offset * 8)) as u8;
             self.lda_imm(if op == AssignOp::BitAnd { !byte } else { byte });
@@ -3810,9 +3877,9 @@ impl Emitter {
                 for offset in 0..size {
                     self.lda(source.address + offset);
                     self.line("    ldy #$00");
-                    self.line(&format!("    sta (${:02X}),y", POINTER_ZP));
+                    self.line(&format!("    sta {}", self.indirect_indexed_y(POINTER_ZP)));
                     if offset + 1 < size {
-                        self.increment_zp(POINTER_ZP);
+                        self.increment_pointer_zp(POINTER_ZP, self.model.pointer_bytes());
                     }
                 }
             }
@@ -3823,10 +3890,10 @@ impl Emitter {
     fn copy_indirect_to_storage(&mut self, storage: Storage, size: u32) {
         for offset in 0..size {
             self.line("    ldy #$00");
-            self.line(&format!("    lda (${:02X}),y", POINTER_ZP));
+            self.line(&format!("    lda {}", self.indirect_indexed_y(POINTER_ZP)));
             self.sta(storage.address + offset);
             if offset + 1 < size {
-                self.increment_zp(POINTER_ZP);
+                self.increment_pointer_zp(POINTER_ZP, self.model.pointer_bytes());
             }
         }
     }
@@ -3890,7 +3957,11 @@ impl Emitter {
         match resolved {
             Type::Array { .. } => self.set_pointer(binding.storage.address),
             Type::Ptr(_) => {
-                self.copy(binding.storage, self.r0, 2);
+                self.copy(
+                    binding.storage,
+                    self.r0,
+                    u32::from(self.model.pointer_bytes()),
+                );
                 self.copy_result_to_zp();
             }
             _ => return Err(Diagnostic::new("indexing requires array or pointer")),
@@ -3904,7 +3975,11 @@ impl Emitter {
         let mut ty = self.model.resolved_type(&binding.ty)?;
         match &ty {
             Type::Ptr(_) => {
-                self.copy(binding.storage, self.r0, 2);
+                self.copy(
+                    binding.storage,
+                    self.r0,
+                    u32::from(self.model.pointer_bytes()),
+                );
                 self.copy_result_to_zp();
                 if let Type::Ptr(inner) = ty {
                     ty = *inner;
@@ -3939,24 +4014,28 @@ impl Emitter {
             self.add_pointer_constant(offset);
             return Ok(());
         }
-        let saved_lo = self.model.allocate(2)?;
-        self.lda(POINTER_ZP);
-        self.sta(saved_lo.address);
-        self.lda(POINTER_ZP + 1);
-        self.sta(saved_lo.address + 1);
+        let pointer_width = self.model.pointer_bytes();
+        let saved_lo = self.model.allocate(u32::from(pointer_width))?;
+        for offset in 0..u32::from(pointer_width) {
+            self.lda(POINTER_ZP + offset);
+            self.sta(saved_lo.address + offset);
+        }
         self.emit_expr(index, &Type::Named("u16".to_owned()))?;
-        self.lda(saved_lo.address);
-        self.sta(POINTER_ZP);
-        self.lda(saved_lo.address + 1);
-        self.sta(POINTER_ZP + 1);
+        for offset in 0..u32::from(pointer_width) {
+            self.lda(saved_lo.address + offset);
+            self.sta(POINTER_ZP + offset);
+        }
         self.scale_pointer_index(element_size)?;
         self.line("    clc");
-        self.lda(saved_lo.address);
-        self.line(&format!("    adc ${:04X}", self.r0.address));
-        self.sta(POINTER_ZP);
-        self.lda(saved_lo.address + 1);
-        self.line(&format!("    adc ${:04X}", self.r0.address + 1));
-        self.sta(POINTER_ZP + 1);
+        for offset in 0..u32::from(pointer_width) {
+            self.lda(saved_lo.address + offset);
+            if offset < 2 {
+                self.line(&format!("    adc ${:04X}", self.r0.address + offset));
+            } else {
+                self.line("    adc #$00");
+            }
+            self.sta(POINTER_ZP + offset);
+        }
         Ok(())
     }
 
@@ -4225,15 +4304,17 @@ impl Emitter {
     }
 
     fn zero(&mut self, storage: Storage) {
-        if self.supports_65c02() {
+        let can_stz = self.supports_65c02()
+            && !(self.cpu == CpuFamily::Wdc65C816 && storage.address > u16::MAX.into());
+        if can_stz {
             for offset in 0..storage.size {
                 self.line(&format!("    stz ${:04X}", storage.address + offset));
             }
-        } else {
-            self.lda_imm(0);
-            for offset in 0..storage.size {
-                self.sta(storage.address + offset);
-            }
+            return;
+        }
+        self.lda_imm(0);
+        for offset in 0..storage.size {
+            self.sta(storage.address + offset);
         }
     }
 
@@ -4340,51 +4421,38 @@ impl Emitter {
     }
 
     fn set_zp_from_storage(&mut self, zero_page: u32, storage: Storage) {
-        self.lda(storage.address);
-        self.sta(zero_page);
-        self.lda(storage.address + 1);
-        self.sta(zero_page + 1);
-    }
-
-    fn increment_zp(&mut self, zero_page: u32) {
-        let done = self.next_label("pointer_incremented");
-        self.line(&format!("    inc ${zero_page:02X}"));
-        self.branch_long("bne", &done);
-        self.line(&format!("    inc ${:02X}", zero_page + 1));
-        self.line(&format!("{done}:"));
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            self.lda(storage.address + offset);
+            self.sta(zero_page + offset);
+        }
     }
 
     fn set_pointer(&mut self, address: u32) {
-        self.lda_imm(address as u8);
-        self.sta(POINTER_ZP);
-        self.lda_imm((address >> 8) as u8);
-        self.sta(POINTER_ZP + 1);
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            self.lda_imm(((address >> (offset * 8)) & 0xFF) as u8);
+            self.sta(POINTER_ZP + offset);
+        }
     }
 
     fn add_pointer_constant(&mut self, value: u32) {
         self.line("    clc");
-        self.lda(POINTER_ZP);
-        self.line(&format!("    adc #${:02X}", value as u8));
-        self.sta(POINTER_ZP);
-        self.lda(POINTER_ZP + 1);
-        self.line(&format!("    adc #${:02X}", (value >> 8) as u8));
-        self.sta(POINTER_ZP + 1);
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            self.lda(POINTER_ZP + offset);
+            self.line(&format!("    adc #${:02X}", (value >> (offset * 8)) as u8));
+            self.sta(POINTER_ZP + offset);
+        }
     }
 
     fn copy_result_to_zp(&mut self) {
-        self.lda(self.r0.address);
-        self.sta(POINTER_ZP);
-        self.lda(self.r0.address + 1);
-        self.sta(POINTER_ZP + 1);
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            self.lda(self.r0.address + offset);
+            self.sta(POINTER_ZP + offset);
+        }
     }
 
     fn copy_zp_to_result(&mut self, width: u8) {
-        self.lda(POINTER_ZP);
-        self.sta(self.r0.address);
-        self.lda(POINTER_ZP + 1);
-        self.sta(self.r0.address + 1);
-        for offset in 2..u32::from(width) {
-            self.lda_imm(0);
+        for offset in 0..u32::from(width) {
+            self.lda(POINTER_ZP + offset);
             self.sta(self.r0.address + offset);
         }
     }
@@ -4392,7 +4460,7 @@ impl Emitter {
     fn load_indirect(&mut self, width: u8) {
         for offset in 0..u32::from(width) {
             self.line(&format!("    ldy #${offset:02X}"));
-            self.line(&format!("    lda (${:02X}),y", POINTER_ZP));
+            self.line(&format!("    lda {}", self.indirect_indexed_y(POINTER_ZP)));
             self.sta(self.r0.address + offset);
         }
     }
@@ -4663,6 +4731,33 @@ impl Emitter {
 
     fn lda(&mut self, address: u32) {
         self.line(&format!("    lda ${address:04X}"));
+    }
+
+    fn ldx_memory(&mut self, address: u32) {
+        if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
+            self.lda(address);
+            self.line("    tax");
+        } else {
+            self.line(&format!("    ldx ${address:04X}"));
+        }
+    }
+
+    fn memory_unary(&mut self, mnemonic: &str, address: u32) {
+        if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
+            self.lda(address);
+            self.line(&format!("    {mnemonic} a"));
+            self.sta(address);
+        } else {
+            self.line(&format!("    {mnemonic} ${address:04X}"));
+        }
+    }
+
+    fn indirect_indexed_y(&self, zero_page: u32) -> String {
+        if self.cpu == CpuFamily::Wdc65C816 {
+            format!("[${zero_page:02X}],y")
+        } else {
+            format!("(${zero_page:02X}),y")
+        }
     }
 
     fn sta(&mut self, address: u32) {

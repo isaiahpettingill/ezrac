@@ -1,0 +1,29 @@
+// PPU timing status from the CPU's HVBJOY register.
+pub const HVBJOY: u16 = 0x4212
+pub const STATUS_VBLANK: u8 = 0x80
+pub const STATUS_HBLANK: u8 = 0x40
+
+pub fn status() -> u8 {
+    return *(cast<ptr<u8>>(cast<u24>(HVBJOY)))
+}
+
+pub fn in_vblank() -> bool { return (status() & STATUS_VBLANK) != 0 }
+pub fn in_hblank() -> bool { return (status() & STATUS_HBLANK) != 0 }
+
+pub fn wait_vblank_start() {
+    while !in_vblank() {}
+}
+
+pub fn wait_vblank_end() {
+    while in_vblank() {}
+}
+
+pub fn wait_frame() {
+    wait_vblank_start()
+    wait_vblank_end()
+}
+
+pub fn wait_two_frames() {
+    wait_frame()
+    wait_frame()
+}

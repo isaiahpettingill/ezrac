@@ -1,0 +1,29 @@
+// CPU-to-SPC700 communication ports. This module does not upload an SPC program.
+pub const APU_PORT0: u16 = 0x2140
+pub const APU_PORT1: u16 = 0x2141
+pub const APU_PORT2: u16 = 0x2142
+pub const APU_PORT3: u16 = 0x2143
+
+fn port_address(port: u8) -> u16 {
+    return APU_PORT0 + cast<u16>(port & 3)
+}
+
+pub fn write_port(port: u8, value: u8) {
+    *(cast<ptr<u8>>(cast<u24>(port_address(port)))) = value
+}
+
+pub fn read_port(port: u8) -> u8 {
+    return *(cast<ptr<u8>>(cast<u24>(port_address(port))))
+}
+
+pub fn send_command(command: u8, value: u8) {
+    write_port(0, command)
+    write_port(1, value)
+}
+
+pub fn clear_ports() {
+    write_port(0, 0)
+    write_port(1, 0)
+    write_port(2, 0)
+    write_port(3, 0)
+}

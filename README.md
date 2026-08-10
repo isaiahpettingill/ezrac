@@ -121,6 +121,8 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/gameboy-assembly.md` documents DMG/CGB LR35902 assembly, ROM output, and the vendorable macro SDK.
 - `examples/nes-2a03/source-hello` compiles EZRA source into an NROM-128 NES image.
 - `examples/nes-2a03/hello-world` contains the raw 2A03 NES hello-world assembly example.
+- `examples/snes-5a22/source-hello` builds EZRA source with the bundled SNES SDK into a LoROM `.sfc` image.
+- `examples/snes-5a22/hello-world` contains a raw Ricoh 5A22/65C816 assembly example.
 - `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
 - `docs/disk-images.md` documents the disk-image command, emulator profiles, and `no_std + alloc` API.
 - `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, limited source backend, operand forms, expressions, word data, and [`examples/dcpu-16`](examples/dcpu-16/).

@@ -140,6 +140,32 @@ fn sega_game_gear_layout_reuses_sega_8bit_memory_map() {
 }
 
 #[test]
+fn snes_5a22_layout_keeps_lorom_code_header_space_and_wram_distinct() {
+    let layout = Layout::snes_5a22();
+    layout.validate().unwrap();
+    assert_eq!(layout.entry.get(), 0x008000);
+    assert_eq!(layout.stack.get(), 0x001FFF);
+    assert!(
+        layout
+            .regions
+            .iter()
+            .any(|region| region.name == "code" && region.end.get() == 0x00DFFF)
+    );
+    assert!(
+        layout
+            .regions
+            .iter()
+            .any(|region| region.name == "ram" && region.start.get() == 0x7E0000)
+    );
+    assert!(
+        layout
+            .regions
+            .iter()
+            .any(|region| region.name == "assets" && region.end.get() == 0x00FFBF)
+    );
+}
+
+#[test]
 fn bare_6502_layout_reserves_zero_page_and_hardware_stack() {
     let layout = Layout::bare_6502();
     layout.validate().unwrap();

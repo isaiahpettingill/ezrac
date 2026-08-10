@@ -88,7 +88,7 @@ impl AssemblerCpu {
             "m68k" | "68000" | "m68000" => Self::M68k,
             "6502" | "mos6502" | "m6502" => Self::Mos6502,
             "65c02" | "cmos65c02" => Self::Cmos65C02,
-            "65c816" | "wdc65c816" | "65816" => Self::Wdc65C816,
+            "65c816" | "wdc65c816" | "65816" | "5a22" => Self::Wdc65C816,
             "2a03" | "ricoh2a03" | "nes" => Self::Ricoh2A03,
             "tms9900" | "9900" => Self::Tms9900,
             "dcpu" | "dcpu16" | "dcpu-16" => Self::Dcpu,
@@ -369,6 +369,7 @@ pub enum OutputFormat {
     Commodore64Prg,
     Commodore64Crt,
     NesRom,
+    SnesRom,
     SmsRom,
     GameGearRom,
 }
@@ -390,6 +391,7 @@ impl OutputFormat {
             Self::Commodore64Prg => "prg",
             Self::Commodore64Crt => "crt",
             Self::NesRom => "nes",
+            Self::SnesRom => "sfc",
             Self::SmsRom => "sms",
             Self::GameGearRom => "gg",
         }
@@ -399,6 +401,7 @@ impl OutputFormat {
 pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
 pub const MSDOS_COM_I8086_TARGET: &str = "msdos-com-i8086";
 pub const NES_2A03_TARGET: &str = "nes-2a03";
+pub const SNES_5A22_TARGET: &str = "snes-5a22";
 pub const SEGA_MASTER_SYSTEM_Z80_TARGET: &str = "sega-master-system-z80";
 pub const SEGA_GAME_GEAR_Z80_TARGET: &str = "sega-game-gear-z80";
 
@@ -476,6 +479,8 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
         Some(&[CpuFamily::Mos6502][..])
     } else if target.starts_with("nes-") {
         Some(&[CpuFamily::Ricoh2A03][..])
+    } else if target.starts_with("snes-") {
+        Some(&[CpuFamily::Wdc65C816][..])
     } else if target.starts_with("sega-master-system-") || target.starts_with("sega-game-gear-") {
         Some(&[CpuFamily::Z80][..])
     } else if target.starts_with("arduboy-") {
@@ -536,6 +541,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::Commodore64Prg
     } else if triple.value.starts_with("nes-2a03") {
         OutputFormat::NesRom
+    } else if triple.value == SNES_5A22_TARGET {
+        OutputFormat::SnesRom
     } else if triple.value == SEGA_MASTER_SYSTEM_Z80_TARGET {
         OutputFormat::SmsRom
     } else if triple.value == SEGA_GAME_GEAR_Z80_TARGET {
@@ -573,6 +580,7 @@ pub fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
         "prg" | "c64" | "commodore64-prg" => Ok(OutputFormat::Commodore64Prg),
         "crt" | "commodore64-crt" => Ok(OutputFormat::Commodore64Crt),
         "nes" | "nes-rom" => Ok(OutputFormat::NesRom),
+        "sfc" | "smc" | "snes" | "snes-rom" => Ok(OutputFormat::SnesRom),
         "sms" | "sega-master-system" => Ok(OutputFormat::SmsRom),
         "gg" | "game-gear" | "sega-game-gear" => Ok(OutputFormat::GameGearRom),
         _ => Err(format!(
@@ -608,7 +616,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "m6809" | "6809" | "6809e" => Some(CpuFamily::M6809),
             "6502" | "mos6502" | "m6502" => Some(CpuFamily::Mos6502),
             "65c02" | "cmos65c02" => Some(CpuFamily::Cmos65C02),
-            "65c816" | "wdc65c816" | "65816" => Some(CpuFamily::Wdc65C816),
+            "65c816" | "wdc65c816" | "65816" | "5a22" => Some(CpuFamily::Wdc65C816),
             "2a03" | "ricoh2a03" | "nes" => Some(CpuFamily::Ricoh2A03),
             "tms9900" | "9900" => Some(CpuFamily::Tms9900),
             "dcpu" | "dcpu16" => Some(CpuFamily::Dcpu),

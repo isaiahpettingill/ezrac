@@ -1328,6 +1328,8 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::Lr35902
             | CpuFamily::Avr
             | CpuFamily::Mos6502
+            | CpuFamily::Cmos65C02
+            | CpuFamily::Wdc65C816
             | CpuFamily::Ricoh2A03
             | CpuFamily::Tms9900
     ) {
@@ -1483,6 +1485,13 @@ fn validate_assembler_cpu_for_target(
     if target.triple.value.starts_with("nes-") && assembler_cpu != AssemblerCpu::Ricoh2A03 {
         return Err(format!(
             "target `{}` requires assembler CPU `2a03`, not `{}`",
+            target.triple.value,
+            assembler_cpu.as_str()
+        ));
+    }
+    if target.triple.value.starts_with("snes-") && assembler_cpu != AssemblerCpu::Wdc65C816 {
+        return Err(format!(
+            "target `{}` requires assembler CPU `65c816`, not `{}`",
             target.triple.value,
             assembler_cpu.as_str()
         ));

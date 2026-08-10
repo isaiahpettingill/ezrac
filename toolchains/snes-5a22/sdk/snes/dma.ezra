@@ -1,0 +1,73 @@
+// CPU DMA channel setup. Channels use $43x0-$43xA, spaced by $10.
+const DMA_BASE: u16 = 0x4300
+const DMA_MDMAEN: u16 = 0x420B
+const DMA_HDMAEN: u16 = 0x420C
+const DMA_VMAIN: u16 = 0x2115
+const DMA_VMADDL: u16 = 0x2116
+const DMA_VMADDH: u16 = 0x2117
+const DMA_CGADD: u16 = 0x2121
+const DMA_OAMADDL: u16 = 0x2102
+const DMA_OAMADDH: u16 = 0x2103
+
+fn register(channel: u8, offset: u8) -> u16 {
+    return DMA_BASE + cast<u16>(channel) * 0x10 + cast<u16>(offset)
+}
+
+fn write_register(address: u16, value: u8) {
+    *(cast<ptr<u8>>(cast<u24>(address))) = value
+}
+
+pub fn set_control(channel: u8, value: u8) { write_register(register(channel, 0), value) }
+pub fn set_destination(channel: u8, register_number: u8) { write_register(register(channel, 1), register_number) }
+
+pub fn set_source(channel: u8, source: u24) {
+    write_register(register(channel, 2), cast<u8>(source))
+    write_register(register(channel, 3), cast<u8>(source >> 8))
+    write_register(register(channel, 4), cast<u8>(source >> 16))
+}
+
+pub fn set_size(channel: u8, size: u16) {
+    write_register(register(channel, 5), cast<u8>(size))
+    write_register(register(channel, 6), cast<u8>(size >> 8))
+}
+
+pub fn start(channel: u8) {
+    let mask: u8 = 1 << (channel & 7)
+    write_register(DMA_MDMAEN, mask)
+}
+
+pub fn start_mask(mask: u8) { write_register(DMA_MDMAEN, mask) }
+pub fn enable_hdma(mask: u8) { write_register(DMA_HDMAEN, mask) }
+pub fn disable_hdma() { write_register(DMA_HDMAEN, 0) }
+
+// Copy interleaved low/high bytes into VRAM. `size` is a byte count and
+// should be even when the source contains complete VRAM words.
+pub fn copy_to_vram(source: u24, address: u16, size: u16) {
+    write_register(DMA_VMAIN, 0x80)
+    write_register(DMA_VMADDL, cast<u8>(address))
+    write_register(DMA_VMADDH, cast<u8>(address >> 8))
+    set_control(0, 0x01)
+    set_destination(0, 0x18)
+    set_source(0, source)
+    set_size(0, size)
+    start(0)
+}
+
+pub fn copy_to_cgram(source: u24, address: u8, size: u16) {
+    write_register(DMA_CGADD, address)
+    set_control(0, 0x00)
+    set_destination(0, 0x22)
+    set_source(0, source)
+    set_size(0, size)
+    start(0)
+}
+
+pub fn copy_to_oam(source: u24, address: u16, size: u16) {
+    write_register(DMA_OAMADDL, cast<u8>(address))
+    write_register(DMA_OAMADDH, cast<u8>(address >> 8))
+    set_control(0, 0x00)
+    set_destination(0, 0x04)
+    set_source(0, source)
+    set_size(0, size)
+    start(0)
+}

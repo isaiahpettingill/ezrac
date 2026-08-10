@@ -251,6 +251,7 @@ pub fn package_executable_with_context(
         OutputFormat::Commodore64Prg => commodore64_prg_bytes(request, code),
         OutputFormat::Commodore64Crt => commodore64_crt_bytes(request, code),
         OutputFormat::NesRom => nes_rom_bytes(request, context, code),
+        OutputFormat::SnesRom => snes_lorom_bytes(request, code),
         OutputFormat::SmsRom => sega_8bit_rom_bytes(request, context, code, false),
         OutputFormat::GameGearRom => sega_8bit_rom_bytes(request, context, code, true),
         OutputFormat::Ti8ek | OutputFormat::Ti8xk => Err(PackageError::new(format!(
@@ -258,6 +259,69 @@ pub fn package_executable_with_context(
             request.output_format.extension()
         ))),
     }
+}
+
+fn snes_lorom_bytes(request: &PackageRequest, code: &[u8]) -> Result<Vec<u8>, PackageError> {
+    if request.target != crate::target::SNES_5A22_TARGET {
+        return Err(PackageError::new(format!(
+            "target `{}` does not support SNES `.sfc` output",
+            request.target
+        )));
+    }
+    if request.load_addr != 0x008000 || request.entry_addr != 0x008000 {
+        return Err(PackageError::new(
+            "SNES LoROM layouts must load and enter at $00:8000",
+        ));
+    }
+    const ROM_SIZE: usize = 0x8000;
+    const HEADER: usize = 0x7FC0;
+    if code.len() > HEADER {
+        return Err(PackageError::new(format!(
+            "SNES bank-00 code and data must fit in {HEADER} bytes before the internal header, got {}",
+            code.len()
+        )));
+    }
+    let mut rom = vec![0xFF; ROM_SIZE];
+    rom[..code.len()].copy_from_slice(code);
+    let mut title = [b' '; 21];
+    let name = request
+        .executable_name
+        .as_deref()
+        .unwrap_or("EZRA GAME")
+        .as_bytes();
+    let copy = name.len().min(title.len());
+    title[..copy].copy_from_slice(&name[..copy]);
+    rom[HEADER..HEADER + title.len()].copy_from_slice(&title);
+    rom[HEADER + 0x15] = 0x20; // SlowROM LoROM.
+    rom[HEADER + 0x16] = 0x00; // ROM only.
+    rom[HEADER + 0x17] = 0x05; // 32 KiB.
+    rom[HEADER + 0x18] = 0x00; // No cartridge SRAM.
+    rom[HEADER + 0x19] = 0x01; // NTSC region.
+    rom[HEADER + 0x1A] = 0x00;
+    rom[HEADER + 0x1B] = 0x00;
+    let entry = (request.entry_addr as u16).to_le_bytes();
+    for vector in [
+        0x7FE4usize,
+        0x7FE6,
+        0x7FE8,
+        0x7FEA,
+        0x7FEE,
+        0x7FF4,
+        0x7FF8,
+        0x7FFA,
+        0x7FFC,
+        0x7FFE,
+    ] {
+        rom[vector..vector + 2].copy_from_slice(&entry);
+    }
+    rom[HEADER + 0x1C..HEADER + 0x20].fill(0);
+    let checksum = rom
+        .iter()
+        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
+    let complement = !checksum;
+    rom[HEADER + 0x1C..HEADER + 0x1E].copy_from_slice(&complement.to_le_bytes());
+    rom[HEADER + 0x1E..HEADER + 0x20].copy_from_slice(&checksum.to_le_bytes());
+    Ok(rom)
 }
 
 fn nes_rom_bytes(

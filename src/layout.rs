@@ -106,6 +106,8 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         Layout::commodore64_6502()
     } else if target.starts_with("nes-") {
         Layout::nes_2a03()
+    } else if target == crate::target::SNES_5A22_TARGET {
+        Layout::snes_5a22()
     } else if target == SEGA_MASTER_SYSTEM_Z80_TARGET {
         Layout::sega_master_system_z80()
     } else if target == SEGA_GAME_GEAR_Z80_TARGET {
@@ -319,6 +321,65 @@ impl Layout {
                 symbol("EZRA_RAM_BASE", Address24::new(0x600000)),
                 symbol("EZRA_RODATA_BASE", Address24::new(0x400000)),
                 symbol("EZRA_ASSET_BASE", Address24::new(0x800000)),
+            ],
+        }
+    }
+
+    pub fn snes_5a22() -> Self {
+        Self {
+            name: "snes_5a22_lorom".to_owned(),
+            load: Address24::new(0x008000),
+            entry: Address24::new(0x008000),
+            stack: Address24::new(0x001FFF),
+            regions: vec![
+                region(
+                    "direct_page",
+                    0x000000,
+                    0x0000FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "stack",
+                    0x000100,
+                    0x001FFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "code",
+                    0x008000,
+                    0x00DFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x00E000, 0x00EFFF, &[RegionFlags::READ]),
+                region("assets", 0x00F000, 0x00FFBF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x7E0000,
+                    0x7E7FFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "scratch",
+                    0x7E8000,
+                    0x7EFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region(
+                    "wram",
+                    0x7F0000,
+                    0x7FFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+            ],
+            sections: bare_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x008000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x008000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x008000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x001FFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x7E0000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x00E000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x00F000)),
             ],
         }
     }

@@ -65,6 +65,7 @@ dependencies = [
  "pest_derive",
  "png",
  "toml",
+ "w65c816",
 ]
 
 [[package]]
@@ -430,6 +431,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "w65c816"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17816e76bcb05a01c8232982a3c58fb63688c0c1650f7e7db603961104853e1"
 
 [[package]]
 name = "windows-link"

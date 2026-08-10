@@ -1,0 +1,43 @@
+// SNES CPU and system-control registers.
+pub const NMITIMEN: u16 = 0x4200
+pub const WRIO: u16 = 0x4201
+pub const MEMSEL: u16 = 0x420D
+pub const MDMAEN: u16 = 0x420B
+pub const HDMAEN: u16 = 0x420C
+
+pub const NMI_ENABLE: u8 = 0x80
+pub const AUTO_JOYPAD: u8 = 0x01
+pub const FAST_ROM: u8 = 0x01
+
+pub fn write_system_register(address: u16, value: u8) {
+    *(cast<ptr<u8>>(cast<u24>(address))) = value
+}
+
+pub fn read_system_register(address: u16) -> u8 {
+    return *(cast<ptr<u8>>(cast<u24>(address)))
+}
+
+// Configure the CPU-side hardware before setting up video or audio. The
+// compiler's 65C816 startup already selects native mode and initializes SP.
+pub fn initialize() {
+    disable_interrupts()
+    write_system_register(NMITIMEN, 0)
+    write_system_register(MDMAEN, 0)
+    write_system_register(HDMAEN, 0)
+    write_system_register(WRIO, 0)
+    write_system_register(MEMSEL, 0)
+}
+
+pub fn disable_interrupts() {
+    asm volatile(clobber flags) { "sei" }
+}
+
+pub fn enable_interrupts() {
+    asm volatile(clobber flags) { "cli" }
+}
+
+pub fn set_nmi_control(value: u8) { write_system_register(NMITIMEN, value) }
+pub fn enable_auto_joypad() { set_nmi_control(AUTO_JOYPAD) }
+pub fn enable_nmi() { set_nmi_control(NMI_ENABLE | AUTO_JOYPAD) }
+pub fn disable_nmi() { set_nmi_control(0) }
+pub fn set_fast_rom(enabled: u8) { write_system_register(MEMSEL, enabled & FAST_ROM) }

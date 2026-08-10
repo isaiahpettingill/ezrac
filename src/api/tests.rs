@@ -83,6 +83,158 @@ fn generic_65c816_source_assembles_far_pointer_access() {
     .unwrap();
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn generic_65c816_compiles_far_scratch_shifts_and_dynamic_pointers() {
+    let source = r#"
+        global shifted: u16 = 0x1234
+        global cursor: ptr<u8> = 0x12FFFF
+        fn main() {
+            shifted = shifted << 1
+            *cursor = cast<u8>(shifted)
+            cursor = cursor + 1
+            *cursor = cast<u8>(shifted >> 8)
+        }
+    "#;
+    let compiled = compile_source_to_assembly(
+        source,
+        &CompileRequest::new("far.ezra", "generic-65c816-bare"),
+    )
+    .unwrap();
+    assert!(
+        compiled.assembly.contains("[$F0],y"),
+        "{}",
+        compiled.assembly
+    );
+
+    assemble_subset_with_symbols_at(AssemblerCpu::Wdc65C816, &compiled.assembly, 0x008000).unwrap();
+}
+
+#[cfg(feature = "mos6502")]
+#[test]
+fn generated_65c816_source_executes_in_reference_emulator() {
+    struct Bus {
+        memory: Vec<u8>,
+        reset: bool,
+    }
+
+    impl w65c816::System for Bus {
+        fn read(
+            &mut self,
+            addr: u32,
+            _addr_type: w65c816::AddressType,
+            _signals: &w65c816::Signals,
+        ) -> u8 {
+            self.memory[addr as usize]
+        }
+
+        fn write(
+            &mut self,
+            addr: u32,
+            data: u8,
+            _addr_type: w65c816::AddressType,
+            _signals: &w65c816::Signals,
+        ) {
+            self.memory[addr as usize] = data;
+        }
+
+        fn res(&mut self) -> bool {
+            self.reset
+        }
+    }
+
+    let compiled = compile_source_to_assembly(
+        "global result: u8 = 0\nfn bump(value: u8) -> u8 { return value + 1 }\nfn main() { result = bump(2) }\n",
+        &CompileRequest::new("run.ezra", "generic-65c816-bare"),
+    )
+    .unwrap();
+    let assembled =
+        assemble_subset_with_symbols_at(AssemblerCpu::Wdc65C816, &compiled.assembly, 0x008000)
+            .unwrap();
+    let exit = assembled
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "__ezra_exit")
+        .unwrap()
+        .addr;
+    let mut bus = Bus {
+        memory: vec![0; 0x0100_0000],
+        reset: true,
+    };
+    bus.memory[0x008000..0x008000 + assembled.bytes.len()].copy_from_slice(&assembled.bytes);
+    bus.memory[0xFFFC..0xFFFE].copy_from_slice(&0x8000u16.to_le_bytes());
+    let mut cpu = w65c816::CPU::new();
+    cpu.cycle(&mut bus);
+    bus.reset = false;
+    for _ in 0..1_000_000 {
+        cpu.cycle(&mut bus);
+        if cpu.pbr() == (exit >> 16) as u8 && cpu.pc() == exit as u16 {
+            break;
+        }
+    }
+    assert_eq!(bus.memory[0x600000], 3);
+}
+
+#[cfg(feature = "mos6502")]
+#[test]
+fn generic_65c816_interrupt_abi_preserves_native_state_and_rejects_calls() {
+    let compiled = compile_source_to_assembly(
+        "interrupt fn irq() {}\nfn main() {}\n",
+        &CompileRequest::new("irq.ezra", "generic-65c816-bare"),
+    )
+    .unwrap();
+    for instruction in [
+        "    php", "    phd", "    phb", "    plb", "    pld", "    plp", "    rti",
+    ] {
+        assert!(
+            compiled.assembly.contains(instruction),
+            "missing {instruction}\n{}",
+            compiled.assembly
+        );
+    }
+    assemble_subset_with_symbols_at(AssemblerCpu::Wdc65C816, &compiled.assembly, 0x008000).unwrap();
+
+    let error = compile_source_to_assembly(
+        "interrupt fn irq() {}\nfn main() { irq() }\n",
+        &CompileRequest::new("irq-call.ezra", "generic-65c816-bare"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot be called as an ordinary function"),
+        "{error}"
+    );
+}
+
+#[cfg(feature = "mos6502")]
+#[test]
+fn snes_source_example_compiles_with_bundled_sdk_and_packages_as_lorom() {
+    let source = include_str!("../../examples/snes-5a22/source-hello/src/main.ezra");
+    let compiled = compile_source_to_assembly(
+        source,
+        &CompileRequest::new("main.ezra", crate::target::SNES_5A22_TARGET),
+    )
+    .unwrap();
+    assert!(compiled.assembly.contains("target: WDC 65C816"));
+    let assembled =
+        assemble_subset_with_symbols_at(AssemblerCpu::Wdc65C816, &compiled.assembly, 0x008000)
+            .unwrap();
+    let rom = package_executable_with_context(
+        &PackageRequest::new(
+            crate::target::SNES_5A22_TARGET,
+            OutputFormat::SnesRom,
+            0x008000,
+            0x008000,
+        ),
+        &PackageContext::new(),
+        &assembled.bytes,
+    )
+    .unwrap();
+    assert_eq!(rom.len(), 0x8000);
+    assert_eq!(&rom[0x7FFC..0x7FFE], &[0x00, 0x80]);
+}
+
 #[test]
 fn artifact_size_report_is_stable_and_separates_payload_from_address_gaps() {
     let report = ArtifactSizeReport::from_sections(

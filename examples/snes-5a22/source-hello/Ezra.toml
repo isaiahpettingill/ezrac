@@ -1,0 +1,10 @@
+[project]
+name = "snes-source-hello"
+
+[build]
+input = "src/main.ezra"
+target = "snes-5a22"
+executable = "source-hello"
+
+[sdk]
+paths = ["../../../toolchains/snes-5a22/sdk"]

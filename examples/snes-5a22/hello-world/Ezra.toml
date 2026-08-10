@@ -1,0 +1,9 @@
+[project]
+name = "snes-hello-world"
+
+[build]
+input = "hello.asm"
+input_kind = "assembly"
+target = "snes-5a22"
+assembler_cpu = "65c816"
+executable = "hello"

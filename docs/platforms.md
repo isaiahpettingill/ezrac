@@ -55,7 +55,9 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `bare-ez80` | 3 | eZ80 ADL | 24 | `.bin` | none | Bare eZ80 target |
 | `commodore64-6502` | 2 | MOS 6510 (6502-compatible) | 16 | `.prg` | `c64.*` | Optional `mos6502` feature; source and assembly target |
 | `generic-6502-bare` | 3 | MOS 6502 | 16 | `.bin` | none | Optional `mos6502` feature; bare source/assembly target |
+| `generic-65c816-bare` | 3 | WDC 65C816 | 24 | `.bin` | none | Native-mode byte ABI, 24-bit pointers, and bank-00 near calls |
 | `nes-2a03` | 3 | Ricoh 2A03 | 16 | `.nes` | `nes.*` | Optional `mos6502` feature; EZRA source, bundled SDK, and raw assembly NROM-128 target |
+| `snes-5a22` | 3 | Ricoh 5A22 / 65C816 core | 24 | `.sfc` | `snes.*` | Native source and assembly, 32 KiB LoROM packaging, generated header/checksum/vectors |
 | `sega-master-system-z80` | 3 | Z80 | 16 | `.sms` | `sms.*` | 32-256 KiB export-SMS target with slot-2 data banking; interrupt runtime pending |
 | `sega-game-gear-z80` | 3 | Z80 | 16 | `.gg` | `sms.*`, `gg.*` | 32-256 KiB Game Gear target with shared slot-2 data banking and Game Gear hardware helpers |
 | `ti99-4a-tms9900` | 3 | TMS9900 | 16 | cartridge `.bin` | `ti99.*` | Optional `tms9900` feature; TI-99/4A scalar source/assembly target |

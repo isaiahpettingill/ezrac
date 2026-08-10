@@ -1,0 +1,38 @@
+// SNES work RAM is visible at banks $7E-$7F and mirrored at $0000-$1FFF.
+pub const WRAM_BASE: u24 = 0x7E0000
+pub const WRAM_END: u24 = 0x800000
+pub const WRAM_SIZE: u24 = 0x020000
+pub const LOW_RAM_BASE: u16 = 0x0000
+pub const LOW_RAM_END: u16 = 0x2000
+
+pub fn write(address: u24, value: u8) {
+    *(cast<ptr<u8>>(address)) = value
+}
+
+pub fn read(address: u24) -> u8 {
+    return *(cast<ptr<u8>>(address))
+}
+
+pub fn clear_low_ram() {
+    let address: u16 = LOW_RAM_BASE
+    while address < LOW_RAM_END {
+        write(cast<u24>(address), 0)
+        address += 1
+    }
+}
+
+pub fn clear_wram() {
+    let address: u24 = WRAM_BASE
+    while address < WRAM_END {
+        write(address, 0)
+        address += 1
+    }
+}
+
+pub fn fill_wram(value: u8) {
+    let address: u24 = WRAM_BASE
+    while address < WRAM_END {
+        write(address, value)
+        address += 1
+    }
+}
