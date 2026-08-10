@@ -237,6 +237,26 @@ fn resolves_generic_bare_6502_target() {
     assert!(!profile.supports_port_io());
 }
 
+#[cfg(feature = "mos6502")]
+#[test]
+fn resolves_bare_65c816_aliases_as_24_bit_raw_targets() {
+    for target in ["generic-65c816-bare", "generic-65816-bare"] {
+        let profile = resolve_target_profile(Some(target)).unwrap();
+        assert_eq!(profile.triple.cpu, CpuFamily::Wdc65C816);
+        assert_eq!(
+            AssemblerCpu::from(profile.triple.cpu),
+            AssemblerCpu::Wdc65C816
+        );
+        assert_eq!(profile.memory.pointer_width_bits, 24);
+        assert_eq!(profile.memory.address_width_bits, 24);
+        assert_eq!(profile.output_format, OutputFormat::RawBin);
+        assert!(!profile.default_sdk_symbols);
+    }
+    let layout = default_layout_for_target("generic-65c816-bare");
+    assert_eq!(layout.name, "bare_65c816");
+    assert_eq!(layout.entry.get(), 0x008000);
+}
+
 #[cfg(feature = "tms9900")]
 #[test]
 fn resolves_ti99_4a_tms9900_target() {

@@ -23,6 +23,26 @@ pub enum Mos6502Variant {
     Ricoh2A03,
 }
 
+/// Widths used by the 65C816 immediate encodings.
+///
+/// The processor starts in emulation mode, where both register groups are
+/// eight bits wide. Native-mode assembly must update these widths with `REP`,
+/// `SEP`, or the `.a8`/`.a16` and `.i8`/`.i16` directives.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Mos65816Widths {
+    pub accumulator: u8,
+    pub index: u8,
+}
+
+impl Default for Mos65816Widths {
+    fn default() -> Self {
+        Self {
+            accumulator: 8,
+            index: 8,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Implied,
@@ -40,7 +60,12 @@ enum Mode {
     IndirectIndexed,
     Relative,
     AbsoluteLong,
+    AbsoluteLongX,
     IndirectLong,
+    DirectIndirectLong,
+    DirectIndirectLongY,
+    StackRelative,
+    StackRelativeIndirectY,
     IndexedIndirectX,
     RelativeLong,
 }
@@ -50,7 +75,15 @@ enum Mode {
 /// Uses the default NMOS 6502 variant. For variant-aware length,
 /// use [`instruction_len_for_variant`].
 pub fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    Ok(encode(text, &HashMap::new(), 0, false, Mos6502Variant::Nmos6502)?.len())
+    Ok(encode_with_widths(
+        text,
+        &HashMap::new(),
+        0,
+        false,
+        Mos6502Variant::Nmos6502,
+        Mos65816Widths::default(),
+    )?
+    .len())
 }
 
 /// Returns the assembled length of a single instruction for a specific
@@ -59,7 +92,17 @@ pub fn instruction_len_for_variant(
     text: &str,
     variant: Mos6502Variant,
 ) -> Result<usize, Diagnostic> {
-    Ok(encode(text, &HashMap::new(), 0, false, variant)?.len())
+    instruction_len_for_variant_with_widths(text, variant, Mos65816Widths::default())
+}
+
+/// Returns the assembled length with explicit 65C816 accumulator and index
+/// widths. Widths only affect immediate operands on the 65C816.
+pub fn instruction_len_for_variant_with_widths(
+    text: &str,
+    variant: Mos6502Variant,
+    widths: Mos65816Widths,
+) -> Result<usize, Diagnostic> {
+    Ok(encode_with_widths(text, &HashMap::new(), 0, false, variant, widths)?.len())
 }
 
 /// Encodes a single MOS 6502 instruction string into bytes.
@@ -75,7 +118,14 @@ pub fn encode_instruction(
     pc: u32,
     resolve: bool,
 ) -> Result<Vec<u8>, Diagnostic> {
-    encode(text, labels, pc, resolve, Mos6502Variant::Nmos6502)
+    encode_with_widths(
+        text,
+        labels,
+        pc,
+        resolve,
+        Mos6502Variant::Nmos6502,
+        Mos65816Widths::default(),
+    )
 }
 
 /// Encodes a single instruction for a specific 6502-family variant
@@ -92,12 +142,42 @@ pub fn encode_instruction_for_variant(
     encode(text, labels, pc, resolve, variant)
 }
 
+/// Encodes one instruction with explicit 65C816 immediate-register widths.
+pub fn encode_instruction_for_variant_with_widths(
+    text: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+    variant: Mos6502Variant,
+    widths: Mos65816Widths,
+) -> Result<Vec<u8>, Diagnostic> {
+    encode_with_widths(text, labels, pc, resolve, variant, widths)
+}
+
 fn encode(
     text: &str,
     labels: &HashMap<String, u32>,
     pc: u32,
     resolve: bool,
     variant: Mos6502Variant,
+) -> Result<Vec<u8>, Diagnostic> {
+    encode_with_widths(
+        text,
+        labels,
+        pc,
+        resolve,
+        variant,
+        Mos65816Widths::default(),
+    )
+}
+
+fn encode_with_widths(
+    text: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    resolve: bool,
+    variant: Mos6502Variant,
+    widths: Mos65816Widths,
 ) -> Result<Vec<u8>, Diagnostic> {
     let normalized = text.trim().to_ascii_lowercase();
     let (mnemonic, operand) = normalized
@@ -134,13 +214,23 @@ fn encode(
     })?;
     let mut out = vec![opcode];
     match mode {
-        Mode::Implied | Mode::Accumulator => {}
-        Mode::Immediate
-        | Mode::ZeroPage
+        Mode::Implied | Mode::Accumulator => {
+            if mnemonic == "brk" {
+                // BRK always has a padding/signature byte, even when source
+                // omits it. This is true for both the 6502 and 65C816.
+                out.push(0);
+            }
+        }
+        Mode::Immediate => push_immediate(&mut out, operand, value, mnemonic, variant, widths)?,
+        Mode::ZeroPage
         | Mode::ZeroPageX
         | Mode::ZeroPageY
         | Mode::IndexedIndirect
-        | Mode::IndirectIndexed => out.push(u8_value(operand, value)?),
+        | Mode::IndirectIndexed
+        | Mode::DirectIndirectLong
+        | Mode::DirectIndirectLongY
+        | Mode::StackRelative
+        | Mode::StackRelativeIndirectY => out.push(u8_value(operand, value)?),
         Mode::Relative => out.push(relative_offset_6502(pc, value)?),
         Mode::RelativeLong => {
             let offset = i64::from(value as i16) - (pc.wrapping_add(3) as i64);
@@ -154,7 +244,7 @@ fn encode(
         | Mode::AbsoluteY
         | Mode::Indirect
         | Mode::IndexedIndirectX => push16(&mut out, value)?,
-        Mode::AbsoluteLong => push24(&mut out, value)?,
+        Mode::AbsoluteLong | Mode::AbsoluteLongX => push24(&mut out, value)?,
         Mode::IndirectLong => push16(&mut out, value)?,
     }
     Ok(out)
@@ -208,6 +298,26 @@ fn parse_operand(
         return Ok((Mode::IndexedIndirect, v));
     }
 
+    if variant == Mos6502Variant::Wdc65C816 {
+        if let Some(inner) = operand
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(",s),y"))
+        {
+            return Ok((
+                Mode::StackRelativeIndirectY,
+                value_or(inner, labels, pc, resolve, 0)?,
+            ));
+        }
+        if let Some(inner) = operand
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix("],y"))
+        {
+            return Ok((
+                Mode::DirectIndirectLongY,
+                value_or(inner, labels, pc, resolve, 0)?,
+            ));
+        }
+    }
     if let Some(inner) = operand
         .strip_prefix('(')
         .and_then(|s| s.strip_suffix(",x)"))
@@ -233,9 +343,14 @@ fn parse_operand(
     }
     if let Some(inner) = operand.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         if variant == Mos6502Variant::Wdc65C816 {
+            let value = value_or(inner, labels, pc, resolve, 0x100)?;
             return Ok((
-                Mode::IndirectLong,
-                value_or(inner, labels, pc, resolve, 0x100)?,
+                if mnemonic == "jmp" || mnemonic == "jml" {
+                    Mode::IndirectLong
+                } else {
+                    Mode::DirectIndirectLong
+                },
+                value,
             ));
         }
         return Err(Diagnostic::new(format!(
@@ -261,9 +376,15 @@ fn parse_operand(
         return Ok((Mode::Indirect, v));
     }
     if let Some(expr) = operand.strip_suffix(",x") {
-        let v = value_or(expr, labels, pc, resolve, 0x100)?;
+        let expr = expr.trim();
+        let explicit_long = expr.starts_with('!');
+        let value_expr = expr.trim_start_matches('!').trim();
+        let v = value_or(value_expr, labels, pc, resolve, 0x100)?;
+        if variant == Mos6502Variant::Wdc65C816 && (explicit_long || v > 0xffff) {
+            return Ok((Mode::AbsoluteLongX, v));
+        }
         return Ok((
-            if operand_is_numeric(expr) && v <= 0xff {
+            if operand_is_numeric(value_expr) && v <= 0xff {
                 Mode::ZeroPageX
             } else {
                 Mode::AbsoluteX
@@ -286,9 +407,19 @@ fn parse_operand(
         && variant == Mos6502Variant::Wdc65C816
     {
         let v = value_or(expr, labels, pc, resolve, 0x100)?;
-        return Ok((Mode::ZeroPage, v));
+        return Ok((Mode::StackRelative, v));
     }
-    let v = value_or(operand, labels, pc, resolve, 0x100)?;
+    if let Some(expr) = operand.strip_prefix('<')
+        && variant == Mos6502Variant::Wdc65C816
+    {
+        return Ok((
+            Mode::ZeroPage,
+            value_or(expr.trim(), labels, pc, resolve, 0)?,
+        ));
+    }
+    let explicit_long = operand.starts_with('!');
+    let value_operand = operand.trim_start_matches('!').trim();
+    let v = value_or(value_operand, labels, pc, resolve, 0x100)?;
     if operand.starts_with('>') || operand.starts_with('^') {
         let prefix = &operand[..1];
         let inner = operand[1..].trim();
@@ -311,27 +442,22 @@ fn parse_operand(
         && variant == Mos6502Variant::Wdc65C816
         && matches!(
             mnemonic,
-            "jmp" | "jsr" | "lda" | "sta" | "adc" | "sbc" | "and" | "ora" | "eor" | "cmp"
+            "jmp"
+                | "jml"
+                | "jsr"
+                | "jsl"
+                | "lda"
+                | "sta"
+                | "adc"
+                | "sbc"
+                | "and"
+                | "ora"
+                | "eor"
+                | "cmp"
         )
     {
-        let explicit_long = operand.contains(':') || operand.starts_with('!');
-        if v > 0xffff || explicit_long {
-            let inner = if explicit_long {
-                operand.trim_start_matches('!')
-            } else {
-                operand
-            };
-            let mode = match mnemonic {
-                "jmp" if explicit_long => Mode::AbsoluteLong,
-                "jsr" if explicit_long => Mode::AbsoluteLong,
-                _ => Mode::AbsoluteLong,
-            };
-            let actual_v = if explicit_long {
-                value_or(inner, labels, pc, resolve, 0x100)?
-            } else {
-                v
-            };
-            return Ok((mode, actual_v));
+        if v > 0xffff || explicit_long || matches!(mnemonic, "jml" | "jsl") {
+            return Ok((Mode::AbsoluteLong, v));
         }
     }
     Ok((
@@ -381,6 +507,35 @@ fn value_or(
         Err(_) if !resolve => Ok(unresolved),
         Err(error) => Err(error),
     }
+}
+
+fn push_immediate(
+    out: &mut Vec<u8>,
+    operand: &str,
+    value: u32,
+    mnemonic: &str,
+    variant: Mos6502Variant,
+    widths: Mos65816Widths,
+) -> Result<(), Diagnostic> {
+    let width = if variant == Mos6502Variant::Wdc65C816 {
+        match mnemonic {
+            "adc" | "and" | "bit" | "cmp" | "eor" | "lda" | "ora" | "sbc" => widths.accumulator,
+            "cpx" | "cpy" | "ldx" | "ldy" => widths.index,
+            _ => 8,
+        }
+    } else {
+        8
+    };
+    match width {
+        8 => out.push(u8_value(operand, value)?),
+        16 => push16(out, value)?,
+        _ => {
+            return Err(Diagnostic::new(
+                "65C816 immediate width must be 8 or 16 bits",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn u8_value(operand: &str, value: u32) -> Result<u8, Diagnostic> {
@@ -451,7 +606,7 @@ impl Mos6502Variant {
 
 fn opcode(m: &str, mode: Mode, variant: Mos6502Variant) -> Option<u8> {
     match (m, mode, variant) {
-        ("brk", Mode::Implied, _) => Some(0x00),
+        ("brk", Mode::Implied | Mode::Immediate, _) => Some(0x00),
         ("php", Mode::Implied, _) => Some(0x08),
         ("clc", Mode::Implied, _) => Some(0x18),
         ("plp", Mode::Implied, _) => Some(0x28),
@@ -578,13 +733,15 @@ fn opcode(m: &str, mode: Mode, variant: Mos6502Variant) -> Option<u8> {
         ("pei", Mode::IndexedIndirect, Mos6502Variant::Wdc65C816) => Some(0xD4),
         ("per", Mode::RelativeLong, Mos6502Variant::Wdc65C816) => Some(0x62),
 
-        // 65C816 JSR indexed indirect and long variants
+        // 65C816 JSR indexed indirect and long variants. `jml` and `jsl`
+        // are the canonical long mnemonics; `jmp !addr` and `jsr !addr`
+        // remain accepted for compatibility with the existing syntax.
         ("jsr", Mode::IndexedIndirectX, Mos6502Variant::Wdc65C816) => Some(0xFC),
-        ("jmp", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x5C),
-        ("jsr", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x22),
-        ("jmp", Mode::IndirectLong, Mos6502Variant::Wdc65C816) => Some(0xDC),
+        ("jmp" | "jml", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x5C),
+        ("jsr" | "jsl", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x22),
+        ("jmp" | "jml", Mode::IndirectLong, Mos6502Variant::Wdc65C816) => Some(0xDC),
 
-        // 65C816 long addressing for ALU/load/store
+        // 65C816 long and stack-relative addressing.
         ("lda", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0xAF),
         ("sta", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x8F),
         ("adc", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x6F),
@@ -593,6 +750,46 @@ fn opcode(m: &str, mode: Mode, variant: Mos6502Variant) -> Option<u8> {
         ("ora", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x0F),
         ("eor", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0x4F),
         ("cmp", Mode::AbsoluteLong, Mos6502Variant::Wdc65C816) => Some(0xCF),
+        ("lda", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0xBF),
+        ("sta", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0x9F),
+        ("adc", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0x7F),
+        ("sbc", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0xFF),
+        ("and", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0x3F),
+        ("ora", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0x1F),
+        ("eor", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0x5F),
+        ("cmp", Mode::AbsoluteLongX, Mos6502Variant::Wdc65C816) => Some(0xDF),
+        ("lda", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0xA7),
+        ("sta", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0x87),
+        ("adc", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0x67),
+        ("sbc", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0xE7),
+        ("and", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0x27),
+        ("ora", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0x07),
+        ("eor", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0x47),
+        ("cmp", Mode::DirectIndirectLong, Mos6502Variant::Wdc65C816) => Some(0xC7),
+        ("lda", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0xB7),
+        ("sta", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0x97),
+        ("adc", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0x77),
+        ("sbc", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0xF7),
+        ("and", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0x37),
+        ("ora", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0x17),
+        ("eor", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0x57),
+        ("cmp", Mode::DirectIndirectLongY, Mos6502Variant::Wdc65C816) => Some(0xD7),
+        ("lda", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0xA3),
+        ("sta", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0x83),
+        ("adc", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0x63),
+        ("sbc", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0xE3),
+        ("and", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0x23),
+        ("ora", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0x03),
+        ("eor", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0x43),
+        ("cmp", Mode::StackRelative, Mos6502Variant::Wdc65C816) => Some(0xC3),
+        ("lda", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0xB3),
+        ("sta", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0x93),
+        ("adc", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0x73),
+        ("sbc", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0xF3),
+        ("and", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0x33),
+        ("ora", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0x13),
+        ("eor", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0x53),
+        ("cmp", Mode::StackRelativeIndirectY, Mos6502Variant::Wdc65C816) => Some(0xD3),
 
         // 65C816 push/pull bank/DP registers
         ("phb", Mode::Implied, Mos6502Variant::Wdc65C816) => Some(0x8B),
@@ -836,6 +1033,8 @@ fn opcode_group(m: &str, mode: Mode, variant: Mos6502Variant) -> Option<u8> {
 
 fn opcode_65c02_group(m: &str, mode: Mode) -> Option<u8> {
     match (m, mode) {
+        ("bit", Mode::ZeroPageX) => Some(0x34),
+        ("bit", Mode::AbsoluteX) => Some(0x3C),
         ("stz", Mode::ZeroPage) => Some(0x64),
         ("stz", Mode::Absolute) => Some(0x9C),
         ("stz", Mode::ZeroPageX) => Some(0x74),

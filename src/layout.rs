@@ -90,6 +90,7 @@ pub fn default_layout_for_target(target: &str) -> Layout {
         match cpu {
             AssemblerCpu::Ez80 => Layout::bare_ez80(),
             AssemblerCpu::Mos6502 => Layout::bare_6502(),
+            AssemblerCpu::Wdc65C816 => Layout::bare_65c816(),
             AssemblerCpu::M68k => Layout::bare_m68k(),
             _ => Layout::bare_16(cpu.as_str()),
         }
@@ -260,6 +261,58 @@ impl Layout {
                 symbol("EZRA_RAM_BASE", Address24::new(0xA000)),
                 symbol("EZRA_RODATA_BASE", Address24::new(0x8000)),
                 symbol("EZRA_ASSET_BASE", Address24::new(0xC000)),
+            ],
+        }
+    }
+
+    /// Generic 65C816 native-mode layout for raw binaries.
+    ///
+    /// The binary loads at bank `$00`, address `$8000`. Direct-page and stack
+    /// storage remain in bank `$00`; callers must establish native mode and
+    /// initialize DBR, D, and the stack before entering generated code.
+    pub fn bare_65c816() -> Self {
+        Self {
+            name: "bare_65c816".to_owned(),
+            load: Address24::new(0x008000),
+            entry: Address24::new(0x008000),
+            stack: Address24::new(0x001FFF),
+            regions: vec![
+                region(
+                    "direct_page",
+                    0x000000,
+                    0x0000FF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "stack",
+                    0x000100,
+                    0x001FFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE, RegionFlags::RESERVED],
+                ),
+                region(
+                    "code",
+                    0x008000,
+                    0x3FFFFF,
+                    &[RegionFlags::READ, RegionFlags::EXECUTE],
+                ),
+                region("rodata", 0x400000, 0x5FFFFF, &[RegionFlags::READ]),
+                region(
+                    "ram",
+                    0x600000,
+                    0x7DFFFF,
+                    &[RegionFlags::READ, RegionFlags::WRITE],
+                ),
+                region("assets", 0x800000, 0xEFFFFF, &[RegionFlags::READ]),
+            ],
+            sections: bare_sections(),
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0x008000)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0x008000)),
+                symbol("EZRA_CODE_BASE", Address24::new(0x008000)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x001FFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x600000)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x400000)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x800000)),
             ],
         }
     }

@@ -529,6 +529,9 @@ impl AssemblyPreprocessor<'_> {
         if name.eq_ignore_ascii_case("global") || name.eq_ignore_ascii_case("globl") {
             return Ok(None);
         }
+        if matches!(name.as_str(), "a8" | "a16" | "i8" | "i16") && arguments.is_empty() {
+            return Ok(Some(ParsedAssemblyItem::Directive { name, arguments }));
+        }
         if name.eq_ignore_ascii_case("assume") {
             let assumption = arguments
                 .join(",")

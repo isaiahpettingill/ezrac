@@ -27,6 +27,12 @@ pub struct LocatedAssemblyItem {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssemblyItem {
+    /// Change the immediate-register widths used by the 65C816 assembler.
+    /// These directives emit no bytes.
+    CpuWidth {
+        accumulator: Option<u8>,
+        index: Option<u8>,
+    },
     Label(String),
     Equ {
         name: String,
@@ -265,6 +271,15 @@ pub fn lower_parsed_assembly(parsed: ParsedAssembly) -> Result<AssemblyProgram, 
                 }
             }
             ParsedAssemblyItem::Instruction(instruction) => AssemblyItem::Instruction(instruction),
+            ParsedAssemblyItem::Directive { name, arguments }
+                if matches!(name.as_str(), "a8" | "a16" | "i8" | "i16") && arguments.is_empty() =>
+            {
+                let width = if name.ends_with("16") { 16 } else { 8 };
+                AssemblyItem::CpuWidth {
+                    accumulator: name.starts_with('a').then_some(width),
+                    index: name.starts_with('i').then_some(width),
+                }
+            }
             ParsedAssemblyItem::Include { .. }
             | ParsedAssemblyItem::Define { .. }
             | ParsedAssemblyItem::MacroDefinition { .. }

@@ -1403,6 +1403,32 @@ fn mos6502_assembler_keeps_label_operands_absolute() {
 
 #[test]
 #[cfg(feature = "mos6502")]
+fn wdc65c816_tracks_width_directives_rep_and_sep() {
+    let assembled = assemble_subset_with_symbols_at(
+        AssemblerCpu::Wdc65C816,
+        ".a16\n.i16\nlda #$1234\nldx #$5678\nsep #$30\nlda #$9a\nldx #$bc\nrep #$20\ncmp #$def0\n",
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        assembled.bytes,
+        [
+            0xA9, 0x34, 0x12, 0xA2, 0x78, 0x56, 0xE2, 0x30, 0xA9, 0x9A, 0xA2, 0xBC, 0xC2, 0x20,
+            0xC9, 0xF0, 0xDE,
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "mos6502")]
+fn wdc65c816_width_directives_reject_other_65xx_cpus() {
+    let error = assemble_subset_with_symbols_at(AssemblerCpu::Mos6502, ".a16\nlda #$1234\n", 0)
+        .unwrap_err();
+    assert!(error.message.contains("require the 65C816 assembler CPU"));
+}
+
+#[test]
+#[cfg(feature = "mos6502")]
 fn mos6502_is_parsed_as_own_assembler_cpu_family() {
     assert_eq!(AssemblerCpu::parse("6502").unwrap(), AssemblerCpu::Mos6502);
     assert_eq!(

@@ -436,6 +436,55 @@ fn wdc816_wdm() {
 }
 
 #[test]
+fn wdc816_long_indexed_indirect_long_and_stack_relative_modes() {
+    let cpu = Mos6502Variant::Wdc65C816;
+    assert_eq!(enc("lda !$123456,x", cpu), vec![0xBF, 0x56, 0x34, 0x12]);
+    assert_eq!(enc("sta [$12]", cpu), vec![0x87, 0x12]);
+    assert_eq!(enc("adc [$34],y", cpu), vec![0x77, 0x34]);
+    assert_eq!(enc("cmp $56,s", cpu), vec![0xC3, 0x56]);
+    assert_eq!(enc("eor ($78,s),y", cpu), vec![0x53, 0x78]);
+    assert_eq!(enc("jml !$123456", cpu), vec![0x5C, 0x56, 0x34, 0x12]);
+    assert_eq!(enc("jsl !$654321", cpu), vec![0x22, 0x21, 0x43, 0x65]);
+}
+
+#[test]
+fn wdc816_immediate_widths_are_explicit() {
+    let cpu = Mos6502Variant::Wdc65C816;
+    let widths = Mos65816Widths {
+        accumulator: 16,
+        index: 16,
+    };
+    assert_eq!(
+        encode_instruction_for_variant_with_widths(
+            "lda #$1234",
+            &HashMap::new(),
+            0,
+            false,
+            cpu,
+            widths
+        )
+        .unwrap(),
+        vec![0xA9, 0x34, 0x12]
+    );
+    assert_eq!(
+        encode_instruction_for_variant_with_widths(
+            "ldx #$5678",
+            &HashMap::new(),
+            0,
+            false,
+            cpu,
+            widths
+        )
+        .unwrap(),
+        vec![0xA2, 0x78, 0x56]
+    );
+    assert_eq!(
+        instruction_len_for_variant_with_widths("cmp #$1234", cpu, widths).unwrap(),
+        3
+    );
+}
+
+#[test]
 fn wdc816_cmos_opcodes_also_work() {
     // 65C816 is a superset of 65C02
     assert_eq!(enc("bra $10", Mos6502Variant::Wdc65C816), vec![0x80, 0x0E]);

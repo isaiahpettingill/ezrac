@@ -39,7 +39,7 @@ use crate::asm::m6800;
 #[cfg(any(feature = "std", feature = "m6809"))]
 use crate::asm::m6809;
 #[cfg(any(feature = "std", feature = "mos6502"))]
-use crate::asm::mos6502::Mos6502Variant;
+use crate::asm::mos6502::{Mos6502Variant, Mos65816Widths};
 #[cfg(feature = "tms9900")]
 use crate::asm::tms9900;
 use crate::diagnostic::{Diagnostic, SourceLocation};
@@ -2122,9 +2122,14 @@ pub fn assemble_program_with_options_at(
     let mut section_ranges = Vec::new();
     let mut current_section = None;
     let mut section_start = default_pc;
+    let mut mos65816_widths = Mos65816Widths::default();
 
     for (item_index, item) in program.items.iter().enumerate() {
         match &item.kind {
+            AssemblyItem::CpuWidth { accumulator, index } => {
+                set_mos65816_widths(cpu, &mut mos65816_widths, *accumulator, *index)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+            }
             AssemblyItem::Label(name) => {
                 validate_assembly_pc(cpu, pc, "assembly label")
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
@@ -2192,10 +2197,17 @@ pub fn assemble_program_with_options_at(
                 let architecture = architecture_instructions[item_index]
                     .as_ref()
                     .expect("architecture parsing follows program items");
-                let len = instruction_len(cpu, architecture, &instruction.to_text())
-                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                let len = instruction_len_with_widths(
+                    cpu,
+                    architecture,
+                    &instruction.to_text(),
+                    mos65816_widths,
+                )
+                .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 instruction_lengths[item_index] = Some(len);
                 pc = checked_assembly_pc_advance(cpu, pc, len as u32)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                update_mos65816_widths(cpu, architecture, &mut mos65816_widths)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
         }
@@ -2250,12 +2262,17 @@ pub fn assemble_program_with_options_at(
         .collect();
     let mut bytes = Vec::new();
     let mut pc = base_addr & 0xFF_FFFF;
+    let mut mos65816_widths = Mos65816Widths::default();
     if default_pc != pc {
         append_org_padding(&mut bytes, pc, default_pc)?;
         pc = default_pc;
     }
     for (item_index, item) in program.items.iter().enumerate() {
         match &item.kind {
+            AssemblyItem::CpuWidth { accumulator, index } => {
+                set_mos65816_widths(cpu, &mut mos65816_widths, *accumulator, *index)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+            }
             AssemblyItem::Label(_) | AssemblyItem::Equ { .. } => {}
             AssemblyItem::Section(name) => {
                 if let Some(base) = section_base(options, name) {
@@ -2297,18 +2314,21 @@ pub fn assemble_program_with_options_at(
                 let architecture = architecture_instructions[item_index]
                     .as_ref()
                     .expect("architecture parsing follows program items");
-                emit_instruction(
+                emit_instruction_with_widths(
                     cpu,
                     architecture,
                     &instruction.to_text(),
                     &encoder_symbols,
                     pc,
                     &mut bytes,
+                    mos65816_widths,
                 )
                 .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
                 let len = instruction_lengths[item_index]
                     .expect("instruction length was computed during the first pass");
                 pc = checked_assembly_pc_advance(cpu, pc, len as u32)
+                    .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
+                update_mos65816_widths(cpu, architecture, &mut mos65816_widths)
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?;
             }
         }
@@ -2542,10 +2562,11 @@ pub fn measure_assembly_program_with_options(
 ) -> Result<usize, Diagnostic> {
     // Reserve expressions can refer to labels, so use the normal two-pass
     // assembler to resolve their size instead of treating them as zero-width.
-    if program
-        .items
-        .iter()
-        .any(|item| matches!(&item.kind, AssemblyItem::Reserve(_)))
+    if cpu == AssemblerCpu::Wdc65C816
+        || program
+            .items
+            .iter()
+            .any(|item| matches!(&item.kind, AssemblyItem::Reserve(_)))
     {
         return assemble_program_with_options_at(cpu, program, 0, options)
             .map(|assembled| assembled.bytes.len());
@@ -2560,7 +2581,8 @@ pub fn measure_assembly_program_with_options(
                 instruction_len(cpu, &architecture, &instruction.to_text())
                     .map_err(|error| error.with_location_if_missing(item.location.clone()))?
             }
-            AssemblyItem::Label(_)
+            AssemblyItem::CpuWidth { .. }
+            | AssemblyItem::Label(_)
             | AssemblyItem::Equ { .. }
             | AssemblyItem::Section(_)
             | AssemblyItem::Org(_)
@@ -2861,6 +2883,23 @@ fn expression_text(expression: &AssemblyExpression) -> String {
     }
 }
 
+fn instruction_len_with_widths(
+    cpu: AssemblerCpu,
+    architecture: &ArchitectureInstruction,
+    diagnostic_text: &str,
+    widths: Mos65816Widths,
+) -> Result<usize, Diagnostic> {
+    #[cfg(any(feature = "std", feature = "mos6502"))]
+    if cpu == AssemblerCpu::Wdc65C816 {
+        return crate::asm::mos6502::instruction_len_for_variant_with_widths(
+            architecture.encoder_text(),
+            Mos6502Variant::Wdc65C816,
+            widths,
+        );
+    }
+    instruction_len(cpu, architecture, diagnostic_text)
+}
+
 fn instruction_len(
     cpu: AssemblerCpu,
     architecture: &ArchitectureInstruction,
@@ -2922,6 +2961,32 @@ fn instruction_len(
             "test assembler does not support instruction `{diagnostic_text}`"
         ))
     })
+}
+
+fn emit_instruction_with_widths(
+    cpu: AssemblerCpu,
+    architecture: &ArchitectureInstruction,
+    diagnostic_text: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    bytes: &mut Vec<u8>,
+    widths: Mos65816Widths,
+) -> Result<(), Diagnostic> {
+    #[cfg(any(feature = "std", feature = "mos6502"))]
+    if cpu == AssemblerCpu::Wdc65C816 {
+        bytes.extend(
+            crate::asm::mos6502::encode_instruction_for_variant_with_widths(
+                architecture.encoder_text(),
+                labels,
+                pc,
+                true,
+                Mos6502Variant::Wdc65C816,
+                widths,
+            )?,
+        );
+        return Ok(());
+    }
+    emit_instruction(cpu, architecture, diagnostic_text, labels, pc, bytes)
 }
 
 fn emit_instruction(
@@ -3075,6 +3140,75 @@ fn z80_imm16_load(cpu: AssemblerCpu, instruction: &AssemblyInstruction) -> Optio
         return None;
     }
     Some((opcode, value))
+}
+
+fn set_mos65816_widths(
+    cpu: AssemblerCpu,
+    widths: &mut Mos65816Widths,
+    accumulator: Option<u8>,
+    index: Option<u8>,
+) -> Result<(), Diagnostic> {
+    if accumulator.is_some() || index.is_some() {
+        if cpu != AssemblerCpu::Wdc65C816 {
+            return Err(Diagnostic::new(
+                "`.a8`, `.a16`, `.i8`, and `.i16` require the 65C816 assembler CPU",
+            ));
+        }
+        if let Some(width) = accumulator {
+            widths.accumulator = width;
+        }
+        if let Some(width) = index {
+            widths.index = width;
+        }
+    }
+    Ok(())
+}
+
+fn update_mos65816_widths(
+    cpu: AssemblerCpu,
+    instruction: &ArchitectureInstruction,
+    widths: &mut Mos65816Widths,
+) -> Result<(), Diagnostic> {
+    if cpu != AssemblerCpu::Wdc65C816 {
+        return Ok(());
+    }
+    let mnemonic = instruction.instruction().mnemonic.to_ascii_lowercase();
+    if mnemonic == "xce" {
+        // The assembler starts in emulation mode, so its tracked M/X state is
+        // already 8-bit. Code that changes carry before XCE can state a
+        // different known width explicitly with `.a8`/`.a16` and `.i8`/`.i16`.
+        return Ok(());
+    }
+    if !matches!(mnemonic.as_str(), "rep" | "sep") {
+        return Ok(());
+    }
+    let operand = instruction
+        .instruction()
+        .operands
+        .first()
+        .ok_or_else(|| Diagnostic::new(format!("65C816 `{mnemonic}` requires an immediate mask")))?
+        .trim();
+    let Some(mask) = operand
+        .strip_prefix('#')
+        .and_then(|value| parse_number(value).ok())
+    else {
+        return Err(Diagnostic::new(format!(
+            "65C816 `{mnemonic}` needs a numeric immediate mask to track register widths"
+        )));
+    };
+    if mask > u8::MAX.into() {
+        return Err(Diagnostic::new(format!(
+            "65C816 `{mnemonic}` mask 0x{mask:X} is outside the 8-bit range"
+        )));
+    }
+    let set = mnemonic == "sep";
+    if mask & 0x20 != 0 {
+        widths.accumulator = if set { 8 } else { 16 };
+    }
+    if mask & 0x10 != 0 {
+        widths.index = if set { 8 } else { 16 };
+    }
+    Ok(())
 }
 
 #[cfg(any(feature = "std", feature = "mos6502"))]
