@@ -42,6 +42,10 @@ pub mod m68k_emitter;
 pub mod mos6502;
 #[cfg(any(feature = "std", feature = "mos6502"))]
 pub mod mos6502_emitter;
+#[cfg(feature = "msp430")]
+pub mod msp430;
+#[cfg(feature = "msp430")]
+pub mod msp430_emitter;
 #[cfg(feature = "tms9900")]
 pub mod tms9900;
 #[cfg(feature = "tms9900")]
@@ -82,5 +86,7 @@ pub use m6800_emitter::emit_m6800_assembly_with_options;
 pub use m6800_emitter::emit_m6809_assembly_with_options;
 #[cfg(any(feature = "std", feature = "mos6502"))]
 pub use mos6502_emitter::emit_mos6502_assembly_with_options;
+#[cfg(feature = "msp430")]
+pub use msp430_emitter::emit_msp430_assembly_with_options;
 #[cfg(feature = "tms9900")]
 pub use tms9900_emitter::emit_tms9900_assembly_with_options;

@@ -8,6 +8,8 @@ use crate::asm::emit_i8086_assembly_with_options;
 use crate::asm::emit_m6800_assembly_with_options;
 #[cfg(feature = "m6809")]
 use crate::asm::emit_m6809_assembly_with_options;
+#[cfg(feature = "msp430")]
+use crate::asm::emit_msp430_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
 
@@ -581,6 +583,18 @@ pub fn check_source_with_sdk_and_overrides(
         #[cfg(not(feature = "tms9900"))]
         {
             unreachable!("TMS9900 targets require the tms9900 Cargo feature")
+        }
+    } else if matches!(
+        cpu,
+        CpuFamily::Msp430 | CpuFamily::Msp430X | CpuFamily::Msp430X2
+    ) {
+        #[cfg(feature = "msp430")]
+        {
+            emit_msp430_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "msp430"))]
+        {
+            unreachable!("MSP430 targets require the msp430 Cargo feature")
         }
     } else {
         emit_ez80_assembly_with_options(&program, assembly_options)

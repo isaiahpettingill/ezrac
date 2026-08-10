@@ -46,6 +46,7 @@ default = [
     "m6809",
     "m68k",
     "mos6502",
+    "msp430",
     "tms9900",
     "dcpu",
 ]
@@ -63,5 +64,6 @@ m6809 = ["dep:mc6809-core"]
 m68k = ["dep:m68000"]
 mos6502 = []
 mos6502-emulator = ["mos6502", "std", "test-runner", "dep:mos6502"]
+msp430 = []
 tms9900 = []
 dcpu = ["dep:dcpu"]

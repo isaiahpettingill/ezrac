@@ -1,0 +1,10 @@
+// MSP430 operand grammar. Parentheses are indexed addressing; @ and @rN+
+// are indirect and autoincrement forms, while # and & mark immediate and
+// absolute operands.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { msp430_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ msp430_operand)* }
+msp430_operand = { msp430_element ~ (architecture_ws ~ msp430_element)* }
+msp430_element = _{ msp430_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+msp430_nested_element = _{ msp430_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+msp430_parenthesized = { architecture_lparen ~ architecture_ws ~ msp430_nested_element ~ (architecture_ws ~ msp430_nested_element)* ~ architecture_ws ~ architecture_rparen }

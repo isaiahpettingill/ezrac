@@ -1,0 +1,36 @@
+use super::*;
+use crate::target::AssemblerCpu;
+
+fn encode(text: &str) -> Vec<u8> {
+    encode_instruction(AssemblerCpu::Msp430, text, &HashMap::new(), 0).unwrap()
+}
+
+#[test]
+fn encodes_core_msp430_instruction_forms() {
+    assert_eq!(encode("nop"), vec![0x03, 0x43]);
+    assert_eq!(encode("mov #1,r4"), vec![0x14, 0x43]);
+    assert_eq!(encode("mov #0x1234,r4"), vec![0x34, 0x40, 0x34, 0x12]);
+    assert_eq!(encode("add r4,r5"), vec![0x05, 0x54]);
+    assert_eq!(encode("mov 4(r5),r6"), vec![0x16, 0x45, 0x04, 0x00]);
+    assert_eq!(encode("mov @r5+,r6"), vec![0x36, 0x45]);
+    assert_eq!(encode("call r4"), vec![0x84, 0x12]);
+}
+
+#[test]
+fn encodes_relative_jumps_and_aliases() {
+    assert_eq!(encode("jmp 0x0004"), vec![0x01, 0x3C]);
+    assert_eq!(encode("jnz 0x0000"), vec![0xFF, 0x23]);
+    assert_eq!(encode("br r4"), encode("mov r4,r0"));
+    assert_eq!(encode("ret"), encode("mov @r1+,r0"));
+}
+
+#[test]
+fn rejects_invalid_msp430_forms() {
+    let error = encode_instruction(AssemblerCpu::Msp430, "mov #0x10000,r4", &HashMap::new(), 0)
+        .unwrap_err();
+    assert!(error.message.contains("outside the 16-bit"), "{error}");
+
+    let error =
+        encode_instruction(AssemblerCpu::Msp430, "mov.a r4,r5", &HashMap::new(), 0).unwrap_err();
+    assert!(error.message.contains("address instructions"), "{error}");
+}

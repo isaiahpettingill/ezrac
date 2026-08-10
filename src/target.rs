@@ -44,6 +44,9 @@ pub enum CpuFamily {
     Wdc65C816,
     Ricoh2A03,
     Tms9900,
+    Msp430,
+    Msp430X,
+    Msp430X2,
     Dcpu,
 }
 
@@ -67,6 +70,9 @@ pub enum AssemblerCpu {
     Wdc65C816,
     Ricoh2A03,
     Tms9900,
+    Msp430,
+    Msp430X,
+    Msp430X2,
     Dcpu,
 }
 
@@ -91,10 +97,13 @@ impl AssemblerCpu {
             "65c816" | "wdc65c816" | "65816" | "5a22" => Self::Wdc65C816,
             "2a03" | "ricoh2a03" | "nes" => Self::Ricoh2A03,
             "tms9900" | "9900" => Self::Tms9900,
+            "msp430" => Self::Msp430,
+            "msp430x" => Self::Msp430X,
+            "msp430x2" | "msp430xv2" => Self::Msp430X2,
             "dcpu" | "dcpu16" | "dcpu-16" => Self::Dcpu,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, dcpu, m6800, m6809, m68k, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, msp430, msp430x, msp430x2, dcpu, m6800, m6809, m68k, or avr"
                 ));
             }
         };
@@ -125,6 +134,7 @@ impl AssemblerCpu {
                 cfg!(feature = "mos6502")
             }
             Self::Tms9900 => cfg!(feature = "tms9900"),
+            Self::Msp430 | Self::Msp430X | Self::Msp430X2 => cfg!(feature = "msp430"),
             Self::Dcpu => cfg!(feature = "dcpu"),
         }
     }
@@ -141,6 +151,7 @@ impl AssemblerCpu {
             Self::M68k => "m68k",
             Self::Mos6502 | Self::Cmos65C02 | Self::Wdc65C816 | Self::Ricoh2A03 => "mos6502",
             Self::Tms9900 => "tms9900",
+            Self::Msp430 | Self::Msp430X | Self::Msp430X2 => "msp430",
             Self::Dcpu => "dcpu",
         }
     }
@@ -165,6 +176,9 @@ impl AssemblerCpu {
             Self::Wdc65C816 => "65c816",
             Self::Ricoh2A03 => "2a03",
             Self::Tms9900 => "tms9900",
+            Self::Msp430 => "msp430",
+            Self::Msp430X => "msp430x",
+            Self::Msp430X2 => "msp430x2",
             Self::Dcpu => "dcpu",
         }
     }
@@ -184,6 +198,9 @@ impl AssemblerCpu {
             | Self::Wdc65C816
             | Self::Ricoh2A03
             | Self::Tms9900
+            | Self::Msp430
+            | Self::Msp430X
+            | Self::Msp430X2
             | Self::Dcpu => None,
             Self::Avr => None,
         }
@@ -222,6 +239,9 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::Wdc65C816 => Self::Wdc65C816,
             CpuFamily::Ricoh2A03 => Self::Ricoh2A03,
             CpuFamily::Tms9900 => Self::Tms9900,
+            CpuFamily::Msp430 => Self::Msp430,
+            CpuFamily::Msp430X => Self::Msp430X,
+            CpuFamily::Msp430X2 => Self::Msp430X2,
             CpuFamily::Dcpu => Self::Dcpu,
         }
     }
@@ -267,6 +287,17 @@ impl CpuFamily {
                     has_cache: false,
                 }
             }
+            Self::Msp430X | Self::Msp430X2 => TargetCapabilities {
+                name: self.as_str(),
+                memory: TargetMemoryModel {
+                    pointer_width_bits: 20,
+                    address_width_bits: 20,
+                },
+                native_int_widths: &[8, 16, 20],
+                supports_port_io: false,
+                prefer_code_size: true,
+                has_cache: false,
+            },
             Self::I8086 => TargetCapabilities {
                 name: self.as_str(),
                 memory: memory16,
@@ -291,6 +322,7 @@ impl CpuFamily {
             | Self::Cmos65C02
             | Self::Ricoh2A03
             | Self::Tms9900
+            | Self::Msp430
             | Self::Dcpu => TargetCapabilities {
                 name: self.as_str(),
                 memory: memory16,
@@ -322,6 +354,9 @@ impl CpuFamily {
             Self::Wdc65C816 => "65c816",
             Self::Ricoh2A03 => "2a03",
             Self::Tms9900 => "tms9900",
+            Self::Msp430 => "msp430",
+            Self::Msp430X => "msp430x",
+            Self::Msp430X2 => "msp430x2",
             Self::Dcpu => "dcpu",
         }
     }
@@ -619,6 +654,9 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "65c816" | "wdc65c816" | "65816" | "5a22" => Some(CpuFamily::Wdc65C816),
             "2a03" | "ricoh2a03" | "nes" => Some(CpuFamily::Ricoh2A03),
             "tms9900" | "9900" => Some(CpuFamily::Tms9900),
+            "msp430" => Some(CpuFamily::Msp430),
+            "msp430x" => Some(CpuFamily::Msp430X),
+            "msp430x2" | "msp430xv2" => Some(CpuFamily::Msp430X2),
             "dcpu" | "dcpu16" => Some(CpuFamily::Dcpu),
             _ => None,
         })

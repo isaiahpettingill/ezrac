@@ -53,6 +53,7 @@ pub(crate) enum RoutineProfile {
     M68k,
     M6800,
     Tms9900,
+    Msp430,
     Dcpu,
 }
 
@@ -445,6 +446,7 @@ fn transfer_profile(profile: RoutineProfile) -> TransferParsingProfile<'static> 
         RoutineProfile::M68k => M68K_PROFILE,
         RoutineProfile::M6800 => M6800_PROFILE,
         RoutineProfile::Tms9900 => TMS9900_PROFILE,
+        RoutineProfile::Msp430 => MSP430_PROFILE,
         RoutineProfile::Dcpu => DCPU_PROFILE,
     }
 }
@@ -536,6 +538,19 @@ const TMS9900_PROFILE: TransferParsingProfile<'static> = TransferParsingProfile:
     direct("bl", 0, true),
     direct("b", 0, false),
     returns("rtwp"),
+]);
+const MSP430_PROFILE: TransferParsingProfile<'static> = TransferParsingProfile::new(&[
+    direct("call", 0, true),
+    direct("jmp", 0, false),
+    direct("jne", 0, true),
+    direct("jeq", 0, true),
+    direct("jhs", 0, true),
+    direct("jlo", 0, true),
+    direct("jn", 0, true),
+    direct("jge", 0, true),
+    direct("jl", 0, true),
+    returns("ret"),
+    returns("reti"),
 ]);
 const DCPU_PROFILE: TransferParsingProfile<'static> =
     TransferParsingProfile::new(&[direct("jsr", 0, true), direct("set", 1, false)]);

@@ -10,6 +10,8 @@ use crate::asm::emit_avr_assembly_with_options;
 use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "mos6502")]
 use crate::asm::emit_mos6502_assembly_with_options;
+#[cfg(feature = "msp430")]
+use crate::asm::emit_msp430_assembly_with_options;
 
 use crate::{
     asm::{AssemblyOptions, AssemblyProgram, emit_ez80_assembly_with_options},
@@ -292,6 +294,18 @@ fn compile_workspace_to_assembly_with_resolved_request(
             {
                 return Err(Diagnostic::new(
                     "MOS 6502 source compilation requires the `mos6502` Cargo feature",
+                ));
+            }
+        }
+        CpuFamily::Msp430 | CpuFamily::Msp430X | CpuFamily::Msp430X2 => {
+            #[cfg(feature = "msp430")]
+            {
+                emit_msp430_assembly_with_options(&program, options)?
+            }
+            #[cfg(not(feature = "msp430"))]
+            {
+                return Err(Diagnostic::new(
+                    "MSP430 source compilation requires the `msp430` Cargo feature",
                 ));
             }
         }

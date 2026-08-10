@@ -56,6 +56,8 @@ use crate::asm::emit_m68k_assembly_with_options;
 use crate::asm::emit_m6800_assembly_with_options;
 #[cfg(feature = "m6809")]
 use crate::asm::emit_m6809_assembly_with_options;
+#[cfg(feature = "msp430")]
+use crate::asm::emit_msp430_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
 
@@ -1793,6 +1795,18 @@ fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<S
             {
                 Err(Diagnostic::new(
                     "TMS9900 source compilation requires the `tms9900` Cargo feature",
+                ))
+            }
+        }
+        CpuFamily::Msp430 | CpuFamily::Msp430X | CpuFamily::Msp430X2 => {
+            #[cfg(feature = "msp430")]
+            {
+                emit_msp430_assembly_with_options(program, options)
+            }
+            #[cfg(not(feature = "msp430"))]
+            {
+                Err(Diagnostic::new(
+                    "MSP430 source compilation requires the `msp430` Cargo feature",
                 ))
             }
         }

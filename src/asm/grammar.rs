@@ -87,6 +87,9 @@ pub(crate) fn parse_instruction(
         | AssemblerCpu::Wdc65C816
         | AssemblerCpu::Ricoh2A03 => mos6502::parse(cpu, &source),
         AssemblerCpu::Tms9900 => tms9900::parse(cpu, &source),
+        AssemblerCpu::Msp430 | AssemblerCpu::Msp430X | AssemblerCpu::Msp430X2 => {
+            msp430::parse(cpu, &source)
+        }
     }
 }
 
@@ -232,6 +235,7 @@ architecture_parser!(m6809, "asm/grammar/m6809.pest", m6809_operand);
 architecture_parser!(m68k, "asm/grammar/m68k.pest", m68k_operand);
 architecture_parser!(mos6502, "asm/grammar/mos6502.pest", mos6502_operand);
 architecture_parser!(tms9900, "asm/grammar/tms9900.pest", tms9900_operand);
+architecture_parser!(msp430, "asm/grammar/msp430.pest", msp430_operand);
 
 #[cfg(test)]
 mod tests;

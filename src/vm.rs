@@ -40,6 +40,8 @@ use crate::asm::m6800;
 use crate::asm::m6809;
 #[cfg(any(feature = "std", feature = "mos6502"))]
 use crate::asm::mos6502::{Mos6502Variant, Mos65816Widths};
+#[cfg(feature = "msp430")]
+use crate::asm::msp430;
 #[cfg(feature = "tms9900")]
 use crate::asm::tms9900;
 use crate::diagnostic::{Diagnostic, SourceLocation};
@@ -1400,6 +1402,9 @@ mod runner {
             | CpuFamily::Wdc65C816
             | CpuFamily::Ricoh2A03
             | CpuFamily::Tms9900
+            | CpuFamily::Msp430
+            | CpuFamily::Msp430X
+            | CpuFamily::Msp430X2
             | CpuFamily::Avr
             | CpuFamily::Dcpu => CpuMode::Z80,
         }
@@ -2946,6 +2951,13 @@ fn instruction_len(
     if cpu == AssemblerCpu::Dcpu {
         return dcpu::instruction_len(text);
     }
+    #[cfg(feature = "msp430")]
+    if matches!(
+        cpu,
+        AssemblerCpu::Msp430 | AssemblerCpu::Msp430X | AssemblerCpu::Msp430X2
+    ) {
+        return msp430::instruction_len(cpu, text);
+    }
     #[cfg(feature = "tms9900")]
     if cpu == AssemblerCpu::Tms9900 {
         return tms9900::instruction_len(text);
@@ -3052,6 +3064,14 @@ fn emit_instruction(
             labels,
             pc / 2,
         )?);
+        return Ok(());
+    }
+    #[cfg(feature = "msp430")]
+    if matches!(
+        cpu,
+        AssemblerCpu::Msp430 | AssemblerCpu::Msp430X | AssemblerCpu::Msp430X2
+    ) {
+        bytes.extend(msp430::encode_instruction(cpu, text, labels, pc)?);
         return Ok(());
     }
     #[cfg(feature = "tms9900")]
