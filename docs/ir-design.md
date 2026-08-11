@@ -1,6 +1,6 @@
-# EZRA IR Design
+# EZRA HIR and TBIR Design
 
-This document describes EZRA's internal HIR/TBIR pipeline and EZIR, its public interchange format. `ezrac emit-ir --stage hir|tbir` prints internal debugging dumps. `ezrac emit-ir --stage ezir` writes stable EZIR v1 JSON that can be compiled with `ezrac build-ir`.
+This document describes EZRA's HIR/TBIR architecture and its intended evolution. The implementation includes in-memory HIR and TBIR forms, and `ezrac emit-ir --stage hir|tbir` prints inspectable text dumps. It does not yet implement every analysis, diagnostic, optimization, or machine-level representation described below.
 
 EZRA does not require a generic backend-neutral IR. Full applications and games are expected to be compiled for one selected target. Cross-platform EZRA code is expected mostly in shared libraries that avoid target-specific hardware behavior.
 
@@ -14,7 +14,6 @@ source
   -> AST
   -> HIR
   -> TBIR
-  -> EZIR boundary
   -> target source emitter
   -> target assembler
   -> configured binary/package emitter
@@ -23,7 +22,7 @@ source
 
 HIR currently retains typed declarations, function bodies, and lightweight analysis such as recursion, tail-call, and loop-candidate markings. TBIR binds the selected target and layout, records memory regions plus typed global/MMIO/embed object provenance, applies scalar simplification, typed immutable-local propagation, local common-subexpression cleanup, pure scalar loop-invariant hoisting, and named global-read LICM, expands approved explicit-inline calls, decides safe tail calls, rewrites supported direct tail recursion into loops, and supplies the transformed program to every source emitter. Target emitters then select native arithmetic and shift instructions for their CPU. The shared intrinsic catalog and zero/one/two-result source nodes are implemented, but target lowering remains uneven. TBIR is not yet a fully lowered basic-block or register-allocation IR.
 
-HIR and TBIR remain internal Rust structs and may change at any time. Their text dumps are for debugging and tests. EZIR v1 owns its serialized types and is the compatibility boundary; consumers must not depend on the Rust representation.
+The remaining sections use design language (`should`, `must`, and planned examples) to define the intended direction. HIR and TBIR are Rust structs in memory today; textual dumps are provided for debugging and tests, not as a stable serialized IR format.
 
 ## Design Goals
 
@@ -76,38 +75,9 @@ Shared libraries are checked in HIR. They should avoid assumptions that only mak
 
 When a target-specific app uses a shared library, the library's HIR is instantiated into the app's TBIR using the selected target profile. Final pointer-width checks, memory model diagnostics, ABI checks, and target-aware optimizations happen after this binding.
 
-## EZIR v1
-
-EZIR is the public, target-bound interchange format built from the optimized TBIR program. HIR stays internal because its bodies and types remain tied to EZRA analysis and syntax.
-
-EZIR v1 is readable JSON with an explicit top-level `version`. Serialized enums have a `kind` field and snake-case names. The required module contains target requirements and declarations. The optional `metadata` map does not affect code generation.
-
-The target block records:
-
-- address width
-- pointer address width
-- pointer storage width
-- native integer widths
-- whether the module requires port I/O
-
-Pointer address width and storage width are separate. For example, MSP430X uses a 20-bit pointer address width and 32-bit storage width. `build-ir` rejects a selected target whose widths, native integers, or port-I/O support do not meet the module requirements.
-
-EZIR owns its declaration, type, expression, place, statement, operator, and inline-assembly types. It does not serialize `ast::Program`, HIR, source spans, source units, or optimization reports. Source text and string metadata are optional.
-
-Current v1 declarations are source-shaped and use structured control flow. SSA is not required. Imports should be resolved before EZIR emission. Bank placement wrappers are preserved.
-
-```sh
-ezrac emit-ir --stage ezir --target agonlight-mos-ez80 main.ezra > main.ezir
-ezrac build-ir --target agonlight-mos-ez80 main.ezir
-```
-
-Unsupported versions, duplicate symbols, duplicate fields or parameters, invalid widths, and incompatible targets are rejected with diagnostics. Compatible v1 additions must use optional fields or metadata. A change that alters required fields or existing semantics requires a new version.
-
-The Rust types in `src/ezir.rs` are an implementation detail. The JSON field names and documented behavior are the contract.
-
 ## TBIR
 
-TBIR is the internal target-bound checked optimization IR. It is created after target selection and project layout resolution.
+TBIR is the target-bound checked optimization IR. It is created after target selection and project layout resolution.
 
 TBIR owns:
 

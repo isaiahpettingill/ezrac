@@ -69,21 +69,11 @@ Emit target assembly to stdout:
 ezrac emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>
 ```
 
-Emit inspectable internal IR or a stable EZIR v1 module to stdout:
+Emit inspectable IR text to stdout:
 
 ```sh
-ezrac emit-ir [--stage hir|tbir|ezir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>
+ezrac emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>
 ```
-
-HIR and TBIR output is for compiler debugging. `--stage ezir` emits the versioned public interchange format. Save it with an `.ezir` extension.
-
-Build an EZIR module:
-
-```sh
-ezrac build-ir [--target <triple>] [--debug-comments] [--layout <file.ezralayout>] <file.ezir>
-```
-
-`build-ir` validates the EZIR version, symbols, target widths, native integer widths, and port-I/O requirement before code generation. It writes the same `.asm`, `.map`, `.size`, and executable artifacts as `build`.
 
 Build source or assembly artifacts:
 
