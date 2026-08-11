@@ -38,7 +38,8 @@ impl AvrVariant {
     }
 
     const fn has_rmw(self) -> bool {
-        matches!(self, Self::Generic | Self::Tiny | Self::Dx | Self::Xmega)
+        // XCH/LAS/LAC/LAT are AVRxm/XMEGA instructions, not AVRxt.
+        matches!(self, Self::Generic | Self::Xmega)
     }
 
     const fn has_des(self) -> bool {
@@ -50,7 +51,7 @@ impl AvrVariant {
     }
 
     const fn has_extended_indirect_program_addressing(self) -> bool {
-        matches!(self, Self::Generic | Self::Xmega)
+        matches!(self, Self::Generic | Self::Dx | Self::Xmega)
     }
 }
 
@@ -114,24 +115,31 @@ pub fn instruction_cycles(
     Ok(match op {
         "call" => InstructionCycles::exact(if modern { 3 } else { 4 }),
         "rcall" | "icall" => InstructionCycles::exact(if modern { 2 } else { 3 }),
-        "ret" | "reti" => {
-            InstructionCycles::exact(if variant == AvrVariant::Xmega { 3 } else { 4 })
-        }
+        "ret" | "reti" => InstructionCycles::exact(4),
         "jmp" | "rjmp" | "ijmp" => InstructionCycles::exact(2 + u8::from(op == "jmp")),
         "eicall" => InstructionCycles::exact(if variant == AvrVariant::Xmega { 3 } else { 4 }),
         "eijmp" => InstructionCycles::exact(2),
         "mul" | "muls" | "mulsu" | "fmul" | "fmuls" | "fmulsu" => InstructionCycles::exact(2),
-        "ld" | "st" if modern => InstructionCycles::range(1, 2),
+        "ld" if modern => InstructionCycles::exact(2),
+        "st" if modern => InstructionCycles::exact(1),
         "ld" | "st" => InstructionCycles::exact(2),
         "ldd" | "std" if matches!(variant, AvrVariant::Tiny | AvrVariant::Dx) => {
             InstructionCycles::exact(1)
         }
-        "lds" if matches!(variant, AvrVariant::Tiny | AvrVariant::Dx) => {
+        "ldd" | "std" => InstructionCycles::exact(2),
+        "lds"
+            if matches!(
+                variant,
+                AvrVariant::Tiny | AvrVariant::Dx | AvrVariant::Xmega
+            ) =>
+        {
             InstructionCycles::exact(3)
         }
-        "ldd" | "std" | "lds" | "sts" | "push" | "pop" | "adiw" | "sbiw" | "sbi" | "cbi" => {
-            InstructionCycles::exact(2)
-        }
+        "lds" | "sts" => InstructionCycles::exact(2),
+        "push" if modern => InstructionCycles::exact(1),
+        "adiw" | "sbiw" | "sbi" | "cbi" => InstructionCycles::exact(2),
+        "pop" => InstructionCycles::exact(2),
+        "xch" | "las" | "lac" | "lat" => InstructionCycles::exact(2),
         "lpm" | "elpm" => InstructionCycles::exact(3),
         "cpse" | "sbrc" | "sbrs" | "sbic" | "sbis" => InstructionCycles::range(1, 3),
         op if op.starts_with("br") => InstructionCycles::range(1, 2),

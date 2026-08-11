@@ -193,13 +193,13 @@ fn encodes_every_pointer_mode_and_long_instruction() {
 fn validates_family_specific_opcodes_and_timings() {
     let labels = HashMap::new();
 
-    for variant in [AvrVariant::Tiny, AvrVariant::Dx, AvrVariant::Xmega] {
+    assert!(encode_instruction_for_variant("xch z,r18", &labels, 0, AvrVariant::Xmega).is_ok());
+    for variant in [AvrVariant::Tiny, AvrVariant::Mega, AvrVariant::Dx] {
         assert!(
-            encode_instruction_for_variant("xch z,r18", &labels, 0, variant).is_ok(),
+            encode_instruction_for_variant("xch z,r18", &labels, 0, variant).is_err(),
             "{variant:?}"
         );
     }
-    assert!(encode_instruction_for_variant("xch z,r18", &labels, 0, AvrVariant::Mega).is_err());
 
     assert!(encode_instruction_for_variant("des 3", &labels, 0, AvrVariant::Xmega).is_ok());
     for variant in [AvrVariant::Tiny, AvrVariant::Mega, AvrVariant::Dx] {
@@ -210,7 +210,8 @@ fn validates_family_specific_opcodes_and_timings() {
     }
 
     assert!(encode_instruction_for_variant("elpm r18,z+", &labels, 0, AvrVariant::Tiny).is_err());
-    assert!(encode_instruction_for_variant("eicall", &labels, 0, AvrVariant::Dx).is_err());
+    assert!(encode_instruction_for_variant("elpm r18,z+", &labels, 0, AvrVariant::Dx).is_ok());
+    assert!(encode_instruction_for_variant("eicall", &labels, 0, AvrVariant::Dx).is_ok());
     assert!(encode_instruction_for_variant("eicall", &labels, 0, AvrVariant::Xmega).is_ok());
 
     assert_eq!(
@@ -226,7 +227,15 @@ fn validates_family_specific_opcodes_and_timings() {
     );
     assert_eq!(
         instruction_cycles("ld r18,z+", AvrVariant::Xmega).unwrap(),
-        super::InstructionCycles { min: 1, max: 2 }
+        super::InstructionCycles { min: 2, max: 2 }
+    );
+    assert_eq!(
+        instruction_cycles("st z+,r18", AvrVariant::Dx).unwrap(),
+        super::InstructionCycles { min: 1, max: 1 }
+    );
+    assert_eq!(
+        instruction_cycles("xch z,r18", AvrVariant::Xmega).unwrap(),
+        super::InstructionCycles { min: 2, max: 2 }
     );
 }
 

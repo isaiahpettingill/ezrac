@@ -17,7 +17,7 @@ name = "ezra"
 [dependencies]
 dcpu = { package = "dcpu16-core", version = "0.1.0", default-features = false, optional = true }
 ez80 = { version = "0.6.0", optional = true }
-pic18-emulator = { version = "0.1.0", optional = true, default-features = false }
+pic18-emulator = { version = "0.1.2", optional = true, default-features = false }
 mos6502 = { version = "0.10.1", optional = true }
 m6800 = { version = "0.1.0", optional = true }
 mc6809-core = { version = "0.3.2", optional = true }
@@ -32,7 +32,8 @@ miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-a
 png = "0.18.1"
 libre99-core = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
 libre99-asm = { git = "https://github.com/isaiahpettingill/libre99.git", rev = "6c86f10bae65f4cc3bdc13289e14bb20af03ab61" }
-mspsim = { package = "mspsim-rs", git = "https://github.com/isaiahpettingill/mspsim-rs.git", rev = "f9ade22" }
+mspsim = { package = "mspsim-rs", version = "0.1.0" }
+avr-emulator = "0.1.2"
 w65c816 = "0.1.17"
 
 [features]
