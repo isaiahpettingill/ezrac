@@ -1368,7 +1368,7 @@ fn arduboy_eeprom_lsp_context_and_update_protocol_are_correct() {
     let source = fs::read_to_string(&path).unwrap();
 
     let sdk = sdk_for_path(&path).unwrap();
-    assert_eq!(sdk.target.as_deref(), Some("arduboy-avr"));
+    assert_eq!(sdk.target.as_deref(), Some("arduboy-atmega32u4"));
     assert!(source.contains(".eeprom_read_wait_ready:"));
     assert!(source.contains(".eeprom_update_wait_ready:"));
     assert!(source.contains("\"in r19, 3Fh\""));

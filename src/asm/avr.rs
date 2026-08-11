@@ -1,7 +1,84 @@
-use crate::{compat::prelude::*, diagnostic::Diagnostic};
+use crate::{compat::prelude::*, diagnostic::Diagnostic, target::AssemblerCpu};
+
+/// AVR product/core profile used for opcode checks and cycle estimates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AvrVariant {
+    /// Backward-compatible assembler profile. Accepts the existing AVR superset.
+    Generic,
+    /// Modern tinyAVR 0/1/2-series (AVRxmega3/AVRxt), not the reduced `avrtiny` core.
+    Tiny,
+    /// Enhanced megaAVR core. The Arduboy's ATmega32U4 is an AVR5 device here.
+    Mega,
+    /// AVR DA/DB/DD/DU/EA/EB/SD families (AVRxmega2/3/4, also called AVRxt).
+    Dx,
+    /// XMEGA AVRxm family.
+    Xmega,
+}
+
+impl AvrVariant {
+    pub const fn from_assembler_cpu(cpu: AssemblerCpu) -> Option<Self> {
+        match cpu {
+            AssemblerCpu::Avr => Some(Self::Generic),
+            AssemblerCpu::AvrTiny => Some(Self::Tiny),
+            AssemblerCpu::AvrMega => Some(Self::Mega),
+            AssemblerCpu::AvrDx => Some(Self::Dx),
+            AssemblerCpu::AvrXmega => Some(Self::Xmega),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Generic => "AVR",
+            Self::Tiny => "tinyAVR",
+            Self::Mega => "megaAVR",
+            Self::Dx => "AVR Dx",
+            Self::Xmega => "XMEGA",
+        }
+    }
+
+    const fn has_rmw(self) -> bool {
+        matches!(self, Self::Generic | Self::Tiny | Self::Dx | Self::Xmega)
+    }
+
+    const fn has_des(self) -> bool {
+        matches!(self, Self::Generic | Self::Xmega)
+    }
+
+    const fn has_elpm(self) -> bool {
+        !matches!(self, Self::Tiny)
+    }
+
+    const fn has_extended_indirect_program_addressing(self) -> bool {
+        matches!(self, Self::Generic | Self::Xmega)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InstructionCycles {
+    pub min: u8,
+    pub max: u8,
+}
+
+impl InstructionCycles {
+    const fn exact(cycles: u8) -> Self {
+        Self {
+            min: cycles,
+            max: cycles,
+        }
+    }
+
+    const fn range(min: u8, max: u8) -> Self {
+        Self { min, max }
+    }
+}
 
 pub fn instruction_len(text: &str) -> Result<usize, Diagnostic> {
-    Ok(encode(text, &HashMap::new(), 0, false)?.len())
+    instruction_len_for_variant(text, AvrVariant::Generic)
+}
+
+pub fn instruction_len_for_variant(text: &str, variant: AvrVariant) -> Result<usize, Diagnostic> {
+    Ok(encode(text, &HashMap::new(), 0, false, variant)?.len())
 }
 
 pub fn encode_instruction(
@@ -9,7 +86,75 @@ pub fn encode_instruction(
     labels: &HashMap<String, u32>,
     pc: u32,
 ) -> Result<Vec<u8>, Diagnostic> {
-    encode(text, labels, pc, true)
+    encode_instruction_for_variant(text, labels, pc, AvrVariant::Generic)
+}
+
+pub fn encode_instruction_for_variant(
+    text: &str,
+    labels: &HashMap<String, u32>,
+    pc: u32,
+    variant: AvrVariant,
+) -> Result<Vec<u8>, Diagnostic> {
+    encode(text, labels, pc, true, variant)
+}
+
+/// Return the documented execution time for the selected core profile.
+/// Conditional and skip instructions return their not-taken/taken range.
+pub fn instruction_cycles(
+    text: &str,
+    variant: AvrVariant,
+) -> Result<InstructionCycles, Diagnostic> {
+    let source = text.trim().to_ascii_lowercase();
+    let (op, _args) = split_mnemonic(&source);
+    validate_variant_instruction(op, variant)?;
+    let modern = matches!(
+        variant,
+        AvrVariant::Tiny | AvrVariant::Dx | AvrVariant::Xmega
+    );
+    Ok(match op {
+        "call" => InstructionCycles::exact(if modern { 3 } else { 4 }),
+        "rcall" | "icall" => InstructionCycles::exact(if modern { 2 } else { 3 }),
+        "ret" | "reti" => {
+            InstructionCycles::exact(if variant == AvrVariant::Xmega { 3 } else { 4 })
+        }
+        "jmp" | "rjmp" | "ijmp" => InstructionCycles::exact(2 + u8::from(op == "jmp")),
+        "eicall" => InstructionCycles::exact(if variant == AvrVariant::Xmega { 3 } else { 4 }),
+        "eijmp" => InstructionCycles::exact(2),
+        "mul" | "muls" | "mulsu" | "fmul" | "fmuls" | "fmulsu" => InstructionCycles::exact(2),
+        "ld" | "st" if modern => InstructionCycles::range(1, 2),
+        "ld" | "st" => InstructionCycles::exact(2),
+        "ldd" | "std" if matches!(variant, AvrVariant::Tiny | AvrVariant::Dx) => {
+            InstructionCycles::exact(1)
+        }
+        "lds" if matches!(variant, AvrVariant::Tiny | AvrVariant::Dx) => {
+            InstructionCycles::exact(3)
+        }
+        "ldd" | "std" | "lds" | "sts" | "push" | "pop" | "adiw" | "sbiw" | "sbi" | "cbi" => {
+            InstructionCycles::exact(2)
+        }
+        "lpm" | "elpm" => InstructionCycles::exact(3),
+        "cpse" | "sbrc" | "sbrs" | "sbic" | "sbis" => InstructionCycles::range(1, 3),
+        op if op.starts_with("br") => InstructionCycles::range(1, 2),
+        _ => InstructionCycles::exact(1),
+    })
+}
+
+fn validate_variant_instruction(op: &str, variant: AvrVariant) -> Result<(), Diagnostic> {
+    let supported = match op {
+        "xch" | "las" | "lac" | "lat" => variant.has_rmw(),
+        "des" => variant.has_des(),
+        "elpm" => variant.has_elpm(),
+        "eijmp" | "eicall" => variant.has_extended_indirect_program_addressing(),
+        _ => true,
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(error(format!(
+            "AVR instruction `{op}` is not supported by the {} profile",
+            variant.name()
+        )))
+    }
 }
 
 fn encode(
@@ -17,9 +162,11 @@ fn encode(
     labels: &HashMap<String, u32>,
     pc: u32,
     resolve: bool,
+    variant: AvrVariant,
 ) -> Result<Vec<u8>, Diagnostic> {
     let source = text.trim().to_ascii_lowercase();
     let (op, args) = split_mnemonic(&source);
+    validate_variant_instruction(op, variant)?;
 
     let fixed = match op {
         "nop" => Some(0x0000),

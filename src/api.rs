@@ -1644,17 +1644,19 @@ fn validate_layout_for_cpu(
         (1u32 << address_width_bits) - 1
     };
     let mut violations = Vec::new();
-    if layout.load.get() > max_addr {
+    if !cpu.is_avr() && layout.load.get() > max_addr {
         violations.push(format!("load address {}", layout.load));
     }
-    if layout.entry.get() > max_addr {
+    if !cpu.is_avr() && layout.entry.get() > max_addr {
         violations.push(format!("entry address {}", layout.entry));
     }
     if layout.stack.get() > max_addr {
         violations.push(format!("stack address {}", layout.stack));
     }
     for region in &layout.regions {
-        if region.start.get() > max_addr || region.end.get() > max_addr {
+        let avr_program_space =
+            cpu.is_avr() && region.flags.contains(crate::layout::RegionFlags::EXECUTE);
+        if !avr_program_space && (region.start.get() > max_addr || region.end.get() > max_addr) {
             violations.push(format!(
                 "region `{}` range {}..{}",
                 region.name, region.start, region.end
@@ -1662,7 +1664,12 @@ fn validate_layout_for_cpu(
         }
     }
     for symbol in &layout.symbols {
-        if symbol.value.get() > max_addr {
+        let avr_program_symbol = cpu.is_avr()
+            && matches!(
+                symbol.name.as_str(),
+                "EZRA_LOAD_ADDR" | "EZRA_ENTRY_ADDR" | "EZRA_CODE_BASE"
+            );
+        if !avr_program_symbol && symbol.value.get() > max_addr {
             violations.push(format!("symbol `{}` value {}", symbol.name, symbol.value));
         }
     }
@@ -1824,7 +1831,11 @@ fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<S
                 ))
             }
         }
-        CpuFamily::Avr => {
+        CpuFamily::Avr
+        | CpuFamily::AvrTiny
+        | CpuFamily::AvrMega
+        | CpuFamily::AvrDx
+        | CpuFamily::AvrXmega => {
             #[cfg(feature = "avr")]
             {
                 emit_avr_assembly_with_options(program, options)

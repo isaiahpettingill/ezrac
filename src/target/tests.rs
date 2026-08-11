@@ -456,17 +456,33 @@ fn resolves_game_boy_assembly_targets() {
 #[test]
 #[cfg(feature = "avr")]
 fn resolves_arduboy_and_bare_avr_target_profiles() {
-    let arduboy = super::resolve_target_profile(Some("arduboy-avr")).unwrap();
-    assert_eq!(arduboy.triple.cpu, super::CpuFamily::Avr);
-    assert_eq!(arduboy.output_format, super::OutputFormat::ArduinoHex);
-    assert_eq!(arduboy.memory.pointer_width_bits, 16);
+    for target in ["arduboy-atmega32u4", "arduboy-avr"] {
+        let arduboy = super::resolve_target_profile(Some(target)).unwrap();
+        assert_eq!(arduboy.triple.cpu, super::CpuFamily::AvrMega);
+        assert_eq!(arduboy.output_format, super::OutputFormat::ArduinoHex);
+        assert_eq!(arduboy.memory.pointer_width_bits, 16);
+    }
 
     let bare = super::resolve_target_profile(Some("bare-avr")).unwrap();
     assert_eq!(bare.triple.cpu, super::CpuFamily::Avr);
     assert_eq!(bare.output_format, super::OutputFormat::RawBin);
     assert!(!bare.default_sdk_symbols);
 
-    let arduboy_layout = crate::layout::default_layout_for_target("arduboy-avr");
+    for (target, cpu, layout_name, stack) in [
+        ("bare-tinyavr", CpuFamily::AvrTiny, "bare_tinyavr", 0x3FFF),
+        ("bare-megaavr", CpuFamily::AvrMega, "bare_megaavr", 0x0AFF),
+        ("bare-avrdx", CpuFamily::AvrDx, "bare_avrdx", 0x7FFF),
+        ("bare-xmega", CpuFamily::AvrXmega, "bare_xmega", 0x3FFF),
+    ] {
+        let profile = resolve_target_profile(Some(target)).unwrap();
+        assert_eq!(profile.triple.cpu, cpu, "{target}");
+        assert_eq!(AssemblerCpu::from(cpu).as_str(), cpu.as_str(), "{target}");
+        let layout = default_layout_for_target(target);
+        assert_eq!(layout.name, layout_name, "{target}");
+        assert_eq!(layout.stack.get(), stack, "{target}");
+    }
+
+    let arduboy_layout = crate::layout::default_layout_for_target("arduboy-atmega32u4");
     assert_eq!(arduboy_layout.name, "arduboy_atmega32u4");
     assert_eq!(arduboy_layout.stack.get(), 0x0AFF);
     assert_eq!(arduboy_layout.regions[0].end.get(), 0x6FFF);

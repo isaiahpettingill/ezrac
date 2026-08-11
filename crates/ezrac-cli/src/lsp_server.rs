@@ -784,7 +784,7 @@ fn bundled_sdk_context(path: &Path) -> Option<BundledSdkContext> {
         "msdos-i8086" => "msdos-com-i8086",
         "ez180n-ez80" => "ez180n-ez80",
         "ezra-test-ez80" => "ezra-test-ez80",
-        "arduboy-avr" => "arduboy-avr",
+        "arduboy-avr" => "arduboy-atmega32u4",
         "zxspectrum-z80" => "zxspectrum-z80",
         _ => return None,
     };

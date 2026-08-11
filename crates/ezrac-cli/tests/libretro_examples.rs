@@ -731,7 +731,7 @@ fn arduboy_snake_runs_on_real_core() {
     let core = core_from_env(ARDUBOY_CORE_ENV);
     let game = build_example(
         "examples/arduboy/snake/main.ezra",
-        "examples/arduboy/snake/target/arduboy-avr/main.hex",
+        "examples/arduboy/snake/target/arduboy-atmega32u4/main.hex",
     );
     let hex = fs::read_to_string(&game).unwrap();
     assert!(hex.starts_with(':'), "Arduboy output is not Intel HEX");

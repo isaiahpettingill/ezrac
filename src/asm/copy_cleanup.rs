@@ -65,7 +65,7 @@ fn parse_register_copy(line: &str, cpu: CpuFamily) -> Option<(String, String, St
 
     let (target, source, self_copy_is_safe) = match cpu {
         CpuFamily::I8086 if mnemonic == "mov" => (first, second, true),
-        CpuFamily::Avr if matches!(mnemonic, "mov" | "movw") => (first, second, true),
+        cpu if cpu.is_avr() && matches!(mnemonic, "mov" | "movw") => (first, second, true),
         CpuFamily::Lr35902 if mnemonic == "ld" => (first, second, true),
         CpuFamily::M6800 | CpuFamily::M6809 if mnemonic == "tfr" => (second, first, true),
         CpuFamily::M68k if mnemonic == "move" || mnemonic.starts_with("move.") => {
@@ -111,7 +111,7 @@ fn is_register(register: &str, cpu: CpuFamily) -> bool {
                 | "bp"
                 | "sp"
         ),
-        CpuFamily::Avr => avr_register(register),
+        cpu if cpu.is_avr() => avr_register(register),
         CpuFamily::Lr35902 => matches!(
             register,
             "a" | "b" | "c" | "d" | "e" | "h" | "l" | "af" | "bc" | "de" | "hl" | "sp"

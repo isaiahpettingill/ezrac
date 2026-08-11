@@ -1,4 +1,7 @@
-use super::{encode_instruction, instruction_len};
+use super::{
+    AvrVariant, encode_instruction, encode_instruction_for_variant, instruction_cycles,
+    instruction_len,
+};
 use std::collections::HashMap;
 
 fn word(value: u16) -> Vec<u8> {
@@ -184,6 +187,47 @@ fn encodes_every_pointer_mode_and_long_instruction() {
         vec![0xff, 0x95, 0xff, 0xff]
     );
     assert_eq!(instruction_len("lds r1, symbol").unwrap(), 4);
+}
+
+#[test]
+fn validates_family_specific_opcodes_and_timings() {
+    let labels = HashMap::new();
+
+    for variant in [AvrVariant::Tiny, AvrVariant::Dx, AvrVariant::Xmega] {
+        assert!(
+            encode_instruction_for_variant("xch z,r18", &labels, 0, variant).is_ok(),
+            "{variant:?}"
+        );
+    }
+    assert!(encode_instruction_for_variant("xch z,r18", &labels, 0, AvrVariant::Mega).is_err());
+
+    assert!(encode_instruction_for_variant("des 3", &labels, 0, AvrVariant::Xmega).is_ok());
+    for variant in [AvrVariant::Tiny, AvrVariant::Mega, AvrVariant::Dx] {
+        assert!(
+            encode_instruction_for_variant("des 3", &labels, 0, variant).is_err(),
+            "{variant:?}"
+        );
+    }
+
+    assert!(encode_instruction_for_variant("elpm r18,z+", &labels, 0, AvrVariant::Tiny).is_err());
+    assert!(encode_instruction_for_variant("eicall", &labels, 0, AvrVariant::Dx).is_err());
+    assert!(encode_instruction_for_variant("eicall", &labels, 0, AvrVariant::Xmega).is_ok());
+
+    assert_eq!(
+        instruction_cycles("call 0", AvrVariant::Mega).unwrap().min,
+        4
+    );
+    assert_eq!(instruction_cycles("call 0", AvrVariant::Dx).unwrap().min, 3);
+    assert_eq!(
+        instruction_cycles("lds r18,0x4000", AvrVariant::Dx)
+            .unwrap()
+            .min,
+        3
+    );
+    assert_eq!(
+        instruction_cycles("ld r18,z+", AvrVariant::Xmega).unwrap(),
+        super::InstructionCycles { min: 1, max: 2 }
+    );
 }
 
 #[test]

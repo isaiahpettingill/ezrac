@@ -2,7 +2,7 @@
 name = "arduboy-sdk-showcase"
 
 [build]
-target = "arduboy-avr"
+target = "arduboy-atmega32u4"
 output = "arduboy"
 executable = "ezra-arduboy-showcase"
 

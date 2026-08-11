@@ -514,7 +514,7 @@ pub fn format_for_target(target: &str, kind: ImageKind) -> Result<NativeImageFor
             ImageKind::Sprite => NativeImageFormat::C64HiresSprite,
             ImageKind::Bitmap => return unsupported_kind(target, kind),
         }
-    } else if matches_target(target, "arduboy-avr") {
+    } else if matches_any_target(target, &["arduboy-atmega32u4", "arduboy-avr"]) {
         match kind {
             ImageKind::Bitmap | ImageKind::Sprite => NativeImageFormat::Arduboy1Bpp,
             ImageKind::Tiles => return unsupported_kind(target, kind),

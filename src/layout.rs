@@ -82,8 +82,16 @@ pub struct Layout {
 }
 
 pub fn default_layout_for_target(target: &str) -> Layout {
-    if target == "bare-avr" || target == "bare-atmega32u4" {
+    if matches!(target, "bare-avr" | "bare-atmega32u4") {
         Layout::bare_avr()
+    } else if target == "bare-megaavr" {
+        Layout::bare_megaavr()
+    } else if target == "bare-tinyavr" {
+        Layout::bare_tinyavr()
+    } else if target == "bare-avrdx" {
+        Layout::bare_avrdx()
+    } else if matches!(target, "bare-xmega" | "bare-avrxmega") {
+        Layout::bare_xmega()
     } else if target.starts_with("generic-pic18-") || target.starts_with("pic18-") {
         Layout::bare_pic18()
     } else if target == "generic-6502-bare" {
@@ -602,7 +610,27 @@ impl Layout {
     /// in flash. The stack symbol remains the hardware SRAM address used by the
     /// AVR startup sequence.
     pub fn bare_avr() -> Self {
-        Self::avr_flash_layout("bare_avr", 0x7FFF)
+        Self::avr_flash_layout("bare_avr", 0x7FFF, 0x0100, 0x0AFF, 0x0800, 0x0900)
+    }
+
+    pub fn bare_megaavr() -> Self {
+        Self::avr_flash_layout("bare_megaavr", 0x7FFF, 0x0100, 0x0AFF, 0x0800, 0x0900)
+    }
+
+    /// Representative modern tinyAVR 0/1/2-series layout. These parts use the
+    /// AVRxmega3/AVRxt core and map SRAM at 0x3800.
+    pub fn bare_tinyavr() -> Self {
+        Self::avr_flash_layout("bare_tinyavr", 0x7FFF, 0x3800, 0x3FFF, 0x3C00, 0x3E00)
+    }
+
+    /// Representative AVR128DA layout: 128 KiB flash and 16 KiB SRAM.
+    pub fn bare_avrdx() -> Self {
+        Self::avr_flash_layout("bare_avrdx", 0x01FFFF, 0x4000, 0x7FFF, 0x6000, 0x7000)
+    }
+
+    /// Representative 128 KiB XMEGA layout with SRAM at 0x2000.
+    pub fn bare_xmega() -> Self {
+        Self::avr_flash_layout("bare_xmega", 0x01FFFF, 0x2000, 0x3FFF, 0x3000, 0x3800)
     }
 
     /// Generic classic PIC18 layout.
@@ -647,17 +675,22 @@ impl Layout {
     /// Arduboy's ATmega32U4 has 32 KiB of flash. The top 4 KiB is retained for
     /// the Caterina bootloader, leaving application flash through 0x6FFF.
     pub fn arduboy_atmega32u4() -> Self {
-        Self::avr_flash_layout("arduboy_atmega32u4", 0x6FFF)
+        Self::avr_flash_layout("arduboy_atmega32u4", 0x6FFF, 0x0100, 0x0AFF, 0x0800, 0x0900)
     }
 
-    fn avr_flash_layout(name: &str, flash_end: u32) -> Self {
+    fn avr_flash_layout(
+        name: &str,
+        flash_end: u32,
+        sram_start: u32,
+        stack_top: u32,
+        rodata_base: u32,
+        asset_base: u32,
+    ) -> Self {
         Self {
             name: name.to_owned(),
             load: Address24::new(0),
             entry: Address24::new(0),
-            // ATmega32U4 SRAM is 0x0100..0x0AFF; SPL/SPH are initialized by
-            // the AVR source backend before entering main.
-            stack: Address24::new(0x0AFF),
+            stack: Address24::new(stack_top),
             regions: vec![region(
                 "flash",
                 0,
@@ -669,8 +702,12 @@ impl Layout {
                 symbol("EZRA_LOAD_ADDR", Address24::new(0)),
                 symbol("EZRA_ENTRY_ADDR", Address24::new(0)),
                 symbol("EZRA_CODE_BASE", Address24::new(0)),
-                symbol("EZRA_RAM_BASE", Address24::new(0x0104)),
-                symbol("EZRA_STACK_TOP", Address24::new(0x0AFF)),
+                // Four bytes immediately below EZRA_RAM_BASE hold the compiler's
+                // two shared 16-bit indirect pointers.
+                symbol("EZRA_RAM_BASE", Address24::new(sram_start + 4)),
+                symbol("EZRA_RODATA_BASE", Address24::new(rodata_base)),
+                symbol("EZRA_ASSET_BASE", Address24::new(asset_base)),
+                symbol("EZRA_STACK_TOP", Address24::new(stack_top)),
             ],
         }
     }

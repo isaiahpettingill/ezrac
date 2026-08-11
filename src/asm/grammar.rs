@@ -77,7 +77,11 @@ pub(crate) fn parse_instruction(
         | AssemblerCpu::Z180
         | AssemblerCpu::Ez80 => z80::parse(cpu, &source),
         AssemblerCpu::Lr35902 => lr35902::parse(cpu, &source),
-        AssemblerCpu::Avr => avr::parse(cpu, &source),
+        AssemblerCpu::Avr
+        | AssemblerCpu::AvrTiny
+        | AssemblerCpu::AvrMega
+        | AssemblerCpu::AvrDx
+        | AssemblerCpu::AvrXmega => avr::parse(cpu, &source),
         AssemblerCpu::Dcpu => dcpu::parse(cpu, &source),
         AssemblerCpu::M6800 => m6800::parse(cpu, &source),
         AssemblerCpu::M6809 => m6809::parse(cpu, &source),

@@ -13,10 +13,15 @@ fn emit(source: &str) -> String {
 
 fn emit_with_arduboy_vectors(source: &str, arduboy_executable: bool) -> String {
     let program = parse_program(Path::new("avr.ezra"), source).unwrap();
+    let cpu = if arduboy_executable {
+        CpuFamily::AvrMega
+    } else {
+        CpuFamily::Avr
+    };
     let assembly = emit_avr_assembly_with_options(
         &program,
         AssemblyOptions {
-            cpu: CpuFamily::Avr,
+            cpu,
             stack_top: Address24::new(0x0aff),
             ram_base: Address24::new(0x0104),
             rodata_base: Address24::new(0x0800),
@@ -27,7 +32,7 @@ fn emit_with_arduboy_vectors(source: &str, arduboy_executable: bool) -> String {
         },
     )
     .unwrap();
-    assemble_subset_with_symbols_at(CpuFamily::Avr.into(), &assembly, 0).unwrap_or_else(|error| {
+    assemble_subset_with_symbols_at(cpu.into(), &assembly, 0).unwrap_or_else(|error| {
         panic!(
             "{error}
 {assembly}"
@@ -582,6 +587,43 @@ fn supports_more_than_four_and_overlapping_register_arguments() {
     assert!(assembly.contains("call _sum"), "{assembly}");
     assert!(assembly.contains("call _first_after_wide"), "{assembly}");
     assert!(assembly.contains("call _take_triple"), "{assembly}");
+}
+
+#[test]
+fn all_avr_family_profiles_emit_and_use_their_layout_addresses() {
+    let source =
+        "global value: u8 = 1 fn main() { let pointer: ptr<u8> = &value; value = *pointer }";
+    for (cpu, stack_top, ram_base) in [
+        (CpuFamily::AvrTiny, 0x3FFF, 0x3804),
+        (CpuFamily::AvrMega, 0x0AFF, 0x0104),
+        (CpuFamily::AvrDx, 0x7FFF, 0x4004),
+        (CpuFamily::AvrXmega, 0x3FFF, 0x2004),
+    ] {
+        let program = parse_program(Path::new("avr-family.ezra"), source).unwrap();
+        let assembly = emit_avr_assembly_with_options(
+            &program,
+            AssemblyOptions {
+                cpu,
+                stack_top: Address24::new(stack_top),
+                ram_base: Address24::new(ram_base),
+                rodata_base: Address24::new(ram_base + 0x100),
+                asset_base: Address24::new(ram_base + 0x200),
+                default_sdk_symbols: false,
+                ..AssemblyOptions::default()
+            },
+        )
+        .unwrap();
+        assemble_subset_with_symbols_at(cpu.into(), &assembly, 0)
+            .unwrap_or_else(|error| panic!("{cpu:?}: {error}\n{assembly}"));
+        assert!(
+            assembly.contains(&format!("ldi r16, {:02X}h", stack_top & 0xFF)),
+            "{cpu:?}: {assembly}"
+        );
+        assert!(
+            assembly.contains(&format!("lds r30, {:04X}h", ram_base - 4)),
+            "{cpu:?}: {assembly}"
+        );
+    }
 }
 
 #[test]

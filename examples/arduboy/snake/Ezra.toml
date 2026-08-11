@@ -2,5 +2,5 @@
 name = "arduboy-snake"
 
 [build]
-target = "arduboy-avr"
+target = "arduboy-atmega32u4"
 output = "hex"

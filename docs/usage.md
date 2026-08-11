@@ -441,7 +441,7 @@ Arduboy targets continue to default to a standalone `.hex`. Set `[build].output 
 
 ```toml
 [build]
-target = "arduboy-avr"
+target = "arduboy-atmega32u4"
 output = "arduboy"
 executable = "pocket-game"
 

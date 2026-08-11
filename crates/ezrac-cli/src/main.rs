@@ -1331,6 +1331,10 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::I8086
             | CpuFamily::Lr35902
             | CpuFamily::Avr
+            | CpuFamily::AvrTiny
+            | CpuFamily::AvrMega
+            | CpuFamily::AvrDx
+            | CpuFamily::AvrXmega
             | CpuFamily::Pic18
             | CpuFamily::Mos6502
             | CpuFamily::Cmos65C02
@@ -1422,7 +1426,7 @@ fn emit_source_assembly(
         }
     } else if options.cpu == CpuFamily::Lr35902 {
         emit_lr35902_assembly_with_options(program, options)
-    } else if options.cpu == CpuFamily::Avr {
+    } else if options.cpu.is_avr() {
         #[cfg(feature = "avr")]
         {
             emit_avr_assembly_with_options(program, options)
@@ -1546,17 +1550,19 @@ fn validate_layout_for_target_profile(
 ) -> Result<(), String> {
     let max_addr = max_address_for_target(target);
     let mut violations = Vec::new();
-    if layout.load.get() > max_addr {
+    if !target.triple.cpu.is_avr() && layout.load.get() > max_addr {
         violations.push(format!("load address {}", layout.load));
     }
-    if layout.entry.get() > max_addr {
+    if !target.triple.cpu.is_avr() && layout.entry.get() > max_addr {
         violations.push(format!("entry address {}", layout.entry));
     }
     if layout.stack.get() > max_addr {
         violations.push(format!("stack address {}", layout.stack));
     }
     for region in &layout.regions {
-        if region.start.get() > max_addr || region.end.get() > max_addr {
+        let avr_program_space =
+            target.triple.cpu.is_avr() && region.flags.contains(ezra::layout::RegionFlags::EXECUTE);
+        if !avr_program_space && (region.start.get() > max_addr || region.end.get() > max_addr) {
             violations.push(format!(
                 "region `{}` range {}..{}",
                 region.name, region.start, region.end
@@ -1564,7 +1570,12 @@ fn validate_layout_for_target_profile(
         }
     }
     for symbol in &layout.symbols {
-        if symbol.value.get() > max_addr {
+        let avr_program_symbol = target.triple.cpu.is_avr()
+            && matches!(
+                symbol.name.as_str(),
+                "EZRA_LOAD_ADDR" | "EZRA_ENTRY_ADDR" | "EZRA_CODE_BASE"
+            );
+        if !avr_program_symbol && symbol.value.get() > max_addr {
             violations.push(format!("symbol `{}` value {}", symbol.name, symbol.value));
         }
     }

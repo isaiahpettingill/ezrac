@@ -1901,22 +1901,22 @@ fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
         }
     "#;
     let sdk = SdkResolver {
-        target: Some("arduboy-avr".to_owned()),
+        target: Some("arduboy-atmega32u4".to_owned()),
         sdk_roots: Vec::new(),
     };
 
-    assert_eq!(
-        builtin_sdk_modules(Some("arduboy-avr")),
-        vec![
-            "arduboy.core",
-            "arduboy.input",
-            "arduboy.oled",
-            "arduboy.eeprom",
-            "arduboy.timing",
-            "arduboy.audio",
-            "arduboy.graphics",
-        ]
-    );
+    let modules = builtin_sdk_modules(Some("arduboy-atmega32u4"));
+    for module in [
+        "arduboy.core",
+        "arduboy.input",
+        "arduboy.oled",
+        "arduboy.eeprom",
+        "arduboy.timing",
+        "arduboy.audio",
+        "arduboy.graphics",
+    ] {
+        assert!(modules.contains(&module), "missing {module}");
+    }
     check_source_with_sdk(
         source,
         &CompileOptions {

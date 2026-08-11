@@ -67,9 +67,12 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `msp430-none-elf` | 3 | MSP430 | 16 | ELF32 `.elf` | none | Optional `msp430` feature; little-endian ELF32 source/assembly target |
 | `msp430x-none-elf` | 3 | MSP430X | 20 | ELF32 `.elf` | none | Optional `msp430` feature; extended-address ELF32 source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
-| `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
+| `bare-avr`, `bare-megaavr` | 3 | enhanced megaAVR (AVRe) | 16 | `.bin` | none | Optional `avr` feature; `avr` is the compatibility alias |
+| `bare-tinyavr` | 3 | modern tinyAVR 0/1/2 (AVRxt/AVRxmega3) | 16 | `.bin` | none | SRAM starts at `0x3800`; not the reduced `avrtiny` core |
+| `bare-avrdx` | 3 | AVR Dx (AVRxt/AVRxmega2-4) | 16 | `.bin` | none | Representative AVR128DA flash/SRAM layout |
+| `bare-xmega` | 3 | XMEGA (AVRxm) | 16 | `.bin` | none | Representative 128 KiB flash, 8 KiB SRAM layout |
 | `generic-pic18-bare` | 2 | classic PIC18 | 21-bit program / 16-bit data | Intel HEX `.hex` | none | Optional `pic18` feature; source, complete classic assembler, and `pic18-emulator` tests |
-| `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
+| `arduboy-atmega32u4` | 3 | ATmega32U4 / enhanced megaAVR (AVR5) | 16 | Intel HEX `.hex` | `arduboy.*` | `arduboy-avr` remains a compatibility alias |
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 
 Any triple containing a supported CPU can resolve if its CPU has a memory model. Unknown platform names usually fall back to a generic layout for that CPU unless they match a special layout rule.
@@ -121,18 +124,25 @@ maps LEM1802 screen memory at word address `0x8000`. See
 
 ## AVR and Arduboy
 
-Build bare AVR source or the Arduboy ATmega32U4 target with the `avr` feature:
+Build a family-specific raw AVR image or the Arduboy ATmega32U4 target with the `avr` feature:
 
 ```sh
-cargo run --features avr -- build --target bare-avr src/main.ezra
-cargo run --features avr -- build --target arduboy-avr src/main.ezra
+cargo run --features avr -- build --target bare-tinyavr src/main.ezra
+cargo run --features avr -- build --target bare-megaavr src/main.ezra
+cargo run --features avr -- build --target bare-avrdx src/main.ezra
+cargo run --features avr -- build --target bare-xmega src/main.ezra
+cargo run --features avr -- build --target arduboy-atmega32u4 src/main.ezra
 ```
 
-`bare-avr` produces a raw flash image. `arduboy-avr` produces Intel HEX by default and reserves the upper 4 KiB of the ATmega32U4's 32 KiB flash for the Caterina bootloader. Set `[build].output = "arduboy"` and provide the required `[arduboy]` `title`, `author`, and `version` fields to instead create a schema-v2 `.arduboy` ZIP package containing `info.json` and `<executable>.hex`. Optional metadata fields are `description`, `date`, `genre`, and `source_url`. Both initialize the hardware stack to `0x0AFF`, clear `r1`, and call `main` from the reset entry.
+`bare-avr` remains an enhanced megaAVR compatibility alias. The family targets use representative memory maps; a board with different flash or SRAM bounds should provide a custom layout. Modern tinyAVR means the 0/1/2-series AVRxt/AVRxmega3 parts, not the older reduced-register `avrtiny` core.
 
-The AVR backend lowers scalar values, pointers, arrays, structs, strings, embedded data, control flow, calls, interrupts, and inline assembly through HIR, TBIR, and the target semantic model. Its register ABI starts argument slots in `r24`, `r22`, `r20`, and `r18`, uses adjacent registers for values that fit without overlapping an earlier slot, and returns values in `r24` through `r26`. The compiler passes remaining or overlapping source-level arguments through call-marshalling storage, so source functions are not limited to four parameters. Assembly routines that follow the register ABI must use only its non-overlapping register arguments. The bundled `arduboy.core`, `arduboy.input`, and `arduboy.oled` modules use this ABI; see `examples/arduboy/snake` for a playable example.
+The assembler checks family-only instructions. `XCH`, `LAC`, `LAS`, and `LAT` are accepted for modern tinyAVR, AVR Dx, and XMEGA but rejected for enhanced megaAVR. `DES` is XMEGA-only. Extended indirect program calls are accepted only by profiles that can include a three-byte PC, and modern tinyAVR rejects `ELPM`. The assembler also exposes family timing data: XMEGA/AVRxt indirect loads and stores can take one cycle, their calls are one cycle faster than enhanced megaAVR calls, while AVRxt direct `LDS` costs three cycles. Generated code keeps indirect data operations in pointer-heavy loops to fit those costs.
 
-The backend allocates source-visible storage in the AVR data address space and emits initialization code for globals, strings, and embedded data. AVR builds are validated through lowering, exhaustive instruction encoding, assembly, and Intel HEX packaging tests.
+`arduboy-atmega32u4` produces Intel HEX by default and reserves the upper 4 KiB of the ATmega32U4's 32 KiB flash for the Caterina bootloader. The old `arduboy-avr` spelling remains an alias and resolves to the same megaAVR CPU profile. Set `[build].output = "arduboy"` and provide the required `[arduboy]` `title`, `author`, and `version` fields to create a schema-v2 `.arduboy` ZIP package containing `info.json` and `<executable>.hex`. Optional metadata fields are `description`, `date`, `genre`, and `source_url`.
+
+The AVR backend lowers scalar values, pointers, arrays, structs, strings, embedded data, control flow, calls, interrupts, and inline assembly through HIR, TBIR, and the target semantic model. Startup now loads the stack from the selected layout, and the shared indirect-pointer scratch bytes follow each family's SRAM base. The ATmega32U4 vector table is emitted only for the Arduboy target. Its register ABI starts argument slots in `r24`, `r22`, `r20`, and `r18`, uses adjacent registers for values that fit without overlapping an earlier slot, and returns values in `r24` through `r26`. The compiler passes remaining or overlapping source-level arguments through call-marshalling storage, so source functions are not limited to four parameters. Assembly routines that follow the register ABI must use only its non-overlapping register arguments. The bundled `arduboy.core`, `arduboy.input`, and `arduboy.oled` modules use this ABI; see `examples/arduboy/snake` for a playable example.
+
+The backend allocates source-visible storage in the AVR data address space and emits initialization code for globals, strings, and embedded data. AVR builds are validated through lowering, family-specific instruction encoding, assembly, and Intel HEX packaging tests.
 
 ## Generic M68k
 

@@ -51,7 +51,7 @@ Only files listed in `assets.images` are converted. Other `file(...)` embeds kee
 | `commodore64-6502` | `tiles` | 8×8 1bpp row bytes |
 | `commodore64-6502` | `sprite` | one 24×21 hires sprite plus the required 64th padding byte |
 | `ti99-4a-tms9900`, `zxspectrum-z80*` | `tiles` | 8×8 1bpp row bytes; color/attribute data remains separate |
-| `arduboy-avr` | `sprite`, `bitmap` | 1bpp vertical pages, one byte per 8-pixel column |
+| `arduboy-atmega32u4` (`arduboy-avr` alias) | `sprite`, `bitmap` | 1bpp vertical pages, one byte per 8-pixel column |
 | `ti83-z80`, `ti83plus-z80`, `ti84-z80`, `ti84plus-z80` | `bitmap` | horizontal row-major 1bpp bytes |
 | `ti84plusce-ez80`, `ti83premiumce-ez80` | `bitmap` | row-major little-endian RGB565 pixels |
 | `agonlight-*` VDP/MOS targets | `sprite`, `bitmap` | row-major RGBA8888 pixels |

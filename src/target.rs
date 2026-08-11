@@ -38,7 +38,12 @@ pub enum CpuFamily {
     I8085,
     I8086,
     Lr35902,
+    /// Compatibility AVR target using the enhanced megaAVR instruction set.
     Avr,
+    AvrTiny,
+    AvrMega,
+    AvrDx,
+    AvrXmega,
     Mos6502,
     Cmos65C02,
     Wdc65C816,
@@ -62,7 +67,12 @@ pub enum AssemblerCpu {
     Z180,
     Ez80,
     Lr35902,
+    /// Compatibility AVR assembler using the enhanced megaAVR instruction set.
     Avr,
+    AvrTiny,
+    AvrMega,
+    AvrDx,
+    AvrXmega,
     M6800,
     M6809,
     M68k,
@@ -90,7 +100,11 @@ impl AssemblerCpu {
             "z180" => Self::Z180,
             "ez80" => Self::Ez80,
             "lr35902" | "gameboy" | "gb" => Self::Lr35902,
-            "avr" | "atmega32u4" => Self::Avr,
+            "avr" => Self::Avr,
+            "tinyavr" => Self::AvrTiny,
+            "megaavr" | "avrmega" | "atmega" | "atmega32u4" => Self::AvrMega,
+            "avrdx" => Self::AvrDx,
+            "xmega" | "avrxmega" => Self::AvrXmega,
             "m6800" | "6800" => Self::M6800,
             "m6809" | "6809" | "6809e" => Self::M6809,
             "m68k" | "68000" | "m68000" => Self::M68k,
@@ -106,7 +120,7 @@ impl AssemblerCpu {
             "pic18" | "pic18-classic" | "pic" => Self::Pic18,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, msp430, msp430x, msp430x2, dcpu, pic18, m6800, m6809, m68k, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, msp430, msp430x, msp430x2, dcpu, pic18, m6800, m6809, m68k, avr, tinyavr, megaavr, avrdx, or xmega"
                 ));
             }
         };
@@ -129,7 +143,9 @@ impl AssemblerCpu {
                 cfg!(feature = "z80")
             }
             Self::Lr35902 => cfg!(feature = "lr35902"),
-            Self::Avr => cfg!(feature = "avr"),
+            Self::Avr | Self::AvrTiny | Self::AvrMega | Self::AvrDx | Self::AvrXmega => {
+                cfg!(feature = "avr")
+            }
             Self::M6800 => cfg!(feature = "m6800"),
             Self::M6809 => cfg!(feature = "m6809"),
             Self::M68k => cfg!(feature = "m68k"),
@@ -149,7 +165,7 @@ impl AssemblerCpu {
             Self::I8086 => "i8086",
             Self::Z80 | Self::R800 | Self::Z80N | Self::Z180 | Self::Ez80 => "z80",
             Self::Lr35902 => "lr35902",
-            Self::Avr => "avr",
+            Self::Avr | Self::AvrTiny | Self::AvrMega | Self::AvrDx | Self::AvrXmega => "avr",
             Self::M6800 => "m6800",
             Self::M6809 => "m6809",
             Self::M68k => "m68k",
@@ -173,6 +189,10 @@ impl AssemblerCpu {
             Self::Ez80 => "ez80",
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
+            Self::AvrTiny => "tinyavr",
+            Self::AvrMega => "megaavr",
+            Self::AvrDx => "avrdx",
+            Self::AvrXmega => "xmega",
             Self::M6800 => "m6800",
             Self::M6809 => "m6809",
             Self::M68k => "m68k",
@@ -209,8 +229,15 @@ impl AssemblerCpu {
             | Self::Msp430X2
             | Self::Dcpu
             | Self::Pic18 => None,
-            Self::Avr => None,
+            Self::Avr | Self::AvrTiny | Self::AvrMega | Self::AvrDx | Self::AvrXmega => None,
         }
+    }
+
+    pub const fn is_avr(self) -> bool {
+        matches!(
+            self,
+            Self::Avr | Self::AvrTiny | Self::AvrMega | Self::AvrDx | Self::AvrXmega
+        )
     }
 
     pub fn supports_z80_syntax(self) -> bool {
@@ -239,6 +266,10 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::M68k => Self::M68k,
             CpuFamily::Lr35902 => Self::Lr35902,
             CpuFamily::Avr => Self::Avr,
+            CpuFamily::AvrTiny => Self::AvrTiny,
+            CpuFamily::AvrMega => Self::AvrMega,
+            CpuFamily::AvrDx => Self::AvrDx,
+            CpuFamily::AvrXmega => Self::AvrXmega,
             CpuFamily::M6800 => Self::M6800,
             CpuFamily::M6809 => Self::M6809,
             CpuFamily::Mos6502 => Self::Mos6502,
@@ -347,6 +378,10 @@ impl CpuFamily {
             | Self::M6800
             | Self::M6809
             | Self::Avr
+            | Self::AvrTiny
+            | Self::AvrMega
+            | Self::AvrDx
+            | Self::AvrXmega
             | Self::Mos6502
             | Self::Cmos65C02
             | Self::Ricoh2A03
@@ -376,6 +411,10 @@ impl CpuFamily {
             Self::I8086 => "i8086",
             Self::Lr35902 => "lr35902",
             Self::Avr => "avr",
+            Self::AvrTiny => "tinyavr",
+            Self::AvrMega => "megaavr",
+            Self::AvrDx => "avrdx",
+            Self::AvrXmega => "xmega",
             Self::M6800 => "m6800",
             Self::M6809 => "m6809",
             Self::Mos6502 => "6502",
@@ -389,6 +428,13 @@ impl CpuFamily {
             Self::Dcpu => "dcpu",
             Self::Pic18 => "pic18",
         }
+    }
+
+    pub const fn is_avr(self) -> bool {
+        matches!(
+            self,
+            Self::Avr | Self::AvrTiny | Self::AvrMega | Self::AvrDx | Self::AvrXmega
+        )
     }
 }
 
@@ -566,7 +612,7 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
     } else if target.starts_with("sega-master-system-") || target.starts_with("sega-game-gear-") {
         Some(&[CpuFamily::Z80][..])
     } else if target.starts_with("arduboy-") {
-        Some(&[CpuFamily::Avr][..])
+        Some(&[CpuFamily::AvrMega][..])
     } else if target.starts_with("generic-pic18-") || target.starts_with("pic18-") {
         Some(&[CpuFamily::Pic18][..])
     } else if target.starts_with("ti99-4a-") {
@@ -696,7 +742,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
     if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
         return Err(format!("invalid target triple `{value}`"));
     }
-    let cpu = parts
+    let mut cpu = parts
         .iter()
         .rev()
         .find_map(|part| match *part {
@@ -710,7 +756,11 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "i8085" | "8085" => Some(CpuFamily::I8085),
             "i8086" | "8086" => Some(CpuFamily::I8086),
             "lr35902" => Some(CpuFamily::Lr35902),
-            "avr" | "atmega32u4" => Some(CpuFamily::Avr),
+            "avr" => Some(CpuFamily::Avr),
+            "tinyavr" => Some(CpuFamily::AvrTiny),
+            "megaavr" | "avrmega" | "atmega" | "atmega32u4" => Some(CpuFamily::AvrMega),
+            "avrdx" => Some(CpuFamily::AvrDx),
+            "xmega" | "avrxmega" => Some(CpuFamily::AvrXmega),
             "m6800" | "6800" => Some(CpuFamily::M6800),
             "m6809" | "6809" | "6809e" => Some(CpuFamily::M6809),
             "6502" | "mos6502" | "m6502" => Some(CpuFamily::Mos6502),
@@ -726,6 +776,11 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             _ => None,
         })
         .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;
+    // `arduboy-avr` predates the family-specific names. It is an ATmega32U4
+    // target, so keep the spelling but never treat it as a generic AVR.
+    if value == "arduboy-avr" {
+        cpu = CpuFamily::AvrMega;
+    }
     let assembler_cpu = AssemblerCpu::from(cpu);
     if !assembler_cpu.is_enabled() {
         return Err(format!(

@@ -337,10 +337,21 @@ fn arbitrary_i8086_target_uses_a_16_bit_layout() {
 #[cfg(feature = "avr")]
 #[test]
 fn compiles_in_memory_source_to_avr_assembly() {
-    let request = CompileRequest::new("memory.ezra", "bare-avr");
-    let compilation = compile_source_to_assembly("fn main() {}", &request).unwrap();
+    for target in [
+        "bare-avr",
+        "bare-tinyavr",
+        "bare-megaavr",
+        "bare-avrdx",
+        "bare-xmega",
+    ] {
+        let request = CompileRequest::new("memory.ezra", target);
+        let compilation = compile_source_to_assembly("fn main() {}", &request).unwrap();
 
-    assert!(compilation.assembly.contains("target: AVR register ABI"));
+        assert!(
+            compilation.assembly.contains("target: AVR register ABI"),
+            "{target}"
+        );
+    }
 }
 
 #[cfg(feature = "mos6502")]

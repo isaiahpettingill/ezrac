@@ -2,7 +2,7 @@
 name = "Arduboy PNG Assets"
 
 [build]
-target = "arduboy-avr"
+target = "arduboy-atmega32u4"
 output = "hex"
 executable = "PNGASSET"
 input = "src/main.ezra"

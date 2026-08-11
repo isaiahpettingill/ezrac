@@ -1553,6 +1553,10 @@ mod runner {
             | CpuFamily::Msp430X
             | CpuFamily::Msp430X2
             | CpuFamily::Avr
+            | CpuFamily::AvrTiny
+            | CpuFamily::AvrMega
+            | CpuFamily::AvrDx
+            | CpuFamily::AvrXmega
             | CpuFamily::Dcpu
             | CpuFamily::Pic18 => CpuMode::Z80,
         }
@@ -3066,8 +3070,8 @@ fn instruction_len(
     }
     let text = architecture.encoder_text();
     #[cfg(any(feature = "std", feature = "avr"))]
-    if cpu == AssemblerCpu::Avr {
-        return avr::instruction_len(text);
+    if let Some(variant) = avr::AvrVariant::from_assembler_cpu(cpu) {
+        return avr::instruction_len_for_variant(text, variant);
     }
     #[cfg(feature = "pic18")]
     if cpu == AssemblerCpu::Pic18 {
@@ -3172,8 +3176,10 @@ fn emit_instruction(
     }
     let text = architecture.encoder_text();
     #[cfg(any(feature = "std", feature = "avr"))]
-    if cpu == AssemblerCpu::Avr {
-        bytes.extend(avr::encode_instruction(text, labels, pc)?);
+    if let Some(variant) = avr::AvrVariant::from_assembler_cpu(cpu) {
+        bytes.extend(avr::encode_instruction_for_variant(
+            text, labels, pc, variant,
+        )?);
         return Ok(());
     }
     #[cfg(feature = "pic18")]
