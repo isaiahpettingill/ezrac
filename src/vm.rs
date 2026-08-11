@@ -40,6 +40,8 @@ use crate::asm::m6800;
 use crate::asm::m6809;
 #[cfg(any(feature = "std", feature = "mos6502"))]
 use crate::asm::mos6502::{Mos6502Variant, Mos65816Widths};
+#[cfg(feature = "pic18")]
+use crate::asm::pic18;
 
 #[cfg(not(any(feature = "std", feature = "mos6502")))]
 #[derive(Clone, Copy, Debug)]
@@ -286,6 +288,8 @@ mod runner {
             #[allow(unused_mut)]
             let mut backends: Vec<Box<dyn EmulatorBackend>> = vec![Box::new(Ez80Emulator)];
 
+            #[cfg(feature = "pic18")]
+            backends.push(Box::new(Pic18Emulator));
             #[cfg(feature = "dcpu")]
             backends.push(Box::new(DcpuEmulator));
             #[cfg(feature = "m6800")]
@@ -618,6 +622,132 @@ mod runner {
 
         fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
             self.run_internal(image, options, None)
+        }
+    }
+
+    #[cfg(feature = "pic18")]
+    pub struct Pic18Emulator;
+
+    #[cfg(feature = "pic18")]
+    const PIC18_DEBUG_SEQUENCE: usize = 0xF70;
+    #[cfg(feature = "pic18")]
+    const PIC18_DEBUG_VALUE: usize = 0xF71;
+    #[cfg(feature = "pic18")]
+    const PIC18_RESULT_CODE: usize = 0xF72;
+    #[cfg(feature = "pic18")]
+    const PIC18_HALT: usize = 0xF73;
+
+    #[cfg(feature = "pic18")]
+    impl EmulatorBackend for Pic18Emulator {
+        fn supports(&self, cpu_family: CpuFamily) -> bool {
+            cpu_family == CpuFamily::Pic18
+        }
+
+        fn run(&self, image: &TestImage, options: &TestRunOptions) -> Result<TestRun, Diagnostic> {
+            use pic18_emulator::{Cpu, CpuError, DataMemory, SliceProgramBus};
+
+            let start = usize::try_from(image.base_addr)
+                .map_err(|_| Diagnostic::new("PIC18 test image base is too large"))?;
+            let end = start
+                .checked_add(image.bytes.len())
+                .ok_or_else(|| Diagnostic::new("PIC18 test image range overflows"))?;
+            if end > (pic18_emulator::PROGRAM_BYTE_ADDRESS_MASK as usize + 1) {
+                return Err(Diagnostic::new("PIC18 test image exceeds program memory"));
+            }
+            let mut program_bytes = vec![0; end];
+            program_bytes[start..end].copy_from_slice(&image.bytes);
+            let mut program = SliceProgramBus::new(&program_bytes);
+            let mut data = DataMemory::new();
+            for (address, value) in &options.initial_memory {
+                let address = usize::try_from(*address)
+                    .map_err(|_| Diagnostic::new("PIC18 initial data address is too large"))?;
+                let slot = data
+                    .as_mut_slice()
+                    .get_mut(address)
+                    .ok_or_else(|| Diagnostic::new("PIC18 initial data address exceeds 4 KiB"))?;
+                *slot = *value;
+            }
+            let mut cpu = Cpu::new();
+            cpu.set_pc(image.base_addr).map_err(|_| {
+                Diagnostic::new("PIC18 test entry must be an aligned program address")
+            })?;
+            let mut debug_sequence = data.as_slice()[PIC18_DEBUG_SEQUENCE];
+            let mut debug_output = Vec::new();
+            let ports = [0; 256];
+
+            for instructions in 1..=options.instruction_budget {
+                match cpu.step(&mut program, &mut data) {
+                    Ok(_) => {}
+                    Err(CpuError::Sleeping) => {
+                        return Ok(TestRun {
+                            halted: true,
+                            result_code: data.as_slice()[PIC18_RESULT_CODE],
+                            instructions: instructions - 1,
+                            debug_output,
+                            ports,
+                            failure: None,
+                        });
+                    }
+                    Err(CpuError::StackOverflow { .. }) => {
+                        return Ok(TestRun {
+                            halted: false,
+                            result_code: data.as_slice()[PIC18_RESULT_CODE],
+                            instructions,
+                            debug_output,
+                            ports,
+                            failure: Some(TestRunFailure::StackOverflow {
+                                sp: cpu.state.stack.len() as u32,
+                            }),
+                        });
+                    }
+                    Err(CpuError::ProgramBus { .. }) => {
+                        return Ok(TestRun {
+                            halted: false,
+                            result_code: data.as_slice()[PIC18_RESULT_CODE],
+                            instructions,
+                            debug_output,
+                            ports,
+                            failure: Some(TestRunFailure::ExecutionOutsideMappedMemory {
+                                pc: cpu.state.pc,
+                            }),
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(TestRun {
+                            halted: false,
+                            result_code: data.as_slice()[PIC18_RESULT_CODE],
+                            instructions,
+                            debug_output,
+                            ports,
+                            failure: Some(TestRunFailure::IllegalInstruction { pc: cpu.state.pc }),
+                        });
+                    }
+                }
+                let sequence = data.as_slice()[PIC18_DEBUG_SEQUENCE];
+                if sequence != debug_sequence {
+                    debug_sequence = sequence;
+                    debug_output.push(data.as_slice()[PIC18_DEBUG_VALUE]);
+                }
+                if data.as_slice()[PIC18_HALT] != 0 {
+                    return Ok(TestRun {
+                        halted: true,
+                        result_code: data.as_slice()[PIC18_RESULT_CODE],
+                        instructions,
+                        debug_output,
+                        ports,
+                        failure: None,
+                    });
+                }
+            }
+
+            Ok(TestRun {
+                halted: false,
+                result_code: data.as_slice()[PIC18_RESULT_CODE],
+                instructions: options.instruction_budget,
+                debug_output,
+                ports,
+                failure: Some(TestRunFailure::Timeout),
+            })
         }
     }
 
@@ -1423,7 +1553,8 @@ mod runner {
             | CpuFamily::Msp430X
             | CpuFamily::Msp430X2
             | CpuFamily::Avr
-            | CpuFamily::Dcpu => CpuMode::Z80,
+            | CpuFamily::Dcpu
+            | CpuFamily::Pic18 => CpuMode::Z80,
         }
     }
 
@@ -2938,6 +3069,10 @@ fn instruction_len(
     if cpu == AssemblerCpu::Avr {
         return avr::instruction_len(text);
     }
+    #[cfg(feature = "pic18")]
+    if cpu == AssemblerCpu::Pic18 {
+        return pic18::instruction_len(text);
+    }
     #[cfg(any(feature = "std", feature = "m6800"))]
     if cpu == AssemblerCpu::M6800 {
         return m6800::instruction_len(text)?.ok_or_else(|| {
@@ -3039,6 +3174,11 @@ fn emit_instruction(
     #[cfg(any(feature = "std", feature = "avr"))]
     if cpu == AssemblerCpu::Avr {
         bytes.extend(avr::encode_instruction(text, labels, pc)?);
+        return Ok(());
+    }
+    #[cfg(feature = "pic18")]
+    if cpu == AssemblerCpu::Pic18 {
+        bytes.extend(pic18::encode_instruction(text, labels, pc)?);
         return Ok(());
     }
     #[cfg(any(feature = "std", feature = "m6800"))]

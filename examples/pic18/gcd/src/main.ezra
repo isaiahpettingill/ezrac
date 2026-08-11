@@ -1,0 +1,16 @@
+global result: u16 = 0
+
+fn gcd(a: u16, b: u16) -> u16 {
+    let left: u16 = a
+    let right: u16 = b
+    while right != 0 {
+        let remainder: u16 = left % right
+        left = right
+        right = remainder
+    }
+    return left
+}
+
+fn main() {
+    result = gcd(84, 30)
+}

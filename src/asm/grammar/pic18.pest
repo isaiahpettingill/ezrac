@@ -1,0 +1,9 @@
+// Classic PIC18 operands. File, literal, bit, and profile selectors are
+// intentionally parsed as general atoms; the encoder owns range validation.
+architecture_instruction = { SOI ~ architecture_ws ~ architecture_mnemonic ~ (architecture_ws1 ~ architecture_operands)? ~ architecture_ws ~ EOI }
+architecture_mnemonic = { architecture_atom }
+architecture_operands = { pic18_operand ~ (architecture_ws ~ architecture_comma ~ architecture_ws ~ pic18_operand)* }
+pic18_operand = { pic18_element ~ (architecture_ws ~ pic18_element)* }
+pic18_element = _{ pic18_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_operator | architecture_atom }
+pic18_nested_element = _{ pic18_parenthesized | architecture_double_quoted | architecture_single_quoted | architecture_comma | architecture_operator | architecture_atom }
+pic18_parenthesized = { architecture_lparen ~ architecture_ws ~ pic18_nested_element ~ (architecture_ws ~ pic18_nested_element)* ~ architecture_ws ~ architecture_rparen }

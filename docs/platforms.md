@@ -6,9 +6,9 @@ EZRA targets are selected with target triples. A target triple has this general 
 vendor-platform-cpu[-version]
 ```
 
-The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80/R800 variants, Intel 8080/8085/8086, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, M6800/M6809, and M68k. Default builds enable every compiler backend. Consumers using `--no-default-features` can enable only the backend features they need; every backend supports `no_std + alloc` compilation.
+The compiler identifies the CPU by scanning target components for a supported CPU family, including eZ80/Z80/R800 variants, Intel 8080/8085/8086, LR35902, MOS 6502, WDC 65C816, TMS9900, DCPU-16, AVR, PIC18, M6800/M6809, and M68k. Default builds enable every compiler backend. Consumers using `--no-default-features` can enable only the backend features they need; every backend supports `no_std + alloc` compilation.
 
-Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have complete EZRA source code generation; optional DCPU-16, M6800, M68k, and TMS9900 targets have target-specific source emitters. MOS 6502 variants also have a source emitter; the initial TMS9900 backend is a documented 8-/16-bit scalar subset. AVR has a complete register-ABI source backend.
+Only CPUs with an implemented memory model can be resolved. A resolvable target does not necessarily have complete EZRA source code generation; optional DCPU-16, M6800, M68k, and TMS9900 targets have target-specific source emitters. MOS 6502 variants also have a source emitter; the initial TMS9900 backend is a documented 8-/16-bit scalar subset. AVR has a complete register-ABI source backend. PIC18 reuses that HIR/TBIR lowering through a classic PIC18 data-byte ABI and has in-process emulator tests.
 
 ## Support Levels
 
@@ -68,6 +68,7 @@ Tier 1 is not a claim that every program or hardware feature works. It means the
 | `msp430x-none-elf` | 3 | MSP430X | 20 | ELF32 `.elf` | none | Optional `msp430` feature; extended-address ELF32 source/assembly target |
 | `generic-dcpu-bare` | 3 | DCPU-16 | 16 | `.bin` | `dcpu.*` | Optional `dcpu` feature; complete handwritten assembly and limited scalar source backend |
 | `bare-avr` | 3 | AVR | 16 | `.bin` | none | Optional `avr` feature; register-ABI source/assembly target |
+| `generic-pic18-bare` | 2 | classic PIC18 | 21-bit program / 16-bit data | Intel HEX `.hex` | none | Optional `pic18` feature; source, complete classic assembler, and `pic18-emulator` tests |
 | `arduboy-avr` | 3 | AVR | 16 | Intel HEX `.hex` | `arduboy.*` | Optional `avr` feature; ATmega32U4 source/assembly target |
 | `generic-m68k-bare` | 3 | Motorola 68000 | 24 | `.bin` | none | Optional `m68k` feature; experimental scalar source/assembly target |
 

@@ -58,6 +58,8 @@ use crate::asm::emit_m6800_assembly_with_options;
 use crate::asm::emit_m6809_assembly_with_options;
 #[cfg(feature = "msp430")]
 use crate::asm::emit_msp430_assembly_with_options;
+#[cfg(feature = "pic18")]
+use crate::asm::emit_pic18_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
 
@@ -1831,6 +1833,18 @@ fn emit_source_assembly(program: &Program, options: AssemblyOptions) -> Result<S
             {
                 Err(Diagnostic::new(
                     "AVR source compilation requires the `avr` Cargo feature",
+                ))
+            }
+        }
+        CpuFamily::Pic18 => {
+            #[cfg(feature = "pic18")]
+            {
+                emit_pic18_assembly_with_options(program, options)
+            }
+            #[cfg(not(feature = "pic18"))]
+            {
+                Err(Diagnostic::new(
+                    "PIC18 source compilation requires the `pic18` Cargo feature",
                 ))
             }
         }

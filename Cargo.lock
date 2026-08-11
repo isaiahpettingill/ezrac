@@ -64,6 +64,7 @@ dependencies = [
  "mspsim-rs",
  "pest",
  "pest_derive",
+ "pic18-emulator",
  "png",
  "toml",
  "w65c816",
@@ -276,6 +277,12 @@ checksum = "f9744bc48116fee06334924bb5f2bad41eed5e89bd26e29b0b799f9a3f82c210"
 dependencies = [
  "pest",
 ]
+
+[[package]]
+name = "pic18-emulator"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c6aa52e1ae0b0fab4480ca7d90ef2512a4fbfcbd87a8ae7d0aa3677306c1bc3"
 
 [[package]]
 name = "play96"

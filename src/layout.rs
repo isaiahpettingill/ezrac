@@ -84,6 +84,8 @@ pub struct Layout {
 pub fn default_layout_for_target(target: &str) -> Layout {
     if target == "bare-avr" || target == "bare-atmega32u4" {
         Layout::bare_avr()
+    } else if target.starts_with("generic-pic18-") || target.starts_with("pic18-") {
+        Layout::bare_pic18()
     } else if target == "generic-6502-bare" {
         Layout::bare_6502()
     } else if let Some(cpu) = bare_target_cpu(target) {
@@ -601,6 +603,45 @@ impl Layout {
     /// AVR startup sequence.
     pub fn bare_avr() -> Self {
         Self::avr_flash_layout("bare_avr", 0x7FFF)
+    }
+
+    /// Generic classic PIC18 layout.
+    ///
+    /// PIC18 program memory and data memory are Harvard spaces. The layout's
+    /// flat regions describe the Intel HEX program image; `EZRA_RAM_BASE`,
+    /// `EZRA_RODATA_BASE`, and `EZRA_ASSET_BASE` are logical data-bus
+    /// addresses used by the source ABI and are not emitted as program bytes.
+    pub fn bare_pic18() -> Self {
+        Self {
+            name: "bare_pic18_classic".to_owned(),
+            load: Address24::new(0),
+            entry: Address24::new(0),
+            stack: Address24::new(0x0DFF),
+            regions: vec![region(
+                "program",
+                0,
+                0x1F_FFFF,
+                &[RegionFlags::READ, RegionFlags::EXECUTE],
+            )],
+            sections: vec![
+                section(".header", "program", 2),
+                section(".text", "program", 2),
+                section(".rodata", "program", 2),
+                section(".data", "program", 2),
+                section(".bss", "program", 2),
+                section(".assets", "program", 2),
+                section(".scratch", "program", 2),
+            ],
+            symbols: vec![
+                symbol("EZRA_LOAD_ADDR", Address24::new(0)),
+                symbol("EZRA_ENTRY_ADDR", Address24::new(0)),
+                symbol("EZRA_CODE_BASE", Address24::new(0)),
+                symbol("EZRA_STACK_TOP", Address24::new(0x0DFF)),
+                symbol("EZRA_RAM_BASE", Address24::new(0x0104)),
+                symbol("EZRA_RODATA_BASE", Address24::new(0x0200)),
+                symbol("EZRA_ASSET_BASE", Address24::new(0x0800)),
+            ],
+        }
     }
 
     /// Arduboy's ATmega32U4 has 32 KiB of flash. The top 4 KiB is retained for

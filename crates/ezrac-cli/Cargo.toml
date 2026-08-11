@@ -33,6 +33,7 @@ default = [
     "msp430",
     "tms9900",
     "dcpu",
+    "pic18",
 ]
 std = ["ezra/std"]
 no-std = ["ezra/no-std"]
@@ -50,6 +51,7 @@ mos6502-emulator = ["mos6502", "test-runner", "ezra/mos6502-emulator"]
 msp430 = ["ezra/msp430"]
 tms9900 = ["ezra/tms9900"]
 dcpu = ["ezra/dcpu"]
+pic18 = ["ezra/pic18"]
 lsp = ["std", "ezra/lsp", "dep:lsp", "dep:serde", "dep:serde_json"]
 
 [dev-dependencies]

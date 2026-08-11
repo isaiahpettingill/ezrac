@@ -62,6 +62,7 @@ impl AssemblyPreprocessOptions {
             ("mos6502-emulator", cfg!(feature = "mos6502-emulator")),
             ("tms9900", cfg!(feature = "tms9900")),
             ("dcpu", cfg!(feature = "dcpu")),
+            ("pic18", cfg!(feature = "pic18")),
             ("lsp", cfg!(feature = "lsp")),
         ] {
             if enabled {

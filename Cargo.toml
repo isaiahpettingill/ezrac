@@ -17,6 +17,7 @@ name = "ezra"
 [dependencies]
 dcpu = { package = "dcpu16-core", version = "0.1.0", default-features = false, optional = true }
 ez80 = { version = "0.6.0", optional = true }
+pic18-emulator = { version = "0.1.0", optional = true, default-features = false }
 mos6502 = { version = "0.10.1", optional = true }
 m6800 = { version = "0.1.0", optional = true }
 mc6809-core = { version = "0.3.2", optional = true }
@@ -50,6 +51,7 @@ default = [
     "msp430",
     "tms9900",
     "dcpu",
+    "pic18",
 ]
 std = ["dep:toml", "pest/std", "pest_derive/std"]
 no-std = []
@@ -68,3 +70,4 @@ mos6502-emulator = ["mos6502", "std", "test-runner", "dep:mos6502"]
 msp430 = []
 tms9900 = []
 dcpu = ["dep:dcpu"]
+pic18 = ["dep:pic18-emulator"]

@@ -3,7 +3,7 @@ mod arithmetic_corpus;
 
 #[cfg(any(feature = "std", feature = "avr"))]
 pub mod avr;
-#[cfg(feature = "avr")]
+#[cfg(any(feature = "std", feature = "avr", feature = "pic18"))]
 pub mod avr_emitter;
 mod comments;
 #[allow(dead_code)]
@@ -11,6 +11,9 @@ mod copy_cleanup;
 pub(crate) mod data;
 pub mod frontend;
 pub(crate) mod grammar;
+pub mod pic18;
+#[cfg(feature = "pic18")]
+pub mod pic18_emitter;
 pub mod preprocess;
 #[allow(dead_code)]
 pub(crate) mod reachability;
@@ -51,7 +54,7 @@ pub mod tms9900;
 #[cfg(feature = "tms9900")]
 pub mod tms9900_emitter;
 
-#[cfg(feature = "avr")]
+#[cfg(any(feature = "avr", feature = "pic18"))]
 pub use avr_emitter::emit_avr_assembly_with_options;
 #[cfg(feature = "dcpu")]
 pub use dcpu_emitter::emit_dcpu_assembly_with_options;
@@ -63,6 +66,8 @@ pub use frontend::{
 };
 #[cfg(feature = "i8086")]
 pub use i8086_emitter::emit_i8086_assembly_with_options;
+#[cfg(feature = "pic18")]
+pub use pic18_emitter::emit_pic18_assembly_with_options;
 pub use preprocess::{
     AssemblyIncludeResolver, AssemblyPreprocessOptions, NullAssemblyIncludeResolver,
     PreprocessedAssembly, ResolvedAssemblyInclude, WorkspaceAssemblyResolver, preprocess_assembly,

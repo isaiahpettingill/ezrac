@@ -48,6 +48,8 @@ use ezra::asm::emit_m6800_assembly_with_options;
 use ezra::asm::emit_m6809_assembly_with_options;
 #[cfg(feature = "msp430")]
 use ezra::asm::emit_msp430_assembly_with_options;
+#[cfg(feature = "pic18")]
+use ezra::asm::emit_pic18_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use ezra::asm::emit_tms9900_assembly_with_options;
 
@@ -1329,6 +1331,7 @@ fn ensure_source_codegen_supported(settings: &BuildSettings) -> Result<(), Strin
             | CpuFamily::I8086
             | CpuFamily::Lr35902
             | CpuFamily::Avr
+            | CpuFamily::Pic18
             | CpuFamily::Mos6502
             | CpuFamily::Cmos65C02
             | CpuFamily::Wdc65C816
@@ -1427,6 +1430,15 @@ fn emit_source_assembly(
         #[cfg(not(feature = "avr"))]
         {
             unreachable!("AVR targets require the avr Cargo feature")
+        }
+    } else if options.cpu == CpuFamily::Pic18 {
+        #[cfg(feature = "pic18")]
+        {
+            emit_pic18_assembly_with_options(program, options)
+        }
+        #[cfg(not(feature = "pic18"))]
+        {
+            unreachable!("PIC18 targets require the pic18 Cargo feature")
         }
     } else if matches!(
         options.cpu,
@@ -3287,6 +3299,15 @@ fn print_targets() {
             output: "elf",
             sdk: "none",
             status: "MSP430X ELF32 source/assembly target",
+        },
+        #[cfg(feature = "pic18")]
+        TargetRow {
+            triple: "generic-pic18-bare",
+            cpu: "pic18",
+            address_width_bits: 21,
+            output: "hex",
+            sdk: "none",
+            status: "classic PIC18 source/assembly target",
         },
         #[cfg(feature = "dcpu")]
         TargetRow {

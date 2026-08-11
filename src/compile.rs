@@ -10,6 +10,8 @@ use crate::asm::emit_m6800_assembly_with_options;
 use crate::asm::emit_m6809_assembly_with_options;
 #[cfg(feature = "msp430")]
 use crate::asm::emit_msp430_assembly_with_options;
+#[cfg(feature = "pic18")]
+use crate::asm::emit_pic18_assembly_with_options;
 #[cfg(feature = "tms9900")]
 use crate::asm::emit_tms9900_assembly_with_options;
 
@@ -167,6 +169,7 @@ fn check_diagnostics_with_sdk_and_overrides(
             | CpuFamily::I8085
             | CpuFamily::Lr35902
             | CpuFamily::Avr
+            | CpuFamily::Pic18
             | CpuFamily::M6800
             | CpuFamily::M6809
     ) {
@@ -541,6 +544,15 @@ pub fn check_source_with_sdk_and_overrides(
         #[cfg(not(feature = "avr"))]
         {
             unreachable!("AVR targets require the avr Cargo feature")
+        }
+    } else if cpu == CpuFamily::Pic18 {
+        #[cfg(feature = "pic18")]
+        {
+            emit_pic18_assembly_with_options(&program, assembly_options)
+        }
+        #[cfg(not(feature = "pic18"))]
+        {
+            unreachable!("PIC18 targets require the pic18 Cargo feature")
         }
     } else if matches!(
         cpu,

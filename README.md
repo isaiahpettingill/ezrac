@@ -124,6 +124,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `examples/snes-5a22/source-hello` builds EZRA source with the bundled SNES SDK into a LoROM `.sfc` image.
 - `examples/snes-5a22/hello-world` contains a raw Ricoh 5A22/65C816 assembly example.
 - `docs/i8086-assembly.md` documents the optional complete strict Intel 8086 standalone assembler and source backend.
+- `docs/pic18-assembly.md` documents the classic PIC18 assembler, source ABI, Intel HEX target, and emulator-backed tests.
 - `docs/disk-images.md` documents the disk-image command, emulator profiles, and `no_std + alloc` API.
 - `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, limited source backend, operand forms, expressions, word data, and [`examples/dcpu-16`](examples/dcpu-16/).
 - [`dcpu-16-libretro`](https://github.com/isaiahpettingill/dcpu-16-libretro) provides the DCPU-16 Standard Machine libretro core; its published [`dcpu16-core`](https://crates.io/crates/dcpu16-core) crate backs EZRAC's DCPU emulator tests.
@@ -136,7 +137,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/real-core-test-results.md` publishes the latest reviewed core identities and pass results.
 - `CHANGELOG.md` summarizes notable development milestones.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
-- The main source target is Agon Light MOS on eZ80 ADL. Default builds include every compiler backend: Intel 8080/8085/8086, eZ80/Z80-family, LR35902, AVR, MOS 6502-family, M6800/M6809, M68k, TMS9900, MSP430, and DCPU-16. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The i8086 backend provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, a complete strict 8086 assembler, and the `msdos-com-i8086` target with bundled `dos.*` SDK; aggregate parameters and returns must be passed by pointer. Target profiles remain at varying maturity levels; see `docs/platforms.md`.
+- The main source target is Agon Light MOS on eZ80 ADL. Default builds include every compiler backend: Intel 8080/8085/8086, eZ80/Z80-family, LR35902, AVR, MOS 6502-family, M6800/M6809, M68k, TMS9900, MSP430, PIC18, and DCPU-16. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The i8086 backend provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, a complete strict 8086 assembler, and the `msdos-com-i8086` target with bundled `dos.*` SDK; aggregate parameters and returns must be passed by pointer. Target profiles remain at varying maturity levels; see `docs/platforms.md`.
 - Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.
@@ -174,7 +175,7 @@ Both std and alloc-only builds validate the selected layout, strictly validate g
 cargo check -p ezra-core --lib --no-default-features --features no-std,z80
 cargo check -p ezra-core --lib --no-default-features --features no-std,mos6502
 cargo check -p ezra-core --lib --no-default-features --features no-std,i8086
-cargo check -p ezra-core --lib --no-default-features --features no-std,avr,m6800,m6809,m68k,tms9900,dcpu,lr35902
+cargo check -p ezra-core --lib --no-default-features --features no-std,avr,m6800,m6809,m68k,tms9900,dcpu,lr35902,pic18
 ```
 
 No-std builds never access host paths: all imported SDK source and binary assets must be included in `Workspace`. The full in-memory indexed PNG pipeline works with `no_std + alloc` through `ezra::image::decode_indexed_png` and `indexed_png_to_native_bytes`; embedded callers supply the PNG bytes and then add the converted bytes to their workspace. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.

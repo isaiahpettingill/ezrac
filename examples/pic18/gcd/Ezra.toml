@@ -1,0 +1,8 @@
+[project]
+name = "pic18-gcd"
+
+[build]
+input = "src/main.ezra"
+target = "generic-pic18-bare"
+output = "hex"
+executable = "pic18-gcd"

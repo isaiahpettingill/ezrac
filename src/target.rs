@@ -48,6 +48,7 @@ pub enum CpuFamily {
     Msp430X,
     Msp430X2,
     Dcpu,
+    Pic18,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +75,7 @@ pub enum AssemblerCpu {
     Msp430X,
     Msp430X2,
     Dcpu,
+    Pic18,
 }
 
 impl AssemblerCpu {
@@ -101,9 +103,10 @@ impl AssemblerCpu {
             "msp430x" => Self::Msp430X,
             "msp430x2" | "msp430xv2" => Self::Msp430X2,
             "dcpu" | "dcpu16" | "dcpu-16" => Self::Dcpu,
+            "pic18" | "pic18-classic" | "pic" => Self::Pic18,
             _ => {
                 return Err(format!(
-                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, msp430, msp430x, msp430x2, dcpu, m6800, m6809, m68k, or avr"
+                    "unsupported assembler CPU `{value}`; expected i8080, i8085, i8086, z80, r800, z80n, z180, ez80, lr35902, 6502, 65c02, 65c816, 2a03, tms9900, msp430, msp430x, msp430x2, dcpu, pic18, m6800, m6809, m68k, or avr"
                 ));
             }
         };
@@ -136,6 +139,7 @@ impl AssemblerCpu {
             Self::Tms9900 => cfg!(feature = "tms9900"),
             Self::Msp430 | Self::Msp430X | Self::Msp430X2 => cfg!(feature = "msp430"),
             Self::Dcpu => cfg!(feature = "dcpu"),
+            Self::Pic18 => cfg!(feature = "pic18"),
         }
     }
 
@@ -153,6 +157,7 @@ impl AssemblerCpu {
             Self::Tms9900 => "tms9900",
             Self::Msp430 | Self::Msp430X | Self::Msp430X2 => "msp430",
             Self::Dcpu => "dcpu",
+            Self::Pic18 => "pic18",
         }
     }
 
@@ -180,6 +185,7 @@ impl AssemblerCpu {
             Self::Msp430X => "msp430x",
             Self::Msp430X2 => "msp430x2",
             Self::Dcpu => "dcpu",
+            Self::Pic18 => "pic18",
         }
     }
 
@@ -201,7 +207,8 @@ impl AssemblerCpu {
             | Self::Msp430
             | Self::Msp430X
             | Self::Msp430X2
-            | Self::Dcpu => None,
+            | Self::Dcpu
+            | Self::Pic18 => None,
             Self::Avr => None,
         }
     }
@@ -243,6 +250,7 @@ impl From<CpuFamily> for AssemblerCpu {
             CpuFamily::Msp430X => Self::Msp430X,
             CpuFamily::Msp430X2 => Self::Msp430X2,
             CpuFamily::Dcpu => Self::Dcpu,
+            CpuFamily::Pic18 => Self::Pic18,
         }
     }
 }
@@ -287,6 +295,19 @@ impl CpuFamily {
                     has_cache: false,
                 }
             }
+            Self::Pic18 => TargetCapabilities {
+                name: "pic18-classic",
+                memory: TargetMemoryModel {
+                    // C data pointers are represented as 16-bit FSR values;
+                    // program labels use the separate 21-bit PIC18 space.
+                    pointer_width_bits: 16,
+                    address_width_bits: 21,
+                },
+                native_int_widths: &[8, 16],
+                supports_port_io: false,
+                prefer_code_size: true,
+                has_cache: false,
+            },
             Self::Msp430X | Self::Msp430X2 => TargetCapabilities {
                 name: self.as_str(),
                 memory: TargetMemoryModel {
@@ -366,9 +387,23 @@ impl CpuFamily {
             Self::Msp430X => "msp430x",
             Self::Msp430X2 => "msp430x2",
             Self::Dcpu => "dcpu",
+            Self::Pic18 => "pic18",
         }
     }
 }
+
+/// Instruction-set profile for the PIC18 family.
+///
+/// The compiler currently exposes only the baseline classic profile. Extended
+/// instruction-set mode remains a separate profile so it cannot silently add
+/// opcodes or change the ABI of a classic device target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pic18Profile {
+    Classic,
+    Extended,
+}
+
+pub const PIC18_INITIAL_PROFILE: Pic18Profile = Pic18Profile::Classic;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetTriple {
@@ -445,6 +480,7 @@ impl OutputFormat {
 
 pub const DEFAULT_TARGET_TRIPLE: &str = "custom-unknown-ez80";
 pub const MSP430_ELF_TARGET: &str = "msp430-none-elf";
+pub const PIC18_GENERIC_BARE_TARGET: &str = "generic-pic18-bare";
 pub const MSDOS_COM_I8086_TARGET: &str = "msdos-com-i8086";
 pub const NES_2A03_TARGET: &str = "nes-2a03";
 pub const SNES_5A22_TARGET: &str = "snes-5a22";
@@ -531,12 +567,24 @@ fn validate_target_cpu_combination(triple: &TargetTriple) -> Result<(), String> 
         Some(&[CpuFamily::Z80][..])
     } else if target.starts_with("arduboy-") {
         Some(&[CpuFamily::Avr][..])
+    } else if target.starts_with("generic-pic18-") || target.starts_with("pic18-") {
+        Some(&[CpuFamily::Pic18][..])
     } else if target.starts_with("ti99-4a-") {
         Some(&[CpuFamily::Tms9900][..])
     } else {
         None
     };
 
+    if triple.cpu == CpuFamily::Pic18
+        && triple
+            .value
+            .split('-')
+            .any(|part| part == "extended" || part == "xinst")
+    {
+        return Err(format!(
+            "PIC18 extended instruction-set mode is not enabled for target `{target}`; use the classic profile"
+        ));
+    }
     if expected.is_some_and(|cpus| !cpus.contains(&triple.cpu)) {
         let expected = expected
             .expect("checked above")
@@ -583,6 +631,8 @@ fn output_format_for_target(triple: &TargetTriple) -> OutputFormat {
         OutputFormat::GameBoyGb
     } else if triple.value.starts_with("arduboy-") {
         OutputFormat::ArduinoHex
+    } else if triple.cpu == CpuFamily::Pic18 {
+        OutputFormat::IntelHex
     } else if triple.value.starts_with("commodore64-6502") {
         OutputFormat::Commodore64Prg
     } else if triple.value.starts_with("nes-2a03") {
@@ -672,6 +722,7 @@ pub fn parse_target_triple(value: &str) -> Result<TargetTriple, String> {
             "msp430x" => Some(CpuFamily::Msp430X),
             "msp430x2" | "msp430xv2" => Some(CpuFamily::Msp430X2),
             "dcpu" | "dcpu16" => Some(CpuFamily::Dcpu),
+            "pic18" | "pic18-classic" | "pic" => Some(CpuFamily::Pic18),
             _ => None,
         })
         .ok_or_else(|| format!("target triple `{value}` is missing a supported CPU family"))?;

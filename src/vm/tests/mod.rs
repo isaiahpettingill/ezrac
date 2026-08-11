@@ -44,3 +44,5 @@ mod m6809_backend;
 mod m68k_backend;
 #[cfg(feature = "mos6502-emulator")]
 mod mos6502_backend;
+#[cfg(feature = "pic18")]
+mod pic18_backend;

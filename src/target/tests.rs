@@ -170,6 +170,26 @@ fn msp430x_elf_targets_keep_the_extended_address_model() {
     assert_eq!(layout.validate(), Ok(()));
 }
 
+#[cfg(feature = "pic18")]
+#[test]
+fn pic18_target_uses_classic_harvard_profile_and_intel_hex() {
+    let target = resolve_target_profile(Some("generic-pic18-bare")).unwrap();
+    assert_eq!(target.triple.cpu, CpuFamily::Pic18);
+    assert_eq!(target.memory.pointer_width_bits, 16);
+    assert_eq!(target.memory.address_width_bits, 21);
+    assert_eq!(target.output_format, OutputFormat::IntelHex);
+    assert_eq!(target.output_format.extension(), "hex");
+
+    let layout = default_layout_for_target("generic-pic18-bare");
+    assert_eq!(layout.name, "bare_pic18_classic");
+    assert_eq!(layout.entry.get(), 0);
+    assert_eq!(layout.stack.get(), 0x0DFF);
+    assert_eq!(layout.validate(), Ok(()));
+
+    assert!(resolve_target_profile(Some("pic18-extended")).is_err());
+    assert!(resolve_target_profile(Some("pic18-xinst")).is_err());
+}
+
 #[test]
 fn cpm_z80_targets_default_to_com_output() {
     let cpm = resolve_target_profile(Some("cpm-2.2-z80")).unwrap();

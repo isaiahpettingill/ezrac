@@ -12,6 +12,8 @@ use crate::asm::emit_i8086_assembly_with_options;
 use crate::asm::emit_mos6502_assembly_with_options;
 #[cfg(feature = "msp430")]
 use crate::asm::emit_msp430_assembly_with_options;
+#[cfg(feature = "pic18")]
+use crate::asm::emit_pic18_assembly_with_options;
 
 use crate::{
     asm::{AssemblyOptions, AssemblyProgram, emit_ez80_assembly_with_options},
@@ -213,13 +215,14 @@ fn compile_workspace_to_assembly_with_resolved_request(
             | CpuFamily::I8085
             | CpuFamily::I8086
             | CpuFamily::Avr
+            | CpuFamily::Pic18
             | CpuFamily::Mos6502
             | CpuFamily::Cmos65C02
             | CpuFamily::Wdc65C816
             | CpuFamily::Ricoh2A03
     ) {
         return Err(Diagnostic::new(format!(
-            "no-std source code generation is currently available only for eZ80/Z80/R800, i8086, AVR, and MOS 6502-family targets, not `{}`",
+            "no-std source code generation is currently available only for eZ80/Z80/R800, i8086, AVR, PIC18, and MOS 6502-family targets, not `{}`",
             target.triple.cpu.as_str()
         )));
     }
@@ -282,6 +285,18 @@ fn compile_workspace_to_assembly_with_resolved_request(
             {
                 return Err(Diagnostic::new(
                     "AVR source compilation requires the `avr` Cargo feature",
+                ));
+            }
+        }
+        CpuFamily::Pic18 => {
+            #[cfg(feature = "pic18")]
+            {
+                emit_pic18_assembly_with_options(&program, options)?
+            }
+            #[cfg(not(feature = "pic18"))]
+            {
+                return Err(Diagnostic::new(
+                    "PIC18 source compilation requires the `pic18` Cargo feature",
                 ));
             }
         }
