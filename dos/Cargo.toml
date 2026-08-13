@@ -1,0 +1,26 @@
+[workspace]
+
+[package]
+name = "ezrac-dos"
+version = "0.1.35"
+edition = "2024"
+publish = false
+
+[lib]
+name = "ezrac_dos"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+ezra = { package = "ezra-core", path = "..", default-features = false, features = ["no-std", "i8086"] }
+
+[profile.dev]
+opt-level = 1
+panic = "abort"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

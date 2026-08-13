@@ -2,6 +2,7 @@
 resolver = "2"
 members = [".", "crates/ezrac-cli"]
 default-members = [".", "crates/ezrac-cli"]
+exclude = ["dos"]
 
 [package]
 name = "ezra-core"

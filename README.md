@@ -129,6 +129,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/dcpu-assembly.md` documents the optional DCPU-16 1.7 assembler, limited source backend, operand forms, expressions, word data, and [`examples/dcpu-16`](examples/dcpu-16/).
 - [`dcpu-16-libretro`](https://github.com/isaiahpettingill/dcpu-16-libretro) provides the DCPU-16 Standard Machine libretro core; its published [`dcpu16-core`](https://crates.io/crates/dcpu16-core) crate backs EZRAC's DCPU emulator tests.
 - `docs/msdos-sdk.md` documents the `msdos-com-i8086` `.COM` target and bundled `dos.*` SDK.
+- `docs/freedos.md` documents the 32-bit FreeDOS-hosted compiler build and its compiler-only command line.
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
 - `spec.md` describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
