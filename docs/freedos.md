@@ -61,6 +61,16 @@ make -C dos
 
 The results are in `dos/target/dos/release`.
 
+## FreeDOS test CD
+
+The complete compiler and hello-world example fit on one ISO image:
+
+```sh
+make -C dos test-cd
+```
+
+This writes `dos/target/freedos-cd/ezrac-freedos.iso`. Mount it in a FreeDOS VM with CD-ROM and MSCDEX support, switch to the CD drive, and run `INSTALL.BAT`. The installer copies the compiler to `C:\EZRAC`, then compiles and runs `HELLO.EZR`. The image is not bootable.
+
 ## FreeDOS test floppies
 
 The compiler is too large for one standard floppy. Build a four-disk 2.88 MiB FAT12 test set after building the compiler:

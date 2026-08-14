@@ -12,17 +12,30 @@ WLINK := $(WATCOM)/binnt64/wlink.exe
 DOS32A := $(WATCOM)/binw/dos32a.exe
 WLINK_CONFIG := $(WATCOM)/binnt64/wlink.lnk
 PYTHON ?= python
+MKISOFS ?= mkisofs
 STACK_OBJ := $(OBJ_DIR)/stack.obj
 ENTRY_OBJ := $(OBJ_DIR)/entry.obj
 CARGO_BUILD := cargo build $(CARGO_FLAGS) --manifest-path Cargo.toml --target dos.json -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features
 
-.PHONY: all check-tools rust-libs test-floppies clean
+.PHONY: all check-tools rust-libs test-floppies test-cd clean
 
 all: check-tools rust-libs $(OUTPUT_DIR)/ezfe.exe $(OUTPUT_DIR)/ezopt.exe $(OUTPUT_DIR)/ezcg.exe $(OUTPUT_DIR)/ezas.exe
 	cp EZRAC.BAT $(OUTPUT_DIR)/EZRAC.BAT
 
 test-floppies: all
 	$(PYTHON) make_test_floppies.py
+
+test-cd: all
+	rm -rf target/freedos-cd/root
+	mkdir -p target/freedos-cd/root
+	cp $(OUTPUT_DIR)/ezfe.exe target/freedos-cd/root/EZFE.EXE
+	cp $(OUTPUT_DIR)/ezopt.exe target/freedos-cd/root/EZOPT.EXE
+	cp $(OUTPUT_DIR)/ezcg.exe target/freedos-cd/root/EZCG.EXE
+	cp $(OUTPUT_DIR)/ezas.exe target/freedos-cd/root/EZAS.EXE
+	cp $(OUTPUT_DIR)/EZRAC.BAT target/freedos-cd/root/EZRAC.BAT
+	cp ../examples/msdos-i8086/hello/hello.ezra target/freedos-cd/root/HELLO.EZR
+	cp INSTALL.CD.BAT target/freedos-cd/root/INSTALL.BAT
+	$(MKISOFS) -quiet -iso-level 1 -V EZRACDOS -o target/freedos-cd/ezrac-freedos.iso target/freedos-cd/root
 
 check-tools:
 	@test -n "$(WATCOM)" || (echo "error: set WATCOM to the OpenWatcom install directory" >&2; exit 1)
