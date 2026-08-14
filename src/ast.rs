@@ -4,6 +4,10 @@ use crate::{
 };
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct Program {
     pub source_path: SourcePathBuf,
     pub source_text: Option<String>,
@@ -12,12 +16,20 @@ pub struct Program {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct SourceUnit {
     pub path: SourcePathBuf,
     pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum Declaration {
     Cfg {
         predicates: Vec<CfgPredicate>,
@@ -41,6 +53,10 @@ pub enum Declaration {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum CfgPredicate {
     Target(String),
     TargetFamily(String),
@@ -58,6 +74,10 @@ pub enum CfgPredicate {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct ConstDecl {
     pub public: bool,
     pub attrs: Vec<String>,
@@ -67,6 +87,10 @@ pub struct ConstDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct AliasDecl {
     pub public: bool,
     pub name: String,
@@ -74,6 +98,10 @@ pub struct AliasDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct PortDecl {
     pub public: bool,
     pub name: String,
@@ -82,6 +110,10 @@ pub struct PortDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct MmioDecl {
     pub public: bool,
     pub volatile: bool,
@@ -91,6 +123,10 @@ pub struct MmioDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct EmbedDecl {
     pub public: bool,
     pub name: String,
@@ -103,6 +139,10 @@ pub struct EmbedDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum EmbedSource {
     File(String),
     Bytes(Vec<Expr>),
@@ -112,6 +152,10 @@ pub enum EmbedSource {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct GlobalDecl {
     pub public: bool,
     pub name: String,
@@ -120,6 +164,10 @@ pub struct GlobalDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct StructDecl {
     pub public: bool,
     pub name: String,
@@ -127,12 +175,20 @@ pub struct StructDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct FieldDecl {
     pub name: String,
     pub ty: Type,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct Function {
     pub public: bool,
     pub attrs: Vec<String>,
@@ -145,6 +201,10 @@ pub struct Function {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct StmtSpan {
     pub span: SourceSpan,
     pub children: Vec<StmtSpan>,
@@ -153,12 +213,20 @@ pub struct StmtSpan {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct SourceReference {
     pub text: String,
     pub span: SourceSpan,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct ExternFunction {
     pub public: bool,
     pub name: String,
@@ -168,12 +236,20 @@ pub struct ExternFunction {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct Param {
     pub name: String,
     pub ty: Type,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum Stmt {
     Let {
         name: String,
@@ -226,6 +302,10 @@ pub enum Stmt {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct AsmInput {
     pub name: String,
     pub ty: Type,
@@ -233,6 +313,10 @@ pub struct AsmInput {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct AsmOutput {
     pub name: String,
     pub ty: Type,
@@ -240,6 +324,10 @@ pub struct AsmOutput {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum Place {
     Ident(String),
     Index { name: String, index: Box<Expr> },
@@ -249,6 +337,10 @@ pub enum Place {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum AssignOp {
     Set,
     Add,
@@ -264,6 +356,10 @@ pub enum AssignOp {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum Expr {
     Int(i64),
     TypedInt(i64, Type),
@@ -322,18 +418,30 @@ pub enum Expr {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct AccessPath {
     pub root: String,
     pub segments: Vec<AccessSegment>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum AccessSegment {
     Field(String),
     Index(Box<Expr>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum UnaryOp {
     Neg,
     BitNot,
@@ -341,6 +449,10 @@ pub enum UnaryOp {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum BinaryOp {
     Mul,
     Div,
@@ -363,6 +475,10 @@ pub enum BinaryOp {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub enum Type {
     Named(String),
     Ptr(Box<Type>),

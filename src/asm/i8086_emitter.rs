@@ -8,7 +8,7 @@
 use crate::{
     asm::{
         AssemblyOptions,
-        comments::{stmt_summary, with_readability_comments},
+        comments::with_readability_comments,
         i8086::instruction_len,
         reachability::{RoutineProfile, strip_unreachable_generated_routines},
     },
@@ -45,17 +45,70 @@ pub fn emit_i8086_assembly_with_options(
     if options.cpu != CpuFamily::I8086 {
         return Err(Diagnostic::new("i8086 emitter requires an i8086 target"));
     }
+    validate_i8086_program(program, &options)?;
     let hir = HirProgram::from_ast(program)?;
     let tbir = TbirProgram::lower(&hir, program, &options)?;
+    emit_i8086_assembly_from_optimized_program(&tbir.lowered_program, options.clone()).map(|asm| {
+        let asm = if options
+            .optimization
+            .is_enabled(crate::optimization::OptimizationPass::RedundantRegisterCopies)
+        {
+            crate::asm::copy_cleanup::remove_redundant_register_copies(&asm, options.cpu)
+        } else {
+            asm
+        };
+        let asm = if options
+            .optimization
+            .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination)
+        {
+            strip_unreachable_generated_routines(&asm, RoutineProfile::I8086)
+        } else {
+            asm
+        };
+        let asm = relax_i8086_branches(&asm);
+        with_readability_comments(asm, program, &options, "i8086", &tbir.source_comments)
+    })
+}
+
+/// Validates source-level i8086 ABI and return constraints before optimization.
+pub fn validate_i8086_program(
+    program: &Program,
+    options: &AssemblyOptions,
+) -> Result<(), Diagnostic> {
+    if options.cpu != CpuFamily::I8086 {
+        return Err(Diagnostic::new("i8086 emitter requires an i8086 target"));
+    }
     let model = SemanticModel::from_program(
-        &tbir.lowered_program,
+        program,
+        16,
+        options.ram_base.get(),
+        options.rodata_base.get(),
+        options.asset_base.get(),
+    )?;
+    let mut emitter = Emitter::new(model, options.clone())?;
+    emitter.validate_source_returns(program)?;
+    emitter.validate_function_signatures(program)?;
+    emitter.collect_ports(program)?;
+    Ok(())
+}
+
+/// Emits strict original-8086 assembly from an already optimized program.
+///
+/// This entry point does not construct HIR or run TBIR optimization.
+pub fn emit_i8086_assembly_from_optimized_program(
+    program: &Program,
+    options: AssemblyOptions,
+) -> Result<String, Diagnostic> {
+    validate_i8086_program(program, &options)?;
+    let model = SemanticModel::from_program(
+        program,
         16,
         options.ram_base.get(),
         options.rodata_base.get(),
         options.asset_base.get(),
     )?;
     Emitter::new(model, options.clone())?
-        .emit(&tbir.lowered_program, program)
+        .emit(program)
         .map(|asm| {
             let asm = if options
                 .optimization
@@ -73,8 +126,7 @@ pub fn emit_i8086_assembly_with_options(
             } else {
                 asm
             };
-            let asm = relax_i8086_branches(&asm);
-            with_readability_comments(asm, program, &options, "i8086", &tbir.source_comments)
+            relax_i8086_branches(&asm)
         })
 }
 
@@ -187,12 +239,7 @@ impl Emitter {
         })
     }
 
-    fn emit(mut self, program: &Program, source_program: &Program) -> Result<String, Diagnostic> {
-        self.validate_source_returns(source_program)?;
-        // Validate the source declarations before TBIR reachability can remove
-        // unused functions with invalid ABI signatures.
-        self.validate_function_signatures(source_program)?;
-        self.collect_ports(source_program)?;
+    fn emit(mut self, program: &Program) -> Result<String, Diagnostic> {
         self.collect_function_attributes(program);
         self.collect_memory_barrier_functions(program);
         if self.interrupt_functions.contains("main") {
@@ -357,9 +404,11 @@ impl Emitter {
             if (function.return_type.is_some() || function.second_return_type.is_some())
                 && block_contains_empty_return(&function.body)
             {
-                return Err(Diagnostic::new(
-                    "return without a value in value-returning function",
-                ));
+                return Err(Diagnostic::new(if function.second_return_type.is_some() {
+                    "return must return 2 values"
+                } else {
+                    "return must return 1 value"
+                }));
             }
             if !naked
                 && (function.return_type.is_some() || function.second_return_type.is_some())
@@ -851,7 +900,11 @@ impl Emitter {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
-        self.line(&format!("    ; source: {}", stmt_summary(stmt)));
+        #[cfg(not(feature = "dos-codegen"))]
+        self.line(&format!(
+            "    ; source: {}",
+            crate::asm::comments::stmt_summary(stmt)
+        ));
         match stmt {
             Stmt::Let { name, ty, value } => {
                 let binding = self.binding(name)?;

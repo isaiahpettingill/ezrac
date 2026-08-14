@@ -4,34 +4,59 @@ ifeq ($(RUST_CONFIG),debug)
 CARGO_FLAGS :=
 endif
 
-TARGET_DIR := target/dos/$(RUST_CONFIG)
-RUST_LIB := $(TARGET_DIR)/libezrac_dos.a
+TARGET_NAME := dos
+OUTPUT_DIR := target/dos/$(RUST_CONFIG)
+OBJ_DIR := target/openwatcom/$(RUST_CONFIG)
 WCC386 := $(WATCOM)/binnt64/wcc386.exe
 WLINK := $(WATCOM)/binnt64/wlink.exe
 DOS32A := $(WATCOM)/binw/dos32a.exe
 WLINK_CONFIG := $(WATCOM)/binnt64/wlink.lnk
+STACK_OBJ := $(OBJ_DIR)/stack.obj
+ENTRY_OBJ := $(OBJ_DIR)/entry.obj
+CARGO_BUILD := cargo build $(CARGO_FLAGS) --manifest-path Cargo.toml --target dos.json -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features
 
-.PHONY: all check-tools clean run
+.PHONY: all check-tools rust-libs clean
 
-all: check-tools stack.obj entry.obj
-	cargo build $(CARGO_FLAGS) --manifest-path Cargo.toml --target dos.json -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
-	mkdir -p $(TARGET_DIR)
-	"$(WLINK)" @"$(WLINK_CONFIG)" name $(TARGET_DIR)/ezrac system dos32x option dosseg option stack=4194304 option stub="$(DOS32A)" file entry.obj file stack.obj library $(RUST_LIB)
+all: check-tools rust-libs $(OUTPUT_DIR)/ezfe.exe $(OUTPUT_DIR)/ezopt.exe $(OUTPUT_DIR)/ezcg.exe $(OUTPUT_DIR)/ezas.exe
+	cp EZRAC.BAT $(OUTPUT_DIR)/EZRAC.BAT
 
 check-tools:
 	@test -n "$(WATCOM)" || (echo "error: set WATCOM to the OpenWatcom install directory" >&2; exit 1)
 	@test -x "$(WCC386)" || (echo "error: OpenWatcom compiler not found at $(WCC386)" >&2; exit 1)
 	@test -x "$(WLINK)" || (echo "error: OpenWatcom linker not found at $(WLINK)" >&2; exit 1)
+	@test -x "$(DOS32A)" || (echo "error: DOS/32A stub not found at $(DOS32A)" >&2; exit 1)
+	@test -f "$(WLINK_CONFIG)" || (echo "error: OpenWatcom linker config not found at $(WLINK_CONFIG)" >&2; exit 1)
 
-stack.obj: stack.nasm
-	nasm -f obj stack.nasm -o stack.obj
+rust-libs:
+	CARGO_TARGET_DIR=target/ezfe $(CARGO_BUILD) --features ezfe
+	CARGO_TARGET_DIR=target/ezopt $(CARGO_BUILD) --features ezopt
+	CARGO_TARGET_DIR=target/ezcg $(CARGO_BUILD) --features ezcg
+	CARGO_TARGET_DIR=target/ezas $(CARGO_BUILD) --features ezas
 
-entry.obj: entry.c
-	"$(WCC386)" -4s -bt=dos -fo=entry.obj entry.c
+$(OBJ_DIR):
+	mkdir -p $(OBJ_DIR)
 
-run: all
-	dosbox $(TARGET_DIR)/ezrac.exe
+$(OUTPUT_DIR):
+	mkdir -p $(OUTPUT_DIR)
+
+$(STACK_OBJ): stack.nasm | $(OBJ_DIR)
+	nasm -f obj stack.nasm -o $(STACK_OBJ)
+
+$(ENTRY_OBJ): entry.c | $(OBJ_DIR)
+	"$(WCC386)" -4s -bt=dos -fo=$(ENTRY_OBJ) entry.c
+
+$(OUTPUT_DIR)/ezfe.exe: rust-libs $(ENTRY_OBJ) $(STACK_OBJ) | $(OUTPUT_DIR)
+	"$(WLINK)" @"$(WLINK_CONFIG)" name $@ system dos32x option dosseg option stack=4194304 option stub="$(DOS32A)" file $(ENTRY_OBJ) file $(STACK_OBJ) library target/ezfe/$(TARGET_NAME)/$(RUST_CONFIG)/libezrac_dos.a
+
+$(OUTPUT_DIR)/ezopt.exe: rust-libs $(ENTRY_OBJ) $(STACK_OBJ) | $(OUTPUT_DIR)
+	"$(WLINK)" @"$(WLINK_CONFIG)" name $@ system dos32x option dosseg option stack=4194304 option stub="$(DOS32A)" file $(ENTRY_OBJ) file $(STACK_OBJ) library target/ezopt/$(TARGET_NAME)/$(RUST_CONFIG)/libezrac_dos.a
+
+$(OUTPUT_DIR)/ezcg.exe: rust-libs $(ENTRY_OBJ) $(STACK_OBJ) | $(OUTPUT_DIR)
+	"$(WLINK)" @"$(WLINK_CONFIG)" name $@ system dos32x option dosseg option stack=4194304 option stub="$(DOS32A)" file $(ENTRY_OBJ) file $(STACK_OBJ) library target/ezcg/$(TARGET_NAME)/$(RUST_CONFIG)/libezrac_dos.a
+
+$(OUTPUT_DIR)/ezas.exe: rust-libs $(ENTRY_OBJ) $(STACK_OBJ) | $(OUTPUT_DIR)
+	"$(WLINK)" @"$(WLINK_CONFIG)" name $@ system dos32x option dosseg option stack=4194304 option stub="$(DOS32A)" file $(ENTRY_OBJ) file $(STACK_OBJ) library target/ezas/$(TARGET_NAME)/$(RUST_CONFIG)/libezrac_dos.a
 
 clean:
 	cargo clean --manifest-path Cargo.toml
-	rm -f stack.obj entry.obj
+	rm -rf target/ezfe target/ezopt target/ezcg target/ezas target/openwatcom

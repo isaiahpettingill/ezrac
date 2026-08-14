@@ -1,19 +1,49 @@
 # FreeDOS compiler
 
-The FreeDOS port is a separate `no_std + alloc` executable. It contains no test runner, LSP server, editor setup, project discovery, or non-DOS command-line options.
-
-The port runs the regular EZRA parser, i8086 code generator, assembler, linker, and DOS `.COM` packager. It enables the no-std i8086 feature set and leaves out host tools.
+The FreeDOS port is a `no_std + alloc` compiler pipeline for `msdos-com-i8086`. It contains no test runner, LSP server, editor setup, project discovery, or host-only command-line tools.
 
 ## Use
 
+Keep these files in the same directory:
+
+- `EZRAC.BAT`
+- `EZFE.EXE`
+- `EZOPT.EXE`
+- `EZCG.EXE`
+- `EZAS.EXE`
+
+Compile a source file with an explicit output name:
+
 ```dos
-EZRAC source.ezra
-EZRAC source.ezra output.com
+EZRAC HELLO.EZRA HELLO.COM
+HELLO.COM
 ```
 
-The first form writes `source.com`. Input must be UTF-8. The command creates a one-file virtual workspace, so project manifests, filesystem imports, and `embed file(...)` are not available.
+Input must be UTF-8. The frontend creates a one-file virtual workspace, so project manifests, filesystem imports, and `embed file(...)` are not available. Built-in `dos.*` SDK imports are available.
 
-EZRAC runs as a 32-bit DOS/32A protected-mode executable. Programs it produces are 16-bit `.COM` files for DOS.
+Programs produced by the pipeline are 16-bit DOS `.COM` files. The four compiler stages run as 32-bit DOS/32A protected-mode executables.
+
+## Pipeline
+
+`EZRAC.BAT` runs four programs:
+
+1. `EZFE.EXE` parses, resolves, and validates EZRA source, then writes `EZRAC.EZI`.
+2. `EZOPT.EXE` lowers the program through HIR and TBIR optimization, then writes `EZRAC.EZO`.
+3. `EZCG.EXE` emits Intel 8086 assembly to `EZRAC.ASM` without rerunning TBIR optimization.
+4. `EZAS.EXE` assembles and packages the requested `.COM` file.
+
+The `.EZI` and `.EZO` files use a compact bincode representation. They are internal, compiler-version-locked files rather than a stable interchange format. Source text, source excerpts, statement spans, debug comments, and optimization explanations are not stored.
+
+Each stage exits before the next starts. DOS therefore reclaims that stage's stack and heap instead of keeping the complete compiler pipeline in memory.
+
+The stages can also be run separately:
+
+```dos
+EZFE SOURCE.EZRA PROGRAM.EZI
+EZOPT PROGRAM.EZI PROGRAM.EZO
+EZCG PROGRAM.EZO PROGRAM.ASM
+EZAS PROGRAM.ASM PROGRAM.COM
+```
 
 ## Build requirements
 
@@ -29,31 +59,16 @@ Build from the repository root:
 make -C dos
 ```
 
-The result is `dos/target/dos/release/ezrac.exe`.
+The results are in `dos/target/dos/release`.
 
-The build:
-
-1. Builds `core` and `alloc` for the custom 32-bit i486 COFF target.
-2. Builds EZRAC as a Rust static library.
-3. Compiles a small OpenWatcom C startup entrypoint.
-4. Adds NASM DOS syscall and MinGW-compatible stack-probe helpers.
-5. Links and binds DOS/32A with OpenWatcom.
-
-The C entrypoint only initializes the Watcom/DOS runtime and calls Rust. The command line, validation, output selection, errors, and compiler behavior are in Rust.
+The build compiles each Rust stage as a separate static library, compiles one OpenWatcom C startup entrypoint, adds NASM DOS syscall and MinGW-compatible stack-probe helpers, then links and binds DOS/32A with OpenWatcom. The DOS release profile uses Rust's `z` size optimization; current stage executables are about 2.4–2.5 MiB each.
 
 ## Runtime memory
 
-The Rust heap requests 4 MiB arenas through DPMI interrupt `31h`, function `0501h`. It is a bump allocator: individual allocations are not reclaimed because every compiler path exits directly through DOS. DOS reclaims all arenas when EZRAC exits.
+The Rust heap requests 4 MiB arenas through DPMI interrupt `31h`, function `0501h`. It is a bump allocator: individual allocations are not reclaimed because each stage exits directly through DOS. DOS reclaims all arenas when a stage exits.
 
-The linked process uses a 4 MiB stack. A FreeDOS VM with at least 128 MiB is recommended while the port is under development.
+Each linked process uses a 4 MiB stack. A FreeDOS VM with at least 128 MiB is recommended while the port is under development.
 
-## FreeDOS test
+## Emulator note
 
-Copy `dos/target/dos/release/ezrac.exe` and an EZRA source file into a FreeDOS VM, then run:
-
-```dos
-EZRAC HELLO.EZRA HELLO.COM
-HELLO.COM
-```
-
-DOSBox-X 2026.08.02 runs `EZRAC /?`, but its host process crashes in DOS/32A's protected-mode file-open bridge. Use FreeDOS under QEMU for compiler runtime testing until that emulator issue is resolved.
+DOSBox-X 2026.08.02 loads the DOS/32A programs, but its host process crashes when DOS/32A forwards the protected-mode file-open interrupt. This occurs after executable startup and is not caused by executable size. Use FreeDOS under QEMU for compiler runtime testing until that emulator issue is resolved.

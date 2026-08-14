@@ -26,6 +26,8 @@ pub mod diagnostic;
 pub mod disk;
 pub mod hir;
 pub mod image;
+#[cfg(all(feature = "no-std", not(feature = "std")))]
+pub mod internal_ir;
 pub mod intrinsics;
 pub mod layout;
 pub mod optimization;

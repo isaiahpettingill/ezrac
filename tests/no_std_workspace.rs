@@ -1,4 +1,4 @@
-#![cfg(feature = "no-std")]
+#![cfg(all(feature = "no-std", not(feature = "std")))]
 
 #[cfg(feature = "z80")]
 use ezra::api::compile_workspace_to_assembly;
@@ -7,12 +7,52 @@ use ezra::{
     ast::{Declaration, EmbedSource, Expr, Program},
     disk::{DiskFile, DiskFormat, DiskRequest, create_disk_image},
 };
+#[cfg(feature = "i8086")]
+use ezra::{
+    api::{
+        build_generated_assembly, emit_optimized_i8086_program, optimize_i8086_program,
+        resolve_workspace_program,
+    },
+    internal_ir::{ArtifactStage, ProgramArtifact},
+};
 #[cfg(feature = "z80")]
 use ezra::{
     asm::{AssemblyPreprocessOptions, preprocess_assembly_workspace},
     target::AssemblerCpu,
     vm::assemble_program_at,
 };
+
+#[cfg(feature = "i8086")]
+#[test]
+fn split_dos_pipeline_matches_the_in_process_build() {
+    let source = "fn main() { let value: u8 = 1 value += 2 }\n";
+    let files = [WorkspaceFile::text("main.ezra", source)];
+    let workspace = Workspace::new(&files);
+    let request = CompileRequest::new("main.ezra", "msdos-com-i8086");
+    let expected = build_workspace(&workspace, "main.ezra", &request).unwrap();
+
+    let program = resolve_workspace_program(&workspace, "main.ezra", &request).unwrap();
+    let frontend = ProgramArtifact::new(
+        ArtifactStage::Frontend,
+        request.target.clone(),
+        request.optimization.level,
+        program,
+    );
+    let frontend = ProgramArtifact::decode(&frontend.encode().unwrap()).unwrap();
+    let optimized = optimize_i8086_program(&frontend.program, &request).unwrap();
+    let optimized = ProgramArtifact::new(
+        ArtifactStage::Optimized,
+        frontend.target,
+        frontend.optimization_level,
+        optimized,
+    );
+    let optimized = ProgramArtifact::decode(&optimized.encode().unwrap()).unwrap();
+    let assembly = emit_optimized_i8086_program(&optimized.program, &request).unwrap();
+    let linked = build_generated_assembly("main.asm", &assembly, "msdos-com-i8086").unwrap();
+
+    assert!(!assembly.contains("preserved source comments"));
+    assert_eq!(linked.executable, expected.executable);
+}
 
 #[test]
 fn creates_disk_image_without_host_io() {

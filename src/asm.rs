@@ -65,7 +65,10 @@ pub use frontend::{
     lower_parsed_assembly, parse_assembly_expression, parse_assembly_syntax,
 };
 #[cfg(feature = "i8086")]
-pub use i8086_emitter::emit_i8086_assembly_with_options;
+pub use i8086_emitter::{
+    emit_i8086_assembly_from_optimized_program, emit_i8086_assembly_with_options,
+    validate_i8086_program,
+};
 #[cfg(feature = "pic18")]
 pub use pic18_emitter::emit_pic18_assembly_with_options;
 pub use preprocess::{

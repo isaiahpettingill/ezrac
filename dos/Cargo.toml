@@ -11,6 +11,13 @@ name = "ezrac_dos"
 path = "src/lib.rs"
 crate-type = ["staticlib"]
 
+[features]
+default = ["ezfe"]
+ezfe = ["ezra/dos-frontend"]
+ezopt = ["ezra/dos-optimizer"]
+ezcg = ["ezra/dos-codegen"]
+ezas = ["ezra/dos-assembler"]
+
 [dependencies]
 ezra = { package = "ezra-core", path = "..", default-features = false, features = ["no-std", "i8086"] }
 
@@ -19,8 +26,8 @@ opt-level = 1
 panic = "abort"
 
 [profile.release]
-opt-level = 1
+opt-level = "z"
 lto = false
-codegen-units = 1
+codegen-units = 16
 panic = "abort"
 strip = "debuginfo"

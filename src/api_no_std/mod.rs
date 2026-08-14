@@ -6,19 +6,23 @@ pub use crate::workspace::{Workspace, WorkspaceFile};
 
 #[cfg(feature = "avr")]
 use crate::asm::emit_avr_assembly_with_options;
-#[cfg(feature = "i8086")]
-use crate::asm::emit_i8086_assembly_with_options;
 #[cfg(feature = "mos6502")]
 use crate::asm::emit_mos6502_assembly_with_options;
 #[cfg(feature = "msp430")]
 use crate::asm::emit_msp430_assembly_with_options;
 #[cfg(feature = "pic18")]
 use crate::asm::emit_pic18_assembly_with_options;
+#[cfg(feature = "i8086")]
+use crate::asm::{
+    emit_i8086_assembly_from_optimized_program, emit_i8086_assembly_with_options,
+    validate_i8086_program,
+};
 
 use crate::{
     asm::{AssemblyOptions, AssemblyProgram, emit_ez80_assembly_with_options},
     ast::{CfgPredicate, Declaration, EmbedSource, Expr, Program},
     diagnostic::Diagnostic,
+    hir::HirProgram,
     layout::{Layout, default_layout_for_target},
     package::{PackageContext, PackageRequest, package_executable_with_context},
     parser::parse_program,
@@ -26,6 +30,7 @@ use crate::{
         Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, OutputFormat, TargetProfile,
         is_msdos_i8086_target, memory_model_for_cpu, resolve_target_profile,
     },
+    tbir::TbirProgram,
     vm::{
         AssemblerSourceOptions, AssemblySymbol, assemble_program_with_options_at,
         assemble_subset_with_options_at, assemble_subset_with_symbols_at,
@@ -149,6 +154,12 @@ pub struct BuildCompilation {
 }
 
 /// Compile one source string without imports.
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 pub fn compile_source_to_assembly(
     source: &str,
     request: &CompileRequest,
@@ -158,7 +169,119 @@ pub fn compile_source_to_assembly(
     compile_workspace_to_assembly(&Workspace::new(&files), &path, request)
 }
 
+/// Parses and resolves a virtual workspace without running target code generation.
+#[cfg(any(
+    feature = "dos-frontend",
+    not(any(
+        feature = "dos-optimizer",
+        feature = "dos-codegen",
+        feature = "dos-assembler"
+    ))
+))]
+pub fn resolve_workspace_program(
+    workspace: &Workspace<'_>,
+    root: &str,
+    request: &CompileRequest,
+) -> Result<Program, Diagnostic> {
+    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    let layout = layout_for_target(&request.target, target.triple.cpu);
+    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
+    let root = normalize_virtual_path(root);
+    let source = workspace_text(workspace, &root)?;
+    let root_program = parse_program(&root, source)?;
+    let mut stack = Vec::new();
+    let mut seen = HashSet::new();
+    let program = resolve_program(workspace, root_program, request, &mut stack, &mut seen)?;
+    let main = program
+        .main_function()
+        .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
+    if !main.params.is_empty() {
+        return Err(Diagnostic::new("main function cannot take parameters"));
+    }
+    if main.return_type.is_some() || main.second_return_type.is_some() {
+        return Err(Diagnostic::new("main function cannot return a value"));
+    }
+    Ok(program)
+}
+
+/// Runs HIR and TBIR optimization for an i8086 program without emitting assembly.
+#[cfg(all(
+    feature = "i8086",
+    any(
+        feature = "dos-optimizer",
+        not(any(
+            feature = "dos-frontend",
+            feature = "dos-codegen",
+            feature = "dos-assembler"
+        ))
+    )
+))]
+pub fn optimize_i8086_program(
+    program: &Program,
+    request: &CompileRequest,
+) -> Result<Program, Diagnostic> {
+    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    if target.triple.cpu != CpuFamily::I8086 {
+        return Err(Diagnostic::new("DOS optimizer requires an i8086 target"));
+    }
+    let layout = layout_for_target(&request.target, target.triple.cpu);
+    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
+    let mut options = assembly_options_for_layout(
+        &layout,
+        target.triple.cpu,
+        &request.target,
+        false,
+        request.default_sdk_symbols,
+    );
+    options.optimization = request.optimization.clone();
+    validate_i8086_program(program, &options)?;
+    let hir = HirProgram::from_ast(program)?;
+    let tbir = TbirProgram::lower(&hir, program, &options)?;
+    Ok(tbir.lowered_program)
+}
+
+/// Emits i8086 assembly from a program that has already passed through TBIR optimization.
+#[cfg(all(
+    feature = "i8086",
+    any(
+        feature = "dos-codegen",
+        not(any(
+            feature = "dos-frontend",
+            feature = "dos-optimizer",
+            feature = "dos-assembler"
+        ))
+    )
+))]
+pub fn emit_optimized_i8086_program(
+    program: &Program,
+    request: &CompileRequest,
+) -> Result<String, Diagnostic> {
+    let target = resolve_target_profile(Some(&request.target)).map_err(Diagnostic::new)?;
+    if target.triple.cpu != CpuFamily::I8086 {
+        return Err(Diagnostic::new(
+            "DOS code generator requires an i8086 target",
+        ));
+    }
+    let layout = layout_for_target(&request.target, target.triple.cpu);
+    validate_layout_for_cpu(&layout, target.triple.cpu, &request.target)?;
+    let mut options = assembly_options_for_layout(
+        &layout,
+        target.triple.cpu,
+        &request.target,
+        false,
+        request.default_sdk_symbols,
+    );
+    options.optimization = request.optimization.clone();
+    emit_i8086_assembly_from_optimized_program(program, options)
+}
+
 /// Parse and compile a root file whose imports are resolved only from `workspace`.
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 pub fn compile_workspace_to_assembly(
     workspace: &Workspace<'_>,
     root: &str,
@@ -171,6 +294,12 @@ pub fn compile_workspace_to_assembly(
 }
 
 /// Compile a virtual workspace using an explicit target layout and code-generation settings.
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 pub fn compile_workspace_to_assembly_with_request(
     workspace: &Workspace<'_>,
     root: &str,
@@ -197,6 +326,12 @@ pub fn compile_workspace_to_assembly_with_request(
     )
 }
 
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 fn compile_workspace_to_assembly_with_resolved_request(
     workspace: &Workspace<'_>,
     root: &str,
@@ -343,6 +478,12 @@ fn compile_workspace_to_assembly_with_resolved_request(
 }
 
 /// Compile, assemble, and package a virtual workspace without host I/O.
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 pub fn build_workspace(
     workspace: &Workspace<'_>,
     root: &str,
@@ -358,6 +499,12 @@ pub fn build_workspace(
 }
 
 /// Compile, assemble, and package a virtual workspace with explicit build settings.
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 pub fn build_workspace_with_request(
     workspace: &Workspace<'_>,
     root: &str,
@@ -393,7 +540,39 @@ pub fn build_workspace_with_request(
     })
 }
 
+/// Assemble and package compiler-generated source for one target.
+#[cfg(any(
+    feature = "dos-assembler",
+    not(any(
+        feature = "dos-frontend",
+        feature = "dos-optimizer",
+        feature = "dos-codegen"
+    ))
+))]
+pub fn build_generated_assembly(
+    source_path: &str,
+    assembly: &str,
+    target: &str,
+) -> Result<LinkedCompilation, Diagnostic> {
+    let build = BuildRequest::for_target(target)?;
+    let program = Program {
+        source_path: source_path.into(),
+        source_text: None,
+        source_units: Vec::new(),
+        declarations: Vec::new(),
+    };
+    link_generated_assembly(source_path, assembly, &program, &build)
+}
+
 /// Link generated assembly and package it with caller-owned build settings.
+#[cfg(any(
+    feature = "dos-assembler",
+    not(any(
+        feature = "dos-frontend",
+        feature = "dos-optimizer",
+        feature = "dos-codegen"
+    ))
+))]
 pub fn link_generated_assembly(
     source_path: &str,
     assembly: &str,
@@ -429,6 +608,12 @@ pub fn link_generated_assembly(
 }
 
 /// Link a preprocessed standalone assembly program at the layout load address.
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 pub fn link_assembly_program(
     source_path: &str,
     program: &AssemblyProgram,
@@ -438,6 +623,12 @@ pub fn link_assembly_program(
 }
 
 /// Link a preprocessed standalone assembly program at an explicit base address.
+#[cfg(not(any(
+    feature = "dos-frontend",
+    feature = "dos-optimizer",
+    feature = "dos-codegen",
+    feature = "dos-assembler"
+)))]
 pub fn link_assembly_program_at(
     source_path: &str,
     program: &AssemblyProgram,

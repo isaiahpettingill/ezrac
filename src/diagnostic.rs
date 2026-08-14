@@ -12,12 +12,20 @@ pub struct SourceLocation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct SourcePosition {
     pub line: usize,
     pub column: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    all(feature = "no-std", not(feature = "std")),
+    derive(bincode::Encode, bincode::Decode)
+)]
 pub struct SourceSpan {
     pub file: SourcePathBuf,
     pub start: SourcePosition,

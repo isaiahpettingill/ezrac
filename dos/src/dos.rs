@@ -1,7 +1,6 @@
 use alloc::{string::String, vec, vec::Vec};
 use core::{arch::asm, fmt, str};
 
-const STDOUT: u16 = 1;
 const STDERR: u16 = 2;
 const READ_ONLY: u16 = 0;
 const CREATE_ATTRIBUTES: u16 = 0;
@@ -14,10 +13,6 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub const fn stdout() -> Self {
-        Self { handle: STDOUT }
-    }
-
     pub const fn stderr() -> Self {
         Self { handle: STDERR }
     }
