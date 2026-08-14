@@ -8,3 +8,5 @@
 /examples/**/*.gaem
 /examples/**/*.nes
 /examples/**/captures/
+.worktrees/
+.worktrees/**/*

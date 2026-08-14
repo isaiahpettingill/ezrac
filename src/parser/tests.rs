@@ -1073,3 +1073,57 @@ fn rejects_more_than_two_return_types_in_the_parser() {
 
     assert!(error.message.contains("at most two values"), "{error}");
 }
+
+#[test]
+fn reports_missing_operator_for_adjacent_identifiers() {
+    let error = parse_program(
+        Path::new("game.ezra"),
+        r#"
+            fn main() {
+                let player_x: u8, player_y: u8 = 0
+                if player_x == 5 && player y == 7 {
+                    set_level(1)
+                }
+            }
+            "#,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "expected an operator between `player` and `y`; the two identifiers are directly adjacent"
+    );
+    let location = error.location().unwrap();
+    assert_eq!(location.line, 4);
+    assert_eq!(location.column, 44);
+}
+
+#[test]
+fn missing_operator_looks_inside_the_broken_block() {
+    // pest's furthest-attempt position lands on the statement after the typo,
+    // so the scan must rewind to the statement that started the misparse.
+    let error = parse_program(
+        Path::new("game.ezra"),
+        "fn main() {\n  let a: u8 = 0\n  if a == 0 && foo bar == 1 {\n    baz()\n  }\n}\n",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "expected an operator between `foo` and `bar`; the two identifiers are directly adjacent"
+    );
+    assert_eq!(error.location().unwrap().line, 3);
+}
+
+#[test]
+fn keyword_followed_by_identifier_is_not_reported_as_missing_operator() {
+    // `if done`, `let value` and `return x` are all legitimate `ident ident`
+    // pairs in disguise; only non-keyword adjacency is the real typo.
+    let error = parse_program(Path::new("game.ezra"), "fn main() { let x: u8 = & }").unwrap_err();
+    assert!(
+        !error.message.contains("expected an operator between"),
+        "{error}"
+    );
+    assert!(!error.message.contains("-->"), "{error}");
+    assert!(error.location().is_some(), "{error:?}");
+}

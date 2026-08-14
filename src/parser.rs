@@ -28,8 +28,8 @@ pub fn parse_program(file: &SourcePath, source: &str) -> Result<Program, Diagnos
     } else {
         source
     };
-    let mut pairs =
-        EzraParser::parse(Rule::program, source).map_err(|error| pest_error(file, error))?;
+    let mut pairs = EzraParser::parse(Rule::program, source)
+        .map_err(|error| pest_error(file, source, error))?;
     let program = pairs
         .next()
         .ok_or_else(|| Diagnostic::new("parser produced no program"))?;
@@ -1467,24 +1467,353 @@ fn parse_escaped(text: &str) -> Result<String, Diagnostic> {
     Ok(out)
 }
 
-fn pest_error(file: &SourcePath, error: pest::error::Error<Rule>) -> Diagnostic {
-    let ((line, column), (end_line, end_column)) = match error.line_col {
+fn pest_error(file: &SourcePath, source: &str, error: pest::error::Error<Rule>) -> Diagnostic {
+    let (start, end) = match error.line_col {
         pest::error::LineColLocation::Pos((line, column)) => {
             ((line, column), (line, column.saturating_add(1)))
         }
         pest::error::LineColLocation::Span(start, end) => (start, end),
     };
+    if let Some((left, right, span)) = missing_operator(file, source, start.0, start.1) {
+        return Diagnostic::at_span(
+            span,
+            format!(
+                "expected an operator between `{}` and `{}`; the two identifiers are directly adjacent",
+                left, right
+            ),
+        );
+    }
     Diagnostic::at_span(
         SourceSpan {
             file: source_path_owned(file),
-            start: SourcePosition { line, column },
+            start: SourcePosition {
+                line: start.0,
+                column: start.1,
+            },
+            end: SourcePosition {
+                line: end.0,
+                column: end.1,
+            },
+        },
+        friendly_parse_message(&error.variant),
+    )
+}
+
+/// A statement keyword that can legitimately be followed by an identifier, so a
+/// bare `ident ident` pair next to it is never a missing-operator typo.
+fn is_identifier_keyword(text: &str) -> bool {
+    matches!(
+        text,
+        "import"
+            | "const"
+            | "alias"
+            | "port"
+            | "mmio"
+            | "embed"
+            | "global"
+            | "struct"
+            | "extern"
+            | "fn"
+            | "let"
+            | "if"
+            | "while"
+            | "loop"
+            | "return"
+            | "break"
+            | "continue"
+            | "asm"
+            | "out"
+            | "in"
+            | "cast"
+            | "pub"
+            | "else"
+            | "true"
+            | "false"
+    )
+}
+
+/// pest reports its parse error at the furthest position it reached, which can
+/// be far past the real mistake: a run like `... && player y == y {` is recast
+/// as expression statements, and the trailing `x { ... }` parses as a struct
+/// literal that swallows the rest of the block ("expected field_init").
+///
+/// When that happens the offending token pair is two identifiers separated only
+/// by spaces or tabs. Scan the statement containing the failure and report that
+/// pair with its real location so the diagnostic points at `y`, not the far side
+/// of the block.
+fn missing_operator(
+    file: &SourcePath,
+    source: &str,
+    line: usize,
+    column: usize,
+) -> Option<(String, String, SourceSpan)> {
+    let failure_offset = offset_of_line_column(source, line, column)?;
+    let window_start = statement_window_start(source, failure_offset);
+    let window = source.get(window_start..failure_offset)?;
+    let (left, right, right_offset) = first_adjacent_identifiers(window)?;
+    let right_start = window_start + right_offset;
+    let (start_line, start_column) = line_column_of_offset(source, right_start)?;
+    let (end_line, end_column) = line_column_of_offset(source, right_start + right.len())?;
+    Some((
+        left,
+        right,
+        SourceSpan {
+            file: source_path_owned(file),
+            start: SourcePosition {
+                line: start_line,
+                column: start_column,
+            },
             end: SourcePosition {
                 line: end_line,
                 column: end_column,
             },
         },
-        error.to_string(),
+    ))
+}
+
+/// The failure offset is pest's furthest attempt, so scan backwards to the start
+/// of the statement that contains it instead of reporting on a sibling line.
+const MISSING_OPERATOR_WINDOW_LINES: usize = 6;
+
+fn statement_window_start(source: &str, failure_offset: usize) -> usize {
+    let mut line_starts = vec![0usize];
+    for (index, ch) in source.char_indices() {
+        if ch == '\n' {
+            line_starts.push(index + 1);
+        }
+    }
+    let failure_line = line_starts
+        .iter()
+        .position(|line_start| *line_start > failure_offset)
+        .map_or(line_starts.len().saturating_sub(1), |index| {
+            index.saturating_sub(1)
+        });
+    let first_candidate = failure_line.saturating_sub(MISSING_OPERATOR_WINDOW_LINES);
+    for line in (first_candidate..=failure_line).rev() {
+        let start = line_starts[line];
+        let end = line_starts.get(line + 1).copied().unwrap_or(source.len());
+        if starts_statement(&source[start..end]) {
+            return start;
+        }
+    }
+    line_starts[first_candidate]
+}
+
+fn starts_statement(line: &str) -> bool {
+    let text = line.trim_start();
+    let bytes = text.as_bytes();
+    if bytes.first() == Some(&b'}') || bytes.first() == Some(&b'@') {
+        return true;
+    }
+    let end = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+        .unwrap_or(bytes.len());
+    if !text.is_char_boundary(end) {
+        return false;
+    }
+    matches!(
+        &text[..end],
+        "import"
+            | "const"
+            | "alias"
+            | "port"
+            | "mmio"
+            | "embed"
+            | "global"
+            | "struct"
+            | "extern"
+            | "fn"
+            | "pub"
+            | "let"
+            | "if"
+            | "while"
+            | "loop"
+            | "return"
+            | "break"
+            | "continue"
+            | "asm"
+            | "out"
+            | "else"
     )
+}
+
+/// Find the first `ident ident` pair whose tokens are separated only by spaces
+/// or tabs. Returns the two names and the offset of the second identifier.
+fn first_adjacent_identifiers(window: &str) -> Option<(String, String, usize)> {
+    let bytes = window.as_bytes();
+    let mut index = 0usize;
+    let mut previous: Option<(usize, usize)> = None;
+    let mut gap_clean = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\r' => {
+                if previous.is_some() {
+                    gap_clean = true;
+                }
+                index += 1;
+            }
+            b'\n' => {
+                previous = None;
+                gap_clean = false;
+                index += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                let current = &window[start..index];
+                if let Some((previous_start, previous_end)) = previous {
+                    let previous_text = &window[previous_start..previous_end];
+                    if gap_clean
+                        && !is_identifier_keyword(current)
+                        && !is_identifier_keyword(previous_text)
+                    {
+                        return Some((previous_text.to_owned(), current.to_owned(), start));
+                    }
+                }
+                previous = Some((start, index));
+                gap_clean = true;
+            }
+            _ => {
+                previous = None;
+                gap_clean = false;
+                index += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Convert a 1-based `(line, column)` into a byte offset, or `None` if the
+/// position does not exist in `source`.
+fn offset_of_line_column(source: &str, line: usize, column: usize) -> Option<usize> {
+    if line == 0 || column == 0 {
+        return None;
+    }
+    let mut current_line = 1usize;
+    let mut current_column = 1usize;
+    for (offset, ch) in source.char_indices() {
+        if current_line == line && current_column == column {
+            return Some(offset);
+        }
+        if ch == '\n' {
+            current_line += 1;
+            current_column = 1;
+        } else {
+            current_column += 1;
+        }
+    }
+    if current_line == line && current_column == column {
+        return Some(source.len());
+    }
+    None
+}
+
+/// Convert a byte offset into a 1-based `(line, column)`, or `None` if the
+/// offset falls inside a multi-byte character.
+fn line_column_of_offset(source: &str, offset: usize) -> Option<(usize, usize)> {
+    if offset > source.len() {
+        return None;
+    }
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for (index, ch) in source.char_indices() {
+        if index >= offset {
+            return Some((line, column));
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    Some((line, column))
+}
+
+/// Render pest's expected-rule list as a friendlier single-line message.
+fn friendly_parse_message(error: &pest::error::ErrorVariant<Rule>) -> String {
+    let pest::error::ErrorVariant::ParsingError {
+        positives,
+        negatives,
+    } = error
+    else {
+        return error.message().into_owned();
+    };
+    let mut expected = positives.iter().map(parse_expected).collect::<Vec<_>>();
+    let mut unexpected = negatives.iter().map(parse_expected).collect::<Vec<_>>();
+    dedupe_in_order(&mut expected);
+    dedupe_in_order(&mut unexpected);
+    match (unexpected.is_empty(), expected.is_empty()) {
+        (true, true) => "syntax error".to_owned(),
+        (true, false) => format!("unexpected tokens; expected {}", join_or(&expected)),
+        (false, true) => format!("unexpected {}", join_or(&unexpected)),
+        (false, false) => format!(
+            "unexpected {}; expected {}",
+            join_or(&unexpected),
+            join_or(&expected)
+        ),
+    }
+}
+
+fn dedupe_in_order(items: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    items.retain(|item| seen.insert(item.clone()));
+}
+
+fn parse_expected(rule: &Rule) -> String {
+    match rule {
+        Rule::block => "`{`".to_owned(),
+        Rule::ident | Rule::path | Rule::path_expr => "an identifier".to_owned(),
+        Rule::int_lit => "an integer".to_owned(),
+        Rule::string_lit => "a string literal".to_owned(),
+        Rule::char_lit => "a character literal".to_owned(),
+        Rule::bool_lit => "`true` or `false`".to_owned(),
+        Rule::array_lit => "an array literal".to_owned(),
+        Rule::field_init => "a struct field (`name: value`)".to_owned(),
+        Rule::field_inits => "a struct field".to_owned(),
+        Rule::or_op
+        | Rule::and_op
+        | Rule::bit_or_op
+        | Rule::bit_xor_op
+        | Rule::bit_and_op
+        | Rule::eq_op
+        | Rule::cmp_op
+        | Rule::shift_op
+        | Rule::add_op
+        | Rule::mul_op
+        | Rule::unary_op
+        | Rule::assign_op => "an operator".to_owned(),
+        Rule::expr_stmt
+        | Rule::let_stmt
+        | Rule::assign_stmt
+        | Rule::if_stmt
+        | Rule::while_stmt
+        | Rule::loop_stmt
+        | Rule::return_stmt
+        | Rule::break_stmt
+        | Rule::continue_stmt
+        | Rule::asm_stmt
+        | Rule::out_stmt => "a statement".to_owned(),
+        other => format!("`{other:?}`"),
+    }
+}
+
+fn join_or(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        2 => format!("{} or {}", items[0], items[1]),
+        _ => format!(
+            "{}, or {}",
+            items[..items.len() - 1].join(", "),
+            items[items.len() - 1]
+        ),
+    }
 }
 
 fn pair_span(file: &SourcePath, pair: &Pair<'_, Rule>) -> SourceSpan {
