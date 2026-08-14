@@ -1,13 +1,15 @@
 {
   "arch": "x86",
   "cpu": "i486",
-  "data-layout": "e-m:e-p:32:32-p270:32:32-p271:32:32-p272:64:64-i128:128-f64:32:64-f80:32-n8:16:32-S128",
+  "data-layout": "e-m:x-p:32:32-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:32-n8:16:32-a:0:32-S32",
   "exe-suffix": ".exe",
   "executables": true,
   "dynamic-linking": false,
+  "function-sections": false,
   "features": "-mmx,-sse",
-  "llvm-target": "i486-unknown-dos-elf",
+  "llvm-target": "i686-pc-windows-gnu",
   "singlethread": true,
+  "binary-format": "coff",
   "os": "dos",
   "panic-strategy": "abort",
   "target-pointer-width": 32,
@@ -18,6 +20,7 @@
   "static-position-independent-executables": false,
   "emit-debug-gdb-scripts": false,
   "disable-redzone": true,
+  "frame-pointer": "always",
   "plt-by-default": false,
   "no-default-libraries": true
 }

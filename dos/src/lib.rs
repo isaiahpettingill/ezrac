@@ -18,22 +18,21 @@ use ezra::api::{CompileRequest, Workspace, WorkspaceFile, build_workspace};
 static ALLOCATOR: heap::DpmiAllocator = heap::DpmiAllocator::new();
 
 #[unsafe(no_mangle)]
-pub extern "C" fn start() -> ! {
-    let code = match run() {
-        Ok(()) => 0,
+pub extern "C" fn rust_start() -> ! {
+    match run() {
+        Ok(()) => dos::exit(0),
         Err(message) => {
             let _ = writeln!(Writer::stderr(), "error: {message}\r");
-            1
+            dos::exit(1)
         }
-    };
-    dos::exit(code)
+    }
 }
 
 fn run() -> Result<(), String> {
     let args = dos::command_line().map_err(String::from)?;
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "/?") {
         print_usage();
-        return Ok(());
+        dos::exit(0);
     }
     if args.len() > 2 {
         return Err("expected EZRAC source.ezra [output.com]".into());
@@ -59,7 +58,7 @@ fn run() -> Result<(), String> {
         "wrote {output} ({} bytes)\r",
         build.executable.len()
     );
-    Ok(())
+    dos::exit(0)
 }
 
 fn replace_extension(path: &str, extension: &str) -> String {

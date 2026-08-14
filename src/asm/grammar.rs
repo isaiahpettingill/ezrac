@@ -57,44 +57,51 @@ pub(crate) fn parse_instruction(
         ));
     }
     let source = instruction.to_text();
+    #[allow(unreachable_patterns)]
     match cpu {
+        #[cfg(any(feature = "std", feature = "intel"))]
         AssemblerCpu::I8080 | AssemblerCpu::I8085 => intel8080::parse(cpu, &source),
-        AssemblerCpu::I8086 => {
-            #[cfg(feature = "i8086")]
-            {
-                i8086::parse(cpu, &source)
-            }
-            #[cfg(not(feature = "i8086"))]
-            {
-                Err(Diagnostic::new(
-                    "i8086 instruction parsing requires the `i8086` Cargo feature",
-                ))
-            }
-        }
+        #[cfg(feature = "i8086")]
+        AssemblerCpu::I8086 => i8086::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "z80"))]
         AssemblerCpu::Z80
         | AssemblerCpu::R800
         | AssemblerCpu::Z80N
         | AssemblerCpu::Z180
         | AssemblerCpu::Ez80 => z80::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "lr35902"))]
         AssemblerCpu::Lr35902 => lr35902::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "avr"))]
         AssemblerCpu::Avr
         | AssemblerCpu::AvrTiny
         | AssemblerCpu::AvrMega
         | AssemblerCpu::AvrDx
         | AssemblerCpu::AvrXmega => avr::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "dcpu"))]
         AssemblerCpu::Dcpu => dcpu::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "m6800"))]
         AssemblerCpu::M6800 => m6800::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "m6809"))]
         AssemblerCpu::M6809 => m6809::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "m68k"))]
         AssemblerCpu::M68k => m68k::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "mos6502"))]
         AssemblerCpu::Mos6502
         | AssemblerCpu::Cmos65C02
         | AssemblerCpu::Wdc65C816
         | AssemblerCpu::Ricoh2A03 => mos6502::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "tms9900"))]
         AssemblerCpu::Tms9900 => tms9900::parse(cpu, &source),
+        #[cfg(any(feature = "std", feature = "msp430"))]
         AssemblerCpu::Msp430 | AssemblerCpu::Msp430X | AssemblerCpu::Msp430X2 => {
             msp430::parse(cpu, &source)
         }
+        #[cfg(any(feature = "std", feature = "pic18"))]
         AssemblerCpu::Pic18 => pic18::parse(cpu, &source),
+        unsupported => Err(Diagnostic::new(format!(
+            "{} instruction parsing is not enabled in this build",
+            unsupported.as_str()
+        ))),
     }
 }
 
@@ -228,19 +235,31 @@ macro_rules! architecture_parser {
     };
 }
 
+#[cfg(any(feature = "std", feature = "z80"))]
 architecture_parser!(z80, "asm/grammar/z80.pest", z80_operand);
+#[cfg(any(feature = "std", feature = "intel"))]
 architecture_parser!(intel8080, "asm/grammar/intel8080.pest", intel8080_operand);
 #[cfg(feature = "i8086")]
 architecture_parser!(i8086, "asm/grammar/i8086.pest", i8086_operand);
+#[cfg(any(feature = "std", feature = "lr35902"))]
 architecture_parser!(lr35902, "asm/grammar/lr35902.pest", lr35902_operand);
+#[cfg(any(feature = "std", feature = "avr"))]
 architecture_parser!(avr, "asm/grammar/avr.pest", avr_operand);
+#[cfg(any(feature = "std", feature = "dcpu"))]
 architecture_parser!(dcpu, "asm/grammar/dcpu.pest", dcpu_operand);
+#[cfg(any(feature = "std", feature = "m6800"))]
 architecture_parser!(m6800, "asm/grammar/m6800.pest", m6800_operand);
+#[cfg(any(feature = "std", feature = "m6809"))]
 architecture_parser!(m6809, "asm/grammar/m6809.pest", m6809_operand);
+#[cfg(any(feature = "std", feature = "m68k"))]
 architecture_parser!(m68k, "asm/grammar/m68k.pest", m68k_operand);
+#[cfg(any(feature = "std", feature = "mos6502"))]
 architecture_parser!(mos6502, "asm/grammar/mos6502.pest", mos6502_operand);
+#[cfg(any(feature = "std", feature = "tms9900"))]
 architecture_parser!(tms9900, "asm/grammar/tms9900.pest", tms9900_operand);
+#[cfg(any(feature = "std", feature = "msp430"))]
 architecture_parser!(msp430, "asm/grammar/msp430.pest", msp430_operand);
+#[cfg(any(feature = "std", feature = "pic18"))]
 architecture_parser!(pic18, "asm/grammar/pic18.pest", pic18_operand);
 
 #[cfg(test)]

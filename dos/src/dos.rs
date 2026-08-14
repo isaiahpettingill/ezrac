@@ -136,20 +136,17 @@ fn read_psp_byte(selector: u16, offset: u32) -> u8 {
     byte
 }
 
+unsafe extern "C" {
+    fn dos_open(path: *const u8, mode: u32) -> u32;
+}
+
 fn open(path: &[u8], mode: u16) -> Result<u16, Error> {
-    let mut value: u16;
-    let mut failed: u8;
-    unsafe {
-        asm!(
-            "int 0x21",
-            "setc {failed}",
-            inlateout("ax") 0x3d00u16 | mode => value,
-            in("edx") path.as_ptr(),
-            failed = lateout(reg_byte) failed,
-            options(nostack),
-        );
+    let result = unsafe { dos_open(path.as_ptr(), mode as u32) };
+    if result & 0x8000_0000 == 0 {
+        Ok(result as u16)
+    } else {
+        Err(Error(result as u16))
     }
-    status(value, failed)
 }
 
 fn create(path: &[u8], attributes: u16) -> Result<u16, Error> {

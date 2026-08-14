@@ -1,6 +1,8 @@
 # FreeDOS compiler
 
-The FreeDOS port is a separate `no_std + alloc` executable. It contains only the EZRA compiler path needed for the `msdos-com-i8086` target. It does not include the test runner, LSP server, project discovery, editor setup, disk-image commands, or non-i8086 backends.
+The FreeDOS port is a separate `no_std + alloc` executable. It contains no test runner, LSP server, editor setup, project discovery, or non-DOS command-line options.
+
+The port runs the regular EZRA parser, i8086 code generator, assembler, linker, and DOS `.COM` packager. It enables the no-std i8086 feature set and leaves out host tools.
 
 ## Use
 
@@ -9,9 +11,9 @@ EZRAC source.ezra
 EZRAC source.ezra output.com
 ```
 
-The first form writes `source.com`. The DOS frontend accepts one UTF-8 EZRA source file. Imports and `embed file(...)` are not yet supported because this first frontend builds a one-file virtual workspace.
+The first form writes `source.com`. Input must be UTF-8. The command creates a one-file virtual workspace, so project manifests, filesystem imports, and `embed file(...)` are not available.
 
-EZRAC itself runs as a 32-bit DOS/32A protected-mode executable. Programs produced by it remain 16-bit `.COM` files for the `msdos-com-i8086` target.
+EZRAC runs as a 32-bit DOS/32A protected-mode executable. Programs it produces are 16-bit `.COM` files for DOS.
 
 ## Build requirements
 
@@ -19,7 +21,7 @@ EZRAC itself runs as a 32-bit DOS/32A protected-mode executable. Programs produc
 - GNU Make
 - NASM
 - OpenWatcom with `WATCOM` set to its install directory
-- DOSBox or a FreeDOS environment for runtime testing
+- FreeDOS for runtime testing
 
 Build from the repository root:
 
@@ -27,22 +29,31 @@ Build from the repository root:
 make -C dos
 ```
 
-The result is `dos/target/dos/release/ezrac.exe`. The build compiles `core` and `alloc` for the custom i486 DOS target, builds EZRAC as a Rust static library, adds a 64 KiB 32-bit stack segment, and links it with OpenWatcom using `system dos32x`.
+The result is `dos/target/dos/release/ezrac.exe`.
 
-The runtime calls DOS interrupt `21h` for arguments, files, console output, and process exit. The Rust heap gets 1 MiB arenas through DPMI interrupt `31h`, function `0501h`, and reuses freed blocks within those arenas. Compiler data therefore uses the DOS extender's 32-bit memory instead of conventional DOS memory. DOS reclaims the arenas when EZRAC exits.
+The build:
+
+1. Builds `core` and `alloc` for the custom 32-bit i486 COFF target.
+2. Builds EZRAC as a Rust static library.
+3. Compiles a small OpenWatcom C startup entrypoint.
+4. Adds NASM DOS syscall and MinGW-compatible stack-probe helpers.
+5. Links and binds DOS/32A with OpenWatcom.
+
+The C entrypoint only initializes the Watcom/DOS runtime and calls Rust. The command line, validation, output selection, errors, and compiler behavior are in Rust.
+
+## Runtime memory
+
+The Rust heap requests 4 MiB arenas through DPMI interrupt `31h`, function `0501h`. It is a bump allocator: individual allocations are not reclaimed because every compiler path exits directly through DOS. DOS reclaims all arenas when EZRAC exits.
+
+The linked process uses a 4 MiB stack. A FreeDOS VM with at least 128 MiB is recommended while the port is under development.
 
 ## FreeDOS test
 
-Copy these files into the same FreeDOS directory:
-
-- `dos/target/dos/release/ezrac.exe`
-- a small `.ezra` source file
-
-Then run:
+Copy `dos/target/dos/release/ezrac.exe` and an EZRA source file into a FreeDOS VM, then run:
 
 ```dos
 EZRAC HELLO.EZRA HELLO.COM
 HELLO.COM
 ```
 
-DOS/32A must be available to the executable. OpenWatcom's `system dos32x` output normally includes the bound extender setup expected by the `dos-rs` link method.
+DOSBox-X 2026.08.02 runs `EZRAC /?`, but its host process crashes in DOS/32A's protected-mode file-open bridge. Use FreeDOS under QEMU for compiler runtime testing until that emulator issue is resolved.
