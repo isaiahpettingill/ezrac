@@ -61,6 +61,22 @@ make -C dos
 
 The results are in `dos/target/dos/release`.
 
+## FreeDOS test floppies
+
+The compiler is too large for one standard floppy. Build a four-disk 2.88 MiB FAT12 test set after building the compiler:
+
+```sh
+make -C dos test-floppies
+```
+
+The images are written to `dos/target/freedos-floppies` as `ezrac-1.img` through `ezrac-4.img`. Attach `ezrac-1.img` to the FreeDOS VM, switch to drive `A:`, and run:
+
+```dos
+INSTALL.BAT
+```
+
+The installer copies itself to `C:\EZRAC`, prompts for the other three images, then compiles and runs the included `HELLO.EZRA` DOS SDK example. The images are not bootable; start the VM from its existing FreeDOS installation.
+
 The build compiles each Rust stage as a separate static library, compiles one OpenWatcom C startup entrypoint, adds NASM DOS syscall and MinGW-compatible stack-probe helpers, then links and binds DOS/32A with OpenWatcom. The DOS release profile uses Rust's `z` size optimization; current stage executables are about 2.4–2.5 MiB each.
 
 ## Runtime memory

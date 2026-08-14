@@ -11,14 +11,18 @@ WCC386 := $(WATCOM)/binnt64/wcc386.exe
 WLINK := $(WATCOM)/binnt64/wlink.exe
 DOS32A := $(WATCOM)/binw/dos32a.exe
 WLINK_CONFIG := $(WATCOM)/binnt64/wlink.lnk
+PYTHON ?= python
 STACK_OBJ := $(OBJ_DIR)/stack.obj
 ENTRY_OBJ := $(OBJ_DIR)/entry.obj
 CARGO_BUILD := cargo build $(CARGO_FLAGS) --manifest-path Cargo.toml --target dos.json -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features
 
-.PHONY: all check-tools rust-libs clean
+.PHONY: all check-tools rust-libs test-floppies clean
 
 all: check-tools rust-libs $(OUTPUT_DIR)/ezfe.exe $(OUTPUT_DIR)/ezopt.exe $(OUTPUT_DIR)/ezcg.exe $(OUTPUT_DIR)/ezas.exe
 	cp EZRAC.BAT $(OUTPUT_DIR)/EZRAC.BAT
+
+test-floppies: all
+	$(PYTHON) make_test_floppies.py
 
 check-tools:
 	@test -n "$(WATCOM)" || (echo "error: set WATCOM to the OpenWatcom install directory" >&2; exit 1)
