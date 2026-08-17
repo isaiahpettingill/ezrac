@@ -341,7 +341,7 @@ impl InstallSyntaxOptions {
         editors.dedup();
         if editors.is_empty() {
             return Err(
-                "install-syntax requires `--all` or at least one editor name; supported editors: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned(),
+                "install-syntax requires `--all` or at least one editor name; supported editors: vim, neovim, nano, micro, helix, vscode, zed, notepad++, fed".to_owned(),
             );
         }
         Ok(Self {
@@ -362,6 +362,7 @@ enum SyntaxEditor {
     Vscode,
     Zed,
     NotepadPlusPlus,
+    Fed,
 }
 
 impl SyntaxEditor {
@@ -375,8 +376,9 @@ impl SyntaxEditor {
             "vscode" | "vs-code" | "code" => Ok(Self::Vscode),
             "zed" => Ok(Self::Zed),
             "notepad++" | "notepadpp" | "npp" => Ok(Self::NotepadPlusPlus),
+            "fed" => Ok(Self::Fed),
             _ => Err(format!(
-                "unsupported editor `{value}`; expected vim, neovim, nano, micro, helix, vscode, zed, or notepad++"
+                "unsupported editor `{value}`; expected vim, neovim, nano, micro, helix, vscode, zed, notepad++, or fed"
             )),
         }
     }
@@ -391,6 +393,7 @@ impl SyntaxEditor {
             Self::Vscode,
             Self::Zed,
             Self::NotepadPlusPlus,
+            Self::Fed,
         ]
     }
 
@@ -404,6 +407,7 @@ impl SyntaxEditor {
             Self::Vscode => "vscode",
             Self::Zed => "zed",
             Self::NotepadPlusPlus => "notepad++",
+            Self::Fed => "fed",
         }
     }
 }
@@ -2678,6 +2682,13 @@ fn install_syntax(options: &InstallSyntaxOptions) -> Result<(), String> {
                     }
                 }
             }
+            Err(error)
+                if options.all
+                    && *editor == SyntaxEditor::Fed
+                    && error.starts_with("could not find FED") =>
+            {
+                eprintln!("skipped fed syntax: {error}");
+            }
             Err(error) => failures.push(format!("{}: {error}", editor.name())),
         }
     }
@@ -2705,6 +2716,7 @@ fn install_syntax_for_editor(editor: SyntaxEditor, dry_run: bool) -> Result<Vec<
         SyntaxEditor::Vscode => install_vscode_syntax(dry_run),
         SyntaxEditor::Zed => install_zed_syntax(dry_run),
         SyntaxEditor::NotepadPlusPlus => install_notepadpp_syntax(dry_run),
+        SyntaxEditor::Fed => install_fed_syntax(dry_run),
     }
 }
 
@@ -2927,6 +2939,106 @@ fn install_notepadpp_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
         include_str!("../assets/editors/notepad++/ezra.xml"),
         dry_run,
     )
+}
+
+const FED_SYNTAX_BEGIN: &str = "# BEGIN EZRAC FED SYNTAX";
+const FED_SYNTAX_END: &str = "# END EZRAC FED SYNTAX";
+
+fn install_fed_syntax(dry_run: bool) -> Result<Vec<PathBuf>, String> {
+    let path = fed_syntax_path()?;
+    if dry_run {
+        return Ok(vec![path]);
+    }
+
+    let existing = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let merged = merge_fed_syntax(&existing, include_str!("../assets/editors/fed/ezra.syn"))?;
+    fs::write(&path, merged)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    Ok(vec![path])
+}
+
+fn fed_syntax_path() -> Result<PathBuf, String> {
+    if let Some(home) = environment_path("FED_HOME") {
+        let path = if home
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("fed.syn"))
+        {
+            home
+        } else {
+            home.join("fed.syn")
+        };
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!("FED_HOME does not contain {}", path.display()));
+    }
+
+    if let Some(paths) = env::var_os("PATH") {
+        for directory in env::split_paths(&paths) {
+            for executable in ["fed.exe", "fed"] {
+                if directory.join(executable).is_file() {
+                    let path = directory.join("fed.syn");
+                    if path.is_file() {
+                        return Ok(path);
+                    }
+                }
+            }
+        }
+    }
+
+    let current = env::current_dir()
+        .map_err(|error| format!("failed to read the current directory: {error}"))?;
+    let path = current.join("fed.syn");
+    if path.is_file() {
+        return Ok(path);
+    }
+
+    Err("could not find FED's fed.syn; set FED_HOME to the directory containing fed.exe and fed.syn, add FED to PATH, or run this command from the FED directory".to_owned())
+}
+
+fn merge_fed_syntax(existing: &str, syntax: &str) -> Result<String, String> {
+    let newline = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let syntax = syntax.replace("\r\n", "\n").replace('\n', newline);
+
+    if let Some(start) = existing.find(FED_SYNTAX_BEGIN) {
+        let relative_end = existing[start..].find(FED_SYNTAX_END).ok_or_else(|| {
+            format!("found `{FED_SYNTAX_BEGIN}` without matching `{FED_SYNTAX_END}`")
+        })?;
+        let mut end = start + relative_end + FED_SYNTAX_END.len();
+        if existing[end..].starts_with("\r\n") {
+            end += 2;
+        } else if existing[end..].starts_with('\n') {
+            end += 1;
+        }
+        let mut merged = String::with_capacity(existing.len() + syntax.len());
+        merged.push_str(&existing[..start]);
+        merged.push_str(&syntax);
+        merged.push_str(&existing[end..]);
+        return Ok(merged);
+    }
+
+    if existing.contains(FED_SYNTAX_END) {
+        return Err(format!(
+            "found `{FED_SYNTAX_END}` without matching `{FED_SYNTAX_BEGIN}`"
+        ));
+    }
+
+    let mut merged = existing.to_owned();
+    if !merged.is_empty() {
+        if !merged.ends_with('\n') {
+            merged.push_str(newline);
+        }
+        if !merged.ends_with(&format!("{newline}{newline}")) {
+            merged.push_str(newline);
+        }
+    }
+    merged.push_str(&syntax);
+    Ok(merged)
 }
 
 fn install_single_syntax_file(
@@ -3382,7 +3494,7 @@ fn print_targets() {
 fn usage() -> String {
     "usage: ezra <command>\n\ncommands:\n  init [--name <name>] [--target <triple>] [--force] [dir]\n                                       create a new EZRA project scaffold\n  install-syntax (--all | [--editor] <editor>...) [--dry-run]\n                                       install editor syntax files for selected editors\n  targets                              list documented target triples, outputs, and SDKs\n  lsp                                  start the language server; requires Cargo feature `lsp`\n  check [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       parse and validate a source file\n  build [--target <triple>] [--cpu <mode>] [--input-kind ezra|assembly] [--size-budget NAME=BYTES]... [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] [file.ezra|file.asm]\n                                       write .asm, .map, .size, and target executable artifacts\n  disk [--format <format>] [--label <label>] --output <image> [--file [NAME=]PATH]...
                                        create an emulator-ready disk image with named files
-  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\nsource optimization options:\n  -O0|-O1|-O2|-O3                    select an optimization level (default: -O2)\n  --enable-optimization <pass>        enable one named optimization pass\n  --disable-optimization <pass>       disable one named optimization pass\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++".to_owned()
+  emit-asm [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit readable target assembly\n  emit-ir [--stage hir|tbir] [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit inspectable HIR or TBIR text\n  test [--target <triple>] [--debug-comments] [--no-default-sdk-symbols] [--layout <file.ezralayout>] <file.ezra>\n                                       emit and run on the target VM\n  assemble [--target <triple>] [--cpu <mode>] [--layout <file.ezralayout>] [--map <file.map>] [--base <addr>] [--output <file.bin>] <file.asm>\n                                       assemble target assembly into a raw binary\n  layout [file.ezralayout]             print the default or custom EZRA layout summary\n  header                               print the default 64-byte cartridge header\n\nsource optimization options:\n  -O0|-O1|-O2|-O3                    select an optimization level (default: -O2)\n  --enable-optimization <pass>        enable one named optimization pass\n  --disable-optimization <pass>       disable one named optimization pass\n\neditors for install-syntax: vim, neovim, nano, micro, helix, vscode, zed, notepad++, fed".to_owned()
 }
 
 #[cfg(all(test, feature = "i8086"))]

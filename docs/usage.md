@@ -287,6 +287,7 @@ helix, hx
 vscode, code
 zed
 notepad++, notepadpp, npp
+fed
 ```
 
 Install locations are best-effort defaults:
@@ -300,7 +301,10 @@ Helix        ~/.config/helix/languages.toml and runtime/queries/ezra/highlights.
 VS Code      ~/.vscode/extensions/ezra-language
 Zed          ~/.local/share/zed/extensions/installed/ezra (or $ZED_DATA_DIR/extensions/installed/ezra)
 Notepad++    %APPDATA%/Notepad++/userDefineLangs/ezra.xml, or ~/.config/Notepad++ on non-Windows
+FED          fed.syn beside the FED executable; resolved with $FED_HOME, PATH, or the current directory
 ```
+
+FED must be closed while its syntax file is updated. Because FED is portable and keeps `fed.syn` beside its executable, set `FED_HOME` to that directory when it is not on `PATH`. `--all` skips FED when no installation can be found.
 
 Some editors may require restart, extension reload, or additional grammar build steps after files are copied. See `docs/editor-syntax.md` for manual installation notes.
 

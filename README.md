@@ -50,7 +50,7 @@ cargo run -- header
 
 `disk` creates M35FD images for DCPU-16, FAT12 floppy images for CP/M through IS-DOS, MOS, and DOS, and D64 images for C64. Each image can contain multiple named files. See `docs/disk-images.md`.
 
-`init` creates a non-destructive starter project with `.gitignore`, `Ezra.toml`, `README.md`, `src/main.ezra`, `sdk/`, and `assets/`. `install-syntax` installs syntax files for selected editors; supported editor names are `vim`, `neovim`, `nano`, `micro`, `helix`, `vscode`, `zed`, and `notepad++`.
+`init` creates a non-destructive starter project with `.gitignore`, `Ezra.toml`, `README.md`, `src/main.ezra`, `sdk/`, and `assets/`. `install-syntax` installs syntax files for selected editors; supported editor names are `vim`, `neovim`, `nano`, `micro`, `helix`, `vscode`, `zed`, `notepad++`, and `fed`.
 
 `lsp` starts the EZRA language server over stdio. It is behind the optional Cargo feature `lsp`, so default installs do not include LSP dependencies. Build or install with `--features lsp` to enable it. Editor setup notes live in `docs/editor-syntax.md`.
 

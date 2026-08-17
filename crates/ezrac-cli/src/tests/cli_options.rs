@@ -251,13 +251,53 @@ fn install_syntax_options_parse_selected_editors() {
         "--editor".to_owned(),
         "vim".to_owned(),
         "nvim".to_owned(),
+        "fed".to_owned(),
         "--dry-run".to_owned(),
     ])
     .unwrap();
 
-    assert_eq!(options.editors, [SyntaxEditor::Vim, SyntaxEditor::Neovim]);
+    assert_eq!(
+        options.editors,
+        [SyntaxEditor::Vim, SyntaxEditor::Neovim, SyntaxEditor::Fed]
+    );
     assert!(options.dry_run);
     assert!(!options.all);
+}
+
+#[test]
+fn fed_syntax_merge_appends_once_and_preserves_existing_definitions() {
+    let existing = "# C syntax\r\nFiles=c\r\nEnd\r\n";
+    let syntax = include_str!("../../assets/editors/fed/ezra.syn");
+
+    let merged = merge_fed_syntax(existing, syntax).unwrap();
+    let merged_again = merge_fed_syntax(&merged, syntax).unwrap();
+
+    assert!(merged.starts_with(existing));
+    assert!(merged.contains("Files=ezra,ezralayout\r\n"));
+    assert!(!merged.contains("\nFiles=ezra,ezralayout\n"));
+    assert_eq!(merged.matches(FED_SYNTAX_BEGIN).count(), 1);
+    assert_eq!(merged_again, merged);
+}
+
+#[test]
+fn fed_syntax_merge_replaces_the_managed_section() {
+    let existing = "before\n# BEGIN EZRAC FED SYNTAX\nold\n# END EZRAC FED SYNTAX\nafter\n";
+    let syntax = include_str!("../../assets/editors/fed/ezra.syn");
+
+    let merged = merge_fed_syntax(existing, syntax).unwrap();
+
+    assert!(merged.starts_with("before\n# BEGIN EZRAC FED SYNTAX\n"));
+    assert!(merged.ends_with("# END EZRAC FED SYNTAX\nafter\n"));
+    assert!(!merged.contains("\nold\n"));
+}
+
+#[test]
+fn fed_syntax_merge_rejects_unpaired_markers() {
+    let syntax = include_str!("../../assets/editors/fed/ezra.syn");
+
+    let error = merge_fed_syntax("# BEGIN EZRAC FED SYNTAX\n", syntax).unwrap_err();
+
+    assert!(error.contains("without matching"), "{error}");
 }
 
 #[test]

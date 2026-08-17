@@ -1,0 +1,20 @@
+# BEGIN EZRAC FED SYNTAX
+# ---------------- EZRA ----------------
+Files=ezra,ezralayout
+EOLComment1=//
+HexMarker=0x
+Symbols=!%&()*+,-./:;<=>?@[]^{|}~
+String='"
+Escape=\
+Case=1
+TabSize=4
+RealTabs=0
+Keywords=alias,align,as,asm,break,bytes,cast,clobber,const,continue,cstr
+Keywords=else,embed,entry,execute,extern,file,fn,global,if,import,in,inline
+Keywords=interrupt,layout,let,load,loop,mmio,naked,out,port,ptr,pub,read
+Keywords=region,repeat,reserved,return,section,stack,struct,symbol,text
+Keywords=volatile,while,write,comptime,no-comptime,true,false
+Keywords=u8,i8,u16,i16,u20,i20,u24,i24,u32,i32,reg8,reg16,reg24,mem,imm
+Keywords=cfg,bank,all,any,not,debug,release
+End
+# END EZRAC FED SYNTAX
