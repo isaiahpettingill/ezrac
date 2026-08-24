@@ -4,9 +4,9 @@
 
 EZRA is a small compiled language for explicit, low-level game and hobby-computer targets. It is designed around explicit integer sizes, target-defined address widths, direct memory and port I/O, embedded assets, inline assembly, readable generated assembly, and emulator-backed tests.
 
-This is alpha software. The language, target profiles, and cartridge formats are still evolving. Start with the [documentation index](docs/README.md), which links to focused getting-started, CLI, language, target, tutorial, and contributor pages. The older `docs/language.md`, `docs/usage.md`, and `docs/platforms.md` pages remain available for full reference tables; `spec.md` is the broader design document.
+This is alpha software. The language, target profiles, and cartridge formats are still evolving. Start with the [documentation index](docs/README.md), which links to focused getting-started, CLI, language, target, tutorial, and contributor pages. The older `docs/language.md`, `docs/usage.md`, and `docs/platforms.md` pages remain available for full reference tables; [`docs/spec.md`](docs/spec.md) is the broader design document.
 
-Implementation status for every specification section is tracked in [`SPEC_COVERAGE.md`](SPEC_COVERAGE.md).
+Implementation status for every specification section is tracked in [`docs/spec-coverage.md`](docs/spec-coverage.md).
 
 ## Commands
 
@@ -131,7 +131,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `docs/msdos-sdk.md` documents the `msdos-com-i8086` `.COM` target and bundled `dos.*` SDK.
 - `docs/freedos.md` documents the 32-bit FreeDOS-hosted compiler build and its compiler-only command line.
 - `docs/cpm-sdk-tracker.md` tracks CP/M SDK coverage and remaining work.
-- `spec.md` describes the intended language, runtime, and cartridge format.
+- [`docs/spec.md`](docs/spec.md) describes the intended language, runtime, and cartridge format.
 - `docs/editor-syntax.md` describes EZRA syntax-highlighting files for supported editors.
 - `docs/image-assets.md` describes indexed PNG conversion to native sprite, tile, and bitmap formats.
 - `docs/real-core-tests.md` explains how to run the opt-in `play96` example suites against real libretro cores.
@@ -139,7 +139,7 @@ Examples live under `examples/agon-mos`. See `docs/agon-apps.md` for app pattern
 - `CHANGELOG.md` summarizes notable development milestones.
 - `docs/ez80-opcode-coverage.md` tracks assembler opcode coverage and roadmap items.
 - The main source target is Agon Light MOS on eZ80 ADL. Default builds include every compiler backend: Intel 8080/8085/8086, eZ80/Z80-family, LR35902, AVR, MOS 6502-family, M6800/M6809, M68k, TMS9900, MSP430, PIC18, and DCPU-16. `ti99-4a-tms9900` emits a bootable one-bank TI-99/4A cartridge ROM with the bundled `ti99.*` SDK. The i8086 backend provides scalar code generation, recursion, aggregate storage, constrained interrupt handlers, typed inline assembly, a complete strict 8086 assembler, and the `msdos-com-i8086` target with bundled `dos.*` SDK; aggregate parameters and returns must be passed by pointer. Target profiles remain at varying maturity levels; see `docs/platforms.md`.
-- Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary.
+- Bundled target SDKs are EZRA source files under `toolchains/*/sdk` and are embedded into the compiler binary when the `embedded-sdk` Cargo feature is enabled. The feature is enabled by default, but constrained builds can omit it with `--no-default-features`.
 - Agon Light MOS examples live under `examples/agon-mos`.
 - Fab Agon Emulator is GPL-3.0 and is not vendored. Use `FAB_AGON_EMULATOR_DIR` with `tools/run-fab-agon.ps1` to point at a local checkout or release.
 
@@ -168,6 +168,8 @@ assert_eq!(build.executable_extension, "com");
 
 `build_workspace` resolves imports from supplied files and returns target assembly, machine code, symbols, and native Agon MOS, CP/M, C64, raw, MSP430 ELF32, or Intel HEX package bytes. For explicit layouts, output formats, package metadata, section-aware standalone assembly, or explicit-base flat assembly, use `BuildRequest`, `build_workspace_with_request`, `link_generated_assembly`, `link_assembly_program`, or `link_assembly_program_at` from `ezra::api`. Explicit layouts drive both source code generation and final linking. The CLI `build` and `assemble` commands resolve host configuration and files into these same library pipelines; they do not own separate compiler, linker, or packager implementations.
 
+`CompileRequest::sdk_mode` defaults to `SdkLookupMode::ExternalThenEmbedded`. Set it to `SdkLookupMode::ExternalOnly` when the caller supplies every SDK module and must not use embedded SDK source. In std builds, add ordered filesystem roots with `sdk_paths`. In alloc-only builds, add virtual roots with `sdk_roots` and include those files in `Workspace`; their relative file embeds are resolved against the imported module path.
+
 `ezra::api`, `diagnostic`, `disk`, `image`, `layout`, `package`, `parser`, and `target` are the supported embedding surface. The crate remains pre-1.0, so breaking API changes may occur in minor releases; documented public types and functions follow semantic versioning once 1.0 is released. Other public modules expose compiler implementation details and should be treated as unstable.
 
 Both std and alloc-only builds validate the selected layout, strictly validate generated target assembly, and ensure the assembled `.text` bytes fit the region assigned by the layout before packaging. Source parsing, import resolution, code generation, assembly, linking, maps, explicit layouts, and packaging work under `no_std + alloc` for every compiler backend. Select only the backends an embedded consumer needs:
@@ -179,7 +181,7 @@ cargo check -p ezra-core --lib --no-default-features --features no-std,i8086
 cargo check -p ezra-core --lib --no-default-features --features no-std,avr,m6800,m6809,m68k,tms9900,dcpu,lr35902,pic18
 ```
 
-No-std builds never access host paths: all imported SDK source and binary assets must be included in `Workspace`. The full in-memory indexed PNG pipeline works with `no_std + alloc` through `ezra::image::decode_indexed_png` and `indexed_png_to_native_bytes`; embedded callers supply the PNG bytes and then add the converted bytes to their workspace. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
+No-std builds never access host paths: all project files and caller SDK files must be included in `Workspace`. List virtual SDK roots in `CompileRequest::sdk_roots` and set `sdk_mode` to `ExternalOnly` when the compiler must run without embedded SDK bytes. Resolution order is source-relative project files, SDK roots in the order supplied, then embedded SDK modules when enabled. The full in-memory indexed PNG pipeline works with `no_std + alloc` through `ezra::image::decode_indexed_png` and `indexed_png_to_native_bytes`; embedded callers supply the PNG bytes and then add the converted bytes to their workspace. In virtual builds, `embed file("assets/blob.bin")` resolves relative to the Ezra source file that declares it and reads the matching `WorkspaceFile`; this also works for assets declared by imported SDK modules. Inline byte, text, C-string, and repeat embeds remain available. The library is checked for `wasm32-unknown-unknown` in both no-std configurations without `wasm-bindgen`. Filesystem project discovery, the CLI, LSP, and emulator test runner remain behind `std`; the external MOS 6502 emulator is separately opt-in through `mos6502-emulator`.
 
 ## Development
 

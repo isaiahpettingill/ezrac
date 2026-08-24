@@ -48,4 +48,4 @@ fn main() {
 - [Embeds and image assets](embeds-assets.md)
 - [Tests, debug helpers, and memory intrinsics](diagnostics.md)
 
-The original [single-page language reference](../language.md) includes the same implementation details in one document. `spec.md` describes intended future design and should not be treated as a list of implemented features.
+The original [single-page language reference](../language.md) includes the same implementation details in one document. The [design specification](../spec.md) describes intended and future behavior; it should not be treated as a list of implemented features.

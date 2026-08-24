@@ -1,6 +1,6 @@
 # EZRA Language Documentation
 
-This document describes the EZRA source language implemented by `ezrac` today. `spec.md` is the broader design document; this file is intended as day-to-day language documentation for code that should parse and build with the current compiler.
+This document describes the EZRA source language implemented by `ezrac` today. [`spec.md`](spec.md) is the broader design document; this file is intended as day-to-day language documentation for code that should parse and build with the current compiler.
 
 ## Source Files
 
@@ -72,7 +72,7 @@ import math
 import agon.console
 ```
 
-For `import foo.bar`, `ezrac` searches for `foo/bar.ezra` relative to the importing file, ancestor directories, the current working directory, configured SDK paths, and finally built-in target SDK modules.
+For `import foo.bar`, `ezrac` searches for the normalized path `foo/bar.ezra` relative to the importing file, its ancestor directories, and the current working directory. It then checks configured SDK roots in order and finally the embedded target SDK when embedded lookup is enabled. An external module with the same name wins over the embedded module. Std callers use filesystem SDK roots; alloc-only callers supply virtual SDK roots and files through `Workspace`. A missing module uses the same resolution diagnostic in both APIs.
 
 Imports are resolved recursively. Cyclic imports are rejected. Duplicate imports are de-duplicated.
 

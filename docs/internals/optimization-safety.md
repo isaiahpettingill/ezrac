@@ -1,6 +1,6 @@
 # Optimization Safety Review
 
-This review classifies the candidate passes in `optimizations.md` against EZRA's
+This review classifies the candidate passes in [`optimizations.md`](optimizations.md) against EZRA's
 low-level hardware semantics. No pass is accepted unless it can preserve volatile
 memory ordering, port I/O ordering, inline-asm barriers, defined arithmetic
 behavior, and emulator-backed test behavior.

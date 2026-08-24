@@ -1,6 +1,6 @@
 # EZRA documentation
 
-EZRA is an experimental compiled language and toolchain for low-level games and hobby-computer targets. This documentation describes the implementation in this repository, not every feature proposed in [`spec.md`](../spec.md).
+EZRA is an experimental compiled language and toolchain for low-level games and hobby-computer targets. This documentation describes the implementation in this repository, not every feature proposed in [`spec.md`](spec.md).
 
 ## Start here
 
@@ -45,6 +45,11 @@ The older [single-page language reference](language.md) remains available for re
 - [HIR and TBIR](internals/hir-tbir.md)
 - [Assembler internals](internals/assembler.md)
 - [Target and layout internals](internals/targets.md)
+- [Language and runtime specification](spec.md) — design goals and proposed behavior.
+- [Specification coverage](spec-coverage.md) — implementation and test status by specification section.
+- [Remaining work](remaining-work.md) — current engineering backlog.
+- [Optimization design notes](internals/optimizations.md) — candidate and implemented optimization work.
+- [Optimization safety review](internals/optimization-safety.md) — side-effect and hardware-safety rules.
 
 ## Existing platform and tool guides
 
@@ -86,4 +91,4 @@ Target-specific pages:
 
 ## Project status
 
-EZRA is pre-1.0 alpha software. Target ABIs, SDK APIs, package formats, and some language features can change. [`SPEC_COVERAGE.md`](../SPEC_COVERAGE.md) tracks the broader design, while [`REMAINING_WORK.md`](../REMAINING_WORK.md) lists known unfinished work.
+EZRA is pre-1.0 alpha software. Target ABIs, SDK APIs, package formats, and some language features can change. [Specification coverage](spec-coverage.md) tracks the broader design, while [remaining work](remaining-work.md) lists known unfinished work.

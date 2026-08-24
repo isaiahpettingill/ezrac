@@ -23,7 +23,7 @@ Recent VM assembler coverage includes:
 - accumulator rotate shorthands: `RLCA`, `RLA`, `RRCA`, `RRA`
 - `BIT`, `SET`, and `RES` register forms
 
-`optimizations.md` contains phase-2 optimization candidates and IR notes. Treat it as remaining design work to evaluate, not an accepted implementation plan.
+[`internals/optimizations.md`](internals/optimizations.md) contains phase-2 optimization candidates and IR notes. Treat it as remaining design work to evaluate, not an accepted implementation plan.
 
 ## High-Priority Remaining Work
 
@@ -117,12 +117,12 @@ Recent VM assembler coverage includes:
 
 ## Medium-Priority Work
 
-- Add a machine-readable spec coverage table, possibly `SPEC_COVERAGE.md`.
+- Keep [`spec-coverage.md`](spec-coverage.md) current as implementation and test coverage change.
 - Add more CLI tests for custom layouts, maps, symbols, and cartridge outputs.
 - Add negative tests for duplicate or colliding declarations across module imports.
 - Add more target-SDK style tests for TI-84 Plus CE and Agon Light hardware abstractions.
 - Keep hardware support generic: SDK modules should be ordinary EZRA code over ports/MMIO, not hardcoded compiler behavior.
-- Evaluate `optimizations.md`; keep only optimizations that can be proven safe for volatile memory, port I/O, inline asm, and emulator-backed tests.
+- Evaluate [`internals/optimizations.md`](internals/optimizations.md); keep only optimizations that can be proven safe for volatile memory, port I/O, inline asm, and emulator-backed tests.
 - Review `spec.md` examples periodically so they remain valid as implementation rules tighten.
 
 ## Verification Expectations
