@@ -9,14 +9,28 @@ use crate::{
 };
 use std::path::Path;
 fn emit(source: &str) -> String {
+    emit_with_optimization(
+        source,
+        crate::optimization::OptimizationOptions::default(),
+        0x1_fffe,
+    )
+}
+
+fn emit_with_optimization(
+    source: &str,
+    optimization: crate::optimization::OptimizationOptions,
+    stack_top: u32,
+) -> String {
     let program = parse_program(Path::new("dcpu.ezra"), source).unwrap();
     let assembly = emit_dcpu_assembly_with_options(
         &program,
         AssemblyOptions {
             cpu: CpuFamily::Dcpu,
+            stack_top: crate::target::Address24::new(stack_top),
             ram_base: crate::target::Address24::new(0x8000),
             rodata_base: crate::target::Address24::new(0x9000),
             asset_base: crate::target::Address24::new(0xa000),
+            optimization,
             ..AssemblyOptions::default()
         },
     )
@@ -365,6 +379,7 @@ fn void_calls_remain_invalid_in_value_contexts() {
         &program,
         AssemblyOptions {
             cpu: CpuFamily::Dcpu,
+            stack_top: crate::target::Address24::new(0x1_fffe),
             ram_base: crate::target::Address24::new(0x8000),
             ..AssemblyOptions::default()
         },
@@ -380,6 +395,7 @@ fn ports_remain_rejected() {
         &program,
         AssemblyOptions {
             cpu: CpuFamily::Dcpu,
+            stack_top: crate::target::Address24::new(0x1_fffe),
             ram_base: crate::target::Address24::new(0x8000),
             ..AssemblyOptions::default()
         },
@@ -433,6 +449,7 @@ fn rejects_catalog_wide_results_and_volatile_block_access() {
         &wide,
         AssemblyOptions {
             cpu: CpuFamily::Dcpu,
+            stack_top: crate::target::Address24::new(0x1_fffe),
             ram_base: crate::target::Address24::new(0x8000),
             ..AssemblyOptions::default()
         },
@@ -452,6 +469,7 @@ fn rejects_catalog_wide_results_and_volatile_block_access() {
         &volatile,
         AssemblyOptions {
             cpu: CpuFamily::Dcpu,
+            stack_top: crate::target::Address24::new(0x1_fffe),
             ram_base: crate::target::Address24::new(0x8000),
             ..AssemblyOptions::default()
         },
@@ -505,4 +523,101 @@ fn preserves_two_results_through_user_function_calls() {
     assert!(run.halted, "{run:?}\n{assembly}");
     assert_eq!(run.result_code, 84, "{assembly}");
     assert_eq!(run.failure, None, "{assembly}");
+}
+
+#[test]
+fn preserves_direct_and_callback_reentry_frames() {
+    let optimization = crate::optimization::OptimizationOptions::new(0).unwrap();
+    let assembly = emit_with_optimization(
+        r#"
+            volatile mmio DEBUG_SEQUENCE: u16 = 0xfff0
+            volatile mmio DEBUG_VALUE: u16 = 0xfff1
+            volatile mmio RESULT: u16 = 0xfff2
+            volatile mmio HALT: u16 = 0xfff3
+            global callback: ptr<fn(u16)u16> = &callback_step
+
+            @extern fn direct(value: u16) -> u16 {
+                let local: u16 = value + 1
+                if value == 0 { return local }
+                return local + direct(value - 1)
+            }
+
+
+            @extern fn callback_step(value: u16) -> u16 {
+                let local: u16 = value + 1
+                if value == 0 { return local }
+                return local + callback(value - 1)
+            }
+
+            fn main() {
+                let direct_value: u16 = direct(4)
+                let callback_value: u16 = callback(3)
+                let total: u16 = direct_value + callback_value
+                RESULT = total
+                DEBUG_VALUE = total
+                DEBUG_SEQUENCE = 1
+                HALT = 1
+            }
+            "#,
+        optimization,
+        0x1_dffe,
+    );
+    let bytes = assemble_subset_at(CpuFamily::Dcpu, &assembly, 0)
+        .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
+    let run = TestRunner::default()
+        .run(
+            &TestImage {
+                cpu_family: CpuFamily::Dcpu,
+                base_addr: 0,
+                bytes,
+            },
+            &TestRunOptions {
+                instruction_budget: 5_000,
+                initial_ports: Vec::new(),
+                initial_memory: Vec::new(),
+                stack_top: 0x1_dffe,
+            },
+        )
+        .unwrap();
+
+    assert!(run.halted, "{run:?}\n{assembly}");
+    assert_eq!(run.debug_output, [25], "{assembly}");
+    assert_eq!(run.result_code, 25, "{assembly}");
+    assert_eq!(run.failure, None, "{assembly}");
+}
+
+#[test]
+fn uses_configured_stack_top_and_rejects_dcpu_interrupts() {
+    let program = parse_program(Path::new("dcpu.ezra"), "fn main() {}").unwrap();
+    let assembly = emit_dcpu_assembly_with_options(
+        &program,
+        AssemblyOptions {
+            cpu: CpuFamily::Dcpu,
+            stack_top: crate::target::Address24::new(0x1_fffa),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(assembly.contains("    set sp, 0xfffd"), "{assembly}");
+
+    let mut invalid_options = AssemblyOptions {
+        cpu: CpuFamily::Dcpu,
+        stack_top: crate::target::Address24::new(0x1_fffd),
+        ..AssemblyOptions::default()
+    };
+    invalid_options.ram_base = crate::target::Address24::new(0x8000);
+    let error = emit_dcpu_assembly_with_options(&program, invalid_options).unwrap_err();
+    assert!(error.message.contains("even byte address"), "{error}");
+
+    let interrupt = parse_program(Path::new("dcpu.ezra"), "interrupt fn main() {}").unwrap();
+    let error = emit_dcpu_assembly_with_options(
+        &interrupt,
+        AssemblyOptions {
+            cpu: CpuFamily::Dcpu,
+            stack_top: crate::target::Address24::new(0x1_fffe),
+            ..AssemblyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.message.contains("interrupt"), "{error}");
 }

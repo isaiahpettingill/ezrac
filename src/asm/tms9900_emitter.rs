@@ -176,10 +176,8 @@ impl Emitter {
         self.line("__ezra_start:");
         self.line("    lwpi >8300");
         self.line("    clr r9");
-        self.line(&format!(
-            "    li r10, >{:04X}",
-            self.options.stack_top.get().min(0xFFFF) & !1
-        ));
+        let stack_top = tms_stack_top(self.options.stack_top.get())?;
+        self.line(&format!("    li r10, >{stack_top:04X}"));
         self.emit_static_initializers(program)?;
         self.line("    bl @_main");
         self.line("__ezra_exit:");
@@ -2690,6 +2688,15 @@ fn tms_local_target() -> Target {
     }
 }
 
+fn tms_stack_top(stack_top: u32) -> Result<u16, Diagnostic> {
+    if stack_top > u16::MAX as u32 {
+        return Err(Diagnostic::new(
+            "TMS9900 stack_top exceeds the 16-bit address space",
+        ));
+    }
+    Ok((stack_top as u16) & !1)
+}
+
 fn plan_function_frame(
     function: &Function,
     model: &SemanticModel,
@@ -2717,13 +2724,19 @@ fn plan_function_frame(
         )
     })?;
 
-    let spill_bytes = planned
-        .allocation
-        .spill_slots
-        .iter()
-        .map(|slot| slot.offset.saturating_add(slot.size))
-        .max()
-        .unwrap_or(0);
+    let mut spill_bytes = 0;
+    for slot in &planned.allocation.spill_slots {
+        let end = slot
+            .offset
+            .checked_add(slot.size)
+            .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
+        spill_bytes = spill_bytes.max(end);
+    }
+    if spill_bytes > 1 << 15 {
+        return Err(Diagnostic::new(
+            "TMS9900 function frame exceeds the 16-bit signed frame displacement",
+        ));
+    }
     let local_bytes = u16::try_from(spill_bytes)
         .map_err(|_| Diagnostic::new("TMS9900 function frame is too large"))?;
     let mut locals = HashMap::new();
@@ -2750,10 +2763,15 @@ fn plan_function_frame(
                     .offset
                     .checked_add(slot.size)
                     .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
-                let offset = i16::try_from(end)
+                let offset = i32::try_from(end)
                     .ok()
                     .and_then(|end| end.checked_neg())
-                    .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
+                    .and_then(|offset| i16::try_from(offset).ok())
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "TMS9900 function frame exceeds the 16-bit signed frame displacement",
+                        )
+                    })?;
                 BindingLocation::Frame(offset)
             }
             Some(Location::Unused) | None => {

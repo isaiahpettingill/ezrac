@@ -6,6 +6,36 @@ The source ABI evaluates scalar values in `R0`, uses `R1` through `R8` as volati
 
 Source code supports 8- and 16-bit scalar variables, pointers and strings, calls, recursion, native multiplication and division/remainder lowering, bitwise operations, comparisons, loops, MMIO, inline assembly, and embedded byte data. Unreachable SDK functions are omitted. Safe parameterless straight-line wrappers are inlined when marked `@inline`; one-statement wrappers are also automatically inlined when their body is cheaper than the call/prologue/return sequence. Arrays, structs, 24-bit values, and variable shifts remain unsupported by this backend.
 
+## EZRA source ABI
+
+`AssemblyOptions.stack_top` selects the initial descending stack address. The
+emitter requires it to fit the TMS9900's 16-bit address space and aligns it to a
+word boundary. `R10` is the stack pointer and `R9` is the frame pointer. `R11`
+is the link register and is saved in each compiled frame. `R0` is the primary
+scalar result; a two-result function returns its values in `R0` and `R1`.
+
+A compiled prologue saves the incoming `R11` and `R9`, sets `R9` to the active
+frame, and allocates negative, word-aligned local/spill offsets. Parameters are
+at positive offsets beginning at `4(R9)`; scalar parameter slots are two bytes
+and 20-bit or wider values are rejected. Callers allocate a temporary argument
+area below the saved links, write arguments in source order, and restore that
+area after the call. The first nine arguments are also copied to `R0` through
+`R8` for naked SDK wrappers. `R0` through `R8` are caller-clobbered; compiled
+locals in `R6` through `R8` are spilled when they are live across a call or
+inline assembly. Frame displacements are checked before emission.
+
+Aggregate parameters and returns are not supported by this source ABI. Use
+pointers to caller-owned or frame-backed storage. Explicit globals, MMIO,
+embeds, and SDK state remain fixed-address data. A function pointer uses the
+same compiled call ABI and may re-enter an active function safely because each
+invocation has its own frame.
+
+Compiler-managed `interrupt` functions are unsupported. A TI-99/4A interrupt
+entry must be a `naked` assembly wrapper that handles the workspace, vector,
+status, acknowledgment, and `RTWP` rules, then calls compiled source only after
+establishing the normal `R9`/`R10` frame ABI. The wrapper must restore the
+hardware workspace before returning; the compiler does not do that work.
+
 ## Build
 
 From the repository root:

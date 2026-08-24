@@ -16,6 +16,33 @@ offsets, matching the rest of the EZRA build API.
 The optional `dcpu` feature uses [`dcpu16-core`](https://crates.io/crates/dcpu16-core)
 for DCPU emulator-backed compiler tests. The standalone assembler stays in EZRAC.
 
+## EZRA source ABI
+
+DCPU-16 source code uses word-addressed memory. `AssemblyOptions.stack_top` is a
+byte address; it must be even and no greater than `0x1FFFE`, and the emitter
+converts it to the DCPU word value used to initialize `SP`. The stack grows
+downward one word at a time. Compiler-managed automatic storage is never a
+fixed global slot.
+
+A compiled function saves `J` at `[J+0]` and the return PC at `[J+1]`. Scalar
+parameters are at `[J+2]`, `[J+3]`, and so on in source order. Register locals
+use `C`, `X`, `Y`, and `Z` when safe; values live across a call, inline assembly,
+or re-entry spill to negative `J`-relative frame slots. Address-taken locals and
+aggregate locals always have stable frame storage. Frame displacements are
+signed 16-bit values, so oversized frames are rejected.
+
+Callers evaluate arguments and push them right-to-left. A callee returns its
+first scalar result in `A` and its second scalar result in `EX`. Aggregate
+parameters and aggregate returns are not part of this source ABI; use pointers
+and caller-owned storage. Explicit globals, MMIO, embeds, and static SDK state
+remain at their configured fixed addresses.
+
+The source backend does not implement compiler-managed `interrupt` functions.
+Interrupt entry, register preservation, acknowledgment, and return must be
+written as a `naked` assembly wrapper using the platform's vector and hardware
+rules. A naked wrapper has no compiler-generated frame or operand binding and
+must preserve the DCPU stack ABI before calling compiled source.
+
 ## Examples
 
 Build the handwritten LEM1802 example or the limited scalar EZRA source example:

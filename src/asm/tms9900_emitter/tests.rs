@@ -239,6 +239,7 @@ fn emits_and_executes_scalar_source_on_libre99() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -304,6 +305,7 @@ fn emits_native_constant_shifts_and_tbir_power_of_two_multiply() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -392,6 +394,7 @@ fn emits_and_executes_unsigned_multiply_on_libre99() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -419,6 +422,7 @@ fn emits_and_executes_signed_multiply_on_libre99() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -492,6 +496,7 @@ fn emits_and_executes_byte_pointer_access_on_libre99() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -531,6 +536,7 @@ fn emits_and_executes_divide_and_remainder_on_libre99() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -570,6 +576,7 @@ fn passes_naked_wrapper_arguments_in_registers() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -672,6 +679,7 @@ fn omits_unreachable_functions_and_inlines_compact_wrappers() {
             load_addr: crate::target::Address24::new(0x0100),
             entry_addr: crate::target::Address24::new(0x0100),
             code_base: crate::target::Address24::new(0x0100),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -850,6 +858,7 @@ fn ti_embeds_are_rom_bytes_with_linked_pointer_labels() {
             load_addr: crate::target::Address24::new(0x6000),
             entry_addr: crate::target::Address24::new(0x6000),
             code_base: crate::target::Address24::new(0x6000),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             rodata_base: crate::target::Address24::new(0x6000),
             asset_base: crate::target::Address24::new(0x6000),
@@ -887,6 +896,7 @@ fn emits_a_bootable_ti99_cartridge_header() {
             load_addr: crate::target::Address24::new(0x6000),
             entry_addr: crate::target::Address24::new(0x6000),
             code_base: crate::target::Address24::new(0x6000),
+            stack_top: crate::target::Address24::new(0xFFFE),
             ram_base: crate::target::Address24::new(0xA000),
             ..AssemblyOptions::default()
         },
@@ -998,4 +1008,74 @@ fn preserves_two_results_through_user_function_calls() {
     }
 
     assert_eq!(ram.read_word(0xA000), 84, "{assembly}");
+}
+
+#[test]
+fn preserves_mutual_and_callback_reentry_frames() {
+    let assembly = emit(
+        r#"
+            global result: u16 = 0
+            global callback: ptr<fn(u16)u16> = &callback_step
+
+            fn direct(value: u16) -> u16 {
+                let local: u16 = value + 1
+                if value == 0 { return local }
+                return local + direct(value - 1)
+            }
+
+            fn even(value: u16) -> u16 {
+                if value == 0 { return 1 }
+                return odd(value - 1)
+            }
+
+            fn odd(value: u16) -> u16 {
+                if value == 0 { return 0 }
+                return even(value - 1)
+            }
+
+            fn callback_step(value: u16) -> u16 {
+                let local: u16 = value + 1
+                if value == 0 { return local }
+                return local + callback(value - 1)
+            }
+
+            fn main() {
+                let direct_value: u16 = direct(4)
+                let mutual_value: u16 = even(6)
+                let callback_value: u16 = callback(3)
+                result = direct_value + mutual_value + callback_value
+            }
+            "#,
+        test_options(),
+    );
+
+    assert!(assembly.contains("_direct:"), "{assembly}");
+    assert!(assembly.contains("_even:"), "{assembly}");
+    assert!(assembly.contains("_odd:"), "{assembly}");
+    assert!(assembly.contains("_callback_step:"), "{assembly}");
+    assert!(assembly.contains("    bl *r0"), "{assembly}");
+    assert!(assembly.contains("@>FFFE(r9)"), "{assembly}");
+    assert_eq!(
+        execute(&assembly, 5_000).read_word(0xA000),
+        26,
+        "{assembly}"
+    );
+}
+
+#[test]
+fn diagnoses_unsupported_interrupts_and_invalid_stack_tops() {
+    let interrupt = parse_program(Path::new("test.ezra"), "interrupt fn main() {}").unwrap();
+    let error = emit_tms9900_assembly_with_options(&interrupt, test_options()).unwrap_err();
+    assert!(error.message.contains("interrupt"), "{error}");
+
+    let program = parse_program(Path::new("test.ezra"), "fn main() {}").unwrap();
+    let mut custom = test_options();
+    custom.stack_top = crate::target::Address24::new(0xEFFE);
+    let assembly = emit_tms9900_assembly_with_options(&program, custom).unwrap();
+    assert!(assembly.contains("    li r10, >EFFE"), "{assembly}");
+
+    let mut options = test_options();
+    options.stack_top = crate::target::Address24::new(0x1_0000);
+    let error = emit_tms9900_assembly_with_options(&program, options).unwrap_err();
+    assert!(error.message.contains("stack_top"), "{error}");
 }

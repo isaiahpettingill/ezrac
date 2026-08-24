@@ -25,7 +25,7 @@ use crate::{
     },
 };
 
-/// Emit the initial MSP430 source backend.
+/// Emit the MSP430 source backend.
 ///
 /// The source backend uses a 16-bit scalar ABI. Values are evaluated in R4;
 /// R5 through R9 are arithmetic scratch registers, R10 through R12 hold
@@ -178,10 +178,12 @@ impl Emitter {
         }
         self.line("section .text");
         self.line("__ezra_start:");
-        self.line(&format!(
-            "    mov #0x{:04X}, r10",
-            self.options.stack_top.get().min(0xFFFF) & !1
-        ));
+        let stack_top = self.configured_stack_top()?;
+        if self.native_20() {
+            self.line(&format!("    mov.a #0x{stack_top:05X},r10"));
+        } else {
+            self.line(&format!("    mov #0x{stack_top:04X}, r10"));
+        }
         self.emit_static_initializers(program)?;
         self.line("    call #_main");
         self.line("__ezra_exit:");
@@ -191,7 +193,7 @@ impl Emitter {
                 && !function.name.contains('.')
                 && reachable.contains(&function.name)
                 && (function.name == "main"
-                    || !tms_compact_wrapper_candidate(function)
+                    || !msp430_compact_wrapper_candidate(function)
                     || self.recursive_functions.contains(&function.name)
                     || referenced_functions.contains(&function.name))
             {
@@ -219,7 +221,7 @@ impl Emitter {
                 Declaration::Function(function) if function.second_return_type.is_some() => {
                     let Some(first) = function.return_type.as_ref() else {
                         return Err(Diagnostic::new(format!(
-                            "TMS9900 two-result function `{}` must have a first return type",
+                            "MSP430 two-result function `{}` must have a first return type",
                             function.name
                         )));
                     };
@@ -228,7 +230,7 @@ impl Emitter {
                             .is_err()
                     {
                         return Err(Diagnostic::new(format!(
-                            "TMS9900 two-result function `{}` must return scalar values that fit in 16 bits",
+                            "MSP430 two-result function `{}` must return scalar values that fit in the target width",
                             function.name
                         )));
                     }
@@ -237,7 +239,7 @@ impl Emitter {
                     if function.second_return_type.is_some() =>
                 {
                     return Err(Diagnostic::new(format!(
-                        "TMS9900 external two-result function `{}` is unsupported; define a source function with the R0/R1 ABI",
+                        "MSP430 external two-result function `{}` is unsupported; define a source function with the R4/R5 ABI",
                         function.name
                     )));
                 }
@@ -266,7 +268,7 @@ impl Emitter {
                 .storage
                 .address
                 .checked_sub(self.options.asset_base.get())
-                .ok_or_else(|| Diagnostic::new("TMS9900 embed is below the asset base"))?;
+                .ok_or_else(|| Diagnostic::new("MSP430 embed is below the asset base"))?;
             if embed_offset > offset {
                 self.line(&format!("    ds {}", embed_offset - offset));
             }
@@ -282,7 +284,7 @@ impl Emitter {
             self.line(&format!("{}:", embed_end_label(&name)));
             offset = embed_offset
                 .checked_add(embed.storage.size)
-                .ok_or_else(|| Diagnostic::new("TMS9900 embed section is too large"))?;
+                .ok_or_else(|| Diagnostic::new("MSP430 embed section is too large"))?;
         }
         Ok(())
     }
@@ -408,7 +410,7 @@ impl Emitter {
         }
         if function.attrs.iter().any(|attr| attr == "interrupt") {
             return Err(Diagnostic::new(
-                "TMS9900 interrupt functions are not implemented; use a naked assembly wrapper",
+                "MSP430 interrupt functions are not implemented; use a naked assembly wrapper",
             ));
         }
 
@@ -462,10 +464,10 @@ impl Emitter {
             offset = offset
                 .checked_add(
                     i16::try_from(abi_slot_bytes(&self.model, &ty)?).map_err(|_| {
-                        Diagnostic::new("TMS9900 function parameter frame is too large")
+                        Diagnostic::new("MSP430 function parameter frame is too large")
                     })?,
                 )
-                .ok_or_else(|| Diagnostic::new("TMS9900 function parameter frame is too large"))?;
+                .ok_or_else(|| Diagnostic::new("MSP430 function parameter frame is too large"))?;
         }
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
@@ -528,7 +530,7 @@ impl Emitter {
                 self.bind(second_name.clone(), second_binding.clone())?;
                 let Expr::Call { path, args } = value else {
                     return Err(Diagnostic::new(
-                        "TMS9900 two-place binding requires a direct two-result call",
+                        "MSP430 two-place binding requires a direct two-result call",
                     ));
                 };
                 self.emit_call(path, args, true)?;
@@ -611,7 +613,7 @@ impl Emitter {
                 {
                     let Some(Expr::Call { path, args }) = value else {
                         return Err(Diagnostic::new(
-                            "TMS9900 two-result function must return a direct two-result call or `return first, second`",
+                            "MSP430 two-result function must return a direct two-result call or `return first, second`",
                         ));
                     };
                     self.emit_call(path, args, true)?;
@@ -637,14 +639,14 @@ impl Emitter {
                         .last()
                         .and_then(Clone::clone)
                         .ok_or_else(|| {
-                            Diagnostic::new("TMS9900 two-value return without two result types")
+                            Diagnostic::new("MSP430 two-value return without two result types")
                         })?;
                 let second_ty = self
                     .second_return_types
                     .last()
                     .and_then(Clone::clone)
                     .ok_or_else(|| {
-                        Diagnostic::new("TMS9900 two-value return without two result types")
+                        Diagnostic::new("MSP430 two-value return without two result types")
                     })?;
                 self.emit_expr(first, &first_ty)?;
                 self.line("    dect r10");
@@ -668,7 +670,7 @@ impl Emitter {
             } => {
                 if !inputs.is_empty() || !outputs.is_empty() {
                     return Err(Diagnostic::new(
-                        "TMS9900 inline asm operands are not implemented; use compiler-owned RAM or a naked wrapper",
+                        "MSP430 inline asm operands are not implemented; use compiler-owned RAM or a naked wrapper",
                     ));
                 }
                 for line in lines {
@@ -677,7 +679,7 @@ impl Emitter {
             }
             Stmt::Out { .. } => {
                 return Err(Diagnostic::new(
-                    "TMS9900 does not support separate port I/O; use TI-99/4A MMIO or CRU assembly",
+                    "MSP430 does not support separate port I/O; use TI-99/4A MMIO or CRU assembly",
                 ));
             }
             Stmt::Expr(expr) => self.emit_expr(expr, &Type::Named("u16".to_owned()))?,
@@ -695,7 +697,7 @@ impl Emitter {
                     .runtime_strings
                     .get(value)
                     .copied()
-                    .ok_or_else(|| Diagnostic::new("missing TMS9900 string storage"))?;
+                    .ok_or_else(|| Diagnostic::new("missing MSP430 string storage"))?;
                 self.load_immediate_typed(i64::from(storage.address), ty)?;
             }
             Expr::Ident(name) => self.load_ident(name, ty)?,
@@ -703,7 +705,7 @@ impl Emitter {
                 if let Some(function) = self.functions.get(name) {
                     if function.second_return_type.is_some() {
                         return Err(Diagnostic::new(format!(
-                            "TMS9900 function pointer cannot reference two-result function `{name}`"
+                            "MSP430 function pointer cannot reference two-result function `{name}`"
                         )));
                     }
                     self.load_address_label(&function_label(name), ty);
@@ -726,7 +728,7 @@ impl Emitter {
                         .or_else(|| self.model.embeds.get(name).map(|embed| embed.storage))
                         .ok_or_else(|| {
                             Diagnostic::new(format!(
-                                "TMS9900 backend can only take the address of a global or embed, not `{name}`"
+                                "MSP430 backend can only take the address of a global or embed, not `{name}`"
                             ))
                         })?;
                     self.load_immediate_typed(i64::from(storage.address), ty)?;
@@ -814,7 +816,7 @@ impl Emitter {
             | Expr::StructInit { .. }
             | Expr::In(_) => {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 expression `{expr:?}` is not implemented by the initial source backend"
+                    "MSP430 expression `{expr:?}` is not implemented by the initial source backend"
                 )));
             }
         }
@@ -841,11 +843,11 @@ impl Emitter {
         let resolution = intrinsics::CATALOG
             .validate_types_with_constants(&name, &types, &constants)
             .map_err(|error| Diagnostic::new(error.to_string()))?;
-        self.validate_tms_intrinsic(&resolution, args)?;
+        self.validate_msp430_intrinsic(&resolution, args)?;
         Ok(Some(resolution))
     }
 
-    fn validate_tms_intrinsic(
+    fn validate_msp430_intrinsic(
         &self,
         resolution: &intrinsics::IntrinsicResolution,
         args: &[Expr],
@@ -866,7 +868,7 @@ impl Emitter {
                 && info.bits > 16
             {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 intrinsic `{}` does not support `{ty:?}`; scalar values are at most 16 bits",
+                    "MSP430 intrinsic `{}` does not support `{ty:?}`; scalar values are at most 16 bits",
                     resolution.canonical_name()
                 )));
             }
@@ -876,7 +878,7 @@ impl Emitter {
                 && info.bits > 16
             {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 intrinsic `{}` does not support `{ty:?}` results",
+                    "MSP430 intrinsic `{}` does not support `{ty:?}` results",
                     resolution.canonical_name()
                 )));
             }
@@ -884,13 +886,13 @@ impl Emitter {
         if let Some(index) = length_argument {
             let length = self.model.const_value(&args[index]).map_err(|_| {
                 Diagnostic::new(format!(
-                    "TMS9900 intrinsic `{}` requires a constant length that fits in 16 bits",
+                    "MSP430 intrinsic `{}` requires a constant length that fits in 16 bits",
                     resolution.canonical_name()
                 ))
             })?;
             if !(0..=u16::MAX as i64).contains(&length) {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 intrinsic `{}` length {length} is outside the 16-bit address space",
+                    "MSP430 intrinsic `{}` length {length} is outside the 16-bit address space",
                     resolution.canonical_name()
                 )));
             }
@@ -901,7 +903,7 @@ impl Emitter {
         ) && self.intrinsic_accesses_volatile_memory(resolution.descriptor.operation, args)
         {
             return Err(Diagnostic::new(format!(
-                "TMS9900 intrinsic `{}` cannot access volatile memory",
+                "MSP430 intrinsic `{}` cannot access volatile memory",
                 resolution.canonical_name()
             )));
         }
@@ -932,10 +934,10 @@ impl Emitter {
         indexes
             .iter()
             .copied()
-            .any(|index| self.is_volatile_tms_expr(&args[index]))
+            .any(|index| self.is_volatile_msp430_expr(&args[index]))
     }
 
-    fn is_volatile_tms_expr(&self, expr: &Expr) -> bool {
+    fn is_volatile_msp430_expr(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Ident(name) => self
                 .model
@@ -943,7 +945,7 @@ impl Emitter {
                 .get(name)
                 .is_some_and(|(_, _, volatile)| *volatile),
             Expr::Cast { expr, .. } | Expr::BankedPointer { pointer: expr, .. } => {
-                self.is_volatile_tms_expr(expr)
+                self.is_volatile_msp430_expr(expr)
             }
             _ => false,
         }
@@ -956,52 +958,54 @@ impl Emitter {
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
         match resolution.descriptor.operation {
-            IntrinsicOperation::Bits(operation) => self.emit_tms_bits(operation, args, resolution),
-            IntrinsicOperation::Int(operation) => self.emit_tms_int(operation, args, resolution),
-            IntrinsicOperation::Mem(operation) => self.emit_tms_mem(operation, args, resolution),
+            IntrinsicOperation::Bits(operation) => {
+                self.emit_msp430_bits(operation, args, resolution)
+            }
+            IntrinsicOperation::Int(operation) => self.emit_msp430_int(operation, args, resolution),
+            IntrinsicOperation::Mem(operation) => self.emit_msp430_mem(operation, args, resolution),
         }
         .map_err(|error| {
             Diagnostic::new(format!(
-                "TMS9900 intrinsic `{}`: {}",
+                "MSP430 intrinsic `{}`: {}",
                 resolution.canonical_name(),
                 error.message
             ))
         })
     }
 
-    fn emit_tms_argument(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+    fn emit_msp430_argument(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
         if matches!(intrinsics::integer_info(ty), Some(info) if info.bits > 16) {
             return self.load_immediate(self.model.const_value(expr)?);
         }
         self.emit_expr(expr, ty)
     }
 
-    fn emit_tms_push_argument(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
-        self.emit_tms_argument(expr, ty)?;
+    fn emit_msp430_push_argument(&mut self, expr: &Expr, ty: &Type) -> Result<(), Diagnostic> {
+        self.emit_msp430_argument(expr, ty)?;
         self.line("    dect r10");
         self.line("    mov r0, *r10");
         Ok(())
     }
 
-    fn emit_tms_two_arguments(
+    fn emit_msp430_two_arguments(
         &mut self,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
-        self.emit_tms_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_msp430_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_argument(&args[1], &resolution.argument_types[1])?;
         self.line("    mov r0, r1");
         self.line("    mov *r10+, r0");
         Ok(())
     }
 
-    fn emit_tms_three_arguments(
+    fn emit_msp430_three_arguments(
         &mut self,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
         for (arg, ty) in args.iter().zip(&resolution.argument_types) {
-            self.emit_tms_push_argument(arg, ty)?;
+            self.emit_msp430_push_argument(arg, ty)?;
         }
         self.line("    mov *r10+, r2");
         self.line("    mov *r10+, r1");
@@ -1009,18 +1013,18 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_bits(
+    fn emit_msp430_bits(
         &mut self,
         operation: BitsIntrinsic,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
         let ty = &resolution.argument_types[0];
-        let bits = tms_intrinsic_integer_bits(ty)?;
-        let mask = tms_intrinsic_integer_mask(bits);
+        let bits = msp430_intrinsic_integer_bits(ty)?;
+        let mask = msp430_intrinsic_integer_mask(bits);
         match operation {
             BitsIntrinsic::RotateLeft | BitsIntrinsic::RotateRight => {
-                self.emit_tms_two_arguments(args, resolution)?;
+                self.emit_msp430_two_arguments(args, resolution)?;
                 self.line(&format!("    andi r1, >{:04X}", bits - 1));
                 self.line("    mov r1, r2");
                 self.line(&format!("    li r3, >{bits:04X}"));
@@ -1057,12 +1061,12 @@ impl Emitter {
             | BitsIntrinsic::Set
             | BitsIntrinsic::Clear
             | BitsIntrinsic::Toggle => {
-                self.emit_tms_argument(&args[0], ty)?;
+                self.emit_msp430_argument(&args[0], ty)?;
                 let bit = 1u16 << self.model.const_value(&args[1])? as u16;
                 match operation {
                     BitsIntrinsic::Test => {
                         self.line(&format!("    andi r0, >{bit:04X}"));
-                        self.emit_tms_boolean_from_r0();
+                        self.emit_msp430_boolean_from_r0();
                     }
                     BitsIntrinsic::Set => self.line(&format!("    ori r0, >{bit:04X}")),
                     BitsIntrinsic::Clear => self.line(&format!("    andi r0, >{:04X}", !bit)),
@@ -1079,20 +1083,20 @@ impl Emitter {
                 }
             }
             BitsIntrinsic::Extract => {
-                self.emit_tms_argument(&args[0], ty)?;
+                self.emit_msp430_argument(&args[0], ty)?;
                 let offset = self.model.const_value(&args[1])? as u16;
                 let width = self.model.const_value(&args[2])? as u16;
                 self.line(&format!("    srl r0, {offset}"));
                 self.line(&format!(
                     "    andi r0, >{:04X}",
-                    tms_intrinsic_integer_mask(width)
+                    msp430_intrinsic_integer_mask(width)
                 ));
             }
             BitsIntrinsic::Insert => {
-                self.emit_tms_two_arguments(args, resolution)?;
+                self.emit_msp430_two_arguments(args, resolution)?;
                 let offset = self.model.const_value(&args[2])? as u16;
                 let width = self.model.const_value(&args[3])? as u16;
-                let field = tms_intrinsic_integer_mask(width);
+                let field = msp430_intrinsic_integer_mask(width);
                 let shifted = field << offset;
                 self.line(&format!("    andi r1, >{field:04X}"));
                 self.line(&format!("    sla r1, {offset}"));
@@ -1101,25 +1105,25 @@ impl Emitter {
                 self.line(&format!("    andi r0, >{mask:04X}"));
             }
             BitsIntrinsic::ByteSwap => {
-                self.emit_tms_argument(&args[0], ty)?;
+                self.emit_msp430_argument(&args[0], ty)?;
                 self.line("    swpb r0");
             }
-            BitsIntrinsic::Reverse => self.emit_tms_bit_loop(&args[0], ty, false)?,
-            BitsIntrinsic::CountOnes => self.emit_tms_bit_loop(&args[0], ty, true)?,
-            BitsIntrinsic::LeadingZeros => self.emit_tms_zero_count(&args[0], ty, true)?,
-            BitsIntrinsic::TrailingZeros => self.emit_tms_zero_count(&args[0], ty, false)?,
+            BitsIntrinsic::Reverse => self.emit_msp430_bit_loop(&args[0], ty, false)?,
+            BitsIntrinsic::CountOnes => self.emit_msp430_bit_loop(&args[0], ty, true)?,
+            BitsIntrinsic::LeadingZeros => self.emit_msp430_zero_count(&args[0], ty, true)?,
+            BitsIntrinsic::TrailingZeros => self.emit_msp430_zero_count(&args[0], ty, false)?,
         }
         Ok(())
     }
 
-    fn emit_tms_bit_loop(
+    fn emit_msp430_bit_loop(
         &mut self,
         expr: &Expr,
         ty: &Type,
         count_ones: bool,
     ) -> Result<(), Diagnostic> {
-        let bits = tms_intrinsic_integer_bits(ty)?;
-        self.emit_tms_argument(expr, ty)?;
+        let bits = msp430_intrinsic_integer_bits(ty)?;
+        self.emit_msp430_argument(expr, ty)?;
         self.line("    mov r0, r1");
         self.line("    clr r2");
         self.line(&format!("    li r3, >{bits:04X}"));
@@ -1146,20 +1150,20 @@ impl Emitter {
         if count_ones {
             self.line(&format!(
                 "    andi r0, >{:04X}",
-                tms_intrinsic_integer_mask(bits)
+                msp430_intrinsic_integer_mask(bits)
             ));
         }
         Ok(())
     }
 
-    fn emit_tms_zero_count(
+    fn emit_msp430_zero_count(
         &mut self,
         expr: &Expr,
         ty: &Type,
         leading: bool,
     ) -> Result<(), Diagnostic> {
-        let bits = tms_intrinsic_integer_bits(ty)?;
-        self.emit_tms_argument(expr, ty)?;
+        let bits = msp430_intrinsic_integer_bits(ty)?;
+        self.emit_msp430_argument(expr, ty)?;
         self.line("    mov r0, r1");
         self.line("    clr r2");
         self.line(&format!("    li r3, >{bits:04X}"));
@@ -1188,7 +1192,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_int(
+    fn emit_msp430_int(
         &mut self,
         operation: IntIntrinsic,
         args: &[Expr],
@@ -1197,32 +1201,33 @@ impl Emitter {
         let ty = &resolution.argument_types[0];
         match operation {
             IntIntrinsic::WideningMul | IntIntrinsic::MulHigh | IntIntrinsic::FullMul => {
-                self.emit_tms_product(operation, ty, args, resolution)?
+                self.emit_msp430_product(operation, ty, args, resolution)?
             }
-            IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => self.emit_tms_saturating(
-                operation == IntIntrinsic::SaturatingSub,
-                ty,
-                args,
-                resolution,
-            )?,
-            IntIntrinsic::Divmod => self.emit_tms_divmod(ty, args, resolution)?,
+            IntIntrinsic::SaturatingAdd | IntIntrinsic::SaturatingSub => self
+                .emit_msp430_saturating(
+                    operation == IntIntrinsic::SaturatingSub,
+                    ty,
+                    args,
+                    resolution,
+                )?,
+            IntIntrinsic::Divmod => self.emit_msp430_divmod(ty, args, resolution)?,
             IntIntrinsic::AddCarry | IntIntrinsic::SubBorrow => {
-                self.emit_tms_carry(operation == IntIntrinsic::SubBorrow, ty, args, resolution)?
+                self.emit_msp430_carry(operation == IntIntrinsic::SubBorrow, ty, args, resolution)?
             }
         }
         Ok(())
     }
 
-    fn emit_tms_product(
+    fn emit_msp430_product(
         &mut self,
         operation: IntIntrinsic,
         ty: &Type,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        let bits = tms_intrinsic_integer_bits(ty)?;
-        let signed = tms_intrinsic_integer_signed(ty);
-        self.emit_tms_two_arguments(args, resolution)?;
+        let bits = msp430_intrinsic_integer_bits(ty)?;
+        let signed = msp430_intrinsic_integer_signed(ty);
+        self.emit_msp430_two_arguments(args, resolution)?;
         if bits == 8 {
             if signed {
                 self.line("    sla r0, 8");
@@ -1292,17 +1297,17 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_saturating(
+    fn emit_msp430_saturating(
         &mut self,
         subtract: bool,
         ty: &Type,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        let bits = tms_intrinsic_integer_bits(ty)?;
-        let mask = tms_intrinsic_integer_mask(bits);
-        self.emit_tms_two_arguments(args, resolution)?;
-        if !tms_intrinsic_integer_signed(ty) {
+        let bits = msp430_intrinsic_integer_bits(ty)?;
+        let mask = msp430_intrinsic_integer_mask(bits);
+        self.emit_msp430_two_arguments(args, resolution)?;
+        if !msp430_intrinsic_integer_signed(ty) {
             if subtract {
                 let zero = self.next_label("intrinsic_sat_zero");
                 let done = self.next_label("intrinsic_sat_done");
@@ -1380,7 +1385,7 @@ impl Emitter {
         self.line(&format!("{clamp_max}:"));
         self.line(&format!(
             "    li r0, >{:04X}",
-            tms_intrinsic_integer_mask(bits - 1)
+            msp430_intrinsic_integer_mask(bits - 1)
         ));
         self.line(&format!("    b @{done}"));
         self.line(&format!("{clamp_min}:"));
@@ -1390,15 +1395,15 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_divmod(
+    fn emit_msp430_divmod(
         &mut self,
         ty: &Type,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        let bits = tms_intrinsic_integer_bits(ty)?;
-        let signed = tms_intrinsic_integer_signed(ty);
-        self.emit_tms_two_arguments(args, resolution)?;
+        let bits = msp430_intrinsic_integer_bits(ty)?;
+        let signed = msp430_intrinsic_integer_signed(ty);
+        self.emit_msp430_two_arguments(args, resolution)?;
         if bits == 8 {
             if signed {
                 self.line("    sla r0, 8");
@@ -1465,16 +1470,16 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_carry(
+    fn emit_msp430_carry(
         &mut self,
         subtract: bool,
         ty: &Type,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        let bits = tms_intrinsic_integer_bits(ty)?;
-        let mask = tms_intrinsic_integer_mask(bits);
-        self.emit_tms_three_arguments(args, resolution)?;
+        let bits = msp430_intrinsic_integer_bits(ty)?;
+        let mask = msp430_intrinsic_integer_mask(bits);
+        self.emit_msp430_three_arguments(args, resolution)?;
         self.line("    andi r2, >0001");
         let set = self.next_label("intrinsic_carry_set");
         let done = self.next_label("intrinsic_carry_done");
@@ -1515,7 +1520,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_mem(
+    fn emit_msp430_mem(
         &mut self,
         operation: MemIntrinsic,
         args: &[Expr],
@@ -1523,11 +1528,11 @@ impl Emitter {
     ) -> Result<(), Diagnostic> {
         match operation {
             MemIntrinsic::CopyNonoverlapping | MemIntrinsic::Move => {
-                self.emit_tms_copy_or_move(operation == MemIntrinsic::Move, args, resolution)
+                self.emit_msp430_copy_or_move(operation == MemIntrinsic::Move, args, resolution)
             }
-            MemIntrinsic::Fill => self.emit_tms_fill(args, resolution),
-            MemIntrinsic::FindByte => self.emit_tms_find_byte(args, resolution),
-            MemIntrinsic::Compare => self.emit_tms_compare(args, resolution),
+            MemIntrinsic::Fill => self.emit_msp430_fill(args, resolution),
+            MemIntrinsic::FindByte => self.emit_msp430_find_byte(args, resolution),
+            MemIntrinsic::Compare => self.emit_msp430_compare(args, resolution),
             MemIntrinsic::LoadLe16
             | MemIntrinsic::LoadBe16
             | MemIntrinsic::LoadLe24
@@ -1537,7 +1542,7 @@ impl Emitter {
                         "24-bit memory loads need a 24-bit target value",
                     ));
                 }
-                self.emit_tms_load16(operation == MemIntrinsic::LoadBe16, args, resolution)
+                self.emit_msp430_load16(operation == MemIntrinsic::LoadBe16, args, resolution)
             }
             MemIntrinsic::StoreLe16
             | MemIntrinsic::StoreBe16
@@ -1548,22 +1553,22 @@ impl Emitter {
                         "24-bit memory stores need a 24-bit target value",
                     ));
                 }
-                self.emit_tms_store16(operation == MemIntrinsic::StoreBe16, args, resolution)
+                self.emit_msp430_store16(operation == MemIntrinsic::StoreBe16, args, resolution)
             }
-            MemIntrinsic::Peek8 => self.emit_tms_peek8(args, resolution),
-            MemIntrinsic::Poke8 => self.emit_tms_poke8(args, resolution),
+            MemIntrinsic::Peek8 => self.emit_msp430_peek8(args, resolution),
+            MemIntrinsic::Poke8 => self.emit_msp430_poke8(args, resolution),
         }
     }
 
-    fn emit_tms_copy_or_move(
+    fn emit_msp430_copy_or_move(
         &mut self,
         move_semantics: bool,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
-        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
-        self.emit_tms_push_argument(&args[2], &resolution.argument_types[2])?;
+        self.emit_msp430_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_msp430_push_argument(&args[2], &resolution.argument_types[2])?;
         self.line("    mov *r10+, r2");
         self.line("    mov *r10+, r4");
         self.line("    mov *r10+, r3");
@@ -1581,15 +1586,15 @@ impl Emitter {
             self.line("    dec r0");
             self.line("    a r0, r3");
             self.line("    a r0, r4");
-            self.emit_tms_copy_loop(true, &done);
+            self.emit_msp430_copy_loop(true, &done);
             self.line(&format!("{forward}:"));
         }
-        self.emit_tms_copy_loop(false, &done);
+        self.emit_msp430_copy_loop(false, &done);
         self.line(&format!("{done}:"));
         Ok(())
     }
 
-    fn emit_tms_copy_loop(&mut self, backward: bool, done: &str) {
+    fn emit_msp430_copy_loop(&mut self, backward: bool, done: &str) {
         let loop_label = self.next_label("intrinsic_copy_loop");
         self.line(&format!("{loop_label}:"));
         self.line("    clr r1");
@@ -1607,14 +1612,14 @@ impl Emitter {
         self.line(&format!("    b @{done}"));
     }
 
-    fn emit_tms_fill(
+    fn emit_msp430_fill(
         &mut self,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
-        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
-        self.emit_tms_push_argument(&args[2], &resolution.argument_types[2])?;
+        self.emit_msp430_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_msp430_push_argument(&args[2], &resolution.argument_types[2])?;
         self.line("    mov *r10+, r2");
         self.line("    mov *r10+, r4");
         self.line("    mov *r10+, r3");
@@ -1632,14 +1637,14 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_find_byte(
+    fn emit_msp430_find_byte(
         &mut self,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
-        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
-        self.emit_tms_argument(&args[2], &resolution.argument_types[2])?;
+        self.emit_msp430_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_msp430_argument(&args[2], &resolution.argument_types[2])?;
         self.line("    mov r0, r5");
         self.line("    mov *r10+, r4");
         self.line("    mov *r10+, r3");
@@ -1669,14 +1674,14 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_compare(
+    fn emit_msp430_compare(
         &mut self,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
-        self.emit_tms_push_argument(&args[1], &resolution.argument_types[1])?;
-        self.emit_tms_push_argument(&args[2], &resolution.argument_types[2])?;
+        self.emit_msp430_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_push_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_msp430_push_argument(&args[2], &resolution.argument_types[2])?;
         self.line("    mov *r10+, r2");
         self.line("    mov *r10+, r4");
         self.line("    mov *r10+, r3");
@@ -1708,13 +1713,13 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_load16(
+    fn emit_msp430_load16(
         &mut self,
         big_endian: bool,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_argument(&args[0], &resolution.argument_types[0])?;
         self.line("    mov r0, r3");
         self.line("    clr r0");
         self.line("    movb *r3, r0");
@@ -1733,14 +1738,14 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_store16(
+    fn emit_msp430_store16(
         &mut self,
         big_endian: bool,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
-        self.emit_tms_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_msp430_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_argument(&args[1], &resolution.argument_types[1])?;
         self.line("    mov *r10+, r3");
         if big_endian {
             self.line("    mov r0, r4");
@@ -1758,28 +1763,28 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_tms_peek8(
+    fn emit_msp430_peek8(
         &mut self,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_argument(&args[0], &resolution.argument_types[0])?;
         self.load_indirect_r0(&Type::Named("u8".to_owned()))
     }
 
-    fn emit_tms_poke8(
+    fn emit_msp430_poke8(
         &mut self,
         args: &[Expr],
         resolution: &intrinsics::IntrinsicResolution,
     ) -> Result<(), Diagnostic> {
-        self.emit_tms_push_argument(&args[0], &resolution.argument_types[0])?;
-        self.emit_tms_argument(&args[1], &resolution.argument_types[1])?;
+        self.emit_msp430_push_argument(&args[0], &resolution.argument_types[0])?;
+        self.emit_msp430_argument(&args[1], &resolution.argument_types[1])?;
         self.line("    mov *r10+, r1");
         self.line("    movb r0, *r1");
         Ok(())
     }
 
-    fn emit_tms_boolean_from_r0(&mut self) {
+    fn emit_msp430_boolean_from_r0(&mut self) {
         let yes = self.next_label("intrinsic_true");
         let done = self.next_label("intrinsic_bool_done");
         self.line("    ci r0, 0");
@@ -1803,13 +1808,13 @@ impl Emitter {
         if let Some(resolution) = self.resolve_intrinsic(path, args)? {
             if resolution.result_count().as_usize() == 2 && !two_results {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 two-result intrinsic `{}` requires a two-result binding",
+                    "MSP430 two-result intrinsic `{}` requires a two-result binding",
                     resolution.canonical_name()
                 )));
             }
             if resolution.result_count().as_usize() != 2 && two_results {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 intrinsic `{}` does not return two values",
+                    "MSP430 intrinsic `{}` does not return two values",
                     resolution.canonical_name()
                 )));
             }
@@ -1829,7 +1834,7 @@ impl Emitter {
         } else {
             if path.len() != 1 {
                 return Err(Diagnostic::new(format!(
-                    "unknown TMS9900 function `{}`",
+                    "unknown MSP430 function `{}`",
                     path.join(".")
                 )));
             }
@@ -1837,7 +1842,7 @@ impl Emitter {
             let pointer_type = self.model.resolved_type(&pointer_type)?;
             let Type::Ptr(inner) = pointer_type.clone() else {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 function pointer call requires `ptr<fn(...)>`, got `{pointer_type:?}`"
+                    "MSP430 function pointer call requires `ptr<fn(...)>`, got `{pointer_type:?}`"
                 )));
             };
             let Type::Function {
@@ -1846,7 +1851,7 @@ impl Emitter {
             } = *inner
             else {
                 return Err(Diagnostic::new(format!(
-                    "TMS9900 function pointer call requires `ptr<fn(...)>`, got `{pointer_type:?}`"
+                    "MSP430 function pointer call requires `ptr<fn(...)>`, got `{pointer_type:?}`"
                 )));
             };
             (
@@ -1862,10 +1867,10 @@ impl Emitter {
         if signature.second_return_type.is_some() != two_results {
             return Err(Diagnostic::new(if signature.second_return_type.is_some() {
                 format!(
-                    "TMS9900 two-result call `{name}` cannot be used where one result is expected"
+                    "MSP430 two-result call `{name}` cannot be used where one result is expected"
                 )
             } else {
-                format!("TMS9900 call `{name}` does not return two values")
+                format!("MSP430 call `{name}` does not return two values")
             }));
         }
         if args.len() != signature.params.len() {
@@ -1877,7 +1882,7 @@ impl Emitter {
         }
         if args.len() > 9 {
             return Err(Diagnostic::new(format!(
-                "TMS9900 function `{name}` has {} arguments; the target ABI supports at most 9",
+                "MSP430 function `{name}` has {} arguments; the target ABI supports at most 9",
                 args.len()
             )));
         }
@@ -1889,7 +1894,7 @@ impl Emitter {
                 let bytes = i32::from(bytes?);
                 total
                     .checked_add(bytes)
-                    .ok_or_else(|| Diagnostic::new("TMS9900 argument frame is too large"))
+                    .ok_or_else(|| Diagnostic::new("MSP430 argument frame is too large"))
             })?;
         self.line("    dect r10");
         self.line("    mov r1, *r10");
@@ -1900,7 +1905,7 @@ impl Emitter {
             self.store_argument_r0(offset, ty)?;
             offset = offset
                 .checked_add(abi_slot_bytes(&self.model, ty)?)
-                .ok_or_else(|| Diagnostic::new("TMS9900 argument frame is too large"))?;
+                .ok_or_else(|| Diagnostic::new("MSP430 argument frame is too large"))?;
         }
         // Compiled functions read arguments from their stack frame. Mirroring
         // the first nine values in R0..R8 preserves the naked SDK wrapper ABI.
@@ -1910,7 +1915,7 @@ impl Emitter {
             self.move_value(0, index as u8, ty);
             offset = offset
                 .checked_add(abi_slot_bytes(&self.model, ty)?)
-                .ok_or_else(|| Diagnostic::new("TMS9900 argument frame is too large"))?;
+                .ok_or_else(|| Diagnostic::new("MSP430 argument frame is too large"))?;
         }
         if indirect {
             let pointer_type = self.named_type(name)?;
@@ -1936,7 +1941,7 @@ impl Emitter {
         let Some(body) = inline_void_body(&function) else {
             return Ok(false);
         };
-        if !tms_compact_wrapper_candidate(&function)
+        if !msp430_compact_wrapper_candidate(&function)
             || self.recursive_functions.contains(name)
             || self.inline_stack.iter().any(|active| active == name)
         {
@@ -2084,7 +2089,7 @@ impl Emitter {
         self.line(&format!("    jeq {zero}"));
         self.line(&format!("    ci r0, {}", bits - 1));
         self.line(&format!("    jh {overflow}"));
-        // Per the TI TMS9900 Programmer's Guide, a zero instruction count takes
+        // Per the TI MSP430 Programmer's Guide, a zero instruction count takes
         // the count from the low four bits of R0. Expression evaluation already
         // places the value in R1 and the runtime count in R0.
         let mnemonic = if right && signed {
@@ -2300,7 +2305,7 @@ impl Emitter {
             self.line("    sla r0, 1");
         } else if element_size != 1 {
             return Err(Diagnostic::new(
-                "TMS9900 dynamic array indexing supports one- and two-byte elements only",
+                "MSP430 dynamic array indexing supports one- and two-byte elements only",
             ));
         }
         self.line(&format!("    li r1, >{:04X}", storage.address));
@@ -2342,7 +2347,7 @@ impl Emitter {
         if let Some((address, ty, _)) = self.model.mmio.get(name) {
             return self.load_address_r0(*address, &ty.clone());
         }
-        Err(Diagnostic::new(format!("unknown TMS9900 value `{name}`")))
+        Err(Diagnostic::new(format!("unknown MSP430 value `{name}`")))
     }
 
     fn load_place(&mut self, place: &Place, ty: &Type) -> Result<(), Diagnostic> {
@@ -2353,7 +2358,7 @@ impl Emitter {
                 self.load_indirect_r0(ty)
             }
             _ => Err(Diagnostic::new(
-                "this assignment target is not implemented by the initial TMS9900 source backend",
+                "this assignment target is not implemented by the initial MSP430 source backend",
             )),
         }
     }
@@ -2372,7 +2377,7 @@ impl Emitter {
                     return self.store_r0_address(*address, &target_ty.clone());
                 }
                 Err(Diagnostic::new(format!(
-                    "unknown TMS9900 assignment target `{name}`"
+                    "unknown MSP430 assignment target `{name}`"
                 )))
             }
             Place::Deref(pointer) => {
@@ -2387,7 +2392,7 @@ impl Emitter {
                 Ok(())
             }
             _ => Err(Diagnostic::new(
-                "this assignment target is not implemented by the initial TMS9900 source backend",
+                "this assignment target is not implemented by the initial MSP430 source backend",
             )),
         }
     }
@@ -2405,7 +2410,7 @@ impl Emitter {
                     return self.model.resolved_type(ty);
                 }
                 Err(Diagnostic::new(format!(
-                    "unknown TMS9900 assignment target `{name}`"
+                    "unknown MSP430 assignment target `{name}`"
                 )))
             }
             Place::Deref(expr) => match self.model.resolved_type(&self.expr_type(expr)?)? {
@@ -2413,7 +2418,7 @@ impl Emitter {
                 _ => Err(Diagnostic::new("dereference requires pointer")),
             },
             _ => Err(Diagnostic::new(
-                "this assignment target is not implemented by the initial TMS9900 source backend",
+                "this assignment target is not implemented by the initial MSP430 source backend",
             )),
         }
     }
@@ -2441,7 +2446,7 @@ impl Emitter {
                 if let Some(function) = self.functions.get(name) {
                     if function.second_return_type.is_some() {
                         return Err(Diagnostic::new(format!(
-                            "TMS9900 function pointer cannot reference two-result function `{name}`"
+                            "MSP430 function pointer cannot reference two-result function `{name}`"
                         )));
                     }
                     Ok(Type::Ptr(Box::new(Type::Function {
@@ -2470,7 +2475,7 @@ impl Emitter {
                 if let Some(resolution) = self.resolve_intrinsic(path, args)? {
                     return resolution.result_types.first().cloned().ok_or_else(|| {
                         Diagnostic::new(format!(
-                            "TMS9900 intrinsic `{}` does not return a value",
+                            "MSP430 intrinsic `{}` does not return a value",
                             resolution.canonical_name()
                         ))
                     });
@@ -2515,7 +2520,7 @@ impl Emitter {
                 _ => Err(Diagnostic::new("indexing requires an array")),
             },
             _ => Err(Diagnostic::new(
-                "expression type is not implemented by the initial TMS9900 source backend",
+                "expression type is not implemented by the initial MSP430 source backend",
             )),
         }
     }
@@ -2666,7 +2671,7 @@ impl Emitter {
     fn load_immediate(&mut self, value: i64) -> Result<(), Diagnostic> {
         if !(-32768..=65535).contains(&value) {
             return Err(Diagnostic::new(format!(
-                "TMS9900 immediate `{value}` is outside 16 bits"
+                "MSP430 immediate `{value}` is outside 16 bits"
             )));
         }
         self.line(&format!("    li r0, >{:04X}", value as u16));
@@ -2695,7 +2700,7 @@ impl Emitter {
         self.binding(name)
             .map(|binding| binding.ty)
             .or_else(|| self.model.global_types.get(name).cloned())
-            .ok_or_else(|| Diagnostic::new(format!("unknown TMS9900 value `{name}`")))
+            .ok_or_else(|| Diagnostic::new(format!("unknown MSP430 value `{name}`")))
     }
 
     fn jump_loop(&mut self, continue_loop: bool) -> Result<(), Diagnostic> {
@@ -2733,6 +2738,17 @@ impl Emitter {
         if !translated.ends_with('\n') {
             self.out.push('\n');
         }
+    }
+
+    fn configured_stack_top(&self) -> Result<u32, Diagnostic> {
+        let maximum = if self.native_20() { 0xF_FFFF } else { 0xFFFF };
+        let stack_top = self.options.stack_top.get();
+        if stack_top > maximum {
+            return Err(Diagnostic::new(format!(
+                "MSP430 stack_top 0x{stack_top:X} exceeds the target address space"
+            )));
+        }
+        Ok(stack_top & !1)
     }
 
     fn native_20(&self) -> bool {
@@ -2867,7 +2883,7 @@ impl Emitter {
     }
 }
 
-/// Translate the compact TMS-shaped instruction selection used by this initial
+/// Translate the compact internal instruction selection used by this initial
 /// 16-bit backend into real MSP430 syntax. Keeping this at the output boundary
 /// avoids duplicating the source lowering and register-allocation logic while
 /// still making the generated assembly usable by the MSP430 assembler.
@@ -3055,17 +3071,17 @@ fn translate_msp430_shift(mnemonic: &str, operands: &str) -> String {
         .join("\n")
 }
 
-const TMS_LOCAL_REGISTERS: [u8; 3] = [6, 7, 8];
-const TMS_SCALAR_WORD_CLASS: RegClass = RegClass(0);
-const TMS_STACK_SPILL_CLASS: SpillClassId = SpillClassId(0);
+const MSP430_LOCAL_REGISTERS: [u8; 3] = [6, 7, 8];
+const MSP430_SCALAR_WORD_CLASS: RegClass = RegClass(0);
+const MSP430_STACK_SPILL_CLASS: SpillClassId = SpillClassId(0);
 
-fn tms_local_target() -> Target {
+fn msp430_local_target() -> Target {
     Target {
-        units: TMS_LOCAL_REGISTERS
+        units: MSP430_LOCAL_REGISTERS
             .iter()
             .map(|register| RegisterUnit::new(format!("r{register}")))
             .collect(),
-        registers: TMS_LOCAL_REGISTERS
+        registers: MSP430_LOCAL_REGISTERS
             .iter()
             .enumerate()
             .map(|(unit, register)| {
@@ -3074,12 +3090,12 @@ fn tms_local_target() -> Target {
             .collect(),
         register_classes: vec![RegisterClass::new(
             "scalar-word",
-            (0..TMS_LOCAL_REGISTERS.len()).map(PhysReg).collect(),
+            (0..MSP430_LOCAL_REGISTERS.len()).map(PhysReg).collect(),
         )],
         spill_classes: vec![
             SpillClass::new("stack", None, 1)
                 .with_base_alignment(2)
-                .for_register_classes(vec![TMS_SCALAR_WORD_CLASS]),
+                .for_register_classes(vec![MSP430_SCALAR_WORD_CLASS]),
         ],
     }
 }
@@ -3092,11 +3108,11 @@ fn plan_function_frame(
     let mut local_types = HashMap::new();
     collect_frame_locals(&function.body, model, &mut source_locals, &mut local_types)?;
 
-    let clobbers = (0..TMS_LOCAL_REGISTERS.len())
+    let clobbers = (0..MSP430_LOCAL_REGISTERS.len())
         .map(PhysReg)
         .collect::<Vec<_>>();
     let planned = allocate_source_locals(
-        &tms_local_target(),
+        &msp430_local_target(),
         &source_locals,
         &function.body,
         &clobbers,
@@ -3111,15 +3127,21 @@ fn plan_function_frame(
         )
     })?;
 
-    let spill_bytes = planned
-        .allocation
-        .spill_slots
-        .iter()
-        .map(|slot| slot.offset.saturating_add(slot.size))
-        .max()
-        .unwrap_or(0);
+    let mut spill_bytes = 0;
+    for slot in &planned.allocation.spill_slots {
+        let end = slot
+            .offset
+            .checked_add(slot.size)
+            .ok_or_else(|| Diagnostic::new("MSP430 function frame is too large"))?;
+        spill_bytes = spill_bytes.max(end);
+    }
+    if spill_bytes > 1 << 15 {
+        return Err(Diagnostic::new(
+            "MSP430 function frame exceeds the 16-bit signed frame displacement",
+        ));
+    }
     let local_bytes = u16::try_from(spill_bytes)
-        .map_err(|_| Diagnostic::new("TMS9900 function frame is too large"))?;
+        .map_err(|_| Diagnostic::new("MSP430 function frame is too large"))?;
     let mut locals = HashMap::new();
     for (name, ty) in local_types {
         let vreg = planned
@@ -3128,8 +3150,8 @@ fn plan_function_frame(
             .ok_or_else(|| Diagnostic::new(format!("missing allocation for local `{name}`")))?;
         let location = match planned.allocation.location(vreg) {
             Some(Location::Register(register)) => {
-                let register = *TMS_LOCAL_REGISTERS.get(register.0).ok_or_else(|| {
-                    Diagnostic::new(format!("invalid TMS9900 local register for `{name}`"))
+                let register = *MSP430_LOCAL_REGISTERS.get(register.0).ok_or_else(|| {
+                    Diagnostic::new(format!("invalid MSP430 local register for `{name}`"))
                 })?;
                 BindingLocation::Register(register)
             }
@@ -3139,15 +3161,20 @@ fn plan_function_frame(
                     .spill_slots
                     .get(slot_index)
                     .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for `{name}`")))?;
-                debug_assert_eq!(slot.class, TMS_STACK_SPILL_CLASS);
+                debug_assert_eq!(slot.class, MSP430_STACK_SPILL_CLASS);
                 let end = slot
                     .offset
                     .checked_add(slot.size)
-                    .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
-                let offset = i16::try_from(end)
+                    .ok_or_else(|| Diagnostic::new("MSP430 function frame is too large"))?;
+                let offset = i32::try_from(end)
                     .ok()
                     .and_then(|end| end.checked_neg())
-                    .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?;
+                    .and_then(|offset| i16::try_from(offset).ok())
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "MSP430 function frame exceeds the 16-bit signed frame displacement",
+                        )
+                    })?;
                 BindingLocation::Frame(offset)
             }
             Some(Location::Unused) | None => {
@@ -3182,7 +3209,7 @@ fn collect_frame_locals(
                         .type_size(&ty)?
                         .checked_add(1)
                         .map(|size| size & !1)
-                        .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?
+                        .ok_or_else(|| Diagnostic::new("MSP430 function frame is too large"))?
                         .max(2)
                 } else {
                     let width = scalar_width(model, &ty)?;
@@ -3192,8 +3219,8 @@ fn collect_frame_locals(
                     return Err(Diagnostic::new(format!("duplicate local `{name}`")));
                 }
                 locals.push(
-                    SourceLocal::new(name.clone(), size, 2, TMS_SCALAR_WORD_CLASS)
-                        .with_spill_classes(vec![TMS_STACK_SPILL_CLASS])
+                    SourceLocal::new(name.clone(), size, 2, MSP430_SCALAR_WORD_CLASS)
+                        .with_spill_classes(vec![MSP430_STACK_SPILL_CLASS])
                         .with_force_memory(aggregate),
                 );
             }
@@ -3213,7 +3240,7 @@ fn collect_frame_locals(
                             .type_size(&ty)?
                             .checked_add(1)
                             .map(|size| size & !1)
-                            .ok_or_else(|| Diagnostic::new("TMS9900 function frame is too large"))?
+                            .ok_or_else(|| Diagnostic::new("MSP430 function frame is too large"))?
                             .max(2)
                     } else {
                         scalar_width(model, &ty)?;
@@ -3223,8 +3250,8 @@ fn collect_frame_locals(
                         return Err(Diagnostic::new(format!("duplicate local `{name}`")));
                     }
                     locals.push(
-                        SourceLocal::new(name.clone(), size, 2, TMS_SCALAR_WORD_CLASS)
-                            .with_spill_classes(vec![TMS_STACK_SPILL_CLASS])
+                        SourceLocal::new(name.clone(), size, 2, MSP430_SCALAR_WORD_CLASS)
+                            .with_spill_classes(vec![MSP430_STACK_SPILL_CLASS])
                             .with_force_memory(aggregate),
                     );
                 }
@@ -3713,7 +3740,7 @@ fn collect_access_path_strings(path: &AccessPath, values: &mut HashSet<String>) 
     }
 }
 
-fn tms_intrinsic_integer_bits(ty: &Type) -> Result<u16, Diagnostic> {
+fn msp430_intrinsic_integer_bits(ty: &Type) -> Result<u16, Diagnostic> {
     match ty {
         Type::Named(name) => match name.as_str() {
             "u8" | "i8" => Ok(8),
@@ -3729,11 +3756,11 @@ fn tms_intrinsic_integer_bits(ty: &Type) -> Result<u16, Diagnostic> {
     }
 }
 
-fn tms_intrinsic_integer_signed(ty: &Type) -> bool {
+fn msp430_intrinsic_integer_signed(ty: &Type) -> bool {
     matches!(ty, Type::Named(name) if matches!(name.as_str(), "i8" | "i16" | "i20"))
 }
 
-fn tms_intrinsic_integer_mask(bits: u16) -> u16 {
+fn msp430_intrinsic_integer_mask(bits: u16) -> u16 {
     if bits >= 16 {
         u16::MAX
     } else {
@@ -3763,7 +3790,7 @@ fn constant_shift_count(expr: &Expr) -> Result<Option<u16>, Diagnostic> {
     };
     u16::try_from(value).map(Some).map_err(|_| {
         Diagnostic::new(format!(
-            "TMS9900 shift count {value} is outside supported range 0..=65535"
+            "MSP430 shift count {value} is outside supported range 0..=65535"
         ))
     })
 }
@@ -3805,7 +3832,7 @@ fn inline_void_body(function: &Function) -> Option<&[Stmt]> {
         .then_some(body)
 }
 
-fn tms_compact_wrapper_candidate(function: &Function) -> bool {
+fn msp430_compact_wrapper_candidate(function: &Function) -> bool {
     let Some(body) = inline_void_body(function) else {
         return false;
     };
