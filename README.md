@@ -4,7 +4,7 @@
 
 EZRA is a small compiled language for explicit, low-level game and hobby-computer targets. It is designed around explicit integer sizes, target-defined address widths, direct memory and port I/O, embedded assets, inline assembly, readable generated assembly, and emulator-backed tests.
 
-This is alpha software. The language, target profiles, and cartridge formats are still evolving. Use `docs/language.md`, `docs/usage.md`, and `docs/platforms.md` for current implemented behavior; `spec.md` is the broader design document.
+This is alpha software. The language, target profiles, and cartridge formats are still evolving. Start with the [documentation index](docs/README.md), which links to focused getting-started, CLI, language, target, tutorial, and contributor pages. The older `docs/language.md`, `docs/usage.md`, and `docs/platforms.md` pages remain available for full reference tables; `spec.md` is the broader design document.
 
 Implementation status for every specification section is tracked in [`SPEC_COVERAGE.md`](SPEC_COVERAGE.md).
 
