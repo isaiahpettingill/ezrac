@@ -422,7 +422,7 @@ fn operand_len(mode: OperandMode, operand: &str) -> Result<usize, Diagnostic> {
 }
 
 fn indexed_len(operand: &str) -> Result<usize, Diagnostic> {
-    let (_, inner) = indexed_inner(operand)?;
+    let (indirect, inner) = indexed_inner(operand)?;
     let Some((offset, register)) = split_index(inner) else {
         return Ok(3);
     };
@@ -449,18 +449,28 @@ fn indexed_len(operand: &str) -> Result<usize, Diagnostic> {
             })
             .unwrap_or(3));
     }
-    let Some(value) = parse_number(strip_force(offset)).ok() else {
+    let force_byte = offset.trim_start().starts_with('<');
+    let Some(value) = indexed_offset_value(offset) else {
         return Ok(3);
     };
-    let value = signed_value(value);
-    let length = if (-16..=15).contains(&value) {
+    let width: u8 = if !indirect && (-16..=15).contains(&value) && !force_byte {
+        0
+    } else if (-128..=127).contains(&value) || force_byte {
         1
-    } else if (-128..=127).contains(&value) {
-        2
     } else {
-        3
+        2
     };
-    Ok(length)
+    Ok(1 + usize::from(width))
+}
+
+fn indexed_offset_value(offset: &str) -> Option<i64> {
+    let text = strip_force(offset);
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let value = signed_value(parse_number(digits).ok()?);
+    Some(if negative { -value } else { value })
 }
 
 fn encode_indexed(

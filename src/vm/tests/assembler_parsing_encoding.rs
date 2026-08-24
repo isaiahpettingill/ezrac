@@ -57,9 +57,24 @@ fn i8086_vm_assembler_accepts_bp_frames_and_stack_call_marshalling() {
             ret
     "#;
     let assembled = assemble_subset_with_symbols_at(AssemblerCpu::I8086, source, 0x1000).unwrap();
-    assert!(assembled.bytes.windows(2).any(|bytes| bytes == [0x55, 0x8B]));
-    assert!(assembled.symbols.iter().any(|symbol| symbol.name == "entry"));
-    assert!(assembled.symbols.iter().any(|symbol| symbol.name == "callee"));
+    assert!(
+        assembled
+            .bytes
+            .windows(2)
+            .any(|bytes| bytes == [0x55, 0x8B])
+    );
+    assert!(
+        assembled
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "entry")
+    );
+    assert!(
+        assembled
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "callee")
+    );
 }
 
 #[test]

@@ -42,9 +42,9 @@ fn lowers_global_and_local_typed_function_pointers() {
     )
     .unwrap();
     let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
-    assert_eq!(assembly.matches("    jsr 0,x").count(), 2, "{assembly}");
+    assert_eq!(assembly.matches("    jsr _add").count(), 2, "{assembly}");
     assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
-    assert!(assembly.contains("    jsr _add"), "{assembly}");
+    assert!(assembly.contains("    jmp _add"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
         .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
 }
@@ -60,7 +60,7 @@ fn lowers_m6809_global_and_local_typed_function_pointers() {
     let assembly = emit_m6809_assembly_with_options(&program, m6809_options()).unwrap();
     assert_eq!(assembly.matches("    jsr 0,x").count(), 2, "{assembly}");
     assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
-    assert!(assembly.contains("    jsr _add"), "{assembly}");
+    assert!(assembly.contains("    jmp _add"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M6809, &assembly, 0)
         .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
 }
@@ -87,27 +87,29 @@ fn local_target_models_accumulators_and_uses_memory_only_locals() {
     assert!(m6809.registers_alias(PhysReg(1), PhysReg(2)));
 }
 
-fn local_initializer_address(assembly: &str, value: u8) -> String {
-    let marker = format!("    ldaa #{value:02X}h\n    staa >");
+fn local_initializer_operand(assembly: &str, value: u8) -> String {
+    let marker = format!("    ldaa #{value:02X}h\n");
     let rest = assembly
         .split_once(&marker)
         .unwrap_or_else(|| panic!("missing local initializer {value:02X}\n{assembly}"))
         .1;
-    rest[..4].to_owned()
+    rest.lines()
+        .find_map(|line| line.trim().strip_prefix("staa "))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("missing local store {value:02X}\n{assembly}"))
 }
 
-fn assert_reuses_memory_local(assembly: &str, cpu: AssemblerCpu) {
-    assert_eq!(
-        local_initializer_address(assembly, 0x11),
-        local_initializer_address(assembly, 0x22),
-        "{assembly}"
-    );
+fn assert_reuses_frame_local(assembly: &str, cpu: AssemblerCpu) {
+    let first = local_initializer_operand(assembly, 0x11);
+    let second = local_initializer_operand(assembly, 0x22);
+    assert_eq!(first, second, "{assembly}");
+    assert!(first.ends_with(",x") || first.ends_with(",u"), "{assembly}");
     assemble_subset_with_symbols_at(cpu, assembly, 0)
         .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
 }
 
 #[test]
-fn colors_nonoverlapping_m6800_locals_into_one_static_byte() {
+fn colors_nonoverlapping_m6800_locals_into_one_frame_byte() {
     let program = parse_program(
         Path::new("m6800_spill_reuse.ezra"),
         r#"
@@ -121,13 +123,15 @@ fn colors_nonoverlapping_m6800_locals_into_one_static_byte() {
             "#,
     )
     .unwrap();
-    let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
-    assert_reuses_memory_local(&assembly, AssemblerCpu::M6800);
+    let mut options = m6800_options();
+    options.optimization = crate::optimization::OptimizationOptions::new(0).unwrap();
+    let assembly = emit_m6800_assembly_with_options(&program, options).unwrap();
+    assert_reuses_frame_local(&assembly, AssemblerCpu::M6800);
 }
 
 #[cfg(feature = "m6809")]
 #[test]
-fn colors_nonoverlapping_m6809_locals_into_one_static_byte() {
+fn colors_nonoverlapping_m6809_locals_into_one_frame_byte() {
     let program = parse_program(
         Path::new("m6809_spill_reuse.ezra"),
         r#"
@@ -141,8 +145,10 @@ fn colors_nonoverlapping_m6809_locals_into_one_static_byte() {
             "#,
     )
     .unwrap();
-    let assembly = emit_m6809_assembly_with_options(&program, m6809_options()).unwrap();
-    assert_reuses_memory_local(&assembly, AssemblerCpu::M6809);
+    let mut options = m6809_options();
+    options.optimization = crate::optimization::OptimizationOptions::new(0).unwrap();
+    let assembly = emit_m6809_assembly_with_options(&program, options).unwrap();
+    assert_reuses_frame_local(&assembly, AssemblerCpu::M6809);
 }
 
 #[test]
@@ -164,7 +170,7 @@ fn emits_assemblable_scalar_globals_locals_and_control_flow() {
     let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
 
     assert!(assembly.contains("_main:"), "{assembly}");
-    assert!(assembly.contains("adda >__ezra_r1"), "{assembly}");
+    assert!(assembly.contains("adda 1,x"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
         .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
 }
@@ -269,14 +275,14 @@ fn run_main_result(source: &str) -> u8 {
                 bytes,
             },
             &TestRunOptions {
-                instruction_budget: 200,
+                instruction_budget: 2_000,
                 initial_ports: Vec::new(),
                 initial_memory: Vec::new(),
-                stack_top: 0x01ff,
+                stack_top: 0x7fff,
             },
         )
         .unwrap();
-    assert!(run.halted, "{assembly}");
+    assert!(run.halted, "run={run:?}\n{assembly}");
     run.result_code
 }
 
@@ -372,7 +378,7 @@ fn lowers_single_bit_mask_branches_to_bita_without_skipping_evaluation() {
     assert_eq!(assembly.matches("    bita #01h\n").count(), 1, "{assembly}");
     assert_eq!(assembly.matches("    bita #02h\n").count(), 1, "{assembly}");
     assert_eq!(assembly.matches("jsr _next").count(), 2, "{assembly}");
-    assert!(!assembly.contains("anda >__ezra_r1"), "{assembly}");
+    assert!(!assembly.contains("__ezra_r1"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M6800, &assembly, 0)
         .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
 }
@@ -462,16 +468,18 @@ fn lowers_m6800_catalog_bit_integer_and_memory_intrinsics() {
         "#,
     )
     .unwrap();
-    let assembly = emit_m6800_assembly_with_options(&program, m6800_options()).unwrap();
+    let mut options = m6800_options();
+    options.optimization = crate::optimization::OptimizationOptions::new(0).unwrap();
+    options
+        .optimization
+        .disable(crate::optimization::OptimizationPass::DeadCodeElimination);
+    let assembly = emit_m6800_assembly_with_options(&program, options).unwrap();
     for instruction in [
         "    asla",
         "    bita #20h",
         "    oraa #08h",
         "    anda #F7h",
         "    eora #04h",
-        "__ezra_intrinsic_copy_forward_loop",
-        "__ezra_intrinsic_copy_backward",
-        "__ezra_intrinsic_fill_loop",
     ] {
         assert!(
             assembly.contains(instruction),

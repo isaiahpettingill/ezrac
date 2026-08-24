@@ -24,4 +24,18 @@ Enable the optional `m6809` Cargo feature. `bare-m6809` also accepts EZRA source
 
 The assembler covers the official MC6809 instruction set, including the A/B accumulator and memory operations, D accumulator operations, X/Y/U/S comparisons and loads/stores, `LEA`, `MUL`, `EXG`, `TFR`, stack masks, short and long branches, `SWI2`/`SWI3`, condition-code operations, indexed indirection, and the M6800-compatible aliases.
 
-M6809 EZRA source uses the same safe TBIR transformations as the other source backends. Power-of-two multiplication is strength-reduced before emission; other 8-bit multiplication uses the M6809 `MUL` instruction. The source backend keeps the existing scalar RAM ABI, while the standalone assembler exposes the full register and addressing model.
+M6809 EZRA source uses the same safe TBIR transformations as the other source backends. Power-of-two multiplication is strength-reduced before emission; other 8-bit multiplication uses the M6809 `MUL` instruction. The standalone assembler exposes the full register and addressing model.
+
+## EZRA source-function ABI
+
+Non-naked EZRA functions use a normal MC6809 stack frame:
+
+- S is the descending hardware stack pointer and holds return addresses and outgoing arguments. U is the frame pointer.
+- The prologue is `pshs u`, an optional `leas -frame_size,s`, then `tfr s,u`. The epilogue is an optional `leas frame_size,s`, then `puls u` followed by `rts`.
+- Stack arguments sit above the saved U and return address. The first parameter occupies the highest bytes below the caller's frame; later parameters follow toward the frame base. Each parameter occupies its natural scalar size; u8 and bool values use one byte and pointers use two big-endian bytes.
+- Locals that need memory, allocator spills, aggregate storage, and compiler scratch live inside the active invocation's frame at fixed offsets from U. Address-taken locals stay at those stable offsets for the whole invocation.
+- A caller reserves and fills the argument area with `pshs a`/`pshs x`, calls the callee, and releases the area with `leas` after the return. No parameter, local, spill, result, or call snapshot uses fixed RAM, so direct and function-pointer recursion work without static snapshots.
+- Scalar results return in A. Two-result scalar calls return the first value in A and the second in B.
+- Globals, MMIO registers, strings, and embed data retain their fixed model addresses.
+- Naked and interrupt functions are not supported by the source emitter.
+- Inline-assembly memory operands for automatic locals expand to frame-relative operands.

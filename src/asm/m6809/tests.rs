@@ -43,3 +43,25 @@ fn keeps_m6800_accumulator_aliases() {
         Some(vec![0xB7, 0x12, 0x34])
     );
 }
+
+#[test]
+fn sizes_indexed_operands_consistently_with_encoding() {
+    for source in [
+        "leas -36,s",
+        "leas 36,s",
+        "leas -128,s",
+        "leas -129,s",
+        "leau 15,u",
+        "leau 16,u",
+        "leax 127,x",
+        "leay 128,x",
+        "leas <-5,s",
+        "leau [100,u]",
+    ] {
+        let encoded = emit_instruction(source, &labels(), 0x0)
+            .unwrap()
+            .expect(source);
+        let length = instruction_len(source).unwrap().expect(source);
+        assert_eq!(encoded.len(), length, "{source}");
+    }
+}

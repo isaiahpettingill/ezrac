@@ -170,7 +170,10 @@ fn calls_and_address_taking_use_bp_relative_frame_spills() {
     let assembly = emit_and_assemble(
         "global sink: u8 = 0 fn helper() {} fn test(input: u8) { let live: u8 = input live += 1 helper() sink = live } fn main() { let addressed: u16 = 9 addressed += 1 let pointer: ptr<u16> = &addressed; *pointer = 11 sink = *pointer test(sink) }",
     );
-    assert!(function_assembly(&assembly, "test").contains("[bp-"), "{assembly}");
+    assert!(
+        function_assembly(&assembly, "test").contains("[bp-"),
+        "{assembly}"
+    );
 }
 
 #[test]

@@ -25,3 +25,17 @@ With the optional `m6800` Cargo feature enabled, the `bare-m6800` target also su
 The assembler accepts the complete official Motorola 6800 ISA. This includes all inherent accumulator, stack, and condition-code operations; `bra`, `brn`, all conditional branches, and `bsr`; indexed and extended memory unary/control operations; and the A, B, X, and stack load/store/arithmetic families in every addressing mode defined by the manual. Store instructions do not accept immediate operands, and memory unary/control operations do not have direct forms.
 
 The implementation has table-driven golden tests for every mnemonic/addressing-form encoding, aliases, operand limits, relative branch limits, labels, equates, and invalid forms. Non-6800 instructions and invalid addressing modes are rejected with diagnostics such as `assembler does not support M6800 instruction ...`.
+
+## EZRA source-function ABI
+
+Non-naked EZRA functions use a dynamic stack frame on the M6800:
+
+- S is the descending hardware stack pointer and holds return addresses and outgoing arguments. X is the frame base inside the active invocation.
+- The prologue reserves the frame with one `des` per frame byte and then runs `tsx`. The epilogue restores X past any pending pushed call arguments, then runs one `inx` per frame byte followed by `txs`.
+- Stack arguments sit above the return address. The first parameter occupies the highest bytes below the caller's frame; later parameters follow toward the frame base. Each parameter occupies its natural scalar size; u8 and bool values use one byte and pointers use two big-endian bytes.
+- Locals that need memory, allocator spills, aggregate storage, and compiler scratch live inside the active invocation's frame at fixed offsets from X. Address-taken locals stay at those stable offsets for the whole invocation.
+- A caller pushes each argument byte with `psha` (function-pointer targets push a selector token plus address byte), calls the callee, and releases the argument area with `ins` after the return. No parameter, local, spill, result, or call snapshot uses fixed RAM, so direct and function-pointer recursion work without static snapshots.
+- Scalar results return in A. Two-result scalar calls return the first value in A and the second in B.
+- Frames are limited to 255 bytes because M6800 indexed displacements are unsigned 8-bit values.
+- Globals, MMIO registers, strings, and embed data retain their fixed model addresses.
+- Naked and interrupt functions are not supported by the source emitter.
