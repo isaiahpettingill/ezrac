@@ -32,6 +32,36 @@ fn i8086_assembler_integrates_labels_directives_and_little_endian_data() {
     }
 }
 
+#[cfg(feature = "i8086")]
+#[test]
+fn i8086_vm_assembler_accepts_bp_frames_and_stack_call_marshalling() {
+    let source = r#"
+        org 1000h
+        entry:
+            push bp
+            mov bp,sp
+            sub sp,20h
+            mov ax,[bp+4]
+            mov [bp-2],ax
+            push ax
+            call near callee
+            add sp,2
+            add sp,20h
+            pop bp
+            ret
+        callee:
+            push bp
+            mov bp,sp
+            mov ax,[bp+4]
+            pop bp
+            ret
+    "#;
+    let assembled = assemble_subset_with_symbols_at(AssemblerCpu::I8086, source, 0x1000).unwrap();
+    assert!(assembled.bytes.windows(2).any(|bytes| bytes == [0x55, 0x8B]));
+    assert!(assembled.symbols.iter().any(|symbol| symbol.name == "entry"));
+    assert!(assembled.symbols.iter().any(|symbol| symbol.name == "callee"));
+}
+
 #[test]
 fn z80_assembler_uses_16_bit_absolute_branches() {
     let bytes =

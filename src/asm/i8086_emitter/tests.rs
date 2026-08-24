@@ -110,7 +110,7 @@ fn i8086_register_model_tracks_ax_aliases_and_reserves_bp_for_words() {
     assert!(target.registers_alias(PhysReg(9), PhysReg(11)));
     assert_eq!(
         target.register_classes[I8086_WORD_CLASS.0].registers,
-        vec![I8086_BP_REGISTER]
+        Vec::<PhysReg>::new()
     );
     assert!(
         target.register_classes[I8086_BYTE_CLASS.0]
@@ -118,28 +118,28 @@ fn i8086_register_model_tracks_ax_aliases_and_reserves_bp_for_words() {
             .is_empty()
     );
     assert_eq!(
-        target.spill_classes[I8086_STATIC_SPILL_CLASS.0].name,
-        "static"
+        target.spill_classes[I8086_FRAME_SPILL_CLASS.0].name,
+        "frame"
     );
 }
 
 #[test]
-fn bp_word_local_avoids_local_memory_traffic_and_strictly_assembles() {
+fn word_local_uses_a_bp_relative_frame_slot_and_strictly_assembles() {
     let source = "fn value() -> u16 { let local: u16 = 42 local += 1 return local } fn main() { let result: u16 = value() }";
     let plan = local_plan(source, "value");
     assert!(matches!(
         plan.bindings["local"].location,
-        PlannedLocation::Bp
+        PlannedLocation::Spill(_)
     ));
 
     let assembly = emit_and_assemble(source);
     let value = function_assembly(&assembly, "value");
-    assert!(value.contains("    mov bp,02Ah\n"), "{value}");
-    assert!(value.contains("    mov ax,bp\n"), "{value}");
+    assert!(value.contains("[bp-"), "{value}");
+    assert!(!value.contains("mov bp,02Ah"), "{value}");
 }
 
 #[test]
-fn calls_and_address_taking_force_word_locals_to_static_spills() {
+fn calls_and_address_taking_use_bp_relative_frame_spills() {
     let call_plan = local_plan(
         "global sink: u16 = 0 fn helper() {} fn test(input: u16) { let live: u16 = input live += 1 helper() sink = live } fn main() { test(7) }",
         "test",
@@ -167,21 +167,18 @@ fn calls_and_address_taking_force_word_locals_to_static_spills() {
         PlannedLocation::Spill(_)
     ));
 
-    emit_and_assemble(
-        "global sink: u16 = 0 fn helper() {} fn test(input: u16) { let live: u16 = input live += 1 helper() sink = live } fn main() { let addressed: u16 = 9 addressed += 1 let pointer: ptr<u16> = &addressed; *pointer = 11 sink = *pointer test(sink) }",
+    let assembly = emit_and_assemble(
+        "global sink: u8 = 0 fn helper() {} fn test(input: u8) { let live: u8 = input live += 1 helper() sink = live } fn main() { let addressed: u16 = 9 addressed += 1 let pointer: ptr<u16> = &addressed; *pointer = 11 sink = *pointer test(sink) }",
     );
+    assert!(function_assembly(&assembly, "test").contains("[bp-"), "{assembly}");
 }
 
 #[test]
-fn nonoverlapping_static_locals_reuse_one_colored_spill_slot() {
+fn nonoverlapping_frame_locals_reuse_one_colored_spill_slot() {
     let source = "global sink: u8 = 0 fn test(input: u8) { let first: u8 = input first += 1 sink = first let second: u8 = input second += 2 sink = second } fn main() { test(1) }";
     let plan = local_plan(source, "test");
-    let PlannedLocation::Spill(first) = plan.bindings["first"].location else {
-        panic!("byte local must spill");
-    };
-    let PlannedLocation::Spill(second) = plan.bindings["second"].location else {
-        panic!("byte local must spill");
-    };
+    let PlannedLocation::Spill(first) = plan.bindings["first"].location;
+    let PlannedLocation::Spill(second) = plan.bindings["second"].location;
     assert_eq!(first, second);
     assert_eq!(plan.spill_sizes, vec![1]);
 
@@ -272,11 +269,11 @@ fn preserves_value_returns_across_void_calls() {
     let read = function_assembly(&assembly, "read");
     let call = read.find("call near _clear").expect("missing clear call");
     let returned = read[call..]
-        .find("mov [04000h],al")
-        .expect("missing return value store");
+        .find("mov [bx],al")
+        .expect("missing hidden result store");
     assert!(
-        !read[call..call + returned].contains("mov [04000h],ax"),
-        "void call must not clear r0 before the enclosing value return:\n{read}"
+        !read[call..call + returned].contains("mov [bx],ax"),
+        "void call must not overwrite the byte result before the enclosing return:\n{read}"
     );
 }
 
@@ -783,7 +780,7 @@ fn explicit_inline_assembles_typed_arguments_nested_helpers_and_safe_fallbacks()
 }
 
 #[test]
-fn recursive_calls_save_static_frames() {
+fn recursive_calls_use_isolated_bp_frames() {
     let assembly = emit_and_assemble(
         r#"
             fn gcd(a: u16, b: u16) -> u16 {
@@ -795,7 +792,8 @@ fn recursive_calls_save_static_frames() {
         "#,
     );
     assert!(assembly.contains("call near _gcd"));
-    assert!(assembly.contains("mov bp,ax"), "{assembly}");
+    assert!(assembly.contains("push bp\n    mov bp,sp"), "{assembly}");
+    assert!(!assembly.contains("mov bp,ax"), "{assembly}");
 }
 
 #[test]
@@ -813,11 +811,69 @@ fn non_tail_recursive_expression_calls_preserve_continuation_values() {
     let accumulate = function_assembly(&assembly, "accumulate");
     assert!(accumulate.contains("call near _accumulate"), "{accumulate}");
     assert!(accumulate.contains("push ax"), "{accumulate}");
-    assert!(accumulate.contains("pop ax"), "{accumulate}");
+    assert!(accumulate.contains("add sp,"), "{accumulate}");
+    assert!(!accumulate.contains("pop ax"), "{accumulate}");
 }
 
 #[test]
-fn interrupt_handlers_preserve_scratch_and_reject_unsafe_calls() {
+fn recursive_invocations_keep_parameters_and_locals_in_separate_bp_frames() {
+    let assembly = emit_and_assemble(
+        r#"
+            fn descend(value: u16) -> u16 {
+                let local: u16 = value
+                if value == 0 { return local }
+                return descend(value - 1) + local
+            }
+            fn main() { let result: u16 = descend(4) }
+        "#,
+    );
+    let descend = function_assembly(&assembly, "descend");
+    assert!(descend.contains("mov ax,[bp+06h]"), "{descend}");
+    assert!(descend.contains("[bp-"), "{descend}");
+    assert!(descend.contains("call near _descend"), "{descend}");
+    assert!(!descend.contains("[04000h]"), "{descend}");
+}
+
+#[test]
+fn function_pointer_callbacks_reenter_the_same_function_with_new_frames() {
+    let assembly = emit_and_assemble(
+        r#"
+            global callback: ptr<fn(u16)u16> = &reenter
+            fn reenter(value: u16) -> u16 {
+                if value == 0 { return 1 }
+                return callback(value - 1) + value
+            }
+            fn main() { let result: u16 = callback(3) }
+        "#,
+    );
+    assert!(assembly.contains("call bx"), "{assembly}");
+    assert!(assembly.contains("__ezra_fn_ptr_reenter:"), "{assembly}");
+    assert!(assembly.contains("call near _reenter"), "{assembly}");
+    assert!(function_assembly(&assembly, "reenter").contains("[bp+06h]"));
+}
+
+#[test]
+fn nested_calls_marshal_source_arguments_on_the_stack() {
+    let assembly = emit_and_assemble(
+        r#"
+            fn leaf(first: u16, second: u16) -> u16 { return first + second }
+            fn outer(value: u16) -> u16 {
+                let intermediate: u16 = leaf(value, 2)
+                return leaf(intermediate, 3)
+            }
+            fn main() { let result: u16 = outer(4) }
+        "#,
+    );
+    let outer = function_assembly(&assembly, "outer");
+    assert_eq!(outer.matches("call near _leaf").count(), 2, "{outer}");
+    assert!(outer.matches("push ax").count() >= 4, "{outer}");
+    assert!(outer.matches("add sp,06h").count() >= 2, "{outer}");
+    assert!(function_assembly(&assembly, "leaf").contains("mov ax,[bp+06h]"));
+    assert!(function_assembly(&assembly, "leaf").contains("mov ax,[bp+08h]"));
+}
+
+#[test]
+fn interrupt_handlers_use_private_frames_and_preserve_registers() {
     let assembly = emit_and_assemble(
         r#"
             interrupt fn irq() { asm volatile { "nop" } }
@@ -831,21 +887,18 @@ fn interrupt_handlers_preserve_scratch_and_reject_unsafe_calls() {
         .split("iret")
         .next()
         .unwrap();
-    assert_eq!(irq.matches("push ax").count(), 13, "{irq}");
-    assert_eq!(irq.matches("pop ax").count(), 13, "{irq}");
+    assert_eq!(irq.matches("push ax").count(), 1, "{irq}");
+    assert_eq!(irq.matches("pop ax").count(), 1, "{irq}");
+    assert_eq!(irq.matches("push bp").count(), 2, "{irq}");
+    assert_eq!(irq.matches("pop bp").count(), 2, "{irq}");
     let save_ds = irq.find("push ds").unwrap();
     let establish_ds = irq.find("mov ds,ax").unwrap();
-    let save_scratch = irq[establish_ds..].find("mov ax,[04000h]").unwrap() + establish_ds;
+    let establish_frame = irq.find("mov bp,sp").unwrap();
     assert!(
-        save_ds < establish_ds && establish_ds < save_scratch,
+        save_ds < establish_ds && establish_ds < establish_frame,
         "{irq}"
     );
-    let restore_scratch = irq
-        .rfind("mov [04000h],ax")
-        .or_else(|| irq.rfind("mov [04000h],al"))
-        .unwrap();
-    let restore_ds = irq.rfind("pop ds").unwrap();
-    assert!(restore_scratch < restore_ds, "{irq}");
+    assert!(irq.contains("sub sp,"), "{irq}");
 
     let error = emit_error(
         r#"
@@ -858,17 +911,15 @@ fn interrupt_handlers_preserve_scratch_and_reject_unsafe_calls() {
         "{error}"
     );
 
-    let error = emit_error(
+    let assembly = emit_and_assemble(
         r#"
             fn helper() {}
             interrupt fn irq() { helper() }
             fn main() {}
         "#,
     );
-    assert!(
-        error.contains("static-frame ABI is not reentrant"),
-        "{error}"
-    );
+    assert!(assembly.contains("_irq:"), "{assembly}");
+    assert!(assembly.contains("call near _helper"), "{assembly}");
 
     let error = emit_error("interrupt fn main() {}");
     assert!(
@@ -964,7 +1015,7 @@ fn inline_asm_loads_inputs_substitutes_classes_and_writes_outputs() {
     );
     assert!(assembly.contains("add al,1"), "{assembly}");
     assert!(assembly.contains("mov dx,020h"), "{assembly}");
-    assert!(assembly.contains("mov [040"), "{assembly}");
+    assert!(assembly.contains("mov [bp-"), "{assembly}");
     let add = assembly.find("add al,1").unwrap();
     assert!(assembly[..add].rfind("mov al,[").is_some(), "{assembly}");
     assert!(assembly[add..].contains(",ax"), "{assembly}");
@@ -1121,7 +1172,7 @@ fn divergent_value_functions_do_not_fall_through() {
 }
 
 #[test]
-fn operation_scratch_allocation_failures_are_diagnostics_not_panics() {
+fn operation_scratch_stays_in_the_per_invocation_frame() {
     let options = AssemblyOptions {
         cpu: CpuFamily::I8086,
         ram_base: Address24::new(0xffdf),
@@ -1143,13 +1194,7 @@ fn operation_scratch_allocation_failures_are_diagnostics_not_panics() {
             "volatile mmio OUTPUT: ptr<u16> = 0x1000 fn main() { let a: u16 = 6 let b: u16 = 3; *OUTPUT = a / b }",
         )
         .unwrap();
-    let error = emit_i8086_assembly_with_options(&divide, options.clone()).unwrap_err();
-    assert!(
-        error
-            .message
-            .contains("storage exceeds target address space"),
-        "{error}"
-    );
+    emit_i8086_assembly_with_options(&divide, options.clone()).unwrap();
 
     let pointer_add = parse_program(
             Path::new("operation-scratch.ezra"),
@@ -1160,9 +1205,9 @@ fn operation_scratch_allocation_failures_are_diagnostics_not_panics() {
 }
 
 #[test]
-fn scratch_allocation_failure_is_a_diagnostic_not_a_panic() {
+fn compiler_scratch_does_not_consume_fixed_ram() {
     let program = parse_program(Path::new("scratch.ezra"), "fn main() {}").unwrap();
-    let error = emit_i8086_assembly_with_options(
+    emit_i8086_assembly_with_options(
         &program,
         AssemblyOptions {
             cpu: CpuFamily::I8086,
@@ -1174,12 +1219,7 @@ fn scratch_allocation_failure_is_a_diagnostic_not_a_panic() {
             ..AssemblyOptions::default()
         },
     )
-    .unwrap_err();
-    assert!(
-        error
-            .message
-            .contains("storage exceeds target address space")
-    );
+    .unwrap();
 }
 
 #[test]

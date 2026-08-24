@@ -26,11 +26,23 @@ Words, immediates, displacements, data emitted with `dw`, and far-pointer fields
 
 ## Generated-code ABI
 
-Generated programs establish a flat small model, clear the direction flag, and use near calls. Pointers are 16-bit offsets. Compiler-owned static slots hold parameters, locals, expression temporaries, and scalar return values; callers preserve their live static frames around nested and recursive scalar calls. Bare startup executes `CLI`, copies `CS` to `DS`, `ES`, and `SS`, and aligns the configured `SP` down to an even address without implicitly executing `STI`. DOS `.COM` startup instead copies `CS` only to `DS` and `ES` and preserves the loader-provided `SS:SP`, because DOS may allocate less than a full segment.
+Generated programs establish a flat small model, clear the direction flag, and use near calls. Pointers are 16-bit offsets. Every non-naked function reserves `BP` as its frame pointer:
 
-A non-naked `interrupt fn` must have no parameters or return value. Its prologue preserves the 8086 general/data-segment registers and compiler scratch, establishes `DS = ES = CS`, and its epilogue restores that state before `IRET`. Ordinary calls to interrupt functions, user-function calls from handlers, and `interrupt fn main` are rejected because `CALL`/`IRET` stack shapes and the static-frame ABI are not interchangeable. Programs remain responsible for installing vectors, providing a valid stack, acknowledging devices, synchronizing shared globals, and handling target-specific NMI or nesting requirements.
+```asm
+    push bp
+    mov bp,sp
+    sub sp,frame_size
+```
 
-Naked functions may contain only operand-free inline assembly and remain responsible for their complete entry/exit sequence.
+The frame grows toward lower addresses. Compiler scratch, locals, allocator spills, temporary values, and hidden result state use negative `BP` displacements. Source parameters use positive displacements above the saved frame pointer. The return address is at `[BP+2]`; the first hidden word or source argument starts at `[BP+4]`. All compiler-owned storage is per invocation, so direct recursion, nested calls, and callback re-entry do not need static frame snapshots. Explicit globals, MMIO objects, strings, constants, and embedded assets remain at their fixed addresses.
+
+Source arguments are evaluated left-to-right into the caller's frame, then pushed right-to-left in even-sized 8086 stack slots. The caller removes those slots after `RET`. A value-returning call has a hidden first argument containing a pointer to the caller's result slot. A two-result call has hidden pointers for the first and second result followed by the source arguments. Function-pointer trampolines use the same stack layout and only forward the call; they do not copy arguments through fixed slots.
+
+Bare startup executes `CLI`, copies `CS` to `DS`, `ES`, and `SS`, and aligns the configured `SP` down to an even address without implicitly executing `STI`. Startup uses a short temporary BP frame for static initialization, then restores `BP` before calling `main`. DOS `.COM` startup instead copies `CS` only to `DS` and `ES` and preserves the loader-provided `SS:SP`, because DOS may allocate less than a full segment.
+
+A non-naked `interrupt fn` must have no parameters or return value. Its prologue saves the 8086 general and segment registers, establishes `DS = ES = CS`, then creates its private BP frame. Its epilogue removes that frame, restores the saved state, and returns with `IRET`. A handler may call ordinary user functions because every callee has its own frame. Ordinary calls to interrupt functions and `interrupt fn main` are rejected because `CALL` cannot supply the hardware interrupt return shape. Programs remain responsible for installing vectors, providing a valid stack, acknowledging devices, synchronizing shared globals, and handling target-specific NMI or nesting requirements.
+
+Naked functions may contain only operand-free inline assembly and remain responsible for their complete entry/exit sequence. `BP`, `SP`, `IP`, and the segment registers are ABI-critical clobbers in non-naked inline assembly.
 
 Inline assembly maps `reg8` operands to `AL`, `reg16` operands to `AX`, `mem` operands to direct compiler storage, and constant `imm` inputs to immediates. Register inputs are loaded before the block and register outputs are written back afterward. The backend rejects `reg24`, duplicate operands, incompatible resolved types, non-constant immediates, overlapping clobbers, and ABI-critical segment, stack, and instruction-pointer clobbers. Every generated output path then passes the result through the strict original-8086 assembler.
 
