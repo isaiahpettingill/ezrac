@@ -6021,6 +6021,12 @@ impl Emitter {
             self.line("    ld (hl), a");
             return Ok(());
         }
+        if op == AssignOp::Set
+            && self.emit_absolute_u24_assignment_if_safe(ptr, &pointee_type, value)?
+        {
+            return Ok(());
+        }
+
         let addr = self.alloc_var(ValueWidth::U24.bytes());
         self.emit_expr_to_hl(ptr, ValueWidth::U24)?;
         self.emit_store_hl(addr);
@@ -6045,6 +6051,43 @@ impl Emitter {
         self.emit_load_hl(addr);
         self.emit_store_var_to_pointed_width(stored);
         Ok(())
+    }
+
+    fn emit_absolute_u24_assignment_if_safe(
+        &mut self,
+        ptr: &Expr,
+        pointee_type: &Type,
+        value: &Expr,
+    ) -> Result<bool, Diagnostic> {
+        if self.cpu != CpuFamily::Ez80 {
+            return Ok(false);
+        }
+        let Ok(width) = self.symbols.type_width(pointee_type) else {
+            return Ok(false);
+        };
+        if width != ValueWidth::U24 {
+            return Ok(false);
+        }
+        let Ok(address) = self.eval_i64_with_local_constants(ptr) else {
+            return Ok(false);
+        };
+        let Some(address) = Self::addr24(address) else {
+            return Ok(false);
+        };
+        let size = u32::from(width.bytes());
+        if self
+            .symbols
+            .volatile_ranges
+            .iter()
+            .any(|(start, end)| address < *end && address.saturating_add(size) > *start)
+        {
+            return Ok(false);
+        }
+
+        self.validate_expr_assignable_to_type(value, pointee_type)?;
+        self.emit_expr_to_type(value, pointee_type)?;
+        self.line(&format!("    ld ({address:06X}h), hl"));
+        Ok(true)
     }
 
     fn ensure_pointer_write_target_is_mutable(

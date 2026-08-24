@@ -84,6 +84,100 @@ fn emits_target_specific_constant_shifts_and_reduces_power_of_two_multiply() {
 }
 
 #[test]
+fn emits_constant_i24_deref_assignment_as_an_absolute_ez80_store() {
+    let source = r#"
+            const OUTPUT: ptr<i24> = 0x0000AA
+
+            fn main() {
+                let a: ptr<i24> = cast<ptr<i24>>(0x0000FFu24)
+                let b: u24 = cast<u24>(a)
+                let c: i24 = cast<i24>(b)
+                *OUTPUT = c
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("issue-128.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let main = asm
+        .split("_main:")
+        .nth(1)
+        .and_then(|body| body.split("    jp __ezra_exit").next())
+        .unwrap();
+
+    assert!(
+        main.contains("    ld hl, 0000FFh\n    ld (0000AAh), hl"),
+        "{main}"
+    );
+    assert_eq!(main.matches("    ld (0000AAh), hl").count(), 1, "{main}");
+    assert!(!main.contains("ld (hl), a"), "{main}");
+    assert!(!main.contains("6000"), "{main}");
+
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn keeps_volatile_i24_deref_assignment_on_the_bytewise_path() {
+    let source = r#"
+            volatile mmio OUTPUT: ptr<i24> = 0x040190
+
+            fn main() {
+                *OUTPUT = 0x010203
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("volatile-i24-store.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let main = asm
+        .split("_main:")
+        .nth(1)
+        .and_then(|body| body.split("    jp __ezra_exit").next())
+        .unwrap();
+
+    assert_eq!(main.matches("    ld (hl), a").count(), 3, "{main}");
+    assert!(!main.contains("ld (040190h), hl"), "{main}");
+
+    let run = run_assembly_test(&asm, 4_000).unwrap();
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
+fn keeps_dynamic_i24_deref_assignment_on_the_existing_fallback() {
+    let source = r#"
+            fn write_value(output: ptr<i24>) {
+                *output = 0x010203
+            }
+
+            fn main() {
+                let target: i24 = 0
+                write_value(&target)
+                test.assert_eq_u24(cast<u24>(*(&target)), 0x010203, 1)
+                test.pass()
+            }
+        "#;
+    let program = parse_program(Path::new("dynamic-i24-store.ezra"), source).unwrap();
+    let asm = emit_ez80_assembly(&program).unwrap();
+    let write_value = asm
+        .split("_write_value:")
+        .nth(1)
+        .and_then(|body| body.split("    ret").next())
+        .unwrap();
+
+    assert_eq!(
+        write_value.matches("    ld (hl), a").count(),
+        3,
+        "{write_value}"
+    );
+    assert!(!write_value.contains("ld (010203h), hl"), "{write_value}");
+
+    let run = run_assembly_test(&asm, 6_000).unwrap();
+    assert!(run.halted, "{asm}");
+    assert_eq!(run.result_code, 0, "{asm}");
+}
+
+#[test]
 fn chooses_costed_shift_add_for_constant_multiplication() {
     let source = r#"
             fn times_three(value: u8) -> u8 {
