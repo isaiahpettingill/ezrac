@@ -182,8 +182,7 @@ fn lowers_global_and_local_typed_function_pointers() {
     )
     .unwrap();
     assert_eq!(assembly.matches("    jsr (a0)").count(), 2, "{assembly}");
-    assert!(assembly.contains("__ezra_fn_ptr_add:"), "{assembly}");
-    assert!(assembly.contains("    jsr (_add).l"), "{assembly}");
+    assert!(assembly.contains("    move.l #_add,d0"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040)
         .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
 }
@@ -440,24 +439,24 @@ fn lowers_local_single_bit_compound_assignments() {
     .unwrap();
 
     for instruction in [
-        "    bset #5,$",
-        "    bclr #5,$",
-        "    bchg #5,$",
-        "    bset #1,$",
-        "    bclr #1,$",
-        "    bchg #1,$",
-        "    bset #7,$",
-        "    bclr #7,$",
-        "    bchg #7,$",
+        "    bset #5,",
+        "    bclr #5,",
+        "    bchg #5,",
+        "    bset #1,",
+        "    bclr #1,",
+        "    bchg #1,",
+        "    bset #7,",
+        "    bclr #7,",
+        "    bchg #7,",
     ] {
         assert!(
             assembly.contains(instruction),
             "missing {instruction}:\n{assembly}"
         );
     }
-    assert_eq!(assembly.matches("    bset #5,$").count(), 1, "{assembly}");
-    assert_eq!(assembly.matches("    bclr #5,$").count(), 1, "{assembly}");
-    assert_eq!(assembly.matches("    bchg #5,$").count(), 1, "{assembly}");
+    assert_eq!(assembly.matches("    bset #5,").count(), 1, "{assembly}");
+    assert_eq!(assembly.matches("    bclr #5,").count(), 1, "{assembly}");
+    assert_eq!(assembly.matches("    bchg #5,").count(), 1, "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040)
         .unwrap_or_else(|error| panic!("{error}\n{assembly}"));
 }
@@ -959,7 +958,7 @@ fn rejects_wider_endian_intrinsics_on_known_volatile_memory() {
 }
 
 #[test]
-fn local_target_reserves_only_a2_through_a6_for_pointers() {
+fn local_target_reserves_only_a2_through_a5_for_pointers() {
     let target = m68k_local_target();
     assert_eq!(
         target
@@ -967,19 +966,19 @@ fn local_target_reserves_only_a2_through_a6_for_pointers() {
             .iter()
             .map(|register| register.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["a2", "a3", "a4", "a5", "a6"]
+        vec!["a2", "a3", "a4", "a5"]
     );
     assert_eq!(
         target.register_classes[M68K_POINTER_CLASS.0].registers,
-        (0..5).map(PhysReg).collect::<Vec<_>>()
+        (0..4).map(PhysReg).collect::<Vec<_>>()
     );
     assert!(
         target.register_classes[M68K_MEMORY_CLASS.0]
             .registers
             .is_empty()
     );
-    for left in 0..5 {
-        for right in 0..5 {
+    for left in 0..4 {
+        for right in 0..4 {
             assert_eq!(
                 target.registers_alias(PhysReg(left), PhysReg(right)),
                 left == right
@@ -1006,7 +1005,7 @@ fn places_source_comments_inline_without_debug_anchors() {
         "// run the program\nfn main() {\n    // initialize value\n    let value: u8 = 1\n    value += 1 // increment value\n}",
     );
 
-    assert!(assembly.contains("_main:\n; run the program"), "{assembly}");
+    assert!(assembly.contains("_main:\n    link a6,"), "{assembly}");
     assert!(assembly.contains("; initialize value"), "{assembly}");
     assert!(assembly.contains("; increment value"), "{assembly}");
     assert!(!assembly.contains("; source:"), "{assembly}");
@@ -1061,31 +1060,38 @@ fn pointer_register_locals_execute_correctly() {
     assert_eq!(run.debug_output, [7], "{assembly}");
 }
 
-fn local_byte_initializer_address(assembly: &str, value: u8) -> String {
-    let marker = format!("    move.b #${value:X},d0\n    move.b d0,$");
+fn local_byte_initializer_frame_offset(assembly: &str, value: u8) -> String {
+    let marker = format!("    move.b #${value:X},d0\n");
     let rest = assembly
         .split_once(&marker)
         .unwrap_or_else(|| panic!("missing local initializer {value:X}\n{assembly}"))
         .1;
-    rest[..6].to_owned()
+    rest.lines()
+        .find_map(|line| {
+            line.strip_prefix("    move.b d0,")
+                .and_then(|operand| operand.strip_suffix("(a6)"))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| panic!("missing frame local initializer {value:X}\n{assembly}"))
 }
 
 #[test]
-fn colors_nonoverlapping_memory_locals_into_one_static_byte() {
+fn colors_nonoverlapping_memory_locals_into_one_frame_slot() {
     let assembly = emit_test_program(
         r#"
                 global sink: u8 = 0
+                fn keep(value: u8) -> u8 { return value }
                 fn main() {
-                    let first: u8 = 0x11
+                    let first: u8 = keep(0x11)
                     sink = first
-                    let second: u8 = 0x22
+                    let second: u8 = keep(0x22)
                     sink = second
                 }
             "#,
     );
     assert_eq!(
-        local_byte_initializer_address(&assembly, 0x11),
-        local_byte_initializer_address(&assembly, 0x22),
+        local_byte_initializer_frame_offset(&assembly, 0x11),
+        local_byte_initializer_frame_offset(&assembly, 0x22),
         "{assembly}"
     );
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
@@ -1153,7 +1159,7 @@ fn spills_pointer_locals_across_inline_asm() {
 }
 
 #[test]
-fn spills_address_taken_pointer_locals() {
+fn keeps_address_taken_pointer_locals_in_the_frame() {
     let assembly = emit_test_program(
         r#"
                 global byte: u8 = 0
@@ -1169,12 +1175,13 @@ fn spills_address_taken_pointer_locals() {
     for register in M68K_ADDRESS_REGISTERS {
         assert!(!main.contains(&format!("a{register}")), "{assembly}");
     }
-    assert!(main.matches("move.b d0,$").count() >= 3, "{assembly}");
+    assert!(main.contains("lea -20(a6),a0"), "{assembly}");
+    assert!(main.contains("move.b d0,-18(a6)"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
 }
 
 #[test]
-fn preserves_static_locals_across_recursive_calls() {
+fn preserves_frame_locals_across_recursive_calls() {
     let program = parse_program(
         Path::new("test.ezra"),
         r#"
@@ -1195,9 +1202,62 @@ fn preserves_static_locals_across_recursive_calls() {
         },
     )
     .unwrap();
-    assert!(assembly.contains("move.b $040"), "{assembly}");
-    assert!(assembly.contains("-(sp)"), "{assembly}");
+    assert!(assembly.contains("_count:\n    link a6,"), "{assembly}");
+    assert!(assembly.contains("    unlk a6\n    rts"), "{assembly}");
+    assert!(!main_assembly(&assembly).contains("$040"), "{assembly}");
     assemble_subset_with_symbols_at(AssemblerCpu::M68k, &assembly, 0x010040).unwrap();
+}
+
+#[cfg(feature = "test-runner")]
+#[test]
+fn recursive_calls_use_isolated_a6_frames() {
+    let (assembly, run) = emit_and_run(
+        r#"
+            volatile mmio DEBUG: u8 = 0xFFFFF0
+            volatile mmio HALT: u8 = 0xFFFFF2
+            fn main() {
+                DEBUG = count(4)
+                HALT = 1
+            }
+            fn count(value: u8) -> u8 {
+                let local: u8 = value
+                if value == 0 { return local }
+                return count(value - 1) + local
+            }
+        "#,
+        2_000,
+    );
+    assert!(run.halted, "{run:?}\n{assembly}");
+    assert_eq!(run.debug_output, [10], "{assembly}");
+    assert!(assembly.matches("    link a6,").count() >= 2, "{assembly}");
+    assert!(!main_assembly(&assembly).contains("$040"), "{assembly}");
+}
+
+#[cfg(feature = "test-runner")]
+#[test]
+fn callback_reentry_uses_isolated_a6_frames() {
+    let (assembly, run) = emit_and_run(
+        r#"
+            volatile mmio DEBUG: u8 = 0xFFFFF0
+            volatile mmio HALT: u8 = 0xFFFFF2
+            global callback: ptr<fn(u8)u8> = 0
+            fn main() {
+                callback = &reenter
+                DEBUG = callback(3)
+                HALT = 1
+            }
+            fn reenter(value: u8) -> u8 {
+                let local: u8 = value + 1
+                if value == 0 { return local }
+                return callback(value - 1) + local
+            }
+        "#,
+        3_000,
+    );
+    assert!(run.halted, "{run:?}\n{assembly}");
+    assert_eq!(run.debug_output, [10], "{assembly}");
+    assert!(assembly.matches("    jsr (a0)").count() >= 2, "{assembly}");
+    assert!(assembly.matches("    link a6,").count() >= 2, "{assembly}");
 }
 
 #[cfg(feature = "test-runner")]
