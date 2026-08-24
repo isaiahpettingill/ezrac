@@ -2,6 +2,7 @@
 
 use crate::compat::prelude::*;
 
+pub use crate::sdk::SdkLookupMode;
 pub use crate::workspace::{Workspace, WorkspaceFile};
 
 #[cfg(feature = "avr")]
@@ -26,6 +27,11 @@ use crate::{
     layout::{Layout, default_layout_for_target},
     package::{PackageContext, PackageRequest, package_executable_with_context},
     parser::parse_program,
+    sdk::{
+        SdkModuleSource, SdkProvider, compiler_intrinsic_modules, compiler_intrinsic_source,
+        embedded_sdk_module_path, embedded_sdk_modules, embedded_sdk_source, module_file_name,
+        module_name_from_relative_path,
+    },
     target::{
         Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, OutputFormat, TargetProfile,
         is_msdos_i8086_target, memory_model_for_cpu, resolve_target_profile,
@@ -45,8 +51,11 @@ pub struct CompileRequest {
     pub source_path: String,
     /// Target triple used for validation, code generation, and packaging.
     pub target: String,
-    /// Retained for API parity. No-std builds never consult these host paths.
-    pub sdk_paths: Vec<String>,
+    /// Virtual SDK roots searched in order after project/source-relative paths.
+    /// Each root names a directory represented by files in `Workspace`.
+    pub sdk_roots: Vec<String>,
+    /// Controls whether the embedded SDK is used after caller-owned files.
+    pub sdk_mode: SdkLookupMode,
     /// Include generator debug comments where supported.
     pub debug_comments: bool,
     /// Enable target SDK symbols built into the code generator.
@@ -60,7 +69,8 @@ impl CompileRequest {
         Self {
             source_path: source_path.into(),
             target: target.into(),
-            sdk_paths: Vec::new(),
+            sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
             debug_comments: false,
             default_sdk_symbols: true,
             optimization: crate::optimization::OptimizationOptions::default(),
@@ -69,6 +79,84 @@ impl CompileRequest {
 
     pub fn with_default_target(source_path: impl Into<String>) -> Self {
         Self::new(source_path, DEFAULT_TARGET_TRIPLE)
+    }
+}
+
+struct WorkspaceSdkProvider<'a> {
+    workspace: &'a Workspace<'a>,
+    roots: &'a [String],
+}
+
+impl SdkProvider for WorkspaceSdkProvider<'_> {
+    fn module_source(
+        &self,
+        target: Option<&str>,
+        module: &str,
+        mode: SdkLookupMode,
+    ) -> Result<Option<SdkModuleSource>, String> {
+        let relative = module_file_name(module);
+        for root in self.roots {
+            let path = if root.is_empty() {
+                relative.clone()
+            } else {
+                normalize_virtual_path(&format!("{root}/{relative}"))
+            };
+            let Some(bytes) = self.workspace.file(&path) else {
+                continue;
+            };
+            let source = core::str::from_utf8(bytes)
+                .map_err(|_| format!("workspace SDK module `{module}` at `{path}` is not UTF-8"))?;
+            return Ok(Some(SdkModuleSource {
+                path,
+                source: source.to_owned(),
+            }));
+        }
+        if let Some(source) = compiler_intrinsic_source(module) {
+            return Ok(Some(SdkModuleSource {
+                path: format!("builtin-sdk/{}", module_file_name(module)),
+                source: source.to_owned(),
+            }));
+        }
+        if mode.allows_embedded() {
+            if let Some((source, path)) = embedded_sdk_source(target, module) {
+                return Ok(Some(SdkModuleSource {
+                    path: embedded_sdk_module_path(target, module)
+                        .unwrap_or_else(|| path.to_owned()),
+                    source: source.to_owned(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn module_names(&self, target: Option<&str>, mode: SdkLookupMode) -> Vec<String> {
+        let mut modules = Vec::new();
+        for file in self.workspace.files {
+            let path = normalize_virtual_path(file.path);
+            for root in self.roots {
+                let relative = if root.is_empty() {
+                    Some(path.as_str())
+                } else {
+                    path.strip_prefix(&format!("{root}/"))
+                };
+                if let Some(relative) = relative
+                    && let Some(module) = module_name_from_relative_path(relative)
+                {
+                    modules.push(module);
+                }
+            }
+        }
+        modules.extend(
+            compiler_intrinsic_modules()
+                .iter()
+                .map(|module| (*module).to_owned()),
+        );
+        if mode.allows_embedded() {
+            modules.extend(embedded_sdk_modules(target).into_iter().map(str::to_owned));
+        }
+        modules.sort();
+        modules.dedup();
+        modules
     }
 }
 
@@ -830,16 +918,11 @@ fn resolve_program(
         let Declaration::Import(import) = declaration else {
             continue;
         };
-        let import_path = resolve_import_path(workspace, &path, import).ok_or_else(|| {
-            Diagnostic::new(format!(
-                "failed to resolve import `{import}` from `{path}` in virtual workspace"
-            ))
-        })?;
+        let (import_path, source) = resolve_import_source(workspace, &path, import, request)?;
         if seen.contains(&import_path) && !stack.contains(&import_path) {
             continue;
         }
-        let source = workspace_text(workspace, &import_path)?;
-        let mut imported = parse_program(&import_path, source)?;
+        let mut imported = parse_program(&import_path, &source)?;
         imported.declarations = active_declarations(imported.declarations, request)?;
         materialize_workspace_embeds(&mut imported, workspace)?;
         let short = import.rsplit('.').next().unwrap_or(import);
@@ -871,8 +954,13 @@ fn resolve_program(
     Ok(program)
 }
 
-fn resolve_import_path(workspace: &Workspace<'_>, importer: &str, import: &str) -> Option<String> {
-    let module = format!("{}.ezra", import.replace('.', "/"));
+fn resolve_import_source(
+    workspace: &Workspace<'_>,
+    importer: &str,
+    import: &str,
+    request: &CompileRequest,
+) -> Result<(String, String), Diagnostic> {
+    let module = module_file_name(import);
     let mut directory = importer
         .rsplit_once('/')
         .map(|(directory, _)| directory)
@@ -884,8 +972,11 @@ fn resolve_import_path(workspace: &Workspace<'_>, importer: &str, import: &str) 
             format!("{directory}/{module}")
         };
         let candidate = normalize_virtual_path(&candidate);
-        if workspace.file(&candidate).is_some() {
-            return Some(candidate);
+        if let Some(bytes) = workspace.file(&candidate) {
+            let source = core::str::from_utf8(bytes).map_err(|_| {
+                Diagnostic::new(format!("workspace source `{candidate}` is not UTF-8"))
+            })?;
+            return Ok((candidate, source.to_owned()));
         }
         let Some((parent, _)) = directory.rsplit_once('/') else {
             if !directory.is_empty() {
@@ -896,7 +987,22 @@ fn resolve_import_path(workspace: &Workspace<'_>, importer: &str, import: &str) 
         };
         directory = parent;
     }
-    None
+
+    let provider = WorkspaceSdkProvider {
+        workspace,
+        roots: &request.sdk_roots,
+    };
+    if let Some(source) = provider
+        .module_source(Some(&request.target), import, request.sdk_mode)
+        .map_err(Diagnostic::new)?
+    {
+        return Ok((source.path, source.source));
+    }
+    Err(missing_import_diagnostic(importer, import))
+}
+
+fn missing_import_diagnostic(importer: &str, import: &str) -> Diagnostic {
+    Diagnostic::new(crate::sdk::missing_module_message(import, importer))
 }
 
 fn direct_import_short_module_counts(program: &Program) -> HashMap<String, usize> {

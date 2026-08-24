@@ -10,8 +10,7 @@ use ezra::{
     },
     ast::{Declaration, Expr, Function, Stmt, Type},
     compile::{
-        CompileOptions, SdkResolver, builtin_sdk_modules,
-        check_module_diagnostics_with_sdk_and_overrides,
+        CompileOptions, SdkResolver, check_module_diagnostics_with_sdk_and_overrides,
         check_source_semantic_diagnostics_with_sdk_and_overrides,
         parse_and_resolve_imports_with_sdk_and_overrides, resolve_import_source,
     },
@@ -20,6 +19,7 @@ use ezra::{
     layout::parse_layout,
     parser::parse_program,
     project::{LspMode, load_nearest_project_config},
+    sdk::{SdkLookupMode, SdkProvider},
     target::{AssemblerCpu, DEFAULT_TARGET_TRIPLE, resolve_target_profile},
     vm::assemble_program_at,
 };
@@ -806,6 +806,7 @@ fn sdks_for_path(path: &Path) -> Result<Vec<SdkResolver>, Diagnostic> {
         return Ok(vec![SdkResolver {
             target: Some(context.target.to_owned()),
             sdk_roots: vec![context.sdk_root],
+            sdk_mode: SdkLookupMode::default(),
         }]);
     }
 
@@ -824,6 +825,7 @@ fn sdks_for_path(path: &Path) -> Result<Vec<SdkResolver>, Diagnostic> {
         .map(|target| SdkResolver {
             target: Some(target),
             sdk_roots: sdk_roots.clone(),
+            sdk_mode: SdkLookupMode::default(),
         })
         .collect())
 }
@@ -2044,41 +2046,7 @@ fn available_modules(sdk: Option<&SdkResolver>) -> Vec<String> {
     let Some(sdk) = sdk else {
         return Vec::new();
     };
-
-    let mut modules = builtin_sdk_modules(sdk.target.as_deref())
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    for root in &sdk.sdk_roots {
-        collect_sdk_modules(root, root, &mut modules);
-    }
-    modules.into_iter().collect()
-}
-
-fn collect_sdk_modules(root: &Path, directory: &Path, modules: &mut BTreeSet<String>) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_sdk_modules(root, &path, modules);
-            continue;
-        }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("ezra") {
-            continue;
-        }
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
-        let module = relative
-            .with_extension("")
-            .to_string_lossy()
-            .replace(['\\', '/'], ".");
-        if !module.is_empty() {
-            modules.insert(module);
-        }
-    }
+    sdk.module_names(sdk.target.as_deref(), sdk.sdk_mode)
 }
 
 fn add_program_symbols(index: &mut SymbolIndex, declarations: &[Declaration]) {

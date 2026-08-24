@@ -34,9 +34,14 @@ use crate::{
     diagnostic::{Diagnostic, SourceLocation, diagnostic_span, source_token_spans},
     layout::{Layout, default_layout_for_target},
     parser::parse_program,
+    sdk::{
+        SdkLookupMode, SdkModuleSource, SdkProvider, compiler_intrinsic_modules,
+        compiler_intrinsic_source, embedded_sdk_module_path, embedded_sdk_modules,
+        embedded_sdk_source, module_file_name, module_name_from_relative_path,
+    },
     target::{
-        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, is_ez180n_target,
-        is_msdos_i8086_target, memory_model_for_cpu, parse_target_triple,
+        Address24, AssemblerCpu, CpuFamily, DEFAULT_TARGET_TRIPLE, is_msdos_i8086_target,
+        memory_model_for_cpu, parse_target_triple,
     },
     workspace::{Workspace, materialize_workspace_embeds},
 };
@@ -58,7 +63,119 @@ pub struct CompileReport {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SdkResolver {
     pub target: Option<String>,
+    /// Filesystem SDK roots are searched in this order.
     pub sdk_roots: Vec<PathBuf>,
+    /// Controls the final embedded SDK fallback.
+    pub sdk_mode: SdkLookupMode,
+}
+
+impl SdkProvider for SdkResolver {
+    fn module_source(
+        &self,
+        target: Option<&str>,
+        module: &str,
+        mode: SdkLookupMode,
+    ) -> Result<Option<SdkModuleSource>, String> {
+        let module_path = PathBuf::from(module_file_name(module));
+        for root in &self.sdk_roots {
+            let path = root.join(&module_path);
+            match fs::read_to_string(&path) {
+                Ok(source) => {
+                    return Ok(Some(SdkModuleSource {
+                        path: path.to_string_lossy().into_owned(),
+                        source,
+                    }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "failed to read SDK module `{module}` at `{}`: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if let Some(source) = compiler_intrinsic_source(module) {
+            return Ok(Some(SdkModuleSource {
+                path: format!("builtin-sdk/{}", module_file_name(module)),
+                source: source.to_owned(),
+            }));
+        }
+        if mode.allows_embedded() {
+            if let Some((source, path)) = embedded_sdk_source(target, module) {
+                return Ok(Some(SdkModuleSource {
+                    path: embedded_sdk_module_path(target, module)
+                        .unwrap_or_else(|| path.to_owned()),
+                    source: source.to_owned(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn module_names(&self, target: Option<&str>, mode: SdkLookupMode) -> Vec<String> {
+        let mut modules = Vec::new();
+        for root in &self.sdk_roots {
+            collect_filesystem_sdk_modules(root, root, &mut modules);
+        }
+        modules.extend(
+            compiler_intrinsic_modules()
+                .iter()
+                .map(|module| (*module).to_owned()),
+        );
+        if mode.allows_embedded() {
+            modules.extend(embedded_sdk_modules(target).into_iter().map(str::to_owned));
+        }
+        modules.sort();
+        modules.dedup();
+        modules
+    }
+}
+
+impl SdkResolver {
+    fn module_source_with_overrides(
+        &self,
+        target: Option<&str>,
+        module: &str,
+        mode: SdkLookupMode,
+        source_overrides: &HashMap<PathBuf, String>,
+    ) -> Result<Option<SdkModuleSource>, String> {
+        let module_path = PathBuf::from(module_file_name(module));
+        for root in &self.sdk_roots {
+            let path = root.join(&module_path);
+            if let Some(source) = source_override(source_overrides, &path) {
+                return Ok(Some(SdkModuleSource {
+                    path: path.to_string_lossy().into_owned(),
+                    source,
+                }));
+            }
+        }
+        self.module_source(target, module, mode)
+    }
+}
+
+fn collect_filesystem_sdk_modules(root: &Path, directory: &Path, modules: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_filesystem_sdk_modules(root, &path, modules);
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("ezra") {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        if let Some(module) = module_name_from_relative_path(&relative.to_string_lossy()) {
+            modules.push(module);
+        }
+    }
 }
 
 pub fn check_source(source: &str, options: &CompileOptions) -> Result<CompileReport, Diagnostic> {
@@ -1610,11 +1727,8 @@ fn read_import_source_with_overrides(
     sdk: &SdkResolver,
     source_overrides: &HashMap<PathBuf, String>,
 ) -> Result<(PathBuf, String), Diagnostic> {
-    let candidates = import_file_candidates(source_path, import, sdk);
-    let missing_path = candidates
-        .first()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from(import.replace('.', "/")).with_extension("ezra"));
+    let candidates = import_file_candidates(source_path, import);
+
     for candidate in candidates {
         if let Some(source) = source_override(source_overrides, &candidate) {
             return Ok((candidate, source));
@@ -1630,19 +1744,21 @@ fn read_import_source_with_overrides(
             }
         }
     }
-    if let Some(source) = builtin_sdk_source(sdk.target.as_deref(), import) {
-        return Ok((
-            builtin_sdk_path(sdk.target.as_deref(), import),
-            source.to_owned(),
-        ));
+    if let Some(source) = sdk
+        .module_source_with_overrides(
+            sdk.target.as_deref(),
+            import,
+            sdk.sdk_mode,
+            source_overrides,
+        )
+        .map_err(Diagnostic::new)?
+    {
+        return Ok((PathBuf::from(source.path), source.source));
     }
-    Err(Diagnostic::new(format!(
-        "failed to read import `{import}` at `{}`: not found",
-        missing_path.display()
-    )))
+    Err(missing_import_diagnostic(source_path, import))
 }
 
-fn import_file_candidates(source_path: &Path, import: &str, sdk: &SdkResolver) -> Vec<PathBuf> {
+fn import_file_candidates(source_path: &Path, import: &str) -> Vec<PathBuf> {
     let module_path = PathBuf::from(import.replace('.', "/")).with_extension("ezra");
     let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
     let mut candidates = Vec::new();
@@ -1655,620 +1771,20 @@ fn import_file_candidates(source_path: &Path, import: &str, sdk: &SdkResolver) -
     if let Ok(project_root) = std::env::current_dir() {
         push_unique_path(&mut candidates, project_root.join(&module_path));
     }
-    for root in &sdk.sdk_roots {
-        push_unique_path(&mut candidates, root.join(&module_path));
-    }
     candidates
 }
 
-fn builtin_sdk_path(target: Option<&str>, import: &str) -> PathBuf {
-    if target.is_some_and(is_msdos_i8086_target) && import.starts_with("dos.") {
-        PathBuf::from(format!(
-            "toolchains/msdos-i8086/sdk/{}.ezra",
-            import.replace('.', "/")
-        ))
-    } else {
-        PathBuf::from(format!("builtin-sdk/{}.ezra", import.replace('.', "/")))
-    }
+fn missing_import_diagnostic(source_path: &Path, import: &str) -> Diagnostic {
+    Diagnostic::new(crate::sdk::missing_module_message(
+        import,
+        &source_path.to_string_lossy(),
+    ))
 }
 
-fn builtin_sdk_source(target: Option<&str>, import: &str) -> Option<&'static str> {
-    if matches!(import, "ezra.bits" | "ezra.int" | "ezra.mem") {
-        Some("// Compiler intrinsic module. Calls are resolved by ezrac.\n")
-    } else if target.is_some_and(|target| target.contains("dcpu")) {
-        match import {
-            "dcpu.hardware" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/hardware.ezra"),
-                "dcpu.hardware",
-            )),
-            "dcpu.lem1802" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/lem1802.ezra"),
-                "dcpu.lem1802",
-            )),
-            "dcpu.keyboard" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/keyboard.ezra"),
-                "dcpu.keyboard",
-            )),
-            "dcpu.clock" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/clock.ezra"),
-                "dcpu.clock",
-            )),
-            "dcpu.speaker" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/generic-dcpu-bare/sdk/dcpu/speaker.ezra"),
-                "dcpu.speaker",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(is_msdos_i8086_target) {
-        match import {
-            "dos.constants" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/constants.ezra"),
-                "dos.constants",
-            )),
-            "dos.raw" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/raw.ezra"),
-                "dos.raw",
-            )),
-            "dos.console" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/console.ezra"),
-                "dos.console",
-            )),
-            "dos.file" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/file.ezra"),
-                "dos.file",
-            )),
-            "dos.directory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/directory.ezra"),
-                "dos.directory",
-            )),
-            "dos.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/memory.ezra"),
-                "dos.memory",
-            )),
-            "dos.datetime" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/datetime.ezra"),
-                "dos.datetime",
-            )),
-            "dos.process" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/process.ezra"),
-                "dos.process",
-            )),
-            "dos.psp" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/msdos-i8086/sdk/dos/psp.ezra"),
-                "dos.psp",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("arduboy-")) {
-        match import {
-            "arduboy.core" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/core.ezra"),
-                "arduboy.core",
-            )),
-            "arduboy.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/input.ezra"),
-                "arduboy.input",
-            )),
-            "arduboy.oled" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/oled.ezra"),
-                "arduboy.oled",
-            )),
-            "arduboy.eeprom" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/eeprom.ezra"),
-                "arduboy.eeprom",
-            )),
-            "arduboy.timing" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/timing.ezra"),
-                "arduboy.timing",
-            )),
-            "arduboy.audio" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/audio.ezra"),
-                "arduboy.audio",
-            )),
-            "arduboy.graphics" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/arduboy-avr/sdk/arduboy/graphics.ezra"),
-                "arduboy.graphics",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("gameboy-")) {
-        match import {
-            "gb.video" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/video.ezra"),
-                "gb.video",
-            )),
-            "gb.sprites" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/sprites.ezra"),
-                "gb.sprites",
-            )),
-            "gb.serial" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/serial.ezra"),
-                "gb.serial",
-            )),
-            "gb.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/input.ezra"),
-                "gb.input",
-            )),
-            "gb.audio" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/audio.ezra"),
-                "gb.audio",
-            )),
-            "gb.color" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/color.ezra"),
-                "gb.color",
-            )),
-            "gb.text" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/gameboy-lr35902/sdk/gb/text.ezra"),
-                "gb.text",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("agonlight-mos-ez80")) {
-        match import {
-            "agon.buffers" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/buffers.ezra"),
-                "agon.buffers",
-            )),
-            "agon.console" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/console.ezra"),
-                "agon.console",
-            )),
-            "agon.mos" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/mos.ezra"),
-                "agon.mos",
-            )),
-            "agon.gpio" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/gpio.ezra"),
-                "agon.gpio",
-            )),
-            "agon.keyboard" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/keyboard.ezra"),
-                "agon.keyboard",
-            )),
-            "agon.mouse" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/mouse.ezra"),
-                "agon.mouse",
-            )),
-            "agon.sprites" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/sprites.ezra"),
-                "agon.sprites",
-            )),
-            "agon.vdp" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/vdp.ezra"),
-                "agon.vdp",
-            )),
-            "agon.text" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/agonlight-mos-ez80/sdk/agon/text.ezra"),
-                "agon.text",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(is_ez180n_target) {
-        match import {
-            "ez180n.console" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ez180n-ez80/sdk/ez180n/console.ezra"),
-                "ez180n.console",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(is_ti_ce_target) {
-        match import {
-            "tice.os" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/tice-ez80/sdk/tice/os.ezra"),
-                "tice.os",
-            )),
-            "tice.lcd" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/tice-ez80/sdk/tice/lcd.ezra"),
-                "tice.lcd",
-            )),
-            "tice.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/tice-ez80/sdk/tice/input.ezra"),
-                "tice.input",
-            )),
-            "tice.vars" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/tice-ez80/sdk/tice/vars.ezra"),
-                "tice.vars",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("ti99-4a-tms9900")) {
-        match import {
-            "ti99.console" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/console.ezra"),
-                "ti99.console",
-            )),
-            "ti99.graphics" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/graphics.ezra"),
-                "ti99.graphics",
-            )),
-            "ti99.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/input.ezra"),
-                "ti99.input",
-            )),
-            "ti99.sprites" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/sprites.ezra"),
-                "ti99.sprites",
-            )),
-            "ti99.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/memory.ezra"),
-                "ti99.memory",
-            )),
-            "ti99.sound" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/sound.ezra"),
-                "ti99.sound",
-            )),
-            "ti99.vdp" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti99-4a-tms9900/sdk/ti99/vdp.ezra"),
-                "ti99.vdp",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(is_ti_z80_target) {
-        match import {
-            "ti.os" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti-z80/sdk/ti/os.ezra"),
-                "ti.os",
-            )),
-            "ti.lcd" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti-z80/sdk/ti/lcd.ezra"),
-                "ti.lcd",
-            )),
-            "ti.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti-z80/sdk/ti/input.ezra"),
-                "ti.input",
-            )),
-            "ti.vars" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ti-z80/sdk/ti/vars.ezra"),
-                "ti.vars",
-            )),
-            _ => None,
-        }
-    } else if target
-        .is_some_and(|target| target == "sega-master-system-z80" || target == "sega-game-gear-z80")
-    {
-        match import {
-            "sms.system" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/system.ezra"),
-                "sms.system",
-            )),
-            "sms.vdp" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/vdp.ezra"),
-                "sms.vdp",
-            )),
-            "sms.video" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/video.ezra"),
-                "sms.video",
-            )),
-            "sms.palette" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/palette.ezra"),
-                "sms.palette",
-            )),
-            "sms.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/memory.ezra"),
-                "sms.memory",
-            )),
-            "sms.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/input.ezra"),
-                "sms.input",
-            )),
-            "sms.bank" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-master-system-z80/sdk/sms/bank.ezra"),
-                "sms.bank",
-            )),
-            "gg.palette" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/palette.ezra"),
-                "gg.palette",
-            )),
-            "gg.input" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/input.ezra"),
-                "gg.input",
-            )),
-            "gg.viewport" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/viewport.ezra"),
-                "gg.viewport",
-            )),
-            "gg.audio" if target == Some("sega-game-gear-z80") => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/sega-game-gear-z80/sdk/gg/audio.ezra"),
-                "gg.audio",
-            )),
-            _ => None,
-        }
-    } else if target == Some(crate::target::SNES_5A22_TARGET) {
-        match import {
-            "snes.system" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/snes-5a22/sdk/snes/system.ezra"),
-                "snes.system",
-            )),
-            "snes.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/snes-5a22/sdk/snes/memory.ezra"),
-                "snes.memory",
-            )),
-            "snes.ppu" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/snes-5a22/sdk/snes/ppu.ezra"),
-                "snes.ppu",
-            )),
-            "snes.dma" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/snes-5a22/sdk/snes/dma.ezra"),
-                "snes.dma",
-            )),
-            "snes.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/snes-5a22/sdk/snes/input.ezra"),
-                "snes.input",
-            )),
-            "snes.audio" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/snes-5a22/sdk/snes/audio.ezra"),
-                "snes.audio",
-            )),
-            "snes.timing" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/snes-5a22/sdk/snes/timing.ezra"),
-                "snes.timing",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("nes-")) {
-        match import {
-            "nes.ppu" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/nes-2a03/sdk/nes/ppu.ezra"),
-                "nes.ppu",
-            )),
-            "nes.palette" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/nes-2a03/sdk/nes/palette.ezra"),
-                "nes.palette",
-            )),
-            "nes.sprites" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/nes-2a03/sdk/nes/sprites.ezra"),
-                "nes.sprites",
-            )),
-            "nes.input" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/nes-2a03/sdk/nes/input.ezra"),
-                "nes.input",
-            )),
-            "nes.audio" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/nes-2a03/sdk/nes/audio.ezra"),
-                "nes.audio",
-            )),
-            "nes.timing" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/nes-2a03/sdk/nes/timing.ezra"),
-                "nes.timing",
-            )),
-            "nes.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/nes-2a03/sdk/nes/memory.ezra"),
-                "nes.memory",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("commodore64-6502")) {
-        match import {
-            "c64.vic" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/commodore64-6502/sdk/c64/vic.ezra"),
-                "c64.vic",
-            )),
-            "c64.sid" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/commodore64-6502/sdk/c64/sid.ezra"),
-                "c64.sid",
-            )),
-            "c64.cia" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/commodore64-6502/sdk/c64/cia.ezra"),
-                "c64.cia",
-            )),
-            "c64.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/commodore64-6502/sdk/c64/memory.ezra"),
-                "c64.memory",
-            )),
-            "c64.kernal" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/commodore64-6502/sdk/c64/kernal.ezra"),
-                "c64.kernal",
-            )),
-            "c64.text" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/commodore64-6502/sdk/c64/text.ezra"),
-                "c64.text",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("zxspectrum-z80")) {
-        match import {
-            "zx.rom" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/rom.ezra"),
-                "zx.rom",
-            )),
-            "zx.screen" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/screen.ezra"),
-                "zx.screen",
-            )),
-            "zx.io" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/io.ezra"),
-                "zx.io",
-            )),
-            "zx.keyboard" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/keyboard.ezra"),
-                "zx.keyboard",
-            )),
-            "zx.sound" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/sound.ezra"),
-                "zx.sound",
-            )),
-            "zx.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/memory.ezra"),
-                "zx.memory",
-            )),
-            "zx.interrupt" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/interrupt.ezra"),
-                "zx.interrupt",
-            )),
-            "zx.text" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/zxspectrum-z80/sdk/zx/text.ezra"),
-                "zx.text",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.starts_with("ezra-test-")) {
-        match import {
-            "harness.io" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ezra-test-ez80/sdk/harness/io.ezra"),
-                "harness.io",
-            )),
-            "harness.layout" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ezra-test-ez80/sdk/harness/layout.ezra"),
-                "harness.layout",
-            )),
-            "harness.memory" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/ezra-test-ez80/sdk/harness/memory.ezra"),
-                "harness.memory",
-            )),
-            _ => None,
-        }
-    } else if target.is_some_and(|target| target.split('-').any(|part| part == "cpm")) {
-        match import {
-            "cpm.bdos" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/bdos.ezra"),
-                "cpm.bdos",
-            )),
-            "cpm.console" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/console.ezra"),
-                "cpm.console",
-            )),
-            "cpm.text" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/text.ezra"),
-                "cpm.text",
-            )),
-            "cpm.dma" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/dma.ezra"),
-                "cpm.dma",
-            )),
-            "cpm.fcb" => Some(builtin_sdk_utf8(
-                include_bytes!("../toolchains/cpm-2.2-z80/sdk/cpm/fcb.ezra"),
-                "cpm.fcb",
-            )),
-            _ => None,
-        }
-    } else {
-        None
-    }
-}
-
-/// Return the built-in SDK modules available for the selected target.
-///
-/// Keep this list derived from `builtin_sdk_source` so consumers such as the
-/// LSP cannot advertise a module that import resolution would reject.
+/// Return embedded target SDK modules available for the selected target.
+/// Embedded names and source paths come from one manifest.
 pub fn builtin_sdk_modules(target: Option<&str>) -> Vec<&'static str> {
-    const MODULES: &[&str] = &[
-        "ezra.bits",
-        "ezra.int",
-        "ezra.mem",
-        "dcpu.hardware",
-        "dcpu.lem1802",
-        "dcpu.keyboard",
-        "dcpu.clock",
-        "dcpu.speaker",
-        "dos.constants",
-        "dos.raw",
-        "dos.console",
-        "dos.file",
-        "dos.directory",
-        "dos.memory",
-        "dos.datetime",
-        "dos.process",
-        "dos.psp",
-        "arduboy.core",
-        "arduboy.input",
-        "arduboy.oled",
-        "arduboy.eeprom",
-        "arduboy.timing",
-        "arduboy.audio",
-        "arduboy.graphics",
-        "gb.video",
-        "gb.sprites",
-        "gb.serial",
-        "gb.input",
-        "gb.audio",
-        "gb.color",
-        "gb.text",
-        "nes.ppu",
-        "nes.palette",
-        "nes.sprites",
-        "nes.input",
-        "nes.audio",
-        "nes.timing",
-        "nes.memory",
-        "snes.system",
-        "snes.memory",
-        "snes.ppu",
-        "snes.dma",
-        "snes.input",
-        "snes.audio",
-        "snes.timing",
-        "sms.system",
-        "sms.vdp",
-        "sms.video",
-        "sms.palette",
-        "sms.memory",
-        "sms.input",
-        "agon.buffers",
-        "agon.console",
-        "agon.mos",
-        "agon.gpio",
-        "agon.keyboard",
-        "agon.mouse",
-        "agon.sprites",
-        "agon.vdp",
-        "agon.text",
-        "ez180n.console",
-        "tice.os",
-        "tice.lcd",
-        "ti.os",
-        "ti.lcd",
-        "ti99.console",
-        "ti99.graphics",
-        "ti99.input",
-        "ti99.sprites",
-        "ti99.memory",
-        "ti99.sound",
-        "ti99.vdp",
-        "zx.rom",
-        "zx.screen",
-        "zx.io",
-        "zx.keyboard",
-        "zx.sound",
-        "zx.memory",
-        "zx.interrupt",
-        "zx.text",
-        "c64.vic",
-        "c64.sid",
-        "c64.cia",
-        "c64.memory",
-        "c64.kernal",
-        "c64.text",
-        "harness.io",
-        "harness.layout",
-        "harness.memory",
-        "cpm.bdos",
-        "cpm.console",
-        "cpm.text",
-        "cpm.dma",
-        "cpm.fcb",
-    ];
-
-    MODULES
-        .iter()
-        .copied()
-        .filter(|module| builtin_sdk_source(target, module).is_some())
-        .collect()
-}
-
-fn is_ti_ce_target(target: &str) -> bool {
-    target.starts_with("ti84plusce-ez80") || target.starts_with("ti83premiumce-ez80")
-}
-
-fn is_ti_z80_target(target: &str) -> bool {
-    target.starts_with("ti83-z80")
-        || target.starts_with("ti83plus-z80")
-        || target.starts_with("ti84-z80")
-        || target.starts_with("ti84plus-z80")
-}
-
-fn builtin_sdk_utf8(bytes: &'static [u8], module: &str) -> &'static str {
-    std::str::from_utf8(bytes)
-        .unwrap_or_else(|_| panic!("built-in SDK module `{module}` is not UTF-8"))
+    embedded_sdk_modules(target)
 }
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -2844,6 +2360,7 @@ mod i8086_validation_tests {
             &SdkResolver {
                 target: Some("bare-i8086".to_owned()),
                 sdk_roots: Vec::new(),
+                sdk_mode: SdkLookupMode::default(),
             },
         )
         .unwrap_err();
@@ -2872,6 +2389,7 @@ mod i8086_validation_tests {
         let sdk = SdkResolver {
             target: Some("msdos-com-i8086".to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         };
 
         assert_eq!(builtin_sdk_modules(sdk.target.as_deref()), MODULES);
@@ -2999,6 +2517,7 @@ mod i8086_validation_tests {
         let sdk = SdkResolver {
             target: Some("msdos-com-i8086".to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         };
 
         for source in PROGRAMS {
@@ -3027,6 +2546,7 @@ mod i8086_validation_tests {
             &SdkResolver {
                 target: Some("custom-board-i8086".to_owned()),
                 sdk_roots: Vec::new(),
+                sdk_mode: SdkLookupMode::default(),
             },
         )
         .unwrap();

@@ -20,6 +20,7 @@ serde_json = { version = "1.0.150", optional = true }
 [features]
 default = [
     "std",
+    "embedded-sdk",
     "test-runner",
     "intel",
     "i8086",
@@ -36,6 +37,7 @@ default = [
     "pic18",
 ]
 std = ["ezra/std"]
+embedded-sdk = ["ezra/embedded-sdk"]
 no-std = ["ezra/no-std"]
 test-runner = ["std", "ezra/test-runner"]
 intel = ["ezra/intel"]

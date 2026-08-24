@@ -1,9 +1,9 @@
 #![cfg(all(feature = "no-std", not(feature = "std")))]
 
-#[cfg(feature = "z80")]
+#[cfg(any(feature = "i8086", feature = "z80"))]
 use ezra::api::compile_workspace_to_assembly;
 use ezra::{
-    api::{CompileRequest, Workspace, WorkspaceFile, build_workspace},
+    api::{CompileRequest, SdkLookupMode, Workspace, WorkspaceFile, build_workspace},
     ast::{Declaration, EmbedSource, Expr, Program},
     disk::{DiskFile, DiskFormat, DiskRequest, create_disk_image},
 };
@@ -21,6 +21,77 @@ use ezra::{
     target::AssemblerCpu,
     vm::assemble_program_at,
 };
+
+#[cfg(feature = "i8086")]
+#[test]
+fn alloc_only_external_dos_sdk_resolves_and_preserves_relative_embeds() {
+    let root_source = "import dos.console\nfn main() { let value: u8 = console.EXTERNAL }\n";
+    let module_source = "pub embed external_payload: bytes = file(\"assets/payload.bin\")\npub const EXTERNAL: u8 = 7\n";
+    let files = [
+        WorkspaceFile::text("src/main.ezra", root_source),
+        WorkspaceFile::text("vendor-sdk/dos/console.ezra", module_source),
+        WorkspaceFile::new("vendor-sdk/dos/assets/payload.bin", &[0xA5, 0x5A]),
+    ];
+    let mut request = CompileRequest::new("src/main.ezra", "msdos-com-i8086");
+    request.sdk_roots.push("vendor-sdk".to_owned());
+    request.sdk_mode = SdkLookupMode::ExternalOnly;
+
+    let compilation =
+        compile_workspace_to_assembly(&Workspace::new(&files), "src/main.ezra", &request).unwrap();
+    assert!(compilation.report.has_main);
+    assert!(compilation
+        .program
+        .declarations
+        .iter()
+        .any(|declaration| matches!(declaration, Declaration::Embed(embed) if embed.name == "dos.console.external_payload")));
+}
+
+#[cfg(feature = "z80")]
+#[test]
+fn alloc_only_external_cpm_and_agon_sdks_resolve_without_embedded_lookup() {
+    for (target, module) in [
+        ("cpm-2.2-z80", "cpm.console"),
+        ("agonlight-mos-ez80", "agon.console"),
+    ] {
+        let root_source = format!(
+            "import {module}\nfn main() {{ let value: u8 = {}.EXTERNAL }}\n",
+            module.rsplit('.').next().unwrap()
+        );
+        let module_source = "pub const EXTERNAL: u8 = 7\n";
+        let module_path = format!("vendor-sdk/{}.ezra", module.replace('.', "/"));
+        let files = [
+            WorkspaceFile::text("src/main.ezra", &root_source),
+            WorkspaceFile::text(&module_path, module_source),
+        ];
+        let mut request = CompileRequest::new("src/main.ezra", target);
+        request.sdk_roots.push("vendor-sdk".to_owned());
+        request.sdk_mode = SdkLookupMode::ExternalOnly;
+
+        let compilation =
+            compile_workspace_to_assembly(&Workspace::new(&files), "src/main.ezra", &request)
+                .unwrap();
+        assert!(compilation.report.has_main);
+    }
+}
+
+#[cfg(feature = "z80")]
+#[test]
+fn alloc_only_missing_sdk_import_uses_the_shared_diagnostic() {
+    let files = [WorkspaceFile::text(
+        "src/main.ezra",
+        "import cpm.console\nfn main() {}\n",
+    )];
+    let mut request = CompileRequest::new("src/main.ezra", "cpm-2.2-z80");
+    request.sdk_roots.push("vendor-sdk".to_owned());
+    request.sdk_mode = SdkLookupMode::ExternalOnly;
+
+    let error = compile_workspace_to_assembly(&Workspace::new(&files), "src/main.ezra", &request)
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "failed to resolve import `cpm.console` from `src/main.ezra`: no source-relative, caller SDK, or embedded SDK module was found"
+    );
+}
 
 #[cfg(feature = "i8086")]
 #[test]

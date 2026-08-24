@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use crate::sdk::SdkLookupMode;
 pub use crate::workspace::{Workspace, WorkspaceFile};
 
 use crate::{
@@ -70,8 +71,10 @@ pub struct CompileRequest {
     pub source_path: PathBuf,
     /// Target triple used for SDK selection, validation, and code generation.
     pub target: String,
-    /// Additional project SDK roots. Built-in SDKs are selected from `target`.
+    /// Additional SDK roots searched in order after project/source-relative paths.
     pub sdk_paths: Vec<PathBuf>,
+    /// Controls whether the embedded SDK is used after the caller roots.
+    pub sdk_mode: SdkLookupMode,
     /// Include generator debug comments in the emitted assembly where supported.
     pub debug_comments: bool,
     /// Enable default target SDK symbols.
@@ -87,6 +90,7 @@ impl CompileRequest {
             source_path: source_path.into(),
             target: target.into(),
             sdk_paths: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
             debug_comments: false,
             default_sdk_symbols: true,
             optimization: crate::optimization::OptimizationOptions::default(),
@@ -102,6 +106,7 @@ impl CompileRequest {
         SdkResolver {
             target: Some(self.target.clone()),
             sdk_roots: self.sdk_paths.clone(),
+            sdk_mode: self.sdk_mode,
         }
     }
 }

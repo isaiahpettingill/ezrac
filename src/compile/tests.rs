@@ -413,6 +413,7 @@ fn multi_diagnostics_resolve_qualified_imported_values() {
     let sdk = SdkResolver {
         target: Some("agonlight-mos-ez80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let source = "import agon.vdp\nfn main() { let color: u8 = vdp.COLOR_GREEN; test.pass() }\n";
 
@@ -607,6 +608,7 @@ fn cfg_filters_declarations_before_semantic_checks() {
     let sdk = SdkResolver {
         target: Some("ti84plusce-ez80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let options = CompileOptions {
         source: PathBuf::from("game.ezra"),
@@ -648,6 +650,7 @@ fn cfg_skips_inactive_imports_before_file_loading() {
     let sdk = SdkResolver {
         target: Some("ti84plusce-ez80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -671,6 +674,7 @@ fn cfg_evaluates_target_predicates_and_multiple_attributes() {
     let sdk = SdkResolver {
         target: Some("agonlight-mos-ez80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -720,6 +724,7 @@ fn cfg_filters_imported_declarations_and_aliases() {
     let sdk = SdkResolver {
         target: Some("ti84plusce-ez80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = load_program_with_sdk(&main_path, &sdk).unwrap();
 
@@ -761,6 +766,7 @@ fn cfg_rejects_unknown_predicates_and_features() {
         &SdkResolver {
             target: Some("agonlight-mos-ez80".to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         },
     )
     .unwrap_err();
@@ -780,6 +786,7 @@ fn cpm_z80_target_uses_builtin_bdos_sdk() {
     let sdk = SdkResolver {
         target: Some("cpm-2.2-z80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -846,6 +853,7 @@ fn cpm_bdos_sdk_exposes_all_cpm_2_2_system_calls() {
     let sdk = SdkResolver {
         target: Some("cpm-2.2-z80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -918,6 +926,7 @@ fn cpm_z80_target_uses_builtin_console_sdk() {
     let sdk = SdkResolver {
         target: Some("cpm-2.2-z80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -941,6 +950,7 @@ fn shared_ti99_sdk_dependencies_do_not_duplicate_import_aliases() {
     let sdk = SdkResolver {
         target: Some("ti99-4a-tms9900".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("main.ezra"), source, &sdk).unwrap();
     let mut names = std::collections::HashSet::new();
@@ -961,6 +971,7 @@ fn ti99_input_sdk_exposes_translated_keyboard_input() {
     let sdk = SdkResolver {
         target: Some("ti99-4a-tms9900".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("main.ezra"), source, &sdk).unwrap();
 
@@ -995,6 +1006,7 @@ fn checks_scalar_source_for_generic_m68k_target() {
         &SdkResolver {
             target: Some("generic-m68k-bare".to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         },
     )
     .unwrap();
@@ -1019,6 +1031,7 @@ fn cpm_z80_target_uses_builtin_fcb_and_dma_sdks() {
     let sdk = SdkResolver {
         target: Some("cpm-2.2-z80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -1059,6 +1072,7 @@ fn zxspectrum_target_uses_builtin_zx_sdk() {
     let sdk = SdkResolver {
         target: Some("zxspectrum-z80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -1114,6 +1128,7 @@ fn commodore64_target_uses_builtin_c64_sdk_and_6502_codegen() {
     let sdk = SdkResolver {
         target: Some("commodore64-6502".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("c64.ezra"), source, &sdk).unwrap();
 
@@ -1161,6 +1176,7 @@ fn ti_ce_targets_use_builtin_tice_sdk() {
         let sdk = SdkResolver {
             target: Some(target.to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         };
         let program =
             parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
@@ -1190,6 +1206,7 @@ fn ti_z80_targets_use_builtin_ti_sdk() {
         let sdk = SdkResolver {
             target: Some(target.to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         };
         let program =
             parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
@@ -1216,6 +1233,7 @@ fn cpm_8080_target_uses_builtin_console_sdk() {
     let sdk = SdkResolver {
         target: Some("cpm-2.2-i8080".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -1243,6 +1261,7 @@ fn cpm_8085_target_uses_builtin_console_sdk() {
     let sdk = SdkResolver {
         target: Some("cpm-2.2-i8085".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let program = parse_and_resolve_imports_with_sdk(Path::new("game.ezra"), source, &sdk).unwrap();
 
@@ -1840,6 +1859,7 @@ fn versioned_msdos_i8086_targets_use_the_dos_sdk_and_startup() {
     let sdk = SdkResolver {
         target: Some(target.to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
 
     assert!(builtin_sdk_modules(Some(target)).contains(&"dos.console"));
@@ -1903,6 +1923,7 @@ fn arduboy_target_uses_builtin_sdk_and_avr_codegen() {
     let sdk = SdkResolver {
         target: Some("arduboy-atmega32u4".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
 
     let modules = builtin_sdk_modules(Some("arduboy-atmega32u4"));
@@ -1957,6 +1978,7 @@ fn intrinsic_modules_resolve_for_every_target() {
         let sdk = SdkResolver {
             target: Some(target.to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         };
         for module in ["ezra.bits", "ezra.int", "ezra.mem"] {
             assert!(builtin_sdk_modules(Some(target)).contains(&module));
@@ -1973,6 +1995,7 @@ fn intrinsic_modules_resolve_for_every_target() {
     let sdk = SdkResolver {
         target: Some("generic-z80-baremetal".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     check_source_with_sdk(
         "import ezra.bits\nimport ezra.int\nimport ezra.mem\nfn main() {\n    let rotated: u8 = bits.rotate_left(1u8, 1u8)\n    let product: u16 = int.widening_mul(2u8, 3u8)\n}\n",
@@ -1999,6 +2022,7 @@ fn ez180n_console_builtin_sdk_resolves_for_every_cpu_target() {
         let sdk = SdkResolver {
             target: Some(target.to_owned()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         };
         assert!(builtin_sdk_modules(Some(target)).contains(&"ez180n.console"));
         let (path, source) =

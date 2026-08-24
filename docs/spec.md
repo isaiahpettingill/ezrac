@@ -429,8 +429,8 @@ layout = "cartridges/agon.toml"
 manifest = "cartridges/manifest.toml"
 
 [sdk]
-# Project-local or external SDK roots. These supplement, but do not replace,
-# the selected target's toolchain SDK unless disabled by target/tool options.
+# Project-local or external SDK roots. They are searched in this order before
+# the embedded SDK.
 paths = ["sdk", "../shared-ezra-sdk"]
 ```
 
@@ -482,20 +482,19 @@ Future targets may include classic Z80 systems such as `cpm-2.2-z80` and `zxspec
 
 ### 7.2 Toolchain SDK Resolution
 
-Target SDKs are distributed with the EZRA toolchain or an installed target package. They are not vendored into each project and are not hardcoded into the compiler.
+Target SDKs are distributed with the EZRA toolchain or an installed target package. The compiler uses one normalized SDK module registry/provider boundary for std compilation, alloc-only virtual workspaces, and LSP discovery.
 
-For `import foo.bar`, module resolution should search:
+For `import foo.bar`, module resolution searches in this deterministic order:
 
 ```text
-1. source-relative paths
-2. project SDK paths from `Ezra.toml`
-3. selected target's toolchain SDK roots
-4. target-independent standard SDK roots
+1. source-relative paths: the importing file, its ancestors, and the project/current directory
+2. caller SDK roots, in the order supplied by the project or API request
+3. embedded target SDK modules, when embedded lookup is enabled
 ```
 
-SDK modules must be normal EZRA modules unless they require explicit target intrinsics. Hardware-facing SDKs should expose typed constants and functions over ports, MMIO, volatile memory, inline assembly, and target layout symbols.
+An external module with the same normalized name shadows the embedded module. SDK modules must be normal EZRA modules unless they require explicit target intrinsics. Hardware-facing SDKs should expose typed constants and functions over ports, MMIO, volatile memory, inline assembly, and target layout symbols.
 
-Bundled SDKs must be stored as EZRA source files in target-specific SDK folders and embedded into the compiler binary. The compiler may also support installed toolchain SDK roots and project SDK paths. Project SDK paths shadow bundled SDK modules so applications can override or extend target libraries without modifying the compiler.
+Bundled SDK source paths and names come from one manifest. The `embedded-sdk` Cargo feature includes those bytes and is enabled by default; constrained compiler builds can use `--no-default-features` and install SDK `.ezra` files beside the tool. Std API callers use ordered filesystem `sdk_paths` and `SdkLookupMode::ExternalOnly`. Alloc-only callers put SDK files in `Workspace`, list virtual `sdk_roots`, and use the same lookup mode. File embeds in virtual SDK modules remain relative to the module's virtual source path.
 
 ### 7.3 Project Scaffolding CLI
 

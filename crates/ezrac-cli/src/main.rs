@@ -26,6 +26,7 @@ use ezra::{
         ArduboyConfig, AssetConfig, BankingConfig, GameBoyConfig, GameBoyMapper, SegaConfig,
         ZxSpectrumConfig, load_nearest_project_config, load_project_config,
     },
+    sdk::SdkLookupMode,
     target::{
         Address24, AssemblerCpu, CpuFamily, OutputFormat, TargetProfile, parse_output_format,
         parse_target_triple, resolve_target_profile,
@@ -883,6 +884,7 @@ fn assemble_file(options: &AssembleOptions) -> Result<(), String> {
         sdk: SdkResolver {
             target: Some(target.triple.value.clone()),
             sdk_roots: Vec::new(),
+            sdk_mode: SdkLookupMode::default(),
         },
         target,
         output_format,
@@ -1215,6 +1217,7 @@ fn resolve_build_settings_with_budgets(
             .as_ref()
             .map(|project| project.sdk_paths.clone())
             .unwrap_or_default(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let project_root = project
         .as_ref()

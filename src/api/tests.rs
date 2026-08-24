@@ -812,6 +812,135 @@ fn resolves_sdk_roots_for_in_memory_compilation() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn external_sdk_roots_resolve_dos_cpm_and_agon_without_embedded_lookup() {
+    for (target, module) in [
+        ("msdos-com-i8086", "dos.console"),
+        ("cpm-2.2-z80", "cpm.console"),
+        ("agonlight-mos-ez80", "agon.console"),
+    ] {
+        let root = std::env::temp_dir().join(format!(
+            "ezrac-external-sdk-{}-{}",
+            std::process::id(),
+            target.replace('-', "_")
+        ));
+        let sdk_root = root.join("installed-sdk");
+        let module_path = sdk_root.join(module.replace('.', "/") + ".ezra");
+        std::fs::create_dir_all(module_path.parent().unwrap()).unwrap();
+        std::fs::write(&module_path, "pub const EXTERNAL: u8 = 7\n").unwrap();
+
+        let mut request = CompileRequest::new(root.join("project/main.ezra"), target);
+        request.sdk_paths.push(sdk_root);
+        request.sdk_mode = SdkLookupMode::ExternalOnly;
+        let source = format!(
+            "import {module}\nfn main() {{ let value: u8 = {}.EXTERNAL }}\n",
+            module.rsplit('.').next().unwrap()
+        );
+        compile_source_to_assembly(&source, &request).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn earlier_external_sdk_root_shadows_later_root_and_embedded_sdk() {
+    let root = std::env::temp_dir().join(format!("ezrac-sdk-order-{}", std::process::id()));
+    let first = root.join("first");
+    let second = root.join("second");
+    for (directory, declaration) in [(&first, "FIRST"), (&second, "SECOND")] {
+        let path = directory.join("dos/console.ezra");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("pub const {declaration}: u8 = 7\n")).unwrap();
+    }
+    let mut request = CompileRequest::new(root.join("project/main.ezra"), "msdos-com-i8086");
+    request.sdk_paths = vec![first, second];
+    let compilation = compile_source_to_assembly(
+        "import dos.console\nfn main() { let value: u8 = console.FIRST }\n",
+        &request,
+    )
+    .unwrap();
+    assert!(compilation.report.has_main);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn external_sdk_can_shadow_a_compiler_intrinsic_module() {
+    let root = std::env::temp_dir().join(format!("ezrac-intrinsic-shadow-{}", std::process::id()));
+    let sdk_root = root.join("sdk");
+    let module_path = sdk_root.join("ezra/mem.ezra");
+    std::fs::create_dir_all(module_path.parent().unwrap()).unwrap();
+    std::fs::write(module_path, "pub const EXTERNAL: u8 = 7\n").unwrap();
+
+    let mut request = CompileRequest::new(root.join("project/main.ezra"), "bare-z80");
+    request.sdk_paths.push(sdk_root);
+    compile_source_to_assembly(
+        "import ezra.mem\nfn main() { let value: u8 = mem.EXTERNAL }\n",
+        &request,
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn std_virtual_workspace_sources_can_supply_an_ordered_sdk_root() {
+    let files = [
+        WorkspaceFile::text(
+            "src/main.ezra",
+            "import dos.console\nfn main() { let value: u8 = console.EXTERNAL }\n",
+        ),
+        WorkspaceFile::text(
+            "vendor-sdk/dos/console.ezra",
+            "pub const EXTERNAL: u8 = 7\n",
+        ),
+    ];
+    let mut request = CompileRequest::new("src/main.ezra", "msdos-com-i8086");
+    request.sdk_paths.push(PathBuf::from("vendor-sdk"));
+    request.sdk_mode = SdkLookupMode::ExternalOnly;
+
+    compile_workspace_to_assembly(&Workspace::new(&files), "src/main.ezra", &request).unwrap();
+}
+
+#[test]
+fn source_relative_module_shadows_caller_sdk_and_embedded_module() {
+    let root = std::env::temp_dir().join(format!("ezrac-sdk-relative-{}", std::process::id()));
+    let project_module = root.join("project/dos/console.ezra");
+    let caller_module = root.join("installed-sdk/dos/console.ezra");
+    std::fs::create_dir_all(project_module.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(caller_module.parent().unwrap()).unwrap();
+    std::fs::write(project_module, "pub const PROJECT: u8 = 7\n").unwrap();
+    std::fs::write(caller_module, "pub const CALLER: u8 = 7\n").unwrap();
+
+    let mut request = CompileRequest::new(root.join("project/main.ezra"), "msdos-com-i8086");
+    request.sdk_paths.push(root.join("installed-sdk"));
+    compile_source_to_assembly(
+        "import dos.console\nfn main() { let value: u8 = console.PROJECT }\n",
+        &request,
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn missing_external_sdk_import_uses_the_shared_diagnostic() {
+    let root = std::env::temp_dir().join(format!("ezrac-sdk-missing-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut request = CompileRequest::new(root.join("project/main.ezra"), "msdos-com-i8086");
+    request.sdk_paths.push(root.join("installed-sdk"));
+    request.sdk_mode = SdkLookupMode::ExternalOnly;
+    let error =
+        compile_source_to_assembly("import dos.console\nfn main() {}\n", &request).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("failed to resolve import `dos.console` from")
+    );
+    assert!(
+        error
+            .message
+            .contains("no source-relative, caller SDK, or embedded SDK module was found")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[cfg(feature = "i8086")]
 #[test]
 fn builds_msdos_com_as_raw_bytes_at_0100h_with_a_reserved_psp() {

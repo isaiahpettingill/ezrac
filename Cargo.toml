@@ -41,6 +41,7 @@ w65c816 = "0.1.17"
 [features]
 default = [
     "std",
+    "embedded-sdk",
     "test-runner",
     "intel",
     "i8086",
@@ -58,6 +59,7 @@ default = [
 ]
 std = ["dep:toml", "pest/std", "pest_derive/std"]
 no-std = []
+embedded-sdk = []
 dos-frontend = []
 dos-optimizer = []
 dos-codegen = []

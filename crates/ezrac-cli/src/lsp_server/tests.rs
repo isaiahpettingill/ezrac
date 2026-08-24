@@ -52,10 +52,14 @@ fn built_in_completion_modules_follow_project_target() {
     let sdk = SdkResolver {
         target: Some("ez180n-ez80".to_owned()),
         sdk_roots: Vec::new(),
+        sdk_mode: SdkLookupMode::default(),
     };
     let modules = available_modules(Some(&sdk));
 
-    assert_eq!(modules, vec!["ez180n.console"]);
+    assert_eq!(
+        modules,
+        vec!["ez180n.console", "ezra.bits", "ezra.int", "ezra.mem"]
+    );
     let items = import_completion_items(Some(&sdk));
     assert!(items.iter().any(|item| {
         item.get("label").and_then(Value::as_str) == Some("import ez180n.console")
@@ -79,10 +83,17 @@ fn custom_sdk_roots_contribute_modules_for_custom_targets() {
     let sdk = SdkResolver {
         target: Some("custom-fantasy-ez80".to_owned()),
         sdk_roots: vec![root.clone()],
+        sdk_mode: SdkLookupMode::default(),
     };
     assert_eq!(
         available_modules(Some(&sdk)),
-        vec!["graphics.screen", "math"]
+        vec![
+            "ezra.bits",
+            "ezra.int",
+            "ezra.mem",
+            "graphics.screen",
+            "math"
+        ]
     );
 
     let _ = fs::remove_dir_all(root);

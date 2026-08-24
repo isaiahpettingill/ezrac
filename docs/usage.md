@@ -357,7 +357,7 @@ Supported fields:
 [optimization].enable   pass names enabled in addition to the selected level
 [optimization].disable  pass names disabled after level and enable processing
 [layout].file           custom .ezralayout file
-[sdk].paths             additional SDK source roots
+[sdk].paths             additional SDK source roots, searched in listed order
 [assets].section        default section for embeds without an explicit section
 [assets].align          default power-of-two alignment for embeds
 [[assets.images]].path  project-relative indexed PNG path
@@ -487,7 +487,7 @@ cargo run -- build --target cpm-2.2-z80 examples/cpm-z80/file-read.ezra
 
 ## SDK Imports
 
-Built-in SDK modules are target-specific. They are embedded into the compiler binary from `toolchains/*/sdk`.
+Built-in SDK modules are target-specific. They are embedded into the compiler binary from `toolchains/*/sdk` when the `embedded-sdk` Cargo feature is enabled. Default builds enable that feature. A constrained build can omit the SDK bytes with `--no-default-features`; callers then install SDK source files beside the compiler and add the directory through `[sdk].paths` or the Rust API.
 
 Use imports like ordinary EZRA modules:
 
@@ -499,14 +499,16 @@ fn main() {
 }
 ```
 
-Project SDK paths are searched before built-in SDK modules:
+Project/source-relative files are searched first. The configured SDK roots are then searched in the listed order, followed by the embedded target SDK when embedded lookup is enabled:
 
 ```toml
 [sdk]
-paths = ["sdk"]
+paths = ["vendor/sdk", "sdk"]
 ```
 
-Given `import device.video`, `ezrac` looks for `device/video.ezra` under each SDK root.
+Given `import device.video`, `ezrac` looks for `device/video.ezra` under the importing file and its ancestor directories, then under each SDK root. An external module with the same normalized name shadows the embedded module.
+
+For std Rust callers, use `CompileRequest::sdk_paths` and set `sdk_mode` to `SdkLookupMode::ExternalOnly` to require installed SDK files. Alloc-only callers cannot use host paths: put the SDK files in `Workspace`, list their virtual directory names in `CompileRequest::sdk_roots`, and use the same `sdk_mode`. A file embed in an external virtual SDK module stays relative to that module's virtual path.
 
 ## Assembly Input
 
