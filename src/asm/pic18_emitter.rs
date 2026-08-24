@@ -694,11 +694,9 @@ mod tests {
     use crate::{asm::AssemblyOptions, parser::parse_program, target::Address24};
     use std::path::Path;
 
-    #[test]
-    fn lowers_scalar_source_through_hir_and_tbir() {
-        let source = "global result: u16 = 0 fn add(a: u16, b: u16) -> u16 { return a + b } fn main() { result = add(20, 22) }";
+    fn emit(source: &str) -> String {
         let program = parse_program(Path::new("pic18.ezra"), source).unwrap();
-        let assembly = emit_pic18_assembly_with_options(
+        emit_pic18_assembly_with_options(
             &program,
             AssemblyOptions {
                 cpu: CpuFamily::Pic18,
@@ -713,9 +711,29 @@ mod tests {
                 ..AssemblyOptions::default()
             },
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn lowers_scalar_source_through_hir_and_tbir() {
+        let assembly = emit(
+            "global result: u16 = 0 fn add(a: u16, b: u16) -> u16 { return a + b } fn main() { result = add(20, 22) }",
+        );
         assert!(assembly.contains("target: PIC18 classic"), "{assembly}");
         assert!(assembly.contains("movlw"), "{assembly}");
         assert!(assembly.contains("call _add"), "{assembly}");
+    }
+
+    #[test]
+    fn lowers_typed_function_pointer_calls_to_callw() {
+        let assembly = emit(
+            "global callback: ptr<fn(u8, u8)u8> = &add global result: u8 = 0 fn add(a: u8, b: u8) -> u8 { return a + b } fn main() { let local: ptr<fn(u8, u8)u8> = &add; result = callback(20, 22); result = local(20, 22) }",
+        );
+
+        assert_eq!(assembly.matches("callw").count(), 2, "{assembly}");
+        assert!(assembly.contains("movwf PCLATH, a"), "{assembly}");
+        assert!(assembly.contains("movwf PCLATU, a"), "{assembly}");
+        assert!(assembly.contains("goto _add"), "{assembly}");
+        assert!(assembly.contains("_add:"), "{assembly}");
     }
 }

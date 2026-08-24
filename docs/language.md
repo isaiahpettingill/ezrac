@@ -414,6 +414,29 @@ extern asm fn read_status() -> u8
 pub extern asm fn put_char(ch: u8)
 ```
 
+### Function Pointers
+
+A typed function pointer records its parameter types and optional result type. Take a function address with `&name`, store it in a global or local, pass it as a parameter, and call it like a direct function.
+
+```ezra
+fn add(left: u8, right: u8) -> u8 {
+    return left + right
+}
+
+fn invoke(callback: ptr<fn(u8, u8)u8>) -> u8 {
+    return callback(20, 22)
+}
+
+fn main() {
+    let callback: ptr<fn(u8, u8)u8> = &add
+    let answer: u8 = invoke(callback)
+}
+```
+
+The result type follows the closing parameter parenthesis without `->`. `ptr<fn()>` and `ptr<fn(u8)>` are void-return function pointers. Assignments and calls require an exact compatible signature. Function pointers currently support zero or one result; two-result callbacks are rejected.
+
+The selected target defines the pointer representation and indirect-call sequence. Some targets point directly to the function entry, while targets with static argument slots use compiler-generated trampolines. PIC18 keeps data pointers and code addresses separate and lowers indirect calls through `CALLW`. LR35902 rejects banked callback targets, and WDC 65C816 callbacks are limited to code in bank `$00`. Code that depends on a specific code-address representation or calling sequence is not portable between targets.
+
 ## Intrinsic Catalog
 
 The following catalog entries are implemented. `T` means one exact integer type; `U` and `V` may differ in width but must follow the rule shown. `same` means the result keeps the value's exact type.
