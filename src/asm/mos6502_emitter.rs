@@ -1114,8 +1114,9 @@ impl Emitter {
                             Some(format!("#${:02X}", *value as u8))
                         } else {
                             let binding = self.binding(name)?;
-                            (self.model.type_width(&binding.ty)? == 1)
-                                .then(|| format!("${:04X}", binding.storage.address))
+                            (self.model.type_width(&binding.ty)? == 1
+                                && frame_offset(binding.storage.address).is_none())
+                            .then(|| format!("${:04X}", binding.storage.address))
                         }
                     }
                     _ => None,
@@ -4250,18 +4251,38 @@ impl Emitter {
         lines: &[String],
     ) -> Result<(), Diagnostic> {
         let mut operands = HashMap::new();
+        let mut frame_temps = HashMap::<String, (Storage, Storage)>::new();
         for input in inputs {
             let binding = self.binding(&input.name)?;
+            let storage = binding.storage;
+            let operand_storage = if frame_offset(storage.address).is_some() {
+                let temporary = self.model.allocate(storage.size)?;
+                self.copy(storage, temporary, storage.size);
+                frame_temps.insert(input.name.clone(), (storage, temporary));
+                temporary
+            } else {
+                storage
+            };
             operands.insert(
                 input.name.clone(),
-                format!("${:04X}", binding.storage.address),
+                format!("${:04X}", operand_storage.address),
             );
         }
         for output in outputs {
             let binding = self.binding(&output.name)?;
+            let storage = binding.storage;
+            let operand_storage = if let Some((_, temporary)) = frame_temps.get(&output.name) {
+                *temporary
+            } else if frame_offset(storage.address).is_some() {
+                let temporary = self.model.allocate(storage.size)?;
+                frame_temps.insert(output.name.clone(), (storage, temporary));
+                temporary
+            } else {
+                storage
+            };
             operands.insert(
                 output.name.clone(),
-                format!("${:04X}", binding.storage.address),
+                format!("${:04X}", operand_storage.address),
             );
         }
         for line in lines {
@@ -4275,6 +4296,9 @@ impl Emitter {
                 )));
             }
             self.line(&format!("    {emitted}"));
+        }
+        for (_, (storage, temporary)) in frame_temps {
+            self.copy(temporary, storage, storage.size);
         }
         Ok(())
     }
@@ -4537,7 +4561,9 @@ impl Emitter {
         let done = self.next_label("increment_done");
         for offset in 0..u32::from(width) {
             let address = storage.address + offset;
-            if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
+            if frame_offset(address).is_some()
+                || (self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into())
+            {
                 // INC has no absolute-long encoding. Keep the byte ABI and
                 // carry the increment through long LDA/ADC/STA operations.
                 if offset == 0 {
@@ -4676,6 +4702,9 @@ impl Emitter {
                 } else {
                     let binding = self.binding(name)?;
                     if self.model.type_width(&binding.ty)? != 1 {
+                        return Ok(false);
+                    }
+                    if frame_offset(binding.storage.address).is_some() {
                         return Ok(false);
                     }
                     self.line(&format!("    cmp ${:04X}", binding.storage.address));

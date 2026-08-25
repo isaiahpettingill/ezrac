@@ -3089,20 +3089,24 @@ impl Emitter {
                 let binding = self.binding(&input.name)?;
                 let storage = self.binding_storage(&binding, "use register local in inline asm")?;
                 if let Some(offset) = frame_offset(storage.address) {
-                    emitted = emitted.replace(
-                        &format!("lds r16, {{{}}}", input.name),
-                        &format!("ldd r16, Y+{offset}"),
-                    );
+                    let placeholder = format!("{{{}}}", input.name);
+                    if emitted.contains(&placeholder) {
+                        emitted = emitted
+                            .replacen("lds", "ldd", 1)
+                            .replace(&placeholder, &format!("Y+{offset}"));
+                    }
                 }
             }
             for output in outputs {
                 let binding = self.binding(&output.name)?;
                 let storage = self.binding_storage(&binding, "use register local in inline asm")?;
                 if let Some(offset) = frame_offset(storage.address) {
-                    emitted = emitted.replace(
-                        &format!("sts {{{}}}, r16", output.name),
-                        &format!("std Y+{offset}, r16"),
-                    );
+                    let placeholder = format!("{{{}}}", output.name);
+                    if emitted.contains(&placeholder) {
+                        emitted = emitted
+                            .replacen("sts", "std", 1)
+                            .replace(&placeholder, &format!("Y+{offset}"));
+                    }
                 }
             }
             for (name, value) in &operands {
