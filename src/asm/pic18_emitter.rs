@@ -311,11 +311,38 @@ fn translate_line(line: &str, state: &mut TranslationState) -> Result<Vec<String
         "sec" => out.push(format!("{indent}bsf STATUS, 0, a")),
         "cli" | "sei" => out.push(format!("{indent}nop")),
         "in" => {
-            let [register, _port] = two_args(&args, "in")?;
-            out.push(format!("{indent}movf STATUS, w, a"));
+            let [register, port] = two_args(&args, "in")?;
+            let source = match port.to_ascii_lowercase().as_str() {
+                "3dh" => "e1h",
+                "3eh" => "e2h",
+                _ => "STATUS",
+            };
+            out.push(format!("{indent}movf {source}, w, a"));
             out.push(format!("{indent}movwf {}, a", register_file(register)?));
         }
-        "out" => out.push(format!("{indent}nop")),
+        "out" => {
+            let [port, register] = two_args(&args, "out")?;
+            match port.to_ascii_lowercase().as_str() {
+                "3dh" => {
+                    out.push(format!("{indent}movf {}, w, a", register_file(register)?));
+                    out.push(format!("{indent}movwf e1h, a"));
+                }
+                "3eh" => {
+                    out.push(format!("{indent}movf {}, w, a", register_file(register)?));
+                    out.push(format!("{indent}movwf e2h, a"));
+                }
+                _ => out.push(format!("{indent}nop")),
+            }
+        }
+        "movw" => {
+            let [destination, source] = two_args(&args, "movw")?;
+            let destination = pair_pair(destination)?;
+            let source = pair_pair(source)?;
+            out.push(format!("{indent}movf {}, w, a", source.0));
+            out.push(format!("{indent}movwf {}, a", destination.0));
+            out.push(format!("{indent}movf {}, w, a", source.1));
+            out.push(format!("{indent}movwf {}, a", destination.1));
+        }
         "icall" => {
             out.push(format!("{indent}movf {}, w, a", register_file_number(30)));
             out.push(format!("{indent}movwf PCLATH, a"));
