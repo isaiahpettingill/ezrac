@@ -481,6 +481,29 @@ const Z80N_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Z80N];
 const Z180_ONLY: &[AssemblerCpu] = &[AssemblerCpu::Z180];
 const Z180_PLUS: &[AssemblerCpu] = &[AssemblerCpu::Z180, AssemblerCpu::Ez80];
 
+/// Removes `(ix...)`/`(iy...)` index-indirect operands so register-mention
+/// checks only see bare uses of the index registers themselves.
+pub(super) fn strip_index_indirect_mentions(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('(') {
+        let after = &rest[open + 1..];
+        let is_index = after.starts_with("ix") || after.starts_with("iy");
+        match after.find(')') {
+            Some(close) if is_index => {
+                out.push_str(&rest[..open]);
+                out.push_str("(idx)");
+                rest = &after[close + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=open]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
 pub const EXACT_INSTRUCTIONS: &[InstructionSpec] = &[
     z80_ez80("nop", &[0x00]),
     z80_ez80("di", &[0xF3]),
@@ -829,6 +852,9 @@ fn encode_ld_direct16(
         let Some(prefix) = direct16_store_prefix(src) else {
             return Ok(None);
         };
+        if is_register_indirect_addr(addr) {
+            return Ok(None);
+        }
         let value = parse_u16(addr)?;
         let mut bytes = prefix.to_vec();
         bytes.push(value as u8);
@@ -839,6 +865,9 @@ fn encode_ld_direct16(
         let Some(prefix) = direct16_load_prefix(dst) else {
             return Ok(None);
         };
+        if is_register_indirect_addr(addr) {
+            return Ok(None);
+        }
         let value = parse_u16(addr)?;
         let mut bytes = prefix.to_vec();
         bytes.push(value as u8);

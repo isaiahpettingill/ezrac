@@ -526,6 +526,26 @@ fn is_z80_family_16bit(cpu: CpuFamily) -> bool {
     )
 }
 
+/// Automatic storage on these CPUs lives in per-invocation IX frames instead
+/// of fixed static RAM. The Intel 8080 family keeps the legacy static ABI.
+pub(super) fn uses_ix_frames(cpu: CpuFamily) -> bool {
+    !is_intel_8080_family(cpu)
+}
+
+/// Frame-backed variables encode their signed IX displacement as a pseudo
+/// address above the 24-bit address space so the existing storage plumbing
+/// works unchanged.
+const FRAME_ADDRESS_BASE: u32 = 0x100_0000;
+const FRAME_OFFSET_BIAS: u32 = 0x8000;
+
+fn frame_displacement(addr: u32) -> Option<i32> {
+    let encoded = addr.checked_sub(FRAME_ADDRESS_BASE)?;
+    if encoded >= 0x1_0000 {
+        return None;
+    }
+    Some(encoded as i32 - FRAME_OFFSET_BIAS as i32)
+}
+
 fn supports_z80_bit_instructions(cpu: CpuFamily) -> bool {
     matches!(
         cpu,
@@ -1335,6 +1355,8 @@ struct Emitter {
     function_naked_stack: Vec<bool>,
     function_storage_stack: Vec<Vec<Variable>>,
     function_local_plans: Vec<HashMap<String, Variable>>,
+    frame_active: bool,
+    frame_cursor: u32,
     cacheable_ranges: Vec<(u32, u32)>,
     assigned_names_stack: Vec<HashSet<String>>,
     storage_required_names_stack: Vec<HashSet<String>>,
@@ -1388,6 +1410,8 @@ impl Emitter {
             function_naked_stack: Vec::new(),
             function_storage_stack: Vec::new(),
             function_local_plans: Vec::new(),
+            frame_active: false,
+            frame_cursor: 0,
             cacheable_ranges,
             assigned_names_stack: Vec::new(),
             storage_required_names_stack: Vec::new(),
@@ -1441,13 +1465,45 @@ impl Emitter {
     }
 
     fn alloc_var<S: Into<u32>>(&mut self, size: S) -> Variable {
-        let variable = self.symbols.alloc_var(size);
+        let size = size.into();
+        let variable = if self.frame_active {
+            let start = self.frame_cursor;
+            self.frame_cursor = start
+                .checked_add(size)
+                .filter(|total| *total <= 0x7FFF)
+                .unwrap_or_else(|| panic!("eZ80 frame exceeds displacement range"));
+            // Variables grow downward from IX: the bytes of an allocation at
+            // cursor positions [start, start+size) occupy displacements
+            // [-(start+size), -(start+1)].
+            Variable {
+                addr: FRAME_ADDRESS_BASE + FRAME_OFFSET_BIAS - start - size,
+                size,
+                element_size: None,
+                len: None,
+            }
+        } else {
+            self.symbols.alloc_var(size)
+        };
         self.track_function_storage(variable);
         variable
     }
 
     fn alloc_storage(&mut self, ty: &Type) -> Result<Variable, Diagnostic> {
-        let variable = self.symbols.alloc_storage(ty)?;
+        let variable = if self.frame_active {
+            match self.symbols.resolved_type(ty)? {
+                Type::Array { element, len } => {
+                    let element_size = self.symbols.type_size(&element)?;
+                    let len = self.symbols.array_len(&len)?;
+                    let mut variable = self.alloc_var(element_size * len);
+                    variable.element_size = Some(element_size);
+                    variable.len = Some(len);
+                    variable
+                }
+                resolved => self.alloc_var(self.symbols.type_size(&resolved)?),
+            }
+        } else {
+            self.symbols.alloc_storage(ty)?
+        };
         self.track_function_storage(variable);
         Ok(variable)
     }
@@ -2186,33 +2242,65 @@ impl Emitter {
         if let Some(second_return_type) = &function.second_return_type {
             self.symbols.type_width(second_return_type)?;
         }
-        let uses_stack_frame = self
+        let legacy_uses_stack_frame = self
             .symbols
             .functions
             .get(&function.name)
             .is_some_and(|sig| sig.stack_arg_bytes > 0);
+        let frame_cpu = !naked && uses_ix_frames(self.cpu);
         self.return_type_stack.push(function.return_type.clone());
         self.second_return_type_stack
             .push(function.second_return_type.clone());
         self.return_value_stack.push(function.return_type.is_some());
         self.second_return_pointer_stack.push(None);
         self.function_name_stack.push(function.name.clone());
-        self.function_frame_stack.push(uses_stack_frame);
+        self.function_frame_stack
+            .push(frame_cpu || legacy_uses_stack_frame);
         self.function_interrupt_stack.push(interrupt);
         self.function_naked_stack.push(naked);
         self.function_storage_stack.push(Vec::new());
+        let mut frame_size = 0;
+        if frame_cpu {
+            // Measurement pass: lay out the frame into a throwaway buffer to
+            // discover its size, then re-emit with the prologue in place.
+            self.frame_active = true;
+            self.frame_cursor = Self::FRAME_RELAY_BYTES;
+            let saved_out = std::mem::take(&mut self.out);
+            let saved_label_counter = self.label_counter;
+            self.bind_params(function)?;
+            let local_plan = self.plan_function_locals(function)?;
+            self.function_local_plans.push(local_plan);
+            let block_result = self.emit_block(&function.body);
+            self.function_local_plans.pop();
+            block_result?;
+            frame_size = self.frame_cursor;
+            self.out = saved_out;
+            self.label_counter = saved_label_counter;
+            self.current_scope_mut().clear();
+            self.current_scope_types_mut().clear();
+            self.current_local_constants_mut().clear();
+            self.current_readonly_pointer_aliases_mut().clear();
+            if let Some(storage) = self.function_storage_stack.last_mut() {
+                storage.clear();
+            }
+            self.frame_cursor = Self::FRAME_RELAY_BYTES;
+        }
         if !naked {
             if interrupt {
-                self.emit_interrupt_prologue();
-            }
-            if uses_stack_frame {
-                self.emit_frame_prologue();
+                self.emit_interrupt_prologue(frame_size);
+            } else if frame_cpu {
+                self.emit_frame_prologue(frame_size);
+                self.frame_active = true;
+            } else if legacy_uses_stack_frame {
+                self.emit_legacy_frame_prologue();
+                self.frame_active = false;
             }
             self.bind_params(function)?;
         }
         let local_plan = self.plan_function_locals(function)?;
         self.function_local_plans.push(local_plan);
         self.emit_block(&function.body)?;
+        self.frame_active = false;
         self.function_local_plans.pop();
         self.function_naked_stack.pop();
         self.function_interrupt_stack.pop();
@@ -2239,8 +2327,11 @@ impl Emitter {
         if function.name == "main" {
             self.line("    jp __ezra_exit");
         } else {
-            if uses_stack_frame {
+            if frame_cpu {
+                self.frame_active = false;
                 self.emit_frame_epilogue();
+            } else if legacy_uses_stack_frame {
+                self.emit_legacy_frame_epilogue();
             }
             self.line("    ret");
         }
@@ -2479,7 +2570,19 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_frame_prologue(&mut self) {
+    fn emit_frame_prologue(&mut self, frame_size: u32) {
+        self.line("    push ix");
+        self.line("    ld ix, 000000h");
+        self.line("    add ix, sp");
+        self.emit_frame_reserve(frame_size);
+    }
+
+    fn emit_frame_epilogue(&mut self) {
+        self.line("    ld sp, ix");
+        self.line("    pop ix");
+    }
+
+    fn emit_legacy_frame_prologue(&mut self) {
         if is_z80_family_16bit(self.cpu) {
             self.line("    push bc");
         } else {
@@ -2489,7 +2592,7 @@ impl Emitter {
         }
     }
 
-    fn emit_frame_epilogue(&mut self) {
+    fn emit_legacy_frame_epilogue(&mut self) {
         if is_z80_family_16bit(self.cpu) {
             self.line("    pop bc");
         } else {
@@ -2497,16 +2600,26 @@ impl Emitter {
         }
     }
 
-    fn emit_interrupt_prologue(&mut self) {
+    fn emit_interrupt_prologue(&mut self, frame_size: u32) {
         self.line("    push af");
         self.line("    push bc");
         self.line("    push de");
         self.line("    push hl");
         self.line("    push ix");
         self.line("    push iy");
+        if uses_ix_frames(self.cpu) {
+            // The saved IY cell becomes the frame anchor; the epilogue
+            // restores SP from it before popping the saved registers.
+            self.line("    ld ix, 000000h");
+            self.line("    add ix, sp");
+            self.emit_frame_reserve(frame_size);
+        }
     }
 
     fn emit_interrupt_epilogue(&mut self) {
+        if uses_ix_frames(self.cpu) {
+            self.line("    ld sp, ix");
+        }
         self.line("    pop iy");
         self.line("    pop ix");
         self.line("    pop hl");
@@ -2815,12 +2928,14 @@ impl Emitter {
                         self.current_function_name()
                     )));
                 }
-                if self.current_function_uses_frame() {
-                    self.emit_frame_epilogue();
-                }
+                // The interrupt epilogue restores SP from IX itself, so it must not
+                // run after the frame epilogue popped IX.
                 if self.current_function_is_interrupt() {
                     self.emit_interrupt_epilogue();
                 } else {
+                    if self.current_function_uses_frame() {
+                        self.emit_frame_epilogue();
+                    }
                     self.line("    ret");
                 }
             }
@@ -2851,12 +2966,14 @@ impl Emitter {
                 }
                 let return_type = self.current_return_type().clone();
                 self.emit_expr_to_type(expr, &return_type)?;
-                if self.current_function_uses_frame() {
-                    self.emit_frame_epilogue();
-                }
+                // The interrupt epilogue restores SP from IX itself, so it must not
+                // run after the frame epilogue popped IX.
                 if self.current_function_is_interrupt() {
                     self.emit_interrupt_epilogue();
                 } else {
+                    if self.current_function_uses_frame() {
+                        self.emit_frame_epilogue();
+                    }
                     self.line("    ret");
                 }
             }
@@ -3026,7 +3143,7 @@ impl Emitter {
             "reg16" | "reg24" => Ok("hl".to_owned()),
             "mem" => {
                 let variable = self.variable(&input.name)?;
-                Ok(format!("({:06X}h)", variable.addr))
+                Ok(self.byte_operand(variable.addr))
             }
             "imm" => {
                 let width = self.symbols.type_width(&input.ty)?;
@@ -3049,7 +3166,7 @@ impl Emitter {
             "reg16" | "reg24" => Ok("hl".to_owned()),
             "mem" => {
                 let variable = self.variable(&output.name)?;
-                Ok(format!("({:06X}h)", variable.addr))
+                Ok(self.byte_operand(variable.addr))
             }
             "imm" => Err(Diagnostic::new(format!(
                 "inline asm output `{}` cannot use imm class",
@@ -3278,7 +3395,7 @@ impl Emitter {
         };
         let bit = changed_bit.trailing_zeros();
         let address = variable.addr + bit / 8;
-        self.line(&format!("    ld hl, {address:06X}h"));
+        self.emit_address_into_hl(address);
         match op {
             AssignOp::BitOr => self.line(&format!("    set {}, (hl)", bit % 8)),
             AssignOp::BitAnd => self.line(&format!("    res {}, (hl)", bit % 8)),
@@ -4030,7 +4147,7 @@ impl Emitter {
                 self.emit_expr_to_hl(&args[0], width)?;
                 self.emit_store_width(value);
                 for offset in (0..width.bytes()).rev() {
-                    self.line(&format!("    ld a, ({:06X}h)", value.addr + offset as u32));
+                    self.load_byte_into_a(value.addr + offset as u32);
                     self.emit_debug_hex_byte_from_a();
                 }
             }
@@ -4120,6 +4237,11 @@ impl Emitter {
         }
         if let Some(temp) = temps.first().copied() {
             self.emit_load_width(temp);
+        }
+        // Unwind this invocation's frame before jumping so the callee's
+        // epilogue returns straight to the original caller.
+        if self.current_function_uses_frame() && uses_ix_frames(self.cpu) {
+            self.emit_frame_epilogue();
         }
         self.line(&format!("    jp {}", function_label(name)));
         Ok(true)
@@ -4296,28 +4418,28 @@ impl Emitter {
         self.line(&format!("{start}:"));
         for offset in 0..result.size {
             if subtract {
-                self.line(&format!("    ld a, ({:06X}h)", right.addr + offset));
+                self.load_byte_into_a(right.addr + offset);
                 self.line("    ld b, a");
-                self.line(&format!("    ld a, ({:06X}h)", left.addr + offset));
+                self.load_byte_into_a(left.addr + offset);
             } else {
-                self.line(&format!("    ld a, ({:06X}h)", left.addr + offset));
+                self.load_byte_into_a(left.addr + offset);
                 self.line("    ld b, a");
-                self.line(&format!("    ld a, ({:06X}h)", right.addr + offset));
+                self.load_byte_into_a(right.addr + offset);
             }
             self.line(if subtract {
                 "    sbc a, b"
             } else {
                 "    adc a, b"
             });
-            self.line(&format!("    ld ({:06X}h), a", result.addr + offset));
+            self.store_byte_from_a(result.addr + offset);
         }
         self.line(&format!("    jp c, {carry_true}"));
         self.line("    xor a");
-        self.line(&format!("    ld ({:06X}h), a", carry_out.addr));
+        self.store_byte_from_a(carry_out.addr);
         self.line(&format!("    jp {done}"));
         self.line(&format!("{carry_true}:"));
         self.line("    ld a, 01h");
-        self.line(&format!("    ld ({:06X}h), a", carry_out.addr));
+        self.store_byte_from_a(carry_out.addr);
         self.line(&format!("{done}:"));
     }
 
@@ -4367,11 +4489,11 @@ impl Emitter {
         self.line(&format!("    jp {loop_label}"));
         self.line(&format!("{found}:"));
         self.line("    ld a, 01h");
-        self.line(&format!("    ld ({:06X}h), a", second_destination.addr));
+        self.store_byte_from_a(second_destination.addr);
         self.line(&format!("    jp {done}"));
         self.line(&format!("{not_found}:"));
         self.line("    xor a");
-        self.line(&format!("    ld ({:06X}h), a", second_destination.addr));
+        self.store_byte_from_a(second_destination.addr);
         self.line(&format!("{done}:"));
         self.emit_load_width(temps[0]);
         Ok(())
@@ -4504,7 +4626,7 @@ impl Emitter {
 
         let pointer_width = self.symbols.type_width(&Type::Named("ptr".to_owned()))?;
         let second_pointer = self.alloc_var(pointer_width.bytes());
-        self.line(&format!("    ld hl, {:06X}h", second_destination.addr));
+        self.emit_address_into_hl(second_destination.addr);
         self.emit_store_width(second_pointer);
 
         let saved_variables =
@@ -4532,11 +4654,14 @@ impl Emitter {
         }
 
         self.emit_save_recursive_call_variables(&saved_variables);
-        self.emit_push_stack_arg_variable(hidden_return_arg);
-        for temp in temps.iter().copied().skip(3).rev() {
-            self.emit_push_stack_arg_variable(temp);
-        }
-        if let Some(temp) = temps.get(2).copied() {
+        self.emit_push_call_stack_arguments(
+            &sig.stack_arg_offsets,
+            &temps,
+            Some((sig.hidden_return_arg_offset.unwrap_or(0), hidden_return_arg)),
+        );
+        if let Some(temp) = temps.get(2).copied()
+            && sig.stack_arg_offsets[2].is_none()
+        {
             if temp.size == 1 {
                 self.emit_load_a(temp);
                 self.line("    ld c, a");
@@ -4550,7 +4675,9 @@ impl Emitter {
                 ));
             }
         }
-        if let Some(temp) = temps.get(1).copied() {
+        if let Some(temp) = temps.get(1).copied()
+            && sig.stack_arg_offsets[1].is_none()
+        {
             if temp.size == 1 {
                 self.emit_load_a(temp);
                 self.line("    ld b, a");
@@ -4559,7 +4686,9 @@ impl Emitter {
                 self.line("    ex de, hl");
             }
         }
-        if let Some(temp) = temps.first().copied() {
+        if let Some(temp) = temps.first().copied()
+            && sig.stack_arg_offsets[0].is_none()
+        {
             self.emit_load_width(temp);
         }
         self.line(&format!("    call {}", function_label(name)));
@@ -4615,12 +4744,10 @@ impl Emitter {
         }
 
         self.emit_save_recursive_call_variables(&saved_variables);
-        if sig.stack_arg_bytes > 0 {
-            for temp in temps.iter().copied().skip(3).rev() {
-                self.emit_push_stack_arg_variable(temp);
-            }
-        }
-        if let Some(temp) = temps.get(2).copied() {
+        self.emit_push_call_stack_arguments(&sig.stack_arg_offsets, &temps, None);
+        if let Some(temp) = temps.get(2).copied()
+            && sig.stack_arg_offsets[2].is_none()
+        {
             if temp.size == 1 {
                 self.emit_load_a(temp);
                 self.line("    ld c, a");
@@ -4636,6 +4763,7 @@ impl Emitter {
         }
         if let Some(temp) = temps.get(1).copied()
             && !sig.uses_arg_slots
+            && sig.stack_arg_offsets[1].is_none()
         {
             if temp.size == 1 {
                 self.emit_load_a(temp);
@@ -4647,10 +4775,14 @@ impl Emitter {
         }
         if let Some(temp) = temps.first().copied()
             && !sig.uses_arg_slots
+            && sig.stack_arg_offsets[0].is_none()
         {
             self.emit_load_width(temp);
         }
-        let first_arg_temp = if !sig.uses_arg_slots && !sig.params.is_empty() {
+        let first_arg_temp = if !sig.uses_arg_slots
+            && !sig.params.is_empty()
+            && sig.stack_arg_offsets[0].is_none()
+        {
             let temp = self.alloc_var(sig.params[0].bytes());
             if sig.params[0].bytes() == 1 {
                 self.emit_store_a(temp);
@@ -4800,10 +4932,13 @@ impl Emitter {
             .iter()
             .map(|param| self.symbols.type_width(param))
             .collect::<Result<Vec<_>, _>>()?;
-        let uses_arg_slots = param_widths.get(2).is_some_and(|third| third.bytes() != 1)
+        let frame_cpu = uses_ix_frames(self.cpu);
+        let registers_cannot_marshal = param_widths.get(2).is_some_and(|third| third.bytes() != 1)
             && param_widths
                 .get(1)
                 .is_some_and(|second| second.bytes() == 1);
+        let uses_arg_slots = !frame_cpu && registers_cannot_marshal;
+        let all_params_on_stack = frame_cpu && registers_cannot_marshal;
         let mut stack_arg_offsets = vec![None; params.len()];
         let mut stack_arg_bytes = 0u8;
         let mut stack_offset = self
@@ -4811,8 +4946,9 @@ impl Emitter {
             .type_width(&Type::Named("ptr".to_owned()))?
             .bytes()
             .saturating_mul(2);
-        if !uses_arg_slots && params.len() > 3 {
-            for (index, width) in param_widths.iter().enumerate().skip(3) {
+        let first_stack_index = if all_params_on_stack { 0 } else { 3 };
+        if params.len() > first_stack_index {
+            for (index, width) in param_widths.iter().enumerate().skip(first_stack_index) {
                 let bytes = width.bytes();
                 if stack_offset as u16 + bytes as u16 > 0x80 {
                     return Err(Diagnostic::new(
@@ -4852,6 +4988,9 @@ impl Emitter {
         args: &[Expr],
         extra_excluded: &[Variable],
     ) -> Vec<Variable> {
+        if !is_intel_8080_family(self.cpu) {
+            return Vec::new();
+        }
         let Some(storage) = self.function_storage_stack.last() else {
             return Vec::new();
         };
@@ -4945,12 +5084,10 @@ impl Emitter {
         }
 
         self.emit_save_recursive_call_variables(&saved_variables);
-        if sig.stack_arg_bytes > 0 {
-            for temp in temps.iter().copied().skip(3).rev() {
-                self.emit_push_stack_arg_variable(temp);
-            }
-        }
-        if let Some(temp) = temps.get(2).copied() {
+        self.emit_push_call_stack_arguments(&sig.stack_arg_offsets, &temps, None);
+        if let Some(temp) = temps.get(2).copied()
+            && sig.stack_arg_offsets[2].is_none()
+        {
             if temp.size == 1 {
                 self.emit_load_a(temp);
                 self.line("    ld c, a");
@@ -4964,7 +5101,9 @@ impl Emitter {
                 ));
             }
         }
-        if let Some(temp) = temps.get(1).copied() {
+        if let Some(temp) = temps.get(1).copied()
+            && sig.stack_arg_offsets[1].is_none()
+        {
             if temp.size == 1 {
                 self.emit_load_a(temp);
                 self.line("    ld b, a");
@@ -4973,7 +5112,9 @@ impl Emitter {
                 self.line("    ex de, hl");
             }
         }
-        if let Some(temp) = temps.first().copied() {
+        if let Some(temp) = temps.first().copied()
+            && sig.stack_arg_offsets[0].is_none()
+        {
             self.emit_load_width(temp);
         }
         self.line(&format!("    call {}", function_label(name)));
@@ -4986,12 +5127,39 @@ impl Emitter {
         Ok(())
     }
 
+    /// Pushes every stack-allocated argument in descending offset order so
+    /// each lands at the displacement the callee's signature promises.
+    fn emit_push_call_stack_arguments(
+        &mut self,
+        offsets: &[Option<u8>],
+        temps: &[Variable],
+        extra: Option<(u8, Variable)>,
+    ) {
+        let mut arguments = offsets
+            .iter()
+            .zip(temps)
+            .filter_map(|(offset, temp)| offset.map(|offset| (offset, *temp)))
+            .collect::<Vec<_>>();
+        if let Some((offset, variable)) = extra {
+            arguments.push((offset, variable));
+        }
+        arguments.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
+        for (_, variable) in arguments {
+            self.emit_push_stack_arg_variable(variable);
+        }
+    }
+
     fn recursive_call_saved_variables(
         &self,
         callee: &str,
         args: &[Expr],
         extra_excluded: &[Variable],
     ) -> Vec<Variable> {
+        // Frame CPUs keep automatic storage in per-invocation IX frames, so
+        // only the legacy Intel 8080 family needs static snapshots.
+        if !is_intel_8080_family(self.cpu) {
+            return Vec::new();
+        }
         let caller = self.current_function_name();
         if !self
             .recursive_call_edges
@@ -5041,7 +5209,7 @@ impl Emitter {
     fn emit_save_recursive_call_variables(&mut self, variables: &[Variable]) {
         for variable in variables {
             for offset in 0..variable.size {
-                self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
+                self.load_byte_into_a(variable.addr + offset);
                 self.line("    dec sp");
                 self.line("    ld hl, 000000h");
                 self.line("    add hl, sp");
@@ -5057,7 +5225,7 @@ impl Emitter {
                 self.line("    add hl, sp");
                 self.line("    ld a, (hl)");
                 self.line("    inc sp");
-                self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+                self.store_byte_from_a(variable.addr + offset);
             }
         }
     }
@@ -5128,12 +5296,14 @@ impl Emitter {
         self.emit_load_width(second_pointer);
         self.emit_store_var_to_pointed_width(second_value);
         self.emit_load_width(first_value);
-        if self.current_function_uses_frame() {
-            self.emit_frame_epilogue();
-        }
+        // The interrupt epilogue restores SP from IX itself, so it must not
+        // run after the frame epilogue popped IX.
         if self.current_function_is_interrupt() {
             self.emit_interrupt_epilogue();
         } else {
+            if self.current_function_uses_frame() {
+                self.emit_frame_epilogue();
+            }
             self.line("    ret");
         }
         Ok(())
@@ -5179,12 +5349,14 @@ impl Emitter {
         self.emit_load_width(second_pointer);
         self.emit_store_var_to_pointed_width(second_value);
         self.emit_load_width(first_value);
-        if self.current_function_uses_frame() {
-            self.emit_frame_epilogue();
-        }
+        // The interrupt epilogue restores SP from IX itself, so it must not
+        // run after the frame epilogue popped IX.
         if self.current_function_is_interrupt() {
             self.emit_interrupt_epilogue();
         } else {
+            if self.current_function_uses_frame() {
+                self.emit_frame_epilogue();
+            }
             self.line("    ret");
         }
         Ok(())
@@ -5310,7 +5482,7 @@ impl Emitter {
         self.line("    xor a");
         for offset in 0..width.bytes() {
             self.line("    ld b, a");
-            self.line(&format!("    ld a, ({:06X}h)", value.addr + offset as u32));
+            self.load_byte_into_a(value.addr + offset as u32);
             self.line("    or b");
         }
         self.emit_normalize_a_to_bool();
@@ -5723,16 +5895,16 @@ impl Emitter {
         let result = self.alloc_var(width.bytes());
 
         for offset in 0..width.bytes() {
-            self.line(&format!("    ld a, ({:06X}h)", left.addr + offset as u32));
+            self.load_byte_into_a(left.addr + offset as u32);
             self.line("    ld b, a");
-            self.line(&format!("    ld a, ({:06X}h)", right.addr + offset as u32));
+            self.load_byte_into_a(right.addr + offset as u32);
             match op {
                 BinaryOp::BitAnd => self.line("    and b"),
                 BinaryOp::BitOr => self.line("    or b"),
                 BinaryOp::BitXor => self.line("    xor b"),
                 _ => unreachable!("not a bitwise op"),
             }
-            self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+            self.store_byte_from_a(result.addr + offset as u32);
         }
 
         self.emit_load_width(result);
@@ -5983,7 +6155,7 @@ impl Emitter {
                         self.line("    inc hl");
                     }
                     self.line("    ld a, (hl)");
-                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+                    self.store_byte_from_a(result.addr + offset as u32);
                 }
                 self.emit_load_width(result);
             }
@@ -6391,13 +6563,10 @@ impl Emitter {
 
         self.line("    ld a, 80h");
         self.line("    ld c, a");
-        self.line(&format!("    ld a, ({:06X}h)", left_var.addr + sign_offset));
+        self.load_byte_into_a(left_var.addr + sign_offset);
         self.line("    and c");
         self.line("    ld b, a");
-        self.line(&format!(
-            "    ld a, ({:06X}h)",
-            right_var.addr + sign_offset
-        ));
+        self.load_byte_into_a(right_var.addr + sign_offset);
         self.line("    and c");
         self.line("    cp b");
         self.line(&format!("    jp z, {same_sign_label}"));
@@ -6919,7 +7088,7 @@ impl Emitter {
     ) {
         let nonnegative_label = self.next_label("signed_nonnegative");
         let sign_addr = variable.addr + variable.size - 1;
-        self.line(&format!("    ld a, ({sign_addr:06X}h)"));
+        self.load_byte_into_a(sign_addr);
         self.line("    ld b, a");
         self.line("    ld a, 7Fh");
         self.line("    cp b");
@@ -6937,9 +7106,9 @@ impl Emitter {
     fn emit_negate_memory(&mut self, variable: Variable) {
         for offset in 0..variable.size {
             let addr = variable.addr + offset;
-            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.load_byte_into_a(addr);
             self.line("    xor FFh");
-            self.line(&format!("    ld ({addr:06X}h), a"));
+            self.store_byte_from_a(addr);
         }
         self.emit_increment_memory(variable);
     }
@@ -6953,7 +7122,7 @@ impl Emitter {
     fn emit_jump_if_memory_zero(&mut self, variable: Variable, zero_label: &str) {
         let nonzero_label = self.next_label("nonzero");
         for offset in 0..variable.size {
-            self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
+            self.load_byte_into_a(variable.addr + offset);
             self.line("    or a");
             self.line(&format!("    jp nz, {nonzero_label}"));
         }
@@ -6963,10 +7132,7 @@ impl Emitter {
 
     fn emit_jump_if_memory_not_equals(&mut self, variable: Variable, bytes: &[u8], label: &str) {
         for (offset, byte) in bytes.iter().copied().enumerate() {
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                variable.addr + offset as u32
-            ));
+            self.load_byte_into_a(variable.addr + offset as u32);
             self.line("    ld b, a");
             self.line(&format!("    ld a, {byte:02X}h"));
             self.line("    cp b");
@@ -6986,7 +7152,7 @@ impl Emitter {
     fn emit_zero_storage(&mut self, variable: Variable) {
         self.line("    xor a");
         for offset in 0..variable.size {
-            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+            self.store_byte_from_a(variable.addr + offset);
         }
     }
 
@@ -6994,11 +7160,11 @@ impl Emitter {
         let done_label = self.next_label("inc_done");
         for offset in 0..variable.size {
             let addr = variable.addr + offset;
-            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.load_byte_into_a(addr);
             self.line("    ld b, a");
             self.line("    ld a, 01h");
             self.line("    add a, b");
-            self.line(&format!("    ld ({addr:06X}h), a"));
+            self.store_byte_from_a(addr);
             self.line("    or a");
             self.line(&format!("    jp nz, {done_label}"));
         }
@@ -7009,13 +7175,13 @@ impl Emitter {
         let done_label = self.next_label("dec_done");
         for offset in 0..variable.size {
             let addr = variable.addr + offset;
-            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.load_byte_into_a(addr);
             self.line("    ld b, a");
             self.line("    ld a, 01h");
             self.line("    ld c, a");
             self.line("    ld a, b");
             self.line("    sub c");
-            self.line(&format!("    ld ({addr:06X}h), a"));
+            self.store_byte_from_a(addr);
             self.line("    ld a, b");
             self.line("    or a");
             self.line(&format!("    jp nz, {done_label}"));
@@ -7117,8 +7283,8 @@ impl Emitter {
                 for offset in (byte_count..size).rev() {
                     let source = variable.addr + u32::from(offset - byte_count);
                     let destination = variable.addr + u32::from(offset);
-                    self.line(&format!("    ld a, ({source:06X}h)"));
-                    self.line(&format!("    ld ({destination:06X}h), a"));
+                    self.load_byte_into_a(source);
+                    self.store_byte_from_a(destination);
                 }
                 self.emit_zero_shifted_bytes(variable, 0, byte_count);
             }
@@ -7126,19 +7292,16 @@ impl Emitter {
                 for offset in 0..size.saturating_sub(byte_count) {
                     let source = variable.addr + u32::from(offset + byte_count);
                     let destination = variable.addr + u32::from(offset);
-                    self.line(&format!("    ld a, ({source:06X}h)"));
-                    self.line(&format!("    ld ({destination:06X}h), a"));
+                    self.load_byte_into_a(source);
+                    self.store_byte_from_a(destination);
                 }
                 if signed {
-                    self.line(&format!(
-                        "    ld a, ({:06X}h)",
-                        variable.addr + u32::from(size - 1)
-                    ));
+                    self.load_byte_into_a(variable.addr + u32::from(size - 1));
                     self.line("    add a, a");
                     self.line("    sbc a, a");
                     for offset in size.saturating_sub(byte_count)..size {
                         let destination = variable.addr + u32::from(offset);
-                        self.line(&format!("    ld ({destination:06X}h), a"));
+                        self.store_byte_from_a(destination);
                     }
                 } else {
                     self.emit_zero_shifted_bytes(
@@ -7159,7 +7322,7 @@ impl Emitter {
         self.line("    xor a");
         for offset in start..start + count {
             let destination = variable.addr + u32::from(offset);
-            self.line(&format!("    ld ({destination:06X}h), a"));
+            self.store_byte_from_a(destination);
         }
     }
 
@@ -7260,44 +7423,35 @@ impl Emitter {
         for offset in (1..variable.size).rev() {
             let source = variable.addr + offset - 1;
             let destination = variable.addr + offset;
-            self.line(&format!("    ld a, ({source:06X}h)"));
-            self.line(&format!("    ld ({destination:06X}h), a"));
+            self.load_byte_into_a(source);
+            self.store_byte_from_a(destination);
         }
         self.line("    xor a");
-        self.line(&format!("    ld ({:06X}h), a", variable.addr));
+        self.store_byte_from_a(variable.addr);
     }
 
     fn emit_shift_memory_right_byte(&mut self, variable: Variable, signed: bool) {
         for offset in 0..variable.size.saturating_sub(1) {
             let source = variable.addr + offset + 1;
             let destination = variable.addr + offset;
-            self.line(&format!("    ld a, ({source:06X}h)"));
-            self.line(&format!("    ld ({destination:06X}h), a"));
+            self.load_byte_into_a(source);
+            self.store_byte_from_a(destination);
         }
         if signed {
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                variable.addr + variable.size - 1
-            ));
+            self.load_byte_into_a(variable.addr + variable.size - 1);
             self.line("    add a, a");
             self.line("    sbc a, a");
         } else {
             self.line("    xor a");
         }
-        self.line(&format!(
-            "    ld ({:06X}h), a",
-            variable.addr + variable.size - 1
-        ));
+        self.store_byte_from_a(variable.addr + variable.size - 1);
     }
 
     fn emit_saturated_shift_memory(&mut self, variable: Variable, op: BinaryOp, signed: bool) {
         match op {
             BinaryOp::Shl => self.line("    xor a"),
             BinaryOp::Shr if signed => {
-                self.line(&format!(
-                    "    ld a, ({:06X}h)",
-                    variable.addr + variable.size - 1
-                ));
+                self.load_byte_into_a(variable.addr + variable.size - 1);
                 self.line("    add a, a");
                 self.line("    sbc a, a");
             }
@@ -7305,26 +7459,26 @@ impl Emitter {
             _ => unreachable!("not a shift op"),
         }
         for offset in 0..variable.size {
-            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+            self.store_byte_from_a(variable.addr + offset);
         }
     }
 
     fn emit_shift_memory_left_once(&mut self, variable: Variable) {
-        self.line(&format!("    ld a, ({:06X}h)", variable.addr));
+        self.load_byte_into_a(variable.addr);
         self.line("    add a, a");
-        self.line(&format!("    ld ({:06X}h), a", variable.addr));
+        self.store_byte_from_a(variable.addr);
         for offset in 1..variable.size {
             let addr = variable.addr + offset;
-            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.load_byte_into_a(addr);
             self.line("    rla");
-            self.line(&format!("    ld ({addr:06X}h), a"));
+            self.store_byte_from_a(addr);
         }
     }
 
     fn emit_shift_memory_right_once(&mut self, variable: Variable, signed: bool) {
         for offset in (0..variable.size).rev() {
             let addr = variable.addr + offset;
-            self.line(&format!("    ld a, ({addr:06X}h)"));
+            self.load_byte_into_a(addr);
             if offset == variable.size - 1 {
                 if signed {
                     self.line("    sra a");
@@ -7334,7 +7488,7 @@ impl Emitter {
             } else {
                 self.line("    rra");
             }
-            self.line(&format!("    ld ({addr:06X}h), a"));
+            self.store_byte_from_a(addr);
         }
     }
 
@@ -7387,9 +7541,9 @@ impl Emitter {
                 self.emit_store_width(value);
                 let result = self.alloc_var(width.bytes());
                 for offset in 0..width.bytes() {
-                    self.line(&format!("    ld a, ({:06X}h)", value.addr + offset as u32));
+                    self.load_byte_into_a(value.addr + offset as u32);
                     self.line("    xor FFh");
-                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset as u32));
+                    self.store_byte_from_a(result.addr + offset as u32);
                 }
                 self.emit_load_width(result);
             }
@@ -7509,14 +7663,14 @@ impl Emitter {
         let value = self.alloc_var(width.bytes());
         self.emit_expr_to_hl(left, width)?;
         self.emit_store_width(value);
-        self.line(&format!("    ld a, ({:06X}h)", value.addr + byte_offset));
+        self.load_byte_into_a(value.addr + byte_offset);
         match op {
             BinaryOp::BitAnd => self.line(&format!("    res {}, a", bit % 8)),
             BinaryOp::BitOr => self.line(&format!("    set {}, a", bit % 8)),
             BinaryOp::BitXor => self.line(&format!("    xor {byte_mask:02X}h")),
             _ => unreachable!("not a bitwise mask operation"),
         }
-        self.line(&format!("    ld ({:06X}h), a", value.addr + byte_offset));
+        self.store_byte_from_a(value.addr + byte_offset);
         self.emit_load_width(value);
         Ok(true)
     }
@@ -7534,7 +7688,7 @@ impl Emitter {
         let value = self.alloc_var(width.bytes());
         self.emit_expr_to_hl(source, width)?;
         self.emit_store_width(value);
-        self.line(&format!("    ld a, ({:06X}h)", value.addr + byte_offset));
+        self.load_byte_into_a(value.addr + byte_offset);
         Ok(())
     }
 
@@ -7686,41 +7840,232 @@ impl Emitter {
         }
     }
 
+    /// Memory operand text for one byte of a variable. Frame-backed storage
+    /// renders as an IX-indexed operand; everything else stays absolute.
+    fn byte_operand(&self, addr: u32) -> String {
+        match frame_displacement(addr) {
+            Some(0) => "(ix)".to_owned(),
+            Some(displacement) if (-128..=127).contains(&displacement) => {
+                format!("(ix{:+})", displacement)
+            }
+            _ => format!("({:06X}h)", addr),
+        }
+    }
+
+    fn load_byte_into_a(&mut self, addr: u32) {
+        match frame_displacement(addr) {
+            Some(displacement) if (-128..=127).contains(&displacement) => {
+                self.line(&format!("    ld a, {}", self.byte_operand(addr)));
+            }
+            Some(_) => {
+                self.emit_address_into_hl(addr);
+                self.line("    ld a, (hl)");
+            }
+            None => self.line(&format!("    ld a, ({:06X}h)", addr)),
+        }
+    }
+
+    fn store_byte_from_a(&mut self, addr: u32) {
+        match frame_displacement(addr) {
+            Some(displacement) if (-128..=127).contains(&displacement) => {
+                self.line(&format!("    ld {}, a", self.byte_operand(addr)));
+            }
+            Some(_) => {
+                self.emit_address_into_hl(addr);
+                self.line("    ld (hl), a");
+            }
+            None => self.line(&format!("    ld ({:06X}h), a", addr)),
+        }
+    }
+
+    /// Loads the effective address of a variable byte into HL.
+    fn emit_address_into_hl(&mut self, addr: u32) {
+        match frame_displacement(addr) {
+            Some(displacement)
+                if displacement != 0
+                    && !is_z80_family_16bit(self.cpu)
+                    && (-128..=127).contains(&displacement) =>
+            {
+                self.line(&format!("    lea hl, ix{:+}", displacement));
+            }
+            Some(displacement) => {
+                self.line("    push ix");
+                self.line("    pop hl");
+                if displacement != 0 {
+                    self.line(&format!("    ld bc, {:04X}h", (displacement as i16) as u16));
+                    self.line("    add hl, bc");
+                }
+            }
+            None => self.line(&format!("    ld hl, {:06X}h", addr)),
+        }
+    }
+
+    fn emit_frame_reserve(&mut self, size: u32) {
+        if size == 0 {
+            return;
+        }
+        // IY is compiler-owned scratch; HL, DE, and BC carry incoming
+        // arguments at function entry, so they must stay untouched.
+        if is_z80_family_16bit(self.cpu) {
+            self.line(&format!(
+                "    ld iy, {:04X}h",
+                (size as i16).wrapping_neg() as u16
+            ));
+        } else {
+            self.line(&format!(
+                "    ld iy, {:06X}h",
+                0x100_0000u32.wrapping_sub(size)
+            ));
+        }
+        self.line("    add iy, sp");
+        self.line("    ld sp, iy");
+        self.line("    ld iy, 000000h");
+    }
+
+    /// Frame scratch used to relay wide accesses to storage beyond the
+    /// signed 8-bit IX displacement range. Always lives at frame offset 0.
+    const FRAME_RELAY_BYTES: u32 = 4;
+
+    fn frame_relay_addr(byte_offset: u32) -> u32 {
+        // The relay behaves like a variable allocated at cursor [0, 4): its
+        // bytes ascend from displacement -FRAME_RELAY_BYTES up to -1.
+        FRAME_ADDRESS_BASE + FRAME_OFFSET_BIAS - Self::FRAME_RELAY_BYTES + byte_offset
+    }
+
+    fn variable_fits_displacement(variable: Variable) -> bool {
+        match frame_displacement(variable.addr) {
+            Some(first) => {
+                let last = frame_displacement(variable.addr + variable.size - 1);
+                first >= -128 && last.is_some_and(|last| last <= 127)
+            }
+            None => true,
+        }
+    }
+
     fn emit_load_a(&mut self, variable: Variable) {
         debug_assert_eq!(variable.size, 1);
-        self.line(&format!("    ld a, ({:06X}h)", variable.addr));
+        self.load_byte_into_a(variable.addr);
     }
 
     fn emit_store_a(&mut self, variable: Variable) {
         debug_assert_eq!(variable.size, 1);
-        self.line(&format!("    ld ({:06X}h), a", variable.addr));
+        self.store_byte_from_a(variable.addr);
     }
 
     fn emit_load_hl(&mut self, variable: Variable) {
         debug_assert_eq!(variable.size, 3);
-        self.line(&format!("    ld hl, ({:06X}h)", variable.addr));
+        if is_z80_family_16bit(self.cpu) {
+            // Legacy 16-bit semantics: word loads move the low two bytes.
+            self.line("    ld hl, 000000h");
+            self.load_byte_into_a(variable.addr);
+            self.line("    ld l, a");
+            self.load_byte_into_a(variable.addr + 1);
+            self.line("    ld h, a");
+            return;
+        }
+        if Self::variable_fits_displacement(variable) {
+            self.line(&format!("    ld hl, {}", self.byte_operand(variable.addr)));
+            return;
+        }
+        let relay = Self::frame_relay_addr(0);
+        for offset in (0..variable.size).rev() {
+            self.load_byte_into_a(variable.addr + offset);
+            self.store_byte_from_a(relay + offset);
+        }
+        self.line(&format!("    ld hl, {}", self.byte_operand(relay)));
+    }
+
+    /// Stores HL into frame storage at an in-range displacement. The eZ80 has
+    /// no indexed wide store, so the upper byte of HL travels through the
+    /// stack; A, F, and transiently SP are the only other side effects.
+    fn emit_store_hl_to_frame(&mut self, displacement: i32) {
+        self.line("    ld a, l");
+        self.line(&format!("    ld (ix{:+}), a", displacement));
+        self.line("    ld a, h");
+        self.line(&format!("    ld (ix{:+}), a", displacement + 1));
+        self.line("    push hl");
+        if is_z80_family_16bit(self.cpu) {
+            self.line("    ld hl, 0001h");
+        } else {
+            self.line("    ld hl, 000002h");
+        }
+        self.line("    add hl, sp");
+        self.line("    ld a, (hl)");
+        self.line("    pop hl");
+        self.line(&format!("    ld (ix{:+}), a", displacement + 2));
     }
 
     fn emit_store_hl(&mut self, variable: Variable) {
         debug_assert_eq!(variable.size, 3);
-        self.line(&format!("    ld ({:06X}h), hl", variable.addr));
+        if is_z80_family_16bit(self.cpu) {
+            // Legacy 16-bit semantics: word stores move the low two bytes.
+            self.line("    ld a, l");
+            self.store_byte_from_a(variable.addr);
+            self.line("    ld a, h");
+            self.store_byte_from_a(variable.addr + 1);
+            return;
+        }
+        let base = frame_displacement(variable.addr);
+        match base {
+            Some(displacement) if displacement >= -128 && displacement + 2 <= 127 => {
+                self.emit_store_hl_to_frame(displacement);
+            }
+            // Static storage keeps the single wide absolute store.
+            None => self.line(&format!("    ld ({:06X}h), hl", variable.addr)),
+            // Beyond the displacement range: stage through the in-range relay.
+            _ => {
+                let relay = Self::frame_relay_addr(0);
+                let relay_displacement = frame_displacement(relay).unwrap_or(-4);
+                self.emit_store_hl_to_frame(relay_displacement);
+                for offset in 0..variable.size {
+                    self.load_byte_into_a(relay + offset);
+                    self.store_byte_from_a(variable.addr + offset);
+                }
+            }
+        }
     }
 
     fn emit_load_hl16(&mut self, variable: Variable) {
         debug_assert_eq!(variable.size, 2);
+        // Clear HL's upper byte first: u16 values must live as clean
+        // zero-extended values in the 24-bit register on eZ80.
         self.line("    ld hl, 000000h");
-        self.line(&format!("    ld a, ({:06X}h)", variable.addr));
+        if Self::variable_fits_displacement(variable) {
+            self.load_byte_into_a(variable.addr);
+            self.line("    ld l, a");
+            self.load_byte_into_a(variable.addr + 1);
+            self.line("    ld h, a");
+            return;
+        }
+        let relay = Self::frame_relay_addr(0);
+        for offset in (0..variable.size).rev() {
+            self.load_byte_into_a(variable.addr + offset);
+            self.store_byte_from_a(relay + offset);
+        }
+        self.load_byte_into_a(relay);
         self.line("    ld l, a");
-        self.line(&format!("    ld a, ({:06X}h)", variable.addr + 1));
+        self.load_byte_into_a(relay + 1);
         self.line("    ld h, a");
     }
 
     fn emit_store_hl16(&mut self, variable: Variable) {
         debug_assert_eq!(variable.size, 2);
+        if Self::variable_fits_displacement(variable) {
+            self.line("    ld a, l");
+            self.store_byte_from_a(variable.addr);
+            self.line("    ld a, h");
+            self.store_byte_from_a(variable.addr + 1);
+            return;
+        }
+        let relay = Self::frame_relay_addr(0);
         self.line("    ld a, l");
-        self.line(&format!("    ld ({:06X}h), a", variable.addr));
+        self.store_byte_from_a(relay);
         self.line("    ld a, h");
-        self.line(&format!("    ld ({:06X}h), a", variable.addr + 1));
+        self.store_byte_from_a(relay + 1);
+        for offset in 0..variable.size {
+            self.load_byte_into_a(relay + offset);
+            self.store_byte_from_a(variable.addr + offset);
+        }
     }
 
     fn emit_load_width(&mut self, variable: Variable) {
@@ -7753,21 +8098,21 @@ impl Emitter {
                     "stack argument offset {displacement} exceeds frame displacement range"
                 )));
             }
-            if is_z80_family_16bit(self.cpu) {
+            if is_intel_8080_family(self.cpu) {
                 self.line(&format!("    ld hl, {displacement:04X}h"));
                 self.line("    add hl, sp");
                 self.line("    ld a, (hl)");
             } else {
                 self.line(&format!("    ld a, (ix+{displacement})"));
             }
-            self.line(&format!("    ld ({:06X}h), a", variable.addr + byte_offset));
+            self.store_byte_from_a(variable.addr + byte_offset);
         }
         Ok(())
     }
 
     fn emit_push_stack_arg_variable(&mut self, variable: Variable) {
         for byte_offset in (0..variable.size).rev() {
-            self.line(&format!("    ld a, ({:06X}h)", variable.addr + byte_offset));
+            self.load_byte_into_a(variable.addr + byte_offset);
             self.line("    dec sp");
             self.line("    ld hl, 000000h");
             self.line("    add hl, sp");
@@ -7787,7 +8132,7 @@ impl Emitter {
                 self.line("    inc hl");
             }
             self.line("    ld a, (hl)");
-            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+            self.store_byte_from_a(variable.addr + offset);
         }
     }
 
@@ -7796,7 +8141,7 @@ impl Emitter {
             if offset != 0 {
                 self.line("    inc hl");
             }
-            self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
+            self.load_byte_into_a(variable.addr + offset);
             self.line("    ld (hl), a");
         }
     }
@@ -7821,8 +8166,8 @@ impl Emitter {
 
     fn emit_copy_storage_bytes(&mut self, source: Variable, target: Variable) {
         for offset in 0..source.size {
-            self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
-            self.line(&format!("    ld ({:06X}h), a", target.addr + offset));
+            self.load_byte_into_a(source.addr + offset);
+            self.store_byte_from_a(target.addr + offset);
         }
     }
 
@@ -7918,13 +8263,13 @@ impl Emitter {
             .map(|embed| embed.variable)
             .or_else(|| self.variable_opt(name))
             .ok_or_else(|| Diagnostic::new(format!("unknown variable `{name}`")))?;
-        self.line(&format!("    ld hl, {:06X}h", variable.addr));
+        self.emit_address_into_hl(variable.addr);
         Ok(())
     }
 
     fn emit_field_address(&mut self, base: &str, field: &str) -> Result<(), Diagnostic> {
         let variable = self.field_variable(base, field)?;
-        self.line(&format!("    ld hl, {:06X}h", variable.addr));
+        self.emit_address_into_hl(variable.addr);
         Ok(())
     }
 
@@ -8092,7 +8437,7 @@ impl Emitter {
             return Ok(());
         }
         if let Some(variable) = self.const_access_variable(path)? {
-            self.line(&format!("    ld hl, {:06X}h", variable.addr));
+            self.emit_address_into_hl(variable.addr);
             return Ok(());
         }
 
@@ -8101,7 +8446,7 @@ impl Emitter {
             .variable_type(&path.root)
             .ok_or_else(|| Diagnostic::new(format!("unknown variable `{}`", path.root)))?
             .clone();
-        self.line(&format!("    ld hl, {:06X}h", root.addr));
+        self.emit_address_into_hl(root.addr);
 
         for segment in &path.segments {
             match segment {
@@ -8263,7 +8608,7 @@ impl Emitter {
             return Ok(());
         }
         if let Some(element) = self.const_array_element_variable(name, index)? {
-            self.line(&format!("    ld hl, {:06X}h", element.addr));
+            self.emit_address_into_hl(element.addr);
             return Ok(());
         }
 
@@ -8290,7 +8635,7 @@ impl Emitter {
             }
         }
         self.line("    push hl");
-        self.line(&format!("    ld hl, {:06X}h", array.addr));
+        self.emit_address_into_hl(array.addr);
         self.line("    pop bc");
         self.line("    add hl, bc");
         Ok(())
@@ -8337,7 +8682,7 @@ impl Emitter {
                         self.line("    inc hl");
                     }
                     self.line("    ld a, (hl)");
-                    self.line(&format!("    ld ({:06X}h), a", result.addr + offset));
+                    self.store_byte_from_a(result.addr + offset);
                 }
                 self.emit_load_width(result);
             }
@@ -9049,7 +9394,7 @@ impl Emitter {
                 let bit = self.eval_i64_with_local_constants(&args[1])? as u32;
                 let byte_offset = bit / 8;
                 let bit_offset = bit % 8;
-                self.line(&format!("    ld a, ({:06X}h)", temps[0].addr + byte_offset));
+                self.load_byte_into_a(temps[0].addr + byte_offset);
                 let true_label = self.next_label("intrinsic_bit_true");
                 let end_label = self.next_label("intrinsic_bit_end");
                 if supports_z80_bit_instructions(self.cpu) {
@@ -9069,7 +9414,7 @@ impl Emitter {
                 let bit = self.eval_i64_with_local_constants(&args[1])? as u32;
                 let byte_offset = bit / 8;
                 let bit_offset = bit % 8;
-                self.line(&format!("    ld a, ({:06X}h)", temps[0].addr + byte_offset));
+                self.load_byte_into_a(temps[0].addr + byte_offset);
                 match operation {
                     BitsIntrinsic::Set if supports_z80_bit_instructions(self.cpu) => {
                         self.line(&format!("    set {bit_offset}, a"));
@@ -9086,7 +9431,7 @@ impl Emitter {
                     }
                     _ => unreachable!("bit operation handled above"),
                 }
-                self.line(&format!("    ld ({:06X}h), a", temps[0].addr + byte_offset));
+                self.store_byte_from_a(temps[0].addr + byte_offset);
                 self.emit_load_width(temps[0]);
             }
             BitsIntrinsic::Extract => {
@@ -9111,11 +9456,8 @@ impl Emitter {
                 let result = self.alloc_var(value_width.bytes());
                 for offset in 0..value_width.bytes() {
                     let source = temps[0].addr + u32::from(value_width.bytes() - 1 - offset);
-                    self.line(&format!("    ld a, ({source:06X}h)"));
-                    self.line(&format!(
-                        "    ld ({:06X}h), a",
-                        result.addr + u32::from(offset)
-                    ));
+                    self.load_byte_into_a(source);
+                    self.store_byte_from_a(result.addr + u32::from(offset));
                 }
                 self.emit_load_width(result);
             }
@@ -9126,7 +9468,7 @@ impl Emitter {
                     let destination = result.addr + u32::from(value_width.bytes() - 1 - offset);
                     let byte = self.alloc_var(1u32);
                     let reversed = self.alloc_var(1u32);
-                    self.line(&format!("    ld a, ({source:06X}h)"));
+                    self.load_byte_into_a(source);
                     self.emit_store_a(byte);
                     self.emit_zero_bytes(reversed);
                     for _ in 0..8 {
@@ -9138,7 +9480,7 @@ impl Emitter {
                         self.emit_store_a(reversed);
                     }
                     self.emit_load_a(reversed);
-                    self.line(&format!("    ld ({destination:06X}h), a"));
+                    self.store_byte_from_a(destination);
                 }
                 self.emit_load_width(result);
             }
@@ -9191,32 +9533,32 @@ impl Emitter {
             self.emit_store_a(variable);
             for offset in 1..variable.size {
                 let address = variable.addr + offset;
-                self.line(&format!("    ld a, ({address:06X}h)"));
+                self.load_byte_into_a(address);
                 self.line("    rla");
-                self.line(&format!("    ld ({address:06X}h), a"));
+                self.store_byte_from_a(address);
             }
             self.emit_load_a(variable);
             self.line("    rla");
             self.emit_store_a(variable);
         } else {
             let high = variable.addr + variable.size - 1;
-            self.line(&format!("    ld a, ({high:06X}h)"));
+            self.load_byte_into_a(high);
             self.line("    srl a");
-            self.line(&format!("    ld ({high:06X}h), a"));
+            self.store_byte_from_a(high);
             for offset in (0..variable.size - 1).rev() {
                 let address = variable.addr + offset;
-                self.line(&format!("    ld a, ({address:06X}h)"));
+                self.load_byte_into_a(address);
                 self.line("    rra");
-                self.line(&format!("    ld ({address:06X}h), a"));
+                self.store_byte_from_a(address);
             }
             let wrapped = self.next_label("intrinsic_rotate_right_wrapped");
             let done = self.next_label("intrinsic_rotate_right_done");
             self.line(&format!("    jp c, {wrapped}"));
             self.line(&format!("    jp {done}"));
             self.line(&format!("{wrapped}:"));
-            self.line(&format!("    ld a, ({high:06X}h)"));
+            self.load_byte_into_a(high);
             self.line("    or 80h");
-            self.line(&format!("    ld ({high:06X}h), a"));
+            self.store_byte_from_a(high);
             self.line(&format!("{done}:"));
         }
     }
@@ -9230,24 +9572,24 @@ impl Emitter {
             if byte_mask == 0 {
                 self.line("    xor a");
             } else {
-                self.line(&format!("    ld a, ({:06X}h)", variable.addr + offset));
+                self.load_byte_into_a(variable.addr + offset);
                 self.line(&format!("    and {byte_mask:02X}h"));
             }
-            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+            self.store_byte_from_a(variable.addr + offset);
         }
     }
 
     fn emit_or_memory(&mut self, destination: Variable, source: Variable) {
         for offset in 0..destination.size {
-            self.line(&format!("    ld a, ({:06X}h)", destination.addr + offset));
+            self.load_byte_into_a(destination.addr + offset);
             self.line("    ld b, a");
             if offset < source.size {
-                self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
+                self.load_byte_into_a(source.addr + offset);
                 self.line("    or b");
             } else {
                 self.line("    ld a, b");
             }
-            self.line(&format!("    ld ({:06X}h), a", destination.addr + offset));
+            self.store_byte_from_a(destination.addr + offset);
         }
     }
 
@@ -9256,10 +9598,7 @@ impl Emitter {
         let byte = self.alloc_var(1u32);
         self.emit_zero_bytes(count);
         for offset in 0..byte_count {
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                source.addr + u32::from(offset)
-            ));
+            self.load_byte_into_a(source.addr + u32::from(offset));
             self.emit_store_a(byte);
             for _ in 0..8 {
                 self.emit_load_a(byte);
@@ -9280,10 +9619,7 @@ impl Emitter {
         self.emit_zero_bytes(count);
         let done = self.next_label("intrinsic_leading_done");
         for offset in (0..byte_count).rev() {
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                source.addr + u32::from(offset)
-            ));
+            self.load_byte_into_a(source.addr + u32::from(offset));
             self.emit_store_a(byte);
             for _ in 0..8 {
                 self.emit_load_a(byte);
@@ -9303,10 +9639,7 @@ impl Emitter {
         self.emit_zero_bytes(count);
         let done = self.next_label("intrinsic_trailing_done");
         for offset in 0..byte_count {
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                source.addr + u32::from(offset)
-            ));
+            self.load_byte_into_a(source.addr + u32::from(offset));
             self.emit_store_a(byte);
             for _ in 0..8 {
                 self.emit_load_a(byte);
@@ -9385,30 +9718,24 @@ impl Emitter {
         count: u32,
     ) {
         for offset in 0..count {
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                source.addr + source_offset + offset
-            ));
-            self.line(&format!(
-                "    ld ({:06X}h), a",
-                destination.addr + destination_offset + offset
-            ));
+            self.load_byte_into_a(source.addr + source_offset + offset);
+            self.store_byte_from_a(destination.addr + destination_offset + offset);
         }
     }
 
     fn emit_zero_bytes(&mut self, variable: Variable) {
         self.line("    xor a");
         for offset in 0..variable.size {
-            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+            self.store_byte_from_a(variable.addr + offset);
         }
     }
 
     fn emit_add_memory(&mut self, destination: Variable, source: Variable) {
         for offset in 0..destination.size {
-            self.line(&format!("    ld a, ({:06X}h)", destination.addr + offset));
+            self.load_byte_into_a(destination.addr + offset);
             self.line("    ld b, a");
             if offset < source.size {
-                self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
+                self.load_byte_into_a(source.addr + offset);
             } else {
                 self.line("    xor a");
             }
@@ -9417,16 +9744,16 @@ impl Emitter {
             } else {
                 self.line("    adc a, b");
             }
-            self.line(&format!("    ld ({:06X}h), a", destination.addr + offset));
+            self.store_byte_from_a(destination.addr + offset);
         }
     }
 
     fn emit_sub_memory(&mut self, destination: Variable, source: Variable) {
         for offset in 0..destination.size {
-            self.line(&format!("    ld a, ({:06X}h)", destination.addr + offset));
+            self.load_byte_into_a(destination.addr + offset);
             self.line("    ld b, a");
             if offset < source.size {
-                self.line(&format!("    ld a, ({:06X}h)", source.addr + offset));
+                self.load_byte_into_a(source.addr + offset);
             } else {
                 self.line("    xor a");
             }
@@ -9439,7 +9766,7 @@ impl Emitter {
                 self.line("    ld a, b");
                 self.line("    sbc a, c");
             }
-            self.line(&format!("    ld ({:06X}h), a", destination.addr + offset));
+            self.store_byte_from_a(destination.addr + offset);
         }
     }
 
@@ -9468,7 +9795,7 @@ impl Emitter {
 
             for _ in 0..u32::from(second.size) * 8 {
                 let skip = self.next_label("intrinsic_mul_skip");
-                self.line(&format!("    ld a, ({:06X}h)", multiplier.addr));
+                self.load_byte_into_a(multiplier.addr);
                 self.line("    and 01h");
                 self.line(&format!("    jp z, {skip}"));
                 self.emit_add_memory(product, multiplicand);
@@ -9496,9 +9823,9 @@ impl Emitter {
                 self.emit_load_a(first);
                 self.line("    mulub a, c");
                 self.line("    ld a, l");
-                self.line(&format!("    ld ({:06X}h), a", product.addr));
+                self.store_byte_from_a(product.addr);
                 self.line("    ld a, h");
-                self.line(&format!("    ld ({:06X}h), a", product.addr + 1));
+                self.store_byte_from_a(product.addr + 1);
             }
             2 => {
                 debug_assert_eq!(product.size, 4);
@@ -9593,13 +9920,13 @@ impl Emitter {
     fn emit_fill_bytes(&mut self, variable: Variable, value: u8) {
         self.line(&format!("    ld a, {value:02X}h"));
         for offset in 0..variable.size {
-            self.line(&format!("    ld ({:06X}h), a", variable.addr + offset));
+            self.store_byte_from_a(variable.addr + offset);
         }
     }
 
     fn emit_jump_if_memory_sign(&mut self, variable: Variable, negative_label: &str) {
         let address = variable.addr + variable.size - 1;
-        self.line(&format!("    ld a, ({address:06X}h)"));
+        self.load_byte_into_a(address);
         self.line("    add a, a");
         self.line(&format!("    jp c, {negative_label}"));
     }
@@ -9607,19 +9934,13 @@ impl Emitter {
     fn emit_signed_max_bytes(&mut self, variable: Variable) {
         self.emit_fill_bytes(variable, 0xFF);
         self.line("    ld a, 7Fh");
-        self.line(&format!(
-            "    ld ({:06X}h), a",
-            variable.addr + variable.size - 1
-        ));
+        self.store_byte_from_a(variable.addr + variable.size - 1);
     }
 
     fn emit_signed_min_bytes(&mut self, variable: Variable) {
         self.emit_zero_bytes(variable);
         self.line("    ld a, 80h");
-        self.line(&format!(
-            "    ld ({:06X}h), a",
-            variable.addr + variable.size - 1
-        ));
+        self.store_byte_from_a(variable.addr + variable.size - 1);
     }
 
     fn emit_memory_intrinsic_value(
@@ -9734,7 +10055,7 @@ impl Emitter {
             } else {
                 result.size - 1 - offset
             };
-            self.line(&format!("    ld ({:06X}h), a", result.addr + result_offset));
+            self.store_byte_from_a(result.addr + result_offset);
             self.emit_increment_memory(temps[0]);
         }
         debug_assert_eq!(pointer_width, self.symbols.type_width(&types[0]).unwrap());
@@ -9759,10 +10080,7 @@ impl Emitter {
             } else {
                 value_size - 1 - offset
             };
-            self.line(&format!(
-                "    ld a, ({:06X}h)",
-                temps[1].addr + value_offset
-            ));
+            self.load_byte_into_a(temps[1].addr + value_offset);
             self.line("    ld (hl), a");
             self.emit_increment_memory(temps[0]);
         }
@@ -12751,7 +13069,10 @@ fn validate_inline_asm_clobbers(
                 line.trim()
             )));
         }
-        let effects = analyze_instruction(cpu, line)?.effects;
+        // Compiler-generated frame operands such as `(ix-4)` only read IX;
+        // clobber declarations are required for bare register mentions.
+        let bare_line = super::strip_index_indirect_mentions(line);
+        let effects = analyze_instruction(cpu, &bare_line)?.effects;
         for register in effects.referenced_special_registers {
             if !asm_clobbers_include(clobbers, register) {
                 return Err(Diagnostic::new(format!(

@@ -67,6 +67,7 @@ These pages cover target-specific features, emulator checks, and older focused i
 - [eZ80 opcode coverage](ez80-opcode-coverage.md)
 - [eZ80 test harness targets](ez80-test-harness-targets.md)
 - [FreeDOS compiler](freedos.md)
+- [eZ80/Z80 source ABI](ez80-source-abi.md)
 - [Game Boy assembly](gameboy-assembly.md)
 - [Image assets](image-assets.md)
 - [IR design notes](ir-design.md)

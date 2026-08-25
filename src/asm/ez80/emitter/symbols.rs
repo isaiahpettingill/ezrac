@@ -280,20 +280,28 @@ impl Symbols {
                 .iter()
                 .map(|param| symbols.type_width(&param.ty))
                 .collect::<Result<Vec<_>, _>>()?;
-            let uses_arg_slots = param_widths.get(2).is_some_and(|third| third.bytes() != 1)
-                && param_widths
-                    .get(1)
-                    .is_some_and(|second| second.bytes() == 1);
-            if extern_asm && uses_arg_slots {
+            let frame_cpu = super::uses_ix_frames(options.cpu);
+            let registers_cannot_marshal =
+                param_widths.get(2).is_some_and(|third| third.bytes() != 1)
+                    && param_widths
+                        .get(1)
+                        .is_some_and(|second| second.bytes() == 1);
+            if extern_asm && registers_cannot_marshal {
                 return Err(Diagnostic::new(format!(
                     "extern asm function `{name}` cannot use a byte second argument followed by a wide third argument"
                 )));
             }
+            // Frame CPUs pass the blocked combination on the stack instead of
+            // through static argument cells; the Intel 8080 family keeps the
+            // legacy static slot convention.
+            let uses_arg_slots = !frame_cpu && registers_cannot_marshal;
+            let all_params_on_stack = frame_cpu && registers_cannot_marshal;
             let mut stack_arg_offsets = vec![None; params.len()];
             let mut stack_arg_bytes = 0u8;
             let mut stack_offset = symbols.function_pointer_width.bytes().saturating_mul(2);
-            if !uses_arg_slots && params.len() > 3 {
-                for (index, width) in param_widths.iter().enumerate().skip(3) {
+            let first_stack_index = if all_params_on_stack { 0 } else { 3 };
+            if params.len() > first_stack_index {
+                for (index, width) in param_widths.iter().enumerate().skip(first_stack_index) {
                     let bytes = width.bytes();
                     if stack_offset as u16 + bytes as u16 > 0x80 {
                         return Err(Diagnostic::new(format!(

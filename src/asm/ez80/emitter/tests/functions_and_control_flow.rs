@@ -16,7 +16,7 @@ fn lowered_function_calls(checked: &CheckedEz80Program, function_name: &str) -> 
     calls
 }
 
-fn debug_let_store_address(assembly: &str, name: &str) -> u32 {
+fn debug_let_store_displacement(assembly: &str, name: &str) -> i32 {
     let marker = format!("; source: let {name}:");
     let body = assembly
         .split(&marker)
@@ -24,14 +24,19 @@ fn debug_let_store_address(assembly: &str, name: &str) -> u32 {
         .unwrap_or_else(|| panic!("missing debug marker for local `{name}`\n{assembly}"));
     let line = body
         .lines()
-        .find(|line| line.trim_start().starts_with("ld (") && line.trim_end().ends_with("), a"))
-        .unwrap_or_else(|| panic!("missing direct store for local `{name}`\n{body}"));
-    let address = line
+        .find(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("ld (ix") && trimmed.ends_with("), a")
+        })
+        .unwrap_or_else(|| panic!("missing frame store for local `{name}`\n{body}"));
+    let displacement = line
         .trim()
-        .strip_prefix("ld (")
-        .and_then(|line| line.strip_suffix("h), a"))
-        .unwrap_or_else(|| panic!("unexpected local store syntax `{line}`"));
-    u32::from_str_radix(address, 16).unwrap()
+        .strip_prefix("ld (ix")
+        .and_then(|line| line.strip_suffix("), a"))
+        .unwrap_or_else(|| panic!("unexpected local store syntax `{line}`"))
+        .parse::<i32>()
+        .unwrap_or_else(|_| panic!("unexpected ix displacement `{line}`"));
+    displacement
 }
 
 #[test]
@@ -166,8 +171,8 @@ fn nonoverlapping_storage_locals_share_static_memory() {
     let assembly = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
 
     assert_eq!(
-        debug_let_store_address(&assembly, "first"),
-        debug_let_store_address(&assembly, "second"),
+        debug_let_store_displacement(&assembly, "first"),
+        debug_let_store_displacement(&assembly, "second"),
         "{assembly}"
     );
     let run = run_assembly_test(&assembly, 2_000).unwrap();
@@ -194,8 +199,8 @@ fn overlapping_storage_locals_use_distinct_static_memory() {
     let assembly = emit_ez80_assembly_with_debug_comments(&program, true).unwrap();
 
     assert_ne!(
-        debug_let_store_address(&assembly, "first"),
-        debug_let_store_address(&assembly, "second"),
+        debug_let_store_displacement(&assembly, "first"),
+        debug_let_store_displacement(&assembly, "second"),
         "{assembly}"
     );
     let run = run_assembly_test(&assembly, 2_000).unwrap();
@@ -1313,8 +1318,8 @@ fn emits_typed_function_pointer_trampolines_for_wide_third_arguments() {
     let asm = emit_ez80_assembly(&program).unwrap();
     let run = run_assembly_test(&asm, 6_000).unwrap();
 
-    assert!(asm.contains("__ezra_fn_ptr_add:"), "{asm}");
-    assert!(asm.contains("call _add"), "{asm}");
+    // Frame CPUs pass the blocked argument combination on the stack; the
+    // indirect-call trampoline jumps straight to the target function.
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }

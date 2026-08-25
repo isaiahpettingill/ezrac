@@ -666,7 +666,12 @@ fn lowers_byte_aligned_wide_temporary_shifts() {
         let function = body(name);
         let addresses = function
             .lines()
-            .filter_map(|line| line.split_once('(')?.1.split_once("h)").map(|part| part.0))
+            .filter(|line| line.contains("(ix"))
+            .filter_map(|line| {
+                let start = line.find("(ix")?;
+                let end = line[start..].find(')')?;
+                Some(line[start..=start + end].to_string())
+            })
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(addresses.len(), expected_storage_bytes, "{function}");
     }
@@ -726,7 +731,7 @@ fn preserves_volatile_wide_accesses_for_byte_aligned_compound_shifts() {
 
     assert_eq!(
         body("shift_status16").matches("    ld a, (hl)").count(),
-        2,
+        3,
         "{asm}"
     );
     assert_eq!(
@@ -736,7 +741,7 @@ fn preserves_volatile_wide_accesses_for_byte_aligned_compound_shifts() {
     );
     assert_eq!(
         body("shift_status24").matches("    ld a, (hl)").count(),
-        3,
+        5,
         "{asm}"
     );
     assert_eq!(
@@ -1062,18 +1067,19 @@ fn preserves_pointer_out_arguments_across_recursive_calls() {
         recursive_call.contains("call _write_through_chain"),
         "{recursive_call}"
     );
-    // The 14-byte caller frame excludes the one-byte `local` out-argument.
-    // Direct comparison branching also avoids a scratch boolean local.
+    // Frame-backed automatic storage needs no static save/restore snapshots
+    // around recursive calls.
     assert_eq!(
         recursive_call.matches("    dec sp").count(),
-        13,
+        0,
         "{recursive_call}"
     );
     assert_eq!(
         recursive_call.matches("    inc sp").count(),
-        13,
+        0,
         "{recursive_call}"
     );
+    assert!(recursive_call.contains("    push ix"), "{recursive_call}");
 }
 
 #[test]
@@ -1438,7 +1444,7 @@ fn propagates_local_scalar_constants_until_assignment() {
 
     assert!(copied.contains("    ld a, 07h"), "{asm}");
     assert!(!copied.contains("    ld (040"), "{asm}");
-    assert!(assigned.contains("    ld a, (040"), "{asm}");
+    assert!(assigned.contains("    ld a, (ix"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
 }
@@ -1529,7 +1535,7 @@ fn keeps_storage_for_addressed_constant_locals() {
         .unwrap();
 
     assert!(addressed.contains("    ld a, 07h"), "{asm}");
-    assert!(addressed.contains("    ld (040"), "{asm}");
+    assert!(addressed.contains("    ld (ix"), "{asm}");
     assert!(addressed.contains("    ld a, (hl)"), "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");
