@@ -196,6 +196,7 @@ struct Emitter {
     frame_stack_top: u32,
     frame_size: u32,
     frame_active: bool,
+    temp_cursor: u32,
 }
 
 impl Emitter {
@@ -236,6 +237,7 @@ impl Emitter {
             frame_stack_top: options.rodata_base.get().saturating_sub(1),
             frame_size: 0,
             frame_active: false,
+            temp_cursor: 0,
         }
     }
 
@@ -502,11 +504,6 @@ impl Emitter {
         let naked = function.attrs.iter().any(|attr| attr == "naked");
         let interrupt = function.attrs.iter().any(|attr| attr == "interrupt");
         let function_ram_base = self.model.next_ram_address();
-        let second_return_pointer = function
-            .second_return_type
-            .as_ref()
-            .map(|_| self.model.allocate(u32::from(self.model.pointer_bytes())))
-            .transpose()?;
         let signature = self
             .model
             .functions
@@ -522,8 +519,8 @@ impl Emitter {
         }
         let (planned_locals, local_bytes) =
             plan_frame_locals(function, &mut self.model, parameter_bytes)?;
-        let frame_size = parameter_bytes + local_bytes;
-        if frame_size > 0xFF {
+        let base_frame_size = parameter_bytes + local_bytes;
+        if base_frame_size > 0xFF {
             return Err(Diagnostic::new(format!(
                 "MOS 6502 function `{}` frame exceeds the 8-bit software stack offset",
                 function.name
@@ -556,6 +553,14 @@ impl Emitter {
                 function.name
             )));
         }
+        self.temp_cursor = base_frame_size;
+        self.frame_active = !naked;
+        let second_return_pointer = function
+            .second_return_type
+            .as_ref()
+            .map(|_| self.model.allocate(u32::from(self.model.pointer_bytes())))
+            .transpose()?;
+        let prologue_start = self.out.len();
         self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(HashMap::new());
         self.return_labels.push(return_label.clone());
@@ -594,8 +599,8 @@ impl Emitter {
                 self.line("    pha");
             }
         }
-        if !naked && frame_size != 0 {
-            self.emit_frame_prologue(frame_size);
+        if !naked {
+            self.emit_frame_prologue(base_frame_size);
         }
         for (index, param) in function.params.iter().enumerate() {
             let storage = parameter_storages[index];
@@ -607,9 +612,12 @@ impl Emitter {
             );
         }
         self.planned_locals.push(planned_locals);
-        self.frame_size = frame_size;
-        self.frame_active = !naked && frame_size != 0;
+        self.frame_size = self.temp_cursor;
         self.emit_block(&function.body)?;
+        self.frame_size = self.temp_cursor;
+        if !naked {
+            self.patch_frame_prologue(prologue_start, self.frame_size)?;
+        }
         self.line(&format!("{return_label}:"));
         if interrupt {
             if self.frame_active {
@@ -649,6 +657,7 @@ impl Emitter {
         self.planned_locals.pop();
         self.frame_active = false;
         self.frame_size = 0;
+        self.temp_cursor = 0;
         self.scopes.pop();
         Ok(())
     }
@@ -719,7 +728,7 @@ impl Emitter {
                         ));
                     }
                     let size = self.model.type_size(&ty)?;
-                    let temporary = self.model.allocate(size)?;
+                    let temporary = self.allocate_temp(size)?;
                     self.emit_initializer(temporary, &ty, value)?;
                     self.emit_store_aggregate_place(target, temporary, size)?;
                     return Ok(());
@@ -754,7 +763,7 @@ impl Emitter {
                         && self.multiply_constant(width, factor, type_is_signed(&ty), false)
                     {
                     } else {
-                        let left = self.model.allocate(u32::from(width))?;
+                        let left = self.allocate_temp(u32::from(width))?;
                         self.copy(self.r0, left, u32::from(width));
                         self.emit_expr(value, &ty)?;
                         self.copy(self.r0, self.r1, u32::from(width));
@@ -1124,7 +1133,7 @@ impl Emitter {
                 let operand = if let Some(operand) = direct_operand {
                     operand
                 } else {
-                    let right_storage = self.model.allocate(1)?;
+                    let right_storage = self.allocate_temp(1)?;
                     self.emit_byte_expr_to(right, expected, right_storage.address)?;
                     format!("${:04X}", right_storage.address)
                 };
@@ -1206,7 +1215,7 @@ impl Emitter {
                 self.ldx_memory(self.binding(name)?.storage.address);
             }
             _ => {
-                let index = self.model.allocate(1)?;
+                let index = self.allocate_temp(1)?;
                 self.emit_byte_expr_to(right, &Type::Named("u8".to_owned()), index.address)?;
                 self.ldx_memory(index.address);
             }
@@ -1375,7 +1384,7 @@ impl Emitter {
                 {
                     return Ok(());
                 }
-                let left_storage = self.model.allocate(u32::from(operand_width))?;
+                let left_storage = self.allocate_temp(u32::from(operand_width))?;
                 self.copy(self.r0, left_storage, u32::from(operand_width));
                 self.emit_expr(right, &operand_ty)?;
                 self.copy(self.r0, self.r1, u32::from(operand_width));
@@ -1464,8 +1473,8 @@ impl Emitter {
                     );
                 }
                 SecondResultDestination::Pointer(_) => {
-                    let first = self.model.allocate(self.model.type_size(first_ty)?)?;
-                    let second = self.model.allocate(self.model.type_size(second_ty)?)?;
+                    let first = self.allocate_temp(self.model.type_size(first_ty)?)?;
+                    let second = self.allocate_temp(self.model.type_size(second_ty)?)?;
                     self.emit_two_result_intrinsic_call(
                         path, args, first, first_ty, second, second_ty,
                     )?;
@@ -1520,7 +1529,7 @@ impl Emitter {
         for (index, arg) in args.iter().enumerate() {
             let ty = &signature.params[index];
             self.emit_expr(arg, ty)?;
-            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            let storage = self.allocate_temp(self.model.type_size(ty)?)?;
             self.copy(self.r0, storage, storage.size);
             evaluated_args.push(storage);
         }
@@ -1553,9 +1562,7 @@ impl Emitter {
         }
         self.set_second_result_pointer(destination);
         self.line(&format!("    jsr {}", function_label(&resolved_name)));
-        let returned = self
-            .model
-            .allocate(self.model.type_size(signature_first)?)?;
+        let returned = self.allocate_temp(self.model.type_size(signature_first)?)?;
         self.copy(self.r0, returned, returned.size);
         for storage in saved.iter().rev() {
             for offset in (0..storage.size).rev() {
@@ -1593,7 +1600,7 @@ impl Emitter {
             .ok_or_else(|| {
                 Diagnostic::new("two-result function has no caller-provided return slot")
             })?;
-        let first_value = self.model.allocate(self.model.type_size(&first_ty)?)?;
+        let first_value = self.allocate_temp(self.model.type_size(&first_ty)?)?;
         self.emit_expr(first, &first_ty)?;
         self.copy(self.r0, first_value, first_value.size);
         self.emit_expr(second, &second_ty)?;
@@ -1629,7 +1636,7 @@ impl Emitter {
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
                 let pointer_width = self.model.pointer_bytes();
-                let destination = self.model.allocate(u32::from(pointer_width))?;
+                let destination = self.allocate_temp(u32::from(pointer_width))?;
                 self.copy(self.r0, destination, u32::from(pointer_width));
                 self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
                 self.set_zp_from_storage(POINTER_ZP, destination);
@@ -1724,7 +1731,7 @@ impl Emitter {
         for (index, arg) in args.iter().enumerate() {
             let ty = &signature.params[index];
             self.emit_expr(arg, ty)?;
-            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            let storage = self.allocate_temp(self.model.type_size(ty)?)?;
             self.copy(self.r0, storage, storage.size);
             evaluated_args.push(storage);
         }
@@ -1779,7 +1786,7 @@ impl Emitter {
             .as_ref()
             .map(|ty| self.model.type_size(ty))
             .transpose()?
-            .map(|size| self.model.allocate(size))
+            .map(|size| self.allocate_temp(size))
             .transpose()?;
         if let Some(return_storage) = return_storage {
             self.copy(self.r0, return_storage, return_storage.size);
@@ -1863,7 +1870,7 @@ impl Emitter {
         let mut values = Vec::with_capacity(args.len());
         for (arg, ty) in args.iter().zip(types) {
             self.emit_expr(arg, ty)?;
-            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            let storage = self.allocate_temp(self.model.type_size(ty)?)?;
             self.copy(self.r0, storage, storage.size);
             values.push(storage);
         }
@@ -2124,18 +2131,15 @@ impl Emitter {
         result_width: u8,
     ) -> Storage {
         let multiplicand = self
-            .model
-            .allocate(u32::from(result_width))
+            .allocate_temp(u32::from(result_width))
             .expect("multiplicand scratch");
         let multiplier = self
-            .model
-            .allocate(u32::from(right_width))
+            .allocate_temp(u32::from(right_width))
             .expect("multiplier scratch");
         let result = self
-            .model
-            .allocate(u32::from(result_width))
+            .allocate_temp(u32::from(result_width))
             .expect("product scratch");
-        let negative = self.model.allocate(1).expect("product sign scratch");
+        let negative = self.allocate_temp(1).expect("product sign scratch");
         self.zero(negative);
         if signed {
             self.normalize_signed_operand(left, left_width, negative, false);
@@ -2216,9 +2220,9 @@ impl Emitter {
         } else {
             self.add_without_initial_carry(width);
         }
-        let saved = self.model.allocate(u32::from(width))?;
+        let saved = self.allocate_temp(u32::from(width))?;
         self.copy(self.r0, saved, u32::from(width));
-        let flag = self.model.allocate(1)?;
+        let flag = self.allocate_temp(1)?;
         let set = self.next_label("carry_set");
         self.branch_long(if borrow { "bcc" } else { "bcs" }, &set);
         self.zero(flag);
@@ -2266,9 +2270,9 @@ impl Emitter {
             }
             return Ok(());
         }
-        let count_value = self.model.allocate(u32::from(count_width))?;
+        let count_value = self.allocate_temp(u32::from(count_width))?;
         self.copy(count, count_value, u32::from(count_width));
-        let modulus = self.model.allocate(u32::from(count_width))?;
+        let modulus = self.allocate_temp(u32::from(count_width))?;
         self.zero(modulus);
         self.load_constant(i64::from(bits), count_width);
         self.copy(self.r0, modulus, u32::from(count_width));
@@ -2362,12 +2366,10 @@ impl Emitter {
 
     fn mask_result(&mut self, width: u8, mask: u64) {
         let source = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("bit mask source scratch");
         let mask_storage = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("bit mask scratch");
         self.copy(self.r0, source, u32::from(width));
         self.load_constant(mask as i64, width);
@@ -2389,16 +2391,13 @@ impl Emitter {
         let field_mask = bit_mask(field_width);
         let shifted_mask = field_mask << offset;
         let inverse = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("insert mask scratch");
         let cleared = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("insert base scratch");
         let inserted = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("insert value scratch");
         self.load_constant((!shifted_mask) as i64, width);
         self.copy(self.r0, inverse, u32::from(width));
@@ -2421,9 +2420,9 @@ impl Emitter {
     }
 
     fn emit_reverse(&mut self, value: Storage, width: u8) -> Result<(), Diagnostic> {
-        let source = self.model.allocate(u32::from(width))?;
-        let result = self.model.allocate(u32::from(width))?;
-        let bit = self.model.allocate(u32::from(width))?;
+        let source = self.allocate_temp(u32::from(width))?;
+        let result = self.allocate_temp(u32::from(width))?;
+        let bit = self.allocate_temp(u32::from(width))?;
         self.copy(value, source, u32::from(width));
         self.zero(result);
         for _ in 0..u32::from(width) * 8 {
@@ -2433,7 +2432,7 @@ impl Emitter {
             self.copy(self.r0, self.r1, u32::from(width));
             self.copy(bit, self.r0, u32::from(width));
             self.emit_binary_op(BinaryOp::BitAnd, width, false)?;
-            let source_bit = self.model.allocate(u32::from(width))?;
+            let source_bit = self.allocate_temp(u32::from(width))?;
             self.copy(self.r0, source_bit, u32::from(width));
             self.copy(result, self.r0, u32::from(width));
             self.shift_constant(width, false, false, 1);
@@ -2449,7 +2448,7 @@ impl Emitter {
     }
 
     fn emit_bit_count(&mut self, source: Storage, width: u8, leading: bool, ones: bool) {
-        let count = self.model.allocate(1).expect("bit count scratch");
+        let count = self.allocate_temp(1).expect("bit count scratch");
         self.zero(count);
         let total = u32::from(width) * 8;
         let order = if leading {
@@ -2649,7 +2648,7 @@ impl Emitter {
         ty: &Type,
     ) -> Result<Storage, Diagnostic> {
         let width = self.model.type_width(ty)?;
-        let count = self.model.allocate(3)?;
+        let count = self.allocate_temp(3)?;
         self.zero(count);
         self.copy(value, count, u32::from(width.min(3)));
         Ok(count)
@@ -2823,7 +2822,7 @@ impl Emitter {
         let values = self.eval_intrinsic_args(args, types)?;
         let length = self.zero_extend_memory_length(values[2], &types[2])?;
         let pointer_width = self.model.pointer_bytes();
-        let left_byte = self.model.allocate(1)?;
+        let left_byte = self.allocate_temp(1)?;
         let less = self.next_label("mem_compare_less");
         let greater = self.next_label("mem_compare_greater");
         let equal = self.next_label("mem_compare_equal");
@@ -2959,7 +2958,7 @@ impl Emitter {
         self.line(&format!("    jmp {loop_label}"));
         self.line(&format!("{found}:"));
         self.copy_zp_width_to_result(pointer_width);
-        let found_pointer = self.model.allocate(u32::from(pointer_width))?;
+        let found_pointer = self.allocate_temp(u32::from(pointer_width))?;
         self.copy(self.r0, found_pointer, u32::from(pointer_width));
         self.load_constant(1, 1);
         self.copy(self.r0, self.r1, 1);
@@ -2978,8 +2977,8 @@ impl Emitter {
         offset: Storage,
         width: u8,
     ) -> Result<Storage, Diagnostic> {
-        let result = self.model.allocate(u32::from(width))?;
-        let rhs = self.model.allocate(u32::from(width))?;
+        let result = self.allocate_temp(u32::from(width))?;
+        let rhs = self.allocate_temp(u32::from(width))?;
         self.zero(rhs);
         self.copy(offset, rhs, u32::from(width).min(offset.size));
         self.add_storages(pointer, rhs, result, width);
@@ -2987,7 +2986,7 @@ impl Emitter {
     }
 
     fn pointer_minus_one(&mut self, value: Storage, width: u8) -> Result<Storage, Diagnostic> {
-        let result = self.model.allocate(u32::from(width))?;
+        let result = self.allocate_temp(u32::from(width))?;
         self.zero(result);
         self.load_constant(1, 1);
         self.copy(self.r0, result, 1);
@@ -3115,13 +3114,13 @@ impl Emitter {
         let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
         let pointer_width = self.model.pointer_bytes();
         self.emit_expr(&args[0], &pointer)?;
-        let destination = self.model.allocate(u32::from(pointer_width))?;
+        let destination = self.allocate_temp(u32::from(pointer_width))?;
         self.copy(self.r0, destination, u32::from(pointer_width));
         self.emit_expr(&args[1], &pointer)?;
-        let source = self.model.allocate(u32::from(pointer_width))?;
+        let source = self.allocate_temp(u32::from(pointer_width))?;
         self.copy(self.r0, source, u32::from(pointer_width));
         self.emit_expr(&args[2], &Type::Named("u16".to_owned()))?;
-        let length = self.model.allocate(2)?;
+        let length = self.allocate_temp(2)?;
         self.copy(self.r0, length, 2);
         let loop_label = self.next_label("memcpy_loop");
         let done = self.next_label("memcpy_done");
@@ -3151,13 +3150,13 @@ impl Emitter {
         let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
         let pointer_width = self.model.pointer_bytes();
         self.emit_expr(&args[0], &pointer)?;
-        let destination = self.model.allocate(u32::from(pointer_width))?;
+        let destination = self.allocate_temp(u32::from(pointer_width))?;
         self.copy(self.r0, destination, u32::from(pointer_width));
         self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
-        let value = self.model.allocate(1)?;
+        let value = self.allocate_temp(1)?;
         self.copy(self.r0, value, 1);
         self.emit_expr(&args[2], &Type::Named("u16".to_owned()))?;
-        let length = self.model.allocate(2)?;
+        let length = self.allocate_temp(2)?;
         self.copy(self.r0, length, 2);
         let loop_label = self.next_label("memset_loop");
         let done = self.next_label("memset_done");
@@ -3436,8 +3435,7 @@ impl Emitter {
             }
             ConstantMultiplyPlan::ShiftAdd { count, subtract } => {
                 let original = self
-                    .model
-                    .allocate(u32::from(width))
+                    .allocate_temp(u32::from(width))
                     .expect("constant multiply scratch");
                 self.copy(self.r0, original, u32::from(width));
                 self.shift_constant(width, false, false, count);
@@ -3450,8 +3448,7 @@ impl Emitter {
             }
             ConstantMultiplyPlan::Horner { magnitude } => {
                 let original = self
-                    .model
-                    .allocate(u32::from(width))
+                    .allocate_temp(u32::from(width))
                     .expect("constant multiply scratch");
                 self.copy(self.r0, original, u32::from(width));
                 let highest_bit = magnitude.ilog2();
@@ -3502,14 +3499,12 @@ impl Emitter {
         let loop_label = self.next_label("mul_loop");
         let done = self.next_label("mul_done");
         let multiplicand = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("multiply scratch");
         let multiplier = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("multiply scratch");
-        let negative = self.model.allocate(1).expect("multiply sign");
+        let negative = self.allocate_temp(1).expect("multiply sign");
         self.zero(negative);
         if signed {
             self.normalize_signed_operand(self.r0, width, negative, false);
@@ -3534,8 +3529,8 @@ impl Emitter {
         let loop_label = self.next_label("div_loop");
         let done = self.next_label("div_done");
         let zero = self.next_label("div_zero");
-        let quotient_negative = self.model.allocate(1).expect("division sign");
-        let remainder_negative = self.model.allocate(1).expect("division sign");
+        let quotient_negative = self.allocate_temp(1).expect("division sign");
+        let remainder_negative = self.allocate_temp(1).expect("division sign");
         self.zero(quotient_negative);
         self.zero(remainder_negative);
         if signed {
@@ -3826,7 +3821,7 @@ impl Emitter {
     }
 
     fn emit_store_place(&mut self, place: &Place, width: u8) -> Result<(), Diagnostic> {
-        let saved = self.model.allocate(u32::from(width))?;
+        let saved = self.allocate_temp(u32::from(width))?;
         self.copy(self.r0, saved, u32::from(width));
         match self.place_address(place)? {
             Address::Direct(address) => self.copy(
@@ -4076,7 +4071,7 @@ impl Emitter {
             return Ok(());
         }
         let pointer_width = self.model.pointer_bytes();
-        let saved_lo = self.model.allocate(u32::from(pointer_width))?;
+        let saved_lo = self.allocate_temp(u32::from(pointer_width))?;
         for offset in 0..u32::from(pointer_width) {
             self.lda(POINTER_ZP + offset);
             self.sta(saved_lo.address + offset);
@@ -4117,7 +4112,7 @@ impl Emitter {
             return Ok(());
         }
 
-        let index = self.model.allocate(2)?;
+        let index = self.allocate_temp(2)?;
         self.copy(self.r0, index, 2);
         self.load_constant(i64::from(scale), 2);
         self.copy(self.r0, self.r1, 2);
@@ -4436,12 +4431,10 @@ impl Emitter {
             return;
         }
         let source = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("pointer scale source");
         let result = self
-            .model
-            .allocate(u32::from(width))
+            .allocate_temp(u32::from(width))
             .expect("pointer scale result");
         self.copy(storage, source, u32::from(width));
         self.zero(result);
@@ -4753,7 +4746,7 @@ impl Emitter {
                 if let Some(address) = self.constant_pointer_address(pointer) {
                     self.lda(address);
                 } else {
-                    let temporary = self.model.allocate(1)?;
+                    let temporary = self.allocate_temp(1)?;
                     if !self.emit_absolute_indexed_load(pointer, temporary.address)? {
                         return Ok(false);
                     }
@@ -4881,7 +4874,46 @@ impl Emitter {
             self.lda(FRAME_POINTER_ZP + offset);
             self.line("    pha");
         }
-        self.adjust_frame_pointer(size, true);
+        self.line("    sec");
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            self.lda(FRAME_POINTER_ZP + offset);
+            self.line("    sbc #$00");
+            self.sta(FRAME_POINTER_ZP + offset);
+        }
+        let _ = size;
+    }
+
+    fn allocate_temp(&mut self, size: u32) -> Result<Storage, Diagnostic> {
+        if !self.frame_active {
+            return self.model.allocate(size);
+        }
+        let end = self
+            .temp_cursor
+            .checked_add(size)
+            .ok_or_else(|| Diagnostic::new("MOS 6502 frame size overflow"))?;
+        if end > 0x100 {
+            return Err(Diagnostic::new(
+                "MOS 6502 function temporaries exceed the 8-bit software stack offset",
+            ));
+        }
+        let storage = frame_storage(self.temp_cursor, size);
+        self.temp_cursor = end;
+        Ok(storage)
+    }
+
+    fn patch_frame_prologue(&mut self, start: usize, size: u32) -> Result<(), Diagnostic> {
+        let mut suffix = self.out[start..].to_owned();
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            let marker = "sbc #$00";
+            let position = suffix.find(marker).ok_or_else(|| {
+                Diagnostic::new("internal error: missing MOS 6502 frame-size placeholder")
+            })?;
+            let byte = (size >> (offset * 8)) as u8;
+            let replacement = format!("sbc #${byte:02X}");
+            suffix.replace_range(position..position + marker.len(), &replacement);
+        }
+        self.out.replace_range(start.., &suffix);
+        Ok(())
     }
 
     fn emit_frame_epilogue(&mut self) {
@@ -6993,6 +7025,20 @@ mod structural_tests {
         );
         assert!(mutual.contains("    pha"), "{mutual}");
         assert!(mutual.contains("    pla"), "{mutual}");
+    }
+
+    #[test]
+    fn compiler_temporaries_are_lowered_into_the_software_frame() {
+        let assembly = emit(
+            r#"
+                fn main() {
+                    let value: u16 = 1
+                    value += 2
+                }
+            "#,
+        );
+        assert!(!assembly.contains("F000"), "{assembly}");
+        assert!(assembly.contains("    sta ($F3),y"), "{assembly}");
     }
 
     #[test]
