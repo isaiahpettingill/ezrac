@@ -27,6 +27,22 @@ use crate::{
 // Four bytes immediately below the target's RAM base are reserved for shared
 // indirect source and destination pointers.
 const POINTER_SCRATCH_BYTES: u32 = 4;
+const FRAME_ADDRESS_BASE: u32 = 0xF000_0000;
+
+fn frame_storage(offset: u32, size: u32) -> Storage {
+    Storage {
+        address: FRAME_ADDRESS_BASE + offset,
+        size,
+    }
+}
+
+fn frame_offset(address: u32) -> Option<u32> {
+    if address >= FRAME_ADDRESS_BASE {
+        Some(address - FRAME_ADDRESS_BASE)
+    } else {
+        None
+    }
+}
 
 pub fn emit_avr_assembly_with_options(
     program: &Program,
@@ -126,6 +142,8 @@ struct Emitter {
     pointer_scratch: u32,
     stack_top: u32,
     arduboy_executable: bool,
+    frame_size: u32,
+    frame_active: bool,
 }
 
 impl Emitter {
@@ -152,6 +170,8 @@ impl Emitter {
             pointer_scratch: options.ram_base.get() - POINTER_SCRATCH_BYTES,
             stack_top: options.stack_top.get(),
             arduboy_executable: options.arduboy_executable,
+            frame_size: 0,
+            frame_active: false,
         }
     }
 
@@ -557,7 +577,22 @@ impl Emitter {
             .as_ref()
             .map(|_| self.model.allocate(2))
             .transpose()?;
-        let locals = plan_function_locals(function, &mut self.model)?;
+        let signature = self
+            .model
+            .functions
+            .get(&function.name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
+        let mut parameter_storages = Vec::new();
+        let mut parameter_bytes = 0;
+        for param in &function.params {
+            let size = self.model.type_size(&param.ty)?;
+            parameter_storages.push(frame_storage(parameter_bytes, size));
+            parameter_bytes += size;
+        }
+        let (locals, local_bytes) =
+            plan_function_locals(function, &mut self.model, parameter_bytes)?;
+        let frame_size = parameter_bytes + local_bytes;
         self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(locals.bindings);
         self.return_labels.push(return_label.clone());
@@ -570,16 +605,13 @@ impl Emitter {
         if interrupt && !naked {
             self.emit_interrupt_prologue();
         }
+        if !naked && frame_size != 0 {
+            self.emit_frame_prologue(frame_size);
+        }
         if let Some(pointer) = second_return_pointer {
             self.line(&format!("    sts {:04X}h, r26", pointer.address));
             self.line(&format!("    sts {:04X}h, r27", pointer.address + 1));
         }
-        let signature = self
-            .model
-            .functions
-            .get(&function.name)
-            .cloned()
-            .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
         let argument_registers = self.argument_registers(&signature.params)?;
         for (index, param) in function.params.iter().enumerate() {
             let slot = signature.argument_slots[index];
@@ -593,10 +625,12 @@ impl Emitter {
                     ));
                 }
             }
-            let storage = self.model.allocate_type(&param.ty)?;
+            let storage = parameter_storages[index];
             self.bind_storage(param.name.clone(), storage, param.ty.clone())?;
             self.copy(slot, storage, size);
         }
+        self.frame_size = frame_size;
+        self.frame_active = !naked && frame_size != 0;
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
         if let Some(ty) = &function.return_type {
@@ -610,10 +644,16 @@ impl Emitter {
         }
         if interrupt {
             if !naked {
+                if self.frame_active {
+                    self.emit_frame_epilogue();
+                }
                 self.emit_interrupt_epilogue();
             }
             self.line("    rti");
         } else if !naked {
+            if self.frame_active {
+                self.emit_frame_epilogue();
+            }
             self.line("    rts");
         }
 
@@ -623,6 +663,8 @@ impl Emitter {
         self.return_labels.pop();
         self.function_ram_bases.pop();
         self.scopes.pop();
+        self.frame_active = false;
+        self.frame_size = 0;
         Ok(())
     }
 
@@ -918,7 +960,7 @@ impl Emitter {
                     let binding = self.binding(name)?;
                     let storage =
                         self.binding_storage(&binding, "take address of register local")?;
-                    self.load_constant(i64::from(storage.address), width);
+                    self.load_storage_address(storage, width);
                 }
             }
             Expr::AddressOfIndex { name, index } => {
@@ -929,7 +971,13 @@ impl Emitter {
                 let binding = self.binding(base)?;
                 let field = self.model.field(&binding.ty, field)?;
                 let storage = self.binding_storage(&binding, "take address of register local")?;
-                self.load_constant(i64::from(storage.address + field.offset), width);
+                self.load_storage_address(
+                    Storage {
+                        address: storage.address + field.offset,
+                        size: field.size,
+                    },
+                    width,
+                );
             }
             Expr::AddressOfAccess(path) => {
                 let (_, _) = self.emit_access_address(path)?;
@@ -3017,16 +3065,46 @@ impl Emitter {
         for input in inputs {
             let binding = self.binding(&input.name)?;
             let storage = self.binding_storage(&binding, "use register local in inline asm")?;
-            operands.insert(input.name.clone(), format!("{:04X}h", storage.address));
+            operands.insert(
+                input.name.clone(),
+                frame_offset(storage.address)
+                    .map(|offset| format!("Y+{offset}"))
+                    .unwrap_or_else(|| format!("{:04X}h", storage.address)),
+            );
         }
         for output in outputs {
             let binding = self.binding(&output.name)?;
             let storage = self.binding_storage(&binding, "use register local in inline asm")?;
-            operands.insert(output.name.clone(), format!("{:04X}h", storage.address));
+            operands.insert(
+                output.name.clone(),
+                frame_offset(storage.address)
+                    .map(|offset| format!("Y+{offset}"))
+                    .unwrap_or_else(|| format!("{:04X}h", storage.address)),
+            );
         }
         let local_label_prefix = self.next_label("asm");
         for line in lines {
             let mut emitted = rewrite_local_labels(line, &local_label_prefix);
+            for input in inputs {
+                let binding = self.binding(&input.name)?;
+                let storage = self.binding_storage(&binding, "use register local in inline asm")?;
+                if let Some(offset) = frame_offset(storage.address) {
+                    emitted = emitted.replace(
+                        &format!("lds r16, {{{}}}", input.name),
+                        &format!("ldd r16, Y+{offset}"),
+                    );
+                }
+            }
+            for output in outputs {
+                let binding = self.binding(&output.name)?;
+                let storage = self.binding_storage(&binding, "use register local in inline asm")?;
+                if let Some(offset) = frame_offset(storage.address) {
+                    emitted = emitted.replace(
+                        &format!("sts {{{}}}, r16", output.name),
+                        &format!("std Y+{offset}, r16"),
+                    );
+                }
+            }
             for (name, value) in &operands {
                 emitted = emitted.replace(&format!("{{{name}}}"), value);
             }
@@ -3282,6 +3360,14 @@ impl Emitter {
     }
 
     fn set_pointer(&mut self, address: u32) {
+        if frame_offset(address).is_some() {
+            self.native_line("    mov r16, r28");
+            self.native_line(&format!("    sts {:04X}h, r16", self.pointer_scratch));
+            self.native_line("    mov r16, r29");
+            self.native_line(&format!("    sts {:04X}h, r16", self.pointer_scratch + 1));
+            self.add_pointer_constant(frame_offset(address).unwrap());
+            return;
+        }
         self.lda_imm(address as u8);
         self.sta(self.pointer_scratch);
         self.lda_imm((address >> 8) as u8);
@@ -3411,11 +3497,94 @@ impl Emitter {
     }
 
     fn lda(&mut self, address: u32) {
+        if let Some(offset) = frame_offset(address) {
+            self.emit_frame_load(offset);
+            return;
+        }
         self.line(&format!("    lda ${address:04X}"));
     }
 
     fn sta(&mut self, address: u32) {
+        if let Some(offset) = frame_offset(address) {
+            self.emit_frame_store(offset);
+            return;
+        }
         self.line(&format!("    sta ${address:04X}"));
+    }
+
+    fn emit_frame_prologue(&mut self, size: u32) {
+        self.native_line("    push r28");
+        self.native_line("    push r29");
+        self.native_line("    in r28, 3Dh");
+        self.native_line("    in r29, 3Eh");
+        self.adjust_y(size, true);
+        self.native_line("    out 3Dh, r28");
+        self.native_line("    out 3Eh, r29");
+    }
+
+    fn emit_frame_epilogue(&mut self) {
+        self.native_line("    in r28, 3Dh");
+        self.native_line("    in r29, 3Eh");
+        self.adjust_y(self.frame_size, false);
+        self.native_line("    out 3Dh, r28");
+        self.native_line("    out 3Eh, r29");
+        self.native_line("    pop r29");
+        self.native_line("    pop r28");
+    }
+
+    fn adjust_y(&mut self, size: u32, subtract: bool) {
+        let instruction = if subtract { "sbiw" } else { "adiw" };
+        let mut remaining = size;
+        while remaining != 0 {
+            let amount = remaining.min(63);
+            self.native_line(&format!("    {instruction} r28, {amount}"));
+            remaining -= amount;
+        }
+    }
+
+    fn load_storage_address(&mut self, storage: Storage, width: u8) {
+        if let Some(offset) = frame_offset(storage.address) {
+            self.native_line("    movw r24, r28");
+            let mut remaining = offset;
+            while remaining != 0 {
+                let amount = remaining.min(63);
+                self.native_line(&format!("    adiw r24, {amount}"));
+                remaining -= amount;
+            }
+            for byte in 2..u32::from(width) {
+                self.lda_imm(0);
+                self.sta(self.r0.address + byte);
+            }
+        } else {
+            self.load_constant(i64::from(storage.address), width);
+        }
+    }
+
+    fn emit_frame_address_in_z(&mut self, offset: u32) {
+        self.native_line("    push r30");
+        self.native_line("    push r31");
+        self.native_line("    movw r30, r28");
+        let mut remaining = offset;
+        while remaining != 0 {
+            let amount = remaining.min(63);
+            self.native_line(&format!("    adiw r30, {amount}"));
+            remaining -= amount;
+        }
+    }
+
+    fn emit_frame_load(&mut self, offset: u32) {
+        self.emit_frame_address_in_z(offset);
+        self.native_line("    ld r16, Z");
+        self.native_line("    pop r31");
+        self.native_line("    pop r30");
+        self.native_line("    tst r16");
+    }
+
+    fn emit_frame_store(&mut self, offset: u32) {
+        self.emit_frame_address_in_z(offset);
+        self.native_line("    st Z, r16");
+        self.native_line("    pop r31");
+        self.native_line("    pop r30");
     }
 
     fn lda_imm(&mut self, value: u8) {
@@ -3449,7 +3618,7 @@ impl Emitter {
 
 const AVR_LOCAL_FIRST_REGISTER: u8 = 2;
 const AVR_LOCAL_LAST_REGISTER: u8 = 15;
-const AVR_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+const AVR_FRAME_SPILL_CLASS: SpillClassId = SpillClassId(0);
 
 fn avr_local_target() -> Target {
     let units = (AVR_LOCAL_FIRST_REGISTER..=AVR_LOCAL_LAST_REGISTER)
@@ -3501,7 +3670,8 @@ fn avr_local_target() -> Target {
 fn plan_function_locals(
     function: &Function,
     model: &mut SemanticModel,
-) -> Result<FunctionLocals, Diagnostic> {
+    frame_offset: u32,
+) -> Result<(FunctionLocals, u32), Diagnostic> {
     let mut source_locals = Vec::new();
     let mut local_types = HashMap::new();
     collect_avr_locals(&function.body, model, &mut source_locals, &mut local_types)?;
@@ -3525,10 +3695,6 @@ fn plan_function_locals(
         .map(|slot| slot.offset.saturating_add(slot.size))
         .max()
         .unwrap_or(0);
-    let spill_storage = (spill_bytes != 0)
-        .then(|| model.allocate(spill_bytes))
-        .transpose()?;
-
     let mut bindings = HashMap::new();
     for (name, ty) in local_types {
         let vreg = planned
@@ -3554,14 +3720,11 @@ fn plan_function_locals(
                     .spill_slots
                     .get(slot_index)
                     .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for `{name}`")))?;
-                debug_assert_eq!(slot.class, AVR_STATIC_SPILL_CLASS);
-                let backing = spill_storage.ok_or_else(|| {
-                    Diagnostic::new(format!("missing AVR spill storage for `{name}`"))
-                })?;
-                BindingLocation::Storage(Storage {
-                    address: backing.address + slot.offset,
-                    size: model.type_size(&ty)?,
-                })
+                debug_assert_eq!(slot.class, AVR_FRAME_SPILL_CLASS);
+                BindingLocation::Storage(frame_storage(
+                    frame_offset + slot.offset,
+                    model.type_size(&ty)?,
+                ))
             }
             Some(Location::Unused) | None => {
                 return Err(Diagnostic::new(format!(
@@ -3571,7 +3734,7 @@ fn plan_function_locals(
         };
         bindings.insert(name, Binding { location, ty });
     }
-    Ok(FunctionLocals { bindings })
+    Ok((FunctionLocals { bindings }, spill_bytes))
 }
 
 fn collect_avr_locals(
@@ -3636,7 +3799,7 @@ fn collect_avr_local(
             1,
             RegClass(usize::from(width.unwrap_or(1) - 1)),
         )
-        .with_spill_classes(vec![AVR_STATIC_SPILL_CLASS])
+        .with_spill_classes(vec![AVR_FRAME_SPILL_CLASS])
         .with_force_memory(force_memory || width.is_none()),
     );
     Ok(())

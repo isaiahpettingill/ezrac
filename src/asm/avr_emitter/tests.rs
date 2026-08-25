@@ -70,7 +70,7 @@ fn plan(source: &str, function_name: &str) -> FunctionLocals {
             _ => None,
         })
         .unwrap();
-    plan_function_locals(function, &mut model).unwrap()
+    plan_function_locals(function, &mut model, 0).unwrap().0
 }
 
 fn storage_address(locals: &FunctionLocals, name: &str) -> u32 {
