@@ -29,6 +29,9 @@ use crate::{
 };
 
 const POINTER_ZP: u32 = 0xF0;
+const FRAME_POINTER_ZP: u32 = 0xF3;
+const FRAME_TEMP_ZP: u32 = 0xF6;
+const FRAME_ADDRESS_BASE: u32 = 0xF000_0000;
 const U16_MUL_HELPER: &str = "__ezra_u16_mul";
 const U16_DIVMOD_HELPER: &str = "__ezra_u16_divmod";
 
@@ -46,6 +49,21 @@ fn declaration_bank(declaration: &Declaration) -> Option<u32> {
         Declaration::Cfg { declaration, .. } => declaration_bank(declaration),
         Declaration::Bank { bank, .. } => Some(*bank),
         _ => None,
+    }
+}
+
+fn frame_storage(offset: u32, size: u32) -> Storage {
+    Storage {
+        address: FRAME_ADDRESS_BASE + offset,
+        size,
+    }
+}
+
+fn frame_offset(address: u32) -> Option<u32> {
+    if address >= FRAME_ADDRESS_BASE {
+        Some(address - FRAME_ADDRESS_BASE)
+    } else {
+        None
     }
 }
 
@@ -175,6 +193,9 @@ struct Emitter {
     cpu: CpuFamily,
     dead_code_elimination: bool,
     mos6502_peepholes: bool,
+    frame_stack_top: u32,
+    frame_size: u32,
+    frame_active: bool,
 }
 
 impl Emitter {
@@ -212,6 +233,9 @@ impl Emitter {
             mos6502_peepholes: options
                 .optimization
                 .is_enabled(crate::optimization::OptimizationPass::Mos6502Peepholes),
+            frame_stack_top: options.rodata_base.get().saturating_sub(1),
+            frame_size: 0,
+            frame_active: false,
         }
     }
 
@@ -266,6 +290,7 @@ impl Emitter {
             self.line("    ldx #$FF");
             self.line("    txs");
         }
+        self.emit_frame_pointer_initialization();
         self.emit_static_initializers(program)?;
         self.line("    jsr _main");
         self.line("__ezra_exit:");
@@ -482,6 +507,28 @@ impl Emitter {
             .as_ref()
             .map(|_| self.model.allocate(u32::from(self.model.pointer_bytes())))
             .transpose()?;
+        let signature = self
+            .model
+            .functions
+            .get(&function.name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
+        let mut parameter_storages = Vec::new();
+        let mut parameter_bytes = 0;
+        for param in &function.params {
+            let size = self.model.type_size(&param.ty)?;
+            parameter_storages.push(frame_storage(parameter_bytes, size));
+            parameter_bytes += size;
+        }
+        let (planned_locals, local_bytes) =
+            plan_frame_locals(function, &mut self.model, parameter_bytes)?;
+        let frame_size = parameter_bytes + local_bytes;
+        if frame_size > 0xFF {
+            return Err(Diagnostic::new(format!(
+                "MOS 6502 function `{}` frame exceeds the 8-bit software stack offset",
+                function.name
+            )));
+        }
         if interrupt
             && (!function.params.is_empty()
                 || function.return_type.is_some()
@@ -547,14 +594,11 @@ impl Emitter {
                 self.line("    pha");
             }
         }
-        let signature = self
-            .model
-            .functions
-            .get(&function.name)
-            .cloned()
-            .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
+        if !naked && frame_size != 0 {
+            self.emit_frame_prologue(frame_size);
+        }
         for (index, param) in function.params.iter().enumerate() {
-            let storage = self.model.allocate_type(&param.ty)?;
+            let storage = parameter_storages[index];
             self.bind(param.name.clone(), storage, param.ty.clone())?;
             self.copy(
                 signature.argument_slots[index],
@@ -562,11 +606,15 @@ impl Emitter {
                 self.model.type_size(&param.ty)?,
             );
         }
-        let planned_locals = plan_static_locals(function, &mut self.model)?;
         self.planned_locals.push(planned_locals);
+        self.frame_size = frame_size;
+        self.frame_active = !naked && frame_size != 0;
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
         if interrupt {
+            if self.frame_active {
+                self.emit_frame_epilogue();
+            }
             if !naked {
                 if self.cpu == CpuFamily::Wdc65C816 {
                     self.line("    rep #$30");
@@ -586,6 +634,9 @@ impl Emitter {
             }
             self.line("    rti");
         } else if !naked {
+            if self.frame_active {
+                self.emit_frame_epilogue();
+            }
             self.line("    rts");
         }
 
@@ -596,6 +647,8 @@ impl Emitter {
         self.function_ram_bases.pop();
         self.current_functions.pop();
         self.planned_locals.pop();
+        self.frame_active = false;
+        self.frame_size = 0;
         self.scopes.pop();
         Ok(())
     }
@@ -1202,7 +1255,8 @@ impl Emitter {
                     )));
                 } else {
                     let binding = self.binding(name)?;
-                    self.load_constant(i64::from(binding.storage.address), width);
+                    self.set_pointer(binding.storage.address);
+                    self.copy_zp_to_result(width);
                 }
             }
             Expr::AddressOfIndex { name, index } => {
@@ -1212,7 +1266,8 @@ impl Emitter {
             Expr::AddressOfField { base, field } => {
                 let binding = self.binding(base)?;
                 let field = self.model.field(&binding.ty, field)?;
-                self.load_constant(i64::from(binding.storage.address + field.offset), width);
+                self.set_pointer(binding.storage.address + field.offset);
+                self.copy_zp_to_result(width);
             }
             Expr::AddressOfAccess(path) => {
                 let (_, _) = self.emit_access_address(path)?;
@@ -2964,8 +3019,7 @@ impl Emitter {
         let width = self.model.pointer_bytes();
         match destination {
             SecondResultDestination::Direct(storage) => {
-                self.load_constant(i64::from(storage.address), width);
-                self.copy_result_to_zp_width(width);
+                self.set_pointer(storage.address);
             }
             SecondResultDestination::Pointer(storage) => {
                 self.set_pointer_from_storage(POINTER_ZP, storage, width);
@@ -3808,6 +3862,9 @@ impl Emitter {
         let Some(address) = self.direct_place_address(place)? else {
             return Ok(false);
         };
+        if frame_offset(address).is_some() {
+            return Ok(false);
+        }
         if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
             return Ok(false);
         }
@@ -3836,6 +3893,9 @@ impl Emitter {
         let Some(address) = self.direct_place_address(place)? else {
             return Ok(false);
         };
+        if frame_offset(address).is_some() {
+            return Ok(false);
+        }
         if self.cpu == CpuFamily::Wdc65C816 && address > u16::MAX.into() {
             return Ok(false);
         }
@@ -4428,6 +4488,14 @@ impl Emitter {
     }
 
     fn set_pointer(&mut self, address: u32) {
+        if let Some(frame_offset) = frame_offset(address) {
+            for byte in 0..u32::from(self.model.pointer_bytes()) {
+                self.lda(FRAME_POINTER_ZP + byte);
+                self.sta(POINTER_ZP + byte);
+            }
+            self.add_pointer_constant(frame_offset);
+            return;
+        }
         for offset in 0..u32::from(self.model.pointer_bytes()) {
             self.lda_imm(((address >> (offset * 8)) & 0xFF) as u8);
             self.sta(POINTER_ZP + offset);
@@ -4730,6 +4798,10 @@ impl Emitter {
     }
 
     fn lda(&mut self, address: u32) {
+        if let Some(offset) = frame_offset(address) {
+            self.emit_frame_load(offset);
+            return;
+        }
         self.line(&format!("    lda ${address:04X}"));
     }
 
@@ -4761,7 +4833,84 @@ impl Emitter {
     }
 
     fn sta(&mut self, address: u32) {
+        if let Some(offset) = frame_offset(address) {
+            self.emit_frame_store(offset);
+            return;
+        }
         self.line(&format!("    sta ${address:04X}"));
+    }
+
+    fn emit_frame_pointer_initialization(&mut self) {
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            self.lda_imm(((self.frame_stack_top >> (offset * 8)) & 0xFF) as u8);
+            self.sta(FRAME_POINTER_ZP + offset);
+        }
+    }
+
+    fn emit_frame_prologue(&mut self, size: u32) {
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            self.lda(FRAME_POINTER_ZP + offset);
+            self.line("    pha");
+        }
+        self.adjust_frame_pointer(size, true);
+    }
+
+    fn emit_frame_epilogue(&mut self) {
+        self.adjust_frame_pointer(self.frame_size, false);
+        for offset in (0..u32::from(self.model.pointer_bytes())).rev() {
+            self.line("    pla");
+            self.sta(FRAME_POINTER_ZP + offset);
+        }
+    }
+
+    fn adjust_frame_pointer(&mut self, size: u32, subtract: bool) {
+        self.line(if subtract { "    sec" } else { "    clc" });
+        for offset in 0..u32::from(self.model.pointer_bytes()) {
+            let byte = ((size >> (offset * 8)) & 0xFF) as u8;
+            self.lda(FRAME_POINTER_ZP + offset);
+            self.line(&format!(
+                "    {} #${byte:02X}",
+                if subtract { "sbc" } else { "adc" }
+            ));
+            self.sta(FRAME_POINTER_ZP + offset);
+        }
+    }
+
+    fn emit_frame_load(&mut self, offset: u32) {
+        self.line("    txa");
+        self.line("    pha");
+        self.line("    tya");
+        self.line("    pha");
+        self.line(&format!("    ldy #${offset:02X}"));
+        self.line(&format!(
+            "    lda {}",
+            self.indirect_indexed_y(FRAME_POINTER_ZP)
+        ));
+        self.sta(FRAME_TEMP_ZP);
+        self.line("    pla");
+        self.line("    tay");
+        self.line("    pla");
+        self.line("    tax");
+        self.lda(FRAME_TEMP_ZP);
+    }
+
+    fn emit_frame_store(&mut self, offset: u32) {
+        self.sta(FRAME_TEMP_ZP);
+        self.line("    txa");
+        self.line("    pha");
+        self.line("    tya");
+        self.line("    pha");
+        self.line(&format!("    ldy #${offset:02X}"));
+        self.lda(FRAME_TEMP_ZP);
+        self.line(&format!(
+            "    sta {}",
+            self.indirect_indexed_y(FRAME_POINTER_ZP)
+        ));
+        self.line("    pla");
+        self.line("    tay");
+        self.line("    pla");
+        self.line("    tax");
+        self.lda(FRAME_TEMP_ZP);
     }
 
     fn lda_imm(&mut self, value: u8) {
@@ -5625,7 +5774,7 @@ fn is_comparison(op: BinaryOp) -> bool {
 }
 
 const MOS6502_MEMORY_LOCAL_CLASS: RegClass = RegClass(0);
-const MOS6502_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+const MOS6502_FRAME_SPILL_CLASS: SpillClassId = SpillClassId(0);
 
 fn mos6502_local_target() -> Target {
     Target {
@@ -5648,13 +5797,14 @@ fn mos6502_local_target() -> Target {
     }
 }
 
-fn plan_static_locals(
+fn plan_frame_locals(
     function: &Function,
     model: &mut SemanticModel,
-) -> Result<HashMap<String, Binding>, Diagnostic> {
+    frame_offset: u32,
+) -> Result<(HashMap<String, Binding>, u32), Diagnostic> {
     let mut locals = Vec::new();
     let mut local_types = HashMap::new();
-    collect_static_locals(&function.body, model, &mut locals, &mut local_types)?;
+    collect_frame_locals(&function.body, model, &mut locals, &mut local_types)?;
     let planned = allocate_source_locals(&mos6502_local_target(), &locals, &function.body, &[])
         .map_err(|diagnostics| {
             Diagnostic::new(format!(
@@ -5673,9 +5823,6 @@ fn plan_static_locals(
         .map(|slot| slot.offset.saturating_add(slot.size))
         .max()
         .unwrap_or(0);
-    let backing = (backing_size != 0)
-        .then(|| model.allocate(backing_size))
-        .transpose()?;
     let mut bindings = HashMap::new();
     for (name, ty) in local_types {
         let vreg = planned.locals.vreg(&name).ok_or_else(|| {
@@ -5699,29 +5846,23 @@ fn plan_static_locals(
             .spill_slots
             .get(slot_index)
             .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for local `{name}`")))?;
-        if slot.class != MOS6502_STATIC_SPILL_CLASS {
+        if slot.class != MOS6502_FRAME_SPILL_CLASS {
             return Err(Diagnostic::new(format!(
                 "invalid spill class for MOS 6502 local `{name}`"
             )));
         }
-        let backing = backing.ok_or_else(|| {
-            Diagnostic::new(format!("missing static backing storage for local `{name}`"))
-        })?;
         bindings.insert(
             name,
             Binding {
-                storage: Storage {
-                    address: backing.address + slot.offset,
-                    size: model.type_size(&ty)?,
-                },
+                storage: frame_storage(frame_offset + slot.offset, model.type_size(&ty)?),
                 ty,
             },
         );
     }
-    Ok(bindings)
+    Ok((bindings, backing_size))
 }
 
-fn collect_static_locals(
+fn collect_frame_locals(
     body: &[Stmt],
     model: &SemanticModel,
     locals: &mut Vec<SourceLocal>,
@@ -5740,7 +5881,7 @@ fn collect_static_locals(
                         1,
                         MOS6502_MEMORY_LOCAL_CLASS,
                     )
-                    .with_spill_classes(vec![MOS6502_STATIC_SPILL_CLASS])
+                    .with_spill_classes(vec![MOS6502_FRAME_SPILL_CLASS])
                     .with_force_memory(true),
                 );
             }
@@ -5762,7 +5903,7 @@ fn collect_static_locals(
                             1,
                             MOS6502_MEMORY_LOCAL_CLASS,
                         )
-                        .with_spill_classes(vec![MOS6502_STATIC_SPILL_CLASS])
+                        .with_spill_classes(vec![MOS6502_FRAME_SPILL_CLASS])
                         .with_force_memory(true),
                     );
                 }
@@ -5772,11 +5913,11 @@ fn collect_static_locals(
                 else_body,
                 ..
             } => {
-                collect_static_locals(then_body, model, locals, local_types)?;
-                collect_static_locals(else_body, model, locals, local_types)?;
+                collect_frame_locals(then_body, model, locals, local_types)?;
+                collect_frame_locals(else_body, model, locals, local_types)?;
             }
             Stmt::While { body, .. } | Stmt::Loop { body } => {
-                collect_static_locals(body, model, locals, local_types)?;
+                collect_frame_locals(body, model, locals, local_types)?;
             }
             _ => {}
         }
@@ -6229,8 +6370,10 @@ mod structural_tests {
         )
         .unwrap();
         let start = model.next_ram_address();
-        let bindings = plan_static_locals(program.main_function().unwrap(), &mut model).unwrap();
-        (bindings, model.next_ram_address() - start)
+        let (bindings, frame_bytes) =
+            plan_frame_locals(program.main_function().unwrap(), &mut model, 0).unwrap();
+        assert_eq!(model.next_ram_address() - start, 0);
+        (bindings, frame_bytes)
     }
 
     #[test]
@@ -6283,7 +6426,7 @@ mod structural_tests {
         assert!(!target.registers_alias(PhysReg(0), PhysReg(2)));
         assert!(!target.registers_alias(PhysReg(1), PhysReg(2)));
         assert_eq!(
-            target.spill_classes[MOS6502_STATIC_SPILL_CLASS.0].base_alignment,
+            target.spill_classes[MOS6502_FRAME_SPILL_CLASS.0].base_alignment,
             1
         );
     }
@@ -6549,10 +6692,10 @@ mod structural_tests {
     #[test]
     fn emits_cmos_bit_operations_only_for_a_cmos_target() {
         let source = r#"
+            global zero: u8 = 1
+            global bits: u8 = 0
             fn main() {
-                let zero: u8 = 1
                 zero = 0
-                let bits: u8 = 0
                 bits &= 0xFE
                 bits |= 1
                 if (bits & 0x80) == 0 { bits = 0 }
@@ -6781,7 +6924,7 @@ mod structural_tests {
     }
 
     #[test]
-    fn saves_static_locals_only_on_recursive_call_edges() {
+    fn gives_each_function_a_software_frame() {
         let nonrecursive = emit(
             r#"
                 fn leaf(value: u8) -> u8 { return value + 1 }
@@ -6791,8 +6934,8 @@ mod structural_tests {
                 }
             "#,
         );
-        assert!(!nonrecursive.contains("    pha"), "{nonrecursive}");
-        assert!(!nonrecursive.contains("    pla"), "{nonrecursive}");
+        assert!(nonrecursive.contains("    sta $00F3"), "{nonrecursive}");
+        assert!(nonrecursive.contains("    pla"), "{nonrecursive}");
 
         let recursive = emit(
             r#"
@@ -6803,7 +6946,7 @@ mod structural_tests {
                 fn main() { let result: u8 = recurse(3) }
             "#,
         );
-        assert!(recursive.contains("    pha"), "{recursive}");
+        assert!(recursive.contains("    sta $00F3"), "{recursive}");
         assert!(recursive.contains("    pla"), "{recursive}");
 
         let mutual = emit(
