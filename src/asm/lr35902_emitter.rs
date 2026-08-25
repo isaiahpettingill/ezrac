@@ -30,6 +30,27 @@ use crate::{
 
 // HRAM scratch avoids clobbering Game Boy I/O registers and is reachable through a16 loads.
 const POINTER_ZP: u32 = 0xFF90;
+const FRAME_POINTER: u32 = 0xFF92;
+const FRAME_ADDRESS_BASE: u32 = 0xF000_0000;
+
+fn frame_storage(offset: u32, size: u32) -> Storage {
+    Storage {
+        address: FRAME_ADDRESS_BASE + offset,
+        size,
+    }
+}
+
+fn frame_offset(address: u32) -> Option<u32> {
+    if address >= FRAME_ADDRESS_BASE {
+        Some(address - FRAME_ADDRESS_BASE)
+    } else {
+        None
+    }
+}
+
+fn is_frame_address(address: u32) -> bool {
+    frame_offset(address).is_some()
+}
 
 pub fn emit_lr35902_assembly_with_options(
     program: &Program,
@@ -518,6 +539,8 @@ struct Emitter {
     indirect_offset: u8,
     needs_indirect_call_helper: bool,
     function_pointer_slots: Vec<(Type, Vec<Storage>)>,
+    frame_size: u32,
+    frame_active: bool,
     banked_layout: BankedLayout,
     gameboy_banking: Option<GameBoyBankingOptions>,
 }
@@ -551,6 +574,8 @@ impl Emitter {
             indirect_offset: 0,
             needs_indirect_call_helper: false,
             function_pointer_slots: Vec::new(),
+            frame_size: 0,
+            frame_active: false,
             banked_layout,
             gameboy_banking,
         }
@@ -939,6 +964,22 @@ impl Emitter {
             .as_ref()
             .map(|_| self.model.allocate(u32::from(self.model.pointer_bytes())))
             .transpose()?;
+        let signature = self
+            .model
+            .functions
+            .get(&function.name)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
+        let mut parameter_storages = Vec::new();
+        let mut parameter_bytes = 0;
+        for param in &function.params {
+            let size = self.model.type_size(&param.ty)?;
+            parameter_storages.push(frame_storage(parameter_bytes, size));
+            parameter_bytes += size;
+        }
+        let (planned_locals, local_bytes) =
+            plan_frame_locals_at(function, &mut self.model, parameter_bytes)?;
+        let frame_size = parameter_bytes + local_bytes;
         if interrupt
             && (!function.params.is_empty()
                 || function.return_type.is_some()
@@ -984,14 +1025,11 @@ impl Emitter {
             self.line("    push de");
             self.line("    push hl");
         }
-        let signature = self
-            .model
-            .functions
-            .get(&function.name)
-            .cloned()
-            .ok_or_else(|| Diagnostic::new(format!("unknown function `{}`", function.name)))?;
+        if !naked && frame_size != 0 {
+            self.emit_frame_prologue(frame_size);
+        }
         for (index, param) in function.params.iter().enumerate() {
-            let storage = self.model.allocate_type(&param.ty)?;
+            let storage = parameter_storages[index];
             self.bind(param.name.clone(), storage, param.ty.clone())?;
             self.copy(
                 signature.argument_slots[index],
@@ -999,12 +1037,16 @@ impl Emitter {
                 self.model.type_size(&param.ty)?,
             );
         }
-        let planned_locals = plan_static_locals(function, &mut self.model)?;
         self.planned_locals.push(planned_locals);
+        self.frame_size = frame_size;
+        self.frame_active = !naked && frame_size != 0;
         self.emit_block(&function.body)?;
         self.line(&format!("{return_label}:"));
 
         if interrupt {
+            if self.frame_active {
+                self.emit_frame_epilogue();
+            }
             if !naked {
                 self.line("    pop hl");
                 self.line("    pop de");
@@ -1013,6 +1055,9 @@ impl Emitter {
             }
             self.line("    reti");
         } else if !naked {
+            if self.frame_active {
+                self.emit_frame_epilogue();
+            }
             self.line("    rts");
         }
 
@@ -1022,6 +1067,8 @@ impl Emitter {
         self.return_labels.pop();
         self.function_ram_bases.pop();
         self.planned_locals.pop();
+        self.frame_active = false;
+        self.frame_size = 0;
         self.scopes.pop();
         Ok(())
     }
@@ -1420,7 +1467,8 @@ impl Emitter {
                     )));
                 } else {
                     let binding = self.binding(name)?;
-                    self.load_constant(i64::from(binding.storage.address), width);
+                    self.set_pointer(binding.storage.address);
+                    self.copy_zp_to_result(width);
                 }
             }
             Expr::AddressOfIndex { name, index } => {
@@ -1430,7 +1478,8 @@ impl Emitter {
             Expr::AddressOfField { base, field } => {
                 let binding = self.binding(base)?;
                 let field = self.model.field(&binding.ty, field)?;
-                self.load_constant(i64::from(binding.storage.address + field.offset), width);
+                self.set_pointer(binding.storage.address + field.offset);
+                self.copy_zp_to_result(width);
             }
             Expr::AddressOfAccess(path) => {
                 let (_, _) = self.emit_access_address(path)?;
@@ -3142,8 +3191,7 @@ impl Emitter {
         let width = self.model.pointer_bytes();
         match destination {
             SecondResultDestination::Direct(storage) => {
-                self.load_constant(i64::from(storage.address), width);
-                self.copy_result_to_zp_width(width);
+                self.set_pointer(storage.address);
             }
             SecondResultDestination::Pointer(storage) => {
                 self.set_pointer_from_storage(POINTER_ZP, storage, width);
@@ -4033,6 +4081,11 @@ impl Emitter {
         let mut operands = HashMap::new();
         for input in inputs {
             let binding = self.binding(&input.name)?;
+            if is_frame_address(binding.storage.address) {
+                return Err(Diagnostic::new(
+                    "LR35902 inline asm cannot use frame-backed memory operands",
+                ));
+            }
             operands.insert(
                 input.name.clone(),
                 format!("${:04X}", binding.storage.address),
@@ -4040,6 +4093,11 @@ impl Emitter {
         }
         for output in outputs {
             let binding = self.binding(&output.name)?;
+            if is_frame_address(binding.storage.address) {
+                return Err(Diagnostic::new(
+                    "LR35902 inline asm cannot use frame-backed memory operands",
+                ));
+            }
             operands.insert(
                 output.name.clone(),
                 format!("${:04X}", binding.storage.address),
@@ -4106,6 +4164,78 @@ impl Emitter {
             self.lda(source.address + offset);
             self.sta(target.address + offset);
         }
+    }
+
+    fn emit_frame_prologue(&mut self, size: u32) {
+        self.load_frame_pointer();
+        self.line("    push hl");
+        self.line(&format!("    add sp, -{size}"));
+        self.line("    ld hl, sp+0");
+        self.line("    ld a, l");
+        self.line(&format!("    ld ({FRAME_POINTER:04X}h), a"));
+        self.line("    ld a, h");
+        self.line(&format!("    ld ({:04X}h), a", FRAME_POINTER + 1));
+    }
+
+    fn emit_frame_epilogue(&mut self) {
+        self.line(&format!("    add sp, {}", self.frame_size));
+        self.line("    pop hl");
+        self.line("    ld a, l");
+        self.line(&format!("    ld ({FRAME_POINTER:04X}h), a"));
+        self.line("    ld a, h");
+        self.line(&format!("    ld ({:04X}h), a", FRAME_POINTER + 1));
+    }
+
+    fn emit_frame_address(&mut self, address: u32) {
+        let offset = frame_offset(address).expect("frame address");
+        self.load_frame_pointer();
+        if offset != 0 {
+            self.line(&format!("    ld bc, {offset:04X}h"));
+            self.line("    add hl, bc");
+        }
+        self.line("    ld a, l");
+        self.line(&format!("    ld ({POINTER_ZP:02X}h), a"));
+        self.line("    ld a, h");
+        self.line(&format!("    ld ({:02X}h), a", POINTER_ZP + 1));
+    }
+
+    fn emit_frame_load(&mut self, address: u32) {
+        let offset = frame_offset(address).expect("frame address");
+        self.line("    push hl");
+        self.line("    push bc");
+        self.load_frame_pointer();
+        if offset != 0 {
+            self.line(&format!("    ld bc, {offset:04X}h"));
+            self.line("    add hl, bc");
+        }
+        self.line("    ld a, (hl)");
+        self.line("    pop bc");
+        self.line("    pop hl");
+    }
+
+    fn emit_frame_store(&mut self, address: u32) {
+        let offset = frame_offset(address).expect("frame address");
+        self.line("    push de");
+        self.line("    ld e, a");
+        self.line("    push hl");
+        self.line("    push bc");
+        self.load_frame_pointer();
+        if offset != 0 {
+            self.line(&format!("    ld bc, {offset:04X}h"));
+            self.line("    add hl, bc");
+        }
+        self.line("    ld a, e");
+        self.line("    ld (hl), a");
+        self.line("    pop bc");
+        self.line("    pop hl");
+        self.line("    pop de");
+    }
+
+    fn load_frame_pointer(&mut self) {
+        self.line(&format!("    ld a, ({FRAME_POINTER:04X}h)"));
+        self.line("    ld l, a");
+        self.line(&format!("    ld a, ({:04X}h)", FRAME_POINTER + 1));
+        self.line("    ld h, a");
     }
 
     fn zero(&mut self, storage: Storage) {
@@ -4233,6 +4363,10 @@ impl Emitter {
     }
 
     fn set_pointer(&mut self, address: u32) {
+        if is_frame_address(address) {
+            self.emit_frame_address(address);
+            return;
+        }
         self.lda_imm(address as u8);
         self.sta(POINTER_ZP);
         self.lda_imm((address >> 8) as u8);
@@ -4354,10 +4488,18 @@ impl Emitter {
     }
 
     fn lda(&mut self, address: u32) {
+        if is_frame_address(address) {
+            self.emit_frame_load(address);
+            return;
+        }
         self.line(&format!("    lda ${address:04X}"));
     }
 
     fn sta(&mut self, address: u32) {
+        if is_frame_address(address) {
+            self.emit_frame_store(address);
+            return;
+        }
         self.line(&format!("    sta ${address:04X}"));
     }
 
@@ -4760,7 +4902,7 @@ fn is_comparison(op: BinaryOp) -> bool {
 }
 
 const LR35902_MEMORY_LOCAL_CLASS: RegClass = RegClass(0);
-const LR35902_STATIC_SPILL_CLASS: SpillClassId = SpillClassId(0);
+const LR35902_FRAME_SPILL_CLASS: SpillClassId = SpillClassId(0);
 
 fn lr35902_local_target() -> Target {
     Target {
@@ -4793,13 +4935,14 @@ fn lr35902_local_target() -> Target {
     }
 }
 
-fn plan_static_locals(
+fn plan_frame_locals_at(
     function: &Function,
     model: &mut SemanticModel,
-) -> Result<HashMap<String, Binding>, Diagnostic> {
+    frame_offset: u32,
+) -> Result<(HashMap<String, Binding>, u32), Diagnostic> {
     let mut locals = Vec::new();
     let mut local_types = HashMap::new();
-    collect_static_locals(&function.body, model, &mut locals, &mut local_types)?;
+    collect_frame_locals(&function.body, model, &mut locals, &mut local_types)?;
     let planned = allocate_source_locals(&lr35902_local_target(), &locals, &function.body, &[])
         .map_err(|diagnostics| {
             Diagnostic::new(format!(
@@ -4818,9 +4961,6 @@ fn plan_static_locals(
         .map(|slot| slot.offset.saturating_add(slot.size))
         .max()
         .unwrap_or(0);
-    let backing = (backing_size != 0)
-        .then(|| model.allocate(backing_size))
-        .transpose()?;
     let mut bindings = HashMap::new();
     for (name, ty) in local_types {
         let vreg = planned.locals.vreg(&name).ok_or_else(|| {
@@ -4844,29 +4984,23 @@ fn plan_static_locals(
             .spill_slots
             .get(slot_index)
             .ok_or_else(|| Diagnostic::new(format!("invalid spill slot for local `{name}`")))?;
-        if slot.class != LR35902_STATIC_SPILL_CLASS {
+        if slot.class != LR35902_FRAME_SPILL_CLASS {
             return Err(Diagnostic::new(format!(
                 "invalid spill class for LR35902 local `{name}`"
             )));
         }
-        let backing = backing.ok_or_else(|| {
-            Diagnostic::new(format!("missing static backing storage for local `{name}`"))
-        })?;
         bindings.insert(
             name,
             Binding {
-                storage: Storage {
-                    address: backing.address + slot.offset,
-                    size: model.type_size(&ty)?,
-                },
+                storage: frame_storage(frame_offset + slot.offset, model.type_size(&ty)?),
                 ty,
             },
         );
     }
-    Ok(bindings)
+    Ok((bindings, backing_size))
 }
 
-fn collect_static_locals(
+fn collect_frame_locals(
     body: &[Stmt],
     model: &SemanticModel,
     locals: &mut Vec<SourceLocal>,
@@ -4885,7 +5019,7 @@ fn collect_static_locals(
                         1,
                         LR35902_MEMORY_LOCAL_CLASS,
                     )
-                    .with_spill_classes(vec![LR35902_STATIC_SPILL_CLASS])
+                    .with_spill_classes(vec![LR35902_FRAME_SPILL_CLASS])
                     .with_force_memory(true),
                 );
             }
@@ -4907,7 +5041,7 @@ fn collect_static_locals(
                             1,
                             LR35902_MEMORY_LOCAL_CLASS,
                         )
-                        .with_spill_classes(vec![LR35902_STATIC_SPILL_CLASS])
+                        .with_spill_classes(vec![LR35902_FRAME_SPILL_CLASS])
                         .with_force_memory(true),
                     );
                 }
@@ -4917,11 +5051,11 @@ fn collect_static_locals(
                 else_body,
                 ..
             } => {
-                collect_static_locals(then_body, model, locals, local_types)?;
-                collect_static_locals(else_body, model, locals, local_types)?;
+                collect_frame_locals(then_body, model, locals, local_types)?;
+                collect_frame_locals(else_body, model, locals, local_types)?;
             }
             Stmt::While { body, .. } | Stmt::Loop { body } => {
-                collect_static_locals(body, model, locals, local_types)?;
+                collect_frame_locals(body, model, locals, local_types)?;
             }
             _ => {}
         }

@@ -53,8 +53,10 @@ fn planned_main_locals(source: &str) -> (HashMap<String, Binding>, u32) {
     )
     .unwrap();
     let start = model.next_ram_address();
-    let bindings = plan_static_locals(program.main_function().unwrap(), &mut model).unwrap();
-    (bindings, model.next_ram_address() - start)
+    let (bindings, frame_bytes) =
+        plan_frame_locals_at(program.main_function().unwrap(), &mut model, 0).unwrap();
+    assert_eq!(model.next_ram_address() - start, 0);
+    (bindings, frame_bytes)
 }
 
 #[test]
@@ -74,13 +76,13 @@ fn local_target_models_byte_pair_aliases_and_memory_only_source_class() {
     assert!(!target.registers_alias(PhysReg(0), PhysReg(7)));
     assert!(!target.registers_alias(PhysReg(7), PhysReg(8)));
     assert_eq!(
-        target.spill_classes[LR35902_STATIC_SPILL_CLASS.0].base_alignment,
+        target.spill_classes[LR35902_FRAME_SPILL_CLASS.0].base_alignment,
         1
     );
 }
 
 #[test]
-fn static_local_plan_reuses_only_nonoverlapping_storage() {
+fn frame_local_plan_reuses_only_nonoverlapping_storage() {
     let (reused, reused_bytes) = planned_main_locals(
         "global result: u8 = 0; fn main() { let first: u8 = 1; result = first; let second: u8 = 2; result = second }",
     );
@@ -349,7 +351,7 @@ fn variable_indices_use_direct_scaled_pointer_arithmetic() {
 
     assert!(!assembly.contains("index_scale"), "{assembly}");
     assert!(!assembly.contains("index_done"), "{assembly}");
-    assert_eq!(assembly.matches("    add hl, bc").count(), 3, "{assembly}");
+    assert_eq!(assembly.matches("    add hl, bc").count(), 7, "{assembly}");
     assert_eq!(assembly.matches("    add hl, hl").count(), 2, "{assembly}");
     assert_eq!(assembly.matches("    add hl, de").count(), 1, "{assembly}");
 }
