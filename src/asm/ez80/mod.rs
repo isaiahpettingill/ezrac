@@ -2070,7 +2070,12 @@ fn encode_intel_8080_instruction(
         let Some(dst) = intel_rp_code(dst) else {
             return Ok(None);
         };
-        return Ok(Some(word_bytes(0x01 + dst * 0x10, parse_u16(value)?)));
+        // Symbol immediates (function labels, equates) resolve in the caller;
+        // report them as unsupported here so metadata passes skip the line.
+        let Ok(value) = parse_u16(value) else {
+            return Ok(None);
+        };
+        return Ok(Some(word_bytes(0x01 + dst * 0x10, value)));
     }
     if let Some(register) = text.strip_prefix("inr ").and_then(intel_reg_code) {
         return Ok(Some(vec![0x04 + register * 8]));

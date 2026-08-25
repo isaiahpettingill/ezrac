@@ -3133,6 +3133,9 @@ fn instruction_len(
     })
 }
 
+/// Intel 8080 `lxi rp, symbol` loads: register-pair immediates whose operand
+/// is a label or equate rather than a numeric literal.
+
 fn emit_instruction_with_widths(
     cpu: AssemblerCpu,
     architecture: &ArchitectureInstruction,

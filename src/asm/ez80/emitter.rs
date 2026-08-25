@@ -221,14 +221,7 @@ fn validate_source_program_before_optimization(
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
     validate_main_signature(main)?;
     validate_all_function_calls(program, &symbols.functions)?;
-    let recursive_call_edges = recursive_call_edges(program, &symbols.functions);
-    validate_all_function_bodies(
-        program,
-        symbols,
-        options.clone(),
-        recursive_call_edges,
-        HashSet::new(),
-    )
+    validate_all_function_bodies(program, symbols, options.clone(), HashSet::new())
 }
 
 pub fn collect_ez80_semantic_diagnostics(
@@ -251,13 +244,7 @@ pub fn collect_ez80_semantic_diagnostics(
             &mut diagnostics,
         );
 
-        let mut emitter = Emitter::new(
-            symbols.clone(),
-            options.clone(),
-            recursive_call_edges(program, &symbols.functions),
-            HashSet::new(),
-            None,
-        );
+        let mut emitter = Emitter::new(symbols.clone(), options.clone(), HashSet::new(), None);
         emitter.disable_dead_code_elimination();
         if let Err(error) = emitter.emit_function(function) {
             let error = locate_program_diagnostic(program, error);
@@ -370,7 +357,6 @@ pub fn emit_ez80_assembly_from_checked(
         .ok_or_else(|| Diagnostic::new("missing required `fn main()`"))?;
     validate_main_signature(main)?;
     validate_all_function_calls(program, &analysis_symbols.functions)?;
-    let recursive_call_edges = recursive_call_edges(program, &analysis_symbols.functions);
     let dead_code = options
         .optimization
         .is_enabled(crate::optimization::OptimizationPass::DeadCodeElimination);
@@ -408,7 +394,6 @@ pub fn emit_ez80_assembly_from_checked(
     let mut validation_emitter = Emitter::new(
         analysis_symbols.clone(),
         options.clone(),
-        recursive_call_edges.clone(),
         tail_call_edges.clone(),
         None,
     );
@@ -428,7 +413,6 @@ pub fn emit_ez80_assembly_from_checked(
     let mut emitter = Emitter::new(
         symbols,
         options.clone(),
-        recursive_call_edges,
         tail_call_edges,
         Some(static_liveness),
     );
@@ -446,7 +430,6 @@ pub fn emit_ez80_assembly_from_checked(
             emitter.emit_function(function)?;
         }
     }
-    emitter.emit_function_pointer_trampolines(program, &emitted_functions)?;
     emitter.emit_required_sections();
     let assembly = peephole_cleanup_with_ranges(
         &emitter.out,
@@ -479,14 +462,7 @@ pub fn emit_ez80_assembly_from_checked(
             })
             .collect::<Vec<_>>();
         for name in &function_references {
-            let Some(signature) = analysis_symbols.functions.get(name) else {
-                continue;
-            };
-            assembly_roots.push(if signature.uses_arg_slots {
-                function_pointer_label(name)
-            } else {
-                function_label(name)
-            });
+            assembly_roots.push(function_label(name));
         }
         assembly_roots.sort();
         assembly_roots.dedup();
@@ -1360,7 +1336,6 @@ struct Emitter {
     cacheable_ranges: Vec<(u32, u32)>,
     assigned_names_stack: Vec<HashSet<String>>,
     storage_required_names_stack: Vec<HashSet<String>>,
-    recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
     static_liveness: Option<StaticLiveness>,
     required_runtime_helpers: HashSet<RuntimeHelper>,
@@ -1378,7 +1353,6 @@ impl Emitter {
     fn new(
         symbols: Symbols,
         options: AssemblyOptions,
-        recursive_call_edges: HashSet<(String, String)>,
         tail_call_edges: HashSet<(String, String)>,
         static_liveness: Option<StaticLiveness>,
     ) -> Self {
@@ -1415,7 +1389,6 @@ impl Emitter {
             cacheable_ranges,
             assigned_names_stack: Vec::new(),
             storage_required_names_stack: Vec::new(),
-            recursive_call_edges,
             tail_call_edges,
             static_liveness,
             required_runtime_helpers: HashSet::new(),
@@ -2125,43 +2098,6 @@ impl Emitter {
         }
     }
 
-    fn emit_function_pointer_trampolines(
-        &mut self,
-        program: &Program,
-        emitted_functions: &HashSet<String>,
-    ) -> Result<(), Diagnostic> {
-        for declaration in &program.declarations {
-            let Declaration::Function(function) = unwrapped_declaration(declaration) else {
-                continue;
-            };
-            if !emitted_functions.contains(&function.name) {
-                continue;
-            }
-            let Some(signature) = self.symbols.functions.get(&function.name).cloned() else {
-                continue;
-            };
-            if !signature.uses_arg_slots || signature.second_return_type.is_some() {
-                continue;
-            }
-            let slots = self.symbols.function_pointer_arg_slots(
-                &signature.param_types,
-                signature.return_type.as_ref(),
-            )?;
-            self.line(&format!("{}:", function_pointer_label(&function.name)));
-            for (source, target) in slots
-                .iter()
-                .copied()
-                .zip(signature.arg_slots.iter().copied())
-            {
-                self.emit_load_width(source);
-                self.emit_store_width(target);
-            }
-            self.line(&format!("    call {}", function_label(&function.name)));
-            self.line("    ret");
-        }
-        Ok(())
-    }
-
     fn emit_function(&mut self, function: &Function) -> Result<(), Diagnostic> {
         validate_function_attrs(function)?;
         let naked = has_attr(function, "naked");
@@ -2242,20 +2178,14 @@ impl Emitter {
         if let Some(second_return_type) = &function.second_return_type {
             self.symbols.type_width(second_return_type)?;
         }
-        let legacy_uses_stack_frame = self
-            .symbols
-            .functions
-            .get(&function.name)
-            .is_some_and(|sig| sig.stack_arg_bytes > 0);
-        let frame_cpu = !naked && uses_ix_frames(self.cpu);
+        let frame_cpu = !naked;
         self.return_type_stack.push(function.return_type.clone());
         self.second_return_type_stack
             .push(function.second_return_type.clone());
         self.return_value_stack.push(function.return_type.is_some());
         self.second_return_pointer_stack.push(None);
         self.function_name_stack.push(function.name.clone());
-        self.function_frame_stack
-            .push(frame_cpu || legacy_uses_stack_frame);
+        self.function_frame_stack.push(frame_cpu);
         self.function_interrupt_stack.push(interrupt);
         self.function_naked_stack.push(naked);
         self.function_storage_stack.push(Vec::new());
@@ -2288,12 +2218,9 @@ impl Emitter {
         if !naked {
             if interrupt {
                 self.emit_interrupt_prologue(frame_size);
-            } else if frame_cpu {
+            } else {
                 self.emit_frame_prologue(frame_size);
                 self.frame_active = true;
-            } else if legacy_uses_stack_frame {
-                self.emit_legacy_frame_prologue();
-                self.frame_active = false;
             }
             self.bind_params(function)?;
         }
@@ -2328,10 +2255,7 @@ impl Emitter {
             self.line("    jp __ezra_exit");
         } else {
             if frame_cpu {
-                self.frame_active = false;
                 self.emit_frame_epilogue();
-            } else if legacy_uses_stack_frame {
-                self.emit_legacy_frame_epilogue();
             }
             self.line("    ret");
         }
@@ -2571,6 +2495,19 @@ impl Emitter {
     }
 
     fn emit_frame_prologue(&mut self, frame_size: u32) {
+        if is_intel_8080_family(self.cpu) {
+            // DE becomes the frame anchor. The incoming BC/DE/HL argument
+            // pairs are pushed uniformly so parameter slots never depend on
+            // which registers happened to carry arguments.
+            self.line("    push bc");
+            self.line("    push de");
+            self.line("    push hl");
+            self.line("    lxi h, 0000h");
+            self.line("    dad sp");
+            self.line("    xchg");
+            self.emit_frame_reserve(frame_size);
+            return;
+        }
         self.line("    push ix");
         self.line("    ld ix, 000000h");
         self.line("    add ix, sp");
@@ -2578,29 +2515,65 @@ impl Emitter {
     }
 
     fn emit_frame_epilogue(&mut self) {
+        if is_intel_8080_family(self.cpu) {
+            // Frame layout above the anchor: saved HL/DE/BC pairs then the
+            // return address, six bytes up. HL carries the return value, so
+            // park it while SP rewinds.
+            self.line("    push hl");
+            self.line("    xchg");
+            self.line("    lxi b, 0006h");
+            self.line("    dad b");
+            self.line("    sphl");
+            self.line("    xchg");
+            return;
+        }
         self.line("    ld sp, ix");
         self.line("    pop ix");
     }
 
-    fn emit_legacy_frame_prologue(&mut self) {
-        if is_z80_family_16bit(self.cpu) {
-            self.line("    push bc");
-        } else {
-            self.line("    push ix");
-            self.line("    ld ix, 000000h");
-            self.line("    add ix, sp");
+    fn emit_frame_reserve(&mut self, size: u32) {
+        if size == 0 {
+            return;
         }
-    }
-
-    fn emit_legacy_frame_epilogue(&mut self) {
-        if is_z80_family_16bit(self.cpu) {
-            self.line("    pop bc");
-        } else {
-            self.line("    pop ix");
+        if is_intel_8080_family(self.cpu) {
+            self.line(&format!(
+                "    lxi h, {:04X}h",
+                (size as i16).wrapping_neg() as u16
+            ));
+            self.line("    dad sp");
+            self.line("    sphl");
+            return;
         }
+        // IY is compiler-owned scratch; HL, DE, and BC carry incoming
+        // arguments at function entry, so they must stay untouched.
+        if is_z80_family_16bit(self.cpu) {
+            self.line(&format!(
+                "    ld iy, {:04X}h",
+                (size as i16).wrapping_neg() as u16
+            ));
+        } else {
+            self.line(&format!(
+                "    ld iy, {:06X}h",
+                0x100_0000u32.wrapping_sub(size)
+            ));
+        }
+        self.line("    add iy, sp");
+        self.line("    ld sp, iy");
+        self.line("    ld iy, 000000h");
     }
 
     fn emit_interrupt_prologue(&mut self, frame_size: u32) {
+        if is_intel_8080_family(self.cpu) {
+            self.line("    push psw");
+            self.line("    push bc");
+            self.line("    push de");
+            self.line("    push hl");
+            self.line("    lxi h, 0000h");
+            self.line("    dad sp");
+            self.line("    xchg");
+            self.emit_frame_reserve(frame_size);
+            return;
+        }
         self.line("    push af");
         self.line("    push bc");
         self.line("    push de");
@@ -2617,6 +2590,18 @@ impl Emitter {
     }
 
     fn emit_interrupt_epilogue(&mut self) {
+        if is_intel_8080_family(self.cpu) {
+            // Anchor layout: saved HL/DE/BC/PSW, four words above SP's home.
+            self.line("    lxi h, 0000h");
+            self.line("    dad d");
+            self.line("    sphl");
+            self.line("    pop hl");
+            self.line("    pop de");
+            self.line("    pop bc");
+            self.line("    pop psw");
+            self.line("    reti");
+            return;
+        }
         if uses_ix_frames(self.cpu) {
             self.line("    ld sp, ix");
         }
@@ -2628,7 +2613,6 @@ impl Emitter {
         self.line("    pop af");
         self.line("    reti");
     }
-
     fn bind_params(&mut self, function: &Function) -> Result<(), Diagnostic> {
         let sig = self
             .symbols
@@ -2650,12 +2634,7 @@ impl Emitter {
                 .insert(param.name.clone(), variable);
             self.current_scope_types_mut()
                 .insert(param.name.clone(), param.ty.clone());
-            if sig.uses_arg_slots {
-                let slot = sig.arg_slots[index];
-                self.emit_load_width(slot);
-                self.emit_store_width(variable);
-                continue;
-            }
+
             if let Some(offset) = sig.stack_arg_offsets[index] {
                 self.emit_load_ix_offset_width_into(offset, variable)?;
                 continue;
@@ -4197,7 +4176,6 @@ impl Emitter {
             .cloned()
             .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
         if sig.arity != args.len()
-            || sig.uses_arg_slots
             || sig.stack_arg_bytes != 0
             || sig.second_return_type.is_some()
             || self.current_function_returns_two_values()
@@ -4628,32 +4606,8 @@ impl Emitter {
         let second_pointer = self.alloc_var(pointer_width.bytes());
         self.emit_address_into_hl(second_destination.addr);
         self.emit_store_width(second_pointer);
-
-        let saved_variables =
-            self.recursive_call_saved_variables(name, args, &[second_destination]);
-        let return_temp = if saved_variables.is_empty() {
-            None
-        } else {
-            Some(self.alloc_var(sig.return_width.bytes()))
-        };
         let hidden_return_arg = second_pointer;
 
-        if sig.uses_arg_slots {
-            for (temp, slot) in temps.iter().copied().zip(sig.arg_slots.iter().copied()) {
-                self.emit_load_width(temp);
-                self.emit_store_width(slot);
-            }
-            self.emit_save_recursive_call_variables(&saved_variables);
-            self.emit_push_stack_arg_variable(hidden_return_arg);
-            self.line(&format!("    call {}", function_label(name)));
-            self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
-            self.emit_store_recursive_call_return(return_temp);
-            self.emit_restore_recursive_call_variables(&saved_variables);
-            self.emit_load_recursive_call_return(return_temp);
-            return Ok(());
-        }
-
-        self.emit_save_recursive_call_variables(&saved_variables);
         self.emit_push_call_stack_arguments(
             &sig.stack_arg_offsets,
             &temps,
@@ -4693,9 +4647,6 @@ impl Emitter {
         }
         self.line(&format!("    call {}", function_label(name)));
         self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
-        self.emit_store_recursive_call_return(return_temp);
-        self.emit_restore_recursive_call_variables(&saved_variables);
-        self.emit_load_recursive_call_return(return_temp);
         Ok(())
     }
 
@@ -4726,24 +4677,6 @@ impl Emitter {
             temps.push(temp);
         }
 
-        let saved_variables = self.indirect_call_saved_variables(args, &[]);
-        let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
-            None
-        } else {
-            Some(self.alloc_var(sig.return_width.bytes()))
-        };
-
-        if sig.uses_arg_slots {
-            let slots = self
-                .symbols
-                .function_pointer_arg_slots(&sig.param_types, sig.return_type.as_ref())?;
-            for (temp, slot) in temps.iter().copied().zip(slots) {
-                self.emit_load_width(temp);
-                self.emit_store_width(slot);
-            }
-        }
-
-        self.emit_save_recursive_call_variables(&saved_variables);
         self.emit_push_call_stack_arguments(&sig.stack_arg_offsets, &temps, None);
         if let Some(temp) = temps.get(2).copied()
             && sig.stack_arg_offsets[2].is_none()
@@ -4755,14 +4688,13 @@ impl Emitter {
                 self.emit_load_width(temp);
                 self.line("    push hl");
                 self.line("    pop bc");
-            } else if !sig.uses_arg_slots {
+            } else {
                 return Err(Diagnostic::new(
                     "current codegen supports a wide third argument only when the second argument is also wide",
                 ));
             }
         }
         if let Some(temp) = temps.get(1).copied()
-            && !sig.uses_arg_slots
             && sig.stack_arg_offsets[1].is_none()
         {
             if temp.size == 1 {
@@ -4774,15 +4706,11 @@ impl Emitter {
             }
         }
         if let Some(temp) = temps.first().copied()
-            && !sig.uses_arg_slots
             && sig.stack_arg_offsets[0].is_none()
         {
             self.emit_load_width(temp);
         }
-        let first_arg_temp = if !sig.uses_arg_slots
-            && !sig.params.is_empty()
-            && sig.stack_arg_offsets[0].is_none()
-        {
+        let first_arg_temp = if !sig.params.is_empty() && sig.stack_arg_offsets[0].is_none() {
             let temp = self.alloc_var(sig.params[0].bytes());
             if sig.params[0].bytes() == 1 {
                 self.emit_store_a(temp);
@@ -4813,9 +4741,6 @@ impl Emitter {
         if sig.stack_arg_bytes > 0 {
             self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
         }
-        self.emit_store_recursive_call_return(return_temp);
-        self.emit_restore_recursive_call_variables(&saved_variables);
-        self.emit_load_recursive_call_return(return_temp);
         Ok(())
     }
 
@@ -4836,51 +4761,6 @@ impl Emitter {
         })
     }
 
-    fn emit_intel8080_function_pointer(&mut self, name: &str) -> Result<(), Diagnostic> {
-        let signature = self
-            .symbols
-            .functions
-            .get(name)
-            .cloned()
-            .ok_or_else(|| Diagnostic::new(format!("unknown function `{name}`")))?;
-        if signature.second_return_type.is_some() {
-            return Err(Diagnostic::new(format!(
-                "function pointer cannot reference two-result function `{name}`"
-            )));
-        }
-
-        let target_label = self.next_label("function_pointer_target");
-        let continuation_label = self.next_label("function_pointer_continue");
-        let capture_label = self.next_label("function_pointer_capture");
-        let after_capture_label = self.next_label("function_pointer_after_capture");
-
-        self.line(&format!("    call {capture_label}"));
-        self.line(&format!("{target_label}:"));
-        if signature.uses_arg_slots {
-            let slots = self.symbols.function_pointer_arg_slots(
-                &signature.param_types,
-                signature.return_type.as_ref(),
-            )?;
-            for (source, target) in slots
-                .iter()
-                .copied()
-                .zip(signature.arg_slots.iter().copied())
-            {
-                self.emit_load_width(source);
-                self.emit_store_width(target);
-            }
-        }
-        self.line(&format!("    call {}", function_label(name)));
-        self.line("    ret");
-        self.line(&format!("{continuation_label}:"));
-        self.line(&format!("    jp {after_capture_label}"));
-        self.line(&format!("{capture_label}:"));
-        self.line("    pop hl");
-        self.line(&format!("    jp {continuation_label}"));
-        self.line(&format!("{after_capture_label}:"));
-        Ok(())
-    }
-
     fn function_pointer_target_label(&self, name: &str) -> Result<String, Diagnostic> {
         let signature = self
             .symbols
@@ -4892,11 +4772,7 @@ impl Emitter {
                 "function pointer cannot reference two-result function `{name}`"
             )));
         }
-        Ok(if signature.uses_arg_slots {
-            function_pointer_label(name)
-        } else {
-            function_label(name)
-        })
+        Ok(function_label(name))
     }
 
     fn function_pointer_type(&self, name: &str) -> Result<Type, Diagnostic> {
@@ -4932,20 +4808,22 @@ impl Emitter {
             .iter()
             .map(|param| self.symbols.type_width(param))
             .collect::<Result<Vec<_>, _>>()?;
-        let frame_cpu = uses_ix_frames(self.cpu);
+        let intel_stack_convention = is_intel_8080_family(self.cpu);
         let registers_cannot_marshal = param_widths.get(2).is_some_and(|third| third.bytes() != 1)
             && param_widths
                 .get(1)
                 .is_some_and(|second| second.bytes() == 1);
-        let uses_arg_slots = !frame_cpu && registers_cannot_marshal;
-        let all_params_on_stack = frame_cpu && registers_cannot_marshal;
+        let uses_arg_slots = false;
+        let all_params_on_stack =
+            intel_stack_convention || (uses_ix_frames(self.cpu) && registers_cannot_marshal);
         let mut stack_arg_offsets = vec![None; params.len()];
         let mut stack_arg_bytes = 0u8;
+        let stack_base_words = if intel_stack_convention { 4 } else { 2 };
         let mut stack_offset = self
             .symbols
             .type_width(&Type::Named("ptr".to_owned()))?
             .bytes()
-            .saturating_mul(2);
+            .saturating_mul(stack_base_words);
         let first_stack_index = if all_params_on_stack { 0 } else { 3 };
         if params.len() > first_stack_index {
             for (index, width) in param_widths.iter().enumerate().skip(first_stack_index) {
@@ -4981,50 +4859,6 @@ impl Emitter {
             hidden_return_arg_offset: None,
             is_interrupt: false,
         })
-    }
-
-    fn indirect_call_saved_variables(
-        &self,
-        args: &[Expr],
-        extra_excluded: &[Variable],
-    ) -> Vec<Variable> {
-        if !is_intel_8080_family(self.cpu) {
-            return Vec::new();
-        }
-        let Some(storage) = self.function_storage_stack.last() else {
-            return Vec::new();
-        };
-        let mut excluded = args
-            .iter()
-            .filter_map(|arg| match arg {
-                Expr::AddressOf(name) => self.variable_opt(name),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        excluded.extend_from_slice(extra_excluded);
-        let mut addresses = storage
-            .iter()
-            .flat_map(|variable| variable.addr..variable.addr.saturating_add(variable.size))
-            .filter(|addr| {
-                !excluded.iter().any(|variable| {
-                    (variable.addr..variable.addr.saturating_add(variable.size)).contains(addr)
-                })
-            })
-            .collect::<Vec<_>>();
-        addresses.sort_unstable();
-        addresses.dedup();
-
-        let mut variables: Vec<Variable> = Vec::new();
-        for addr in addresses {
-            if let Some(variable) = variables.last_mut()
-                && variable.addr + variable.size == addr
-            {
-                variable.size += 1;
-            } else {
-                variables.push(scalar_var(addr, 1));
-            }
-        }
-        variables
     }
 
     fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<(), Diagnostic> {
@@ -5063,27 +4897,6 @@ impl Emitter {
             temps.push(temp);
         }
 
-        let saved_variables = self.recursive_call_saved_variables(name, args, &[]);
-        let return_temp = if saved_variables.is_empty() || sig.return_type.is_none() {
-            None
-        } else {
-            Some(self.alloc_var(sig.return_width.bytes()))
-        };
-
-        if sig.uses_arg_slots {
-            for (temp, slot) in temps.iter().copied().zip(sig.arg_slots.iter().copied()) {
-                self.emit_load_width(temp);
-                self.emit_store_width(slot);
-            }
-            self.emit_save_recursive_call_variables(&saved_variables);
-            self.line(&format!("    call {}", function_label(name)));
-            self.emit_store_recursive_call_return(return_temp);
-            self.emit_restore_recursive_call_variables(&saved_variables);
-            self.emit_load_recursive_call_return(return_temp);
-            return Ok(());
-        }
-
-        self.emit_save_recursive_call_variables(&saved_variables);
         self.emit_push_call_stack_arguments(&sig.stack_arg_offsets, &temps, None);
         if let Some(temp) = temps.get(2).copied()
             && sig.stack_arg_offsets[2].is_none()
@@ -5121,9 +4934,6 @@ impl Emitter {
         if sig.stack_arg_bytes > 0 {
             self.emit_drop_stack_arg_bytes(sig.stack_arg_bytes);
         }
-        self.emit_store_recursive_call_return(return_temp);
-        self.emit_restore_recursive_call_variables(&saved_variables);
-        self.emit_load_recursive_call_return(return_temp);
         Ok(())
     }
 
@@ -5146,99 +4956,6 @@ impl Emitter {
         arguments.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
         for (_, variable) in arguments {
             self.emit_push_stack_arg_variable(variable);
-        }
-    }
-
-    fn recursive_call_saved_variables(
-        &self,
-        callee: &str,
-        args: &[Expr],
-        extra_excluded: &[Variable],
-    ) -> Vec<Variable> {
-        // Frame CPUs keep automatic storage in per-invocation IX frames, so
-        // only the legacy Intel 8080 family needs static snapshots.
-        if !is_intel_8080_family(self.cpu) {
-            return Vec::new();
-        }
-        let caller = self.current_function_name();
-        if !self
-            .recursive_call_edges
-            .contains(&(caller.to_owned(), callee.to_owned()))
-        {
-            return Vec::new();
-        }
-
-        let Some(storage) = self.function_storage_stack.last() else {
-            return Vec::new();
-        };
-        let mut excluded = args
-            .iter()
-            .filter_map(|arg| match arg {
-                // The callee can mutate this local through its pointer parameter.
-                // Do not restore its pre-call value after returning.
-                Expr::AddressOf(name) => self.variable_opt(name),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        excluded.extend_from_slice(extra_excluded);
-        let mut addresses = storage
-            .iter()
-            .flat_map(|variable| variable.addr..variable.addr.saturating_add(variable.size))
-            .filter(|addr| {
-                !excluded.iter().any(|variable| {
-                    (variable.addr..variable.addr.saturating_add(variable.size)).contains(addr)
-                })
-            })
-            .collect::<Vec<_>>();
-        addresses.sort_unstable();
-        addresses.dedup();
-
-        let mut variables: Vec<Variable> = Vec::new();
-        for addr in addresses {
-            if let Some(variable) = variables.last_mut()
-                && variable.addr + variable.size == addr
-            {
-                variable.size += 1;
-            } else {
-                variables.push(scalar_var(addr, 1));
-            }
-        }
-        variables
-    }
-
-    fn emit_save_recursive_call_variables(&mut self, variables: &[Variable]) {
-        for variable in variables {
-            for offset in 0..variable.size {
-                self.load_byte_into_a(variable.addr + offset);
-                self.line("    dec sp");
-                self.line("    ld hl, 000000h");
-                self.line("    add hl, sp");
-                self.line("    ld (hl), a");
-            }
-        }
-    }
-
-    fn emit_restore_recursive_call_variables(&mut self, variables: &[Variable]) {
-        for variable in variables.iter().rev() {
-            for offset in (0..variable.size).rev() {
-                self.line("    ld hl, 000000h");
-                self.line("    add hl, sp");
-                self.line("    ld a, (hl)");
-                self.line("    inc sp");
-                self.store_byte_from_a(variable.addr + offset);
-            }
-        }
-    }
-
-    fn emit_store_recursive_call_return(&mut self, return_temp: Option<Variable>) {
-        if let Some(return_temp) = return_temp {
-            self.emit_store_width(return_temp);
-        }
-    }
-
-    fn emit_load_recursive_call_return(&mut self, return_temp: Option<Variable>) {
-        if let Some(return_temp) = return_temp {
-            self.emit_load_width(return_temp);
         }
     }
 
@@ -5571,9 +5288,23 @@ impl Emitter {
             Expr::AddressOf(name) => {
                 if self.symbols.functions.contains_key(name) {
                     if is_intel_8080_family(self.cpu) {
-                        self.emit_intel8080_function_pointer(name)?;
+                        // The 8080 cannot load a label immediate, so capture
+                        // the return address of a call as the target address.
+                        let target = self.next_label("fn_ptr_target");
+                        let continuation = self.next_label("fn_ptr_continue");
+                        let capture = self.next_label("fn_ptr_capture");
+                        let after = self.next_label("fn_ptr_after_capture");
+                        self.line(&format!("    call {capture}"));
+                        self.line(&format!("{target}:"));
+                        self.line(&format!("    jp {}", function_label(name)));
+                        self.line(&format!("{continuation}:"));
+                        self.line(&format!("    jp {after}"));
+                        self.line(&format!("{capture}:"));
+                        self.line("    pop hl");
+                        self.line(&format!("    jp {continuation}"));
+                        self.line(&format!("{after}:"));
                     } else {
-                        let label = self.function_pointer_target_label(name)?;
+                        let label = function_label(name);
                         self.line(&format!("    ld hl, {label}"));
                     }
                 } else {
@@ -7853,6 +7584,10 @@ impl Emitter {
     }
 
     fn load_byte_into_a(&mut self, addr: u32) {
+        if is_intel_8080_family(self.cpu) {
+            self.emit_intel_frame_byte_access(addr, true);
+            return;
+        }
         match frame_displacement(addr) {
             Some(displacement) if (-128..=127).contains(&displacement) => {
                 self.line(&format!("    ld a, {}", self.byte_operand(addr)));
@@ -7866,6 +7601,10 @@ impl Emitter {
     }
 
     fn store_byte_from_a(&mut self, addr: u32) {
+        if is_intel_8080_family(self.cpu) {
+            self.emit_intel_frame_byte_access(addr, false);
+            return;
+        }
         match frame_displacement(addr) {
             Some(displacement) if (-128..=127).contains(&displacement) => {
                 self.line(&format!("    ld {}, a", self.byte_operand(addr)));
@@ -7878,8 +7617,57 @@ impl Emitter {
         }
     }
 
+    /// 8080 frame byte access. Computes FP+displacement through the stack so
+    /// HL, DE, and BC all survive; A carries the byte in both directions.
+    fn emit_intel_frame_byte_access(&mut self, addr: u32, load: bool) {
+        let displacement = match frame_displacement(addr) {
+            Some(displacement) => displacement,
+            None => {
+                // Static storage keeps plain direct addressing.
+                if load {
+                    self.line(&format!("    ld a, ({:06X}h)", addr));
+                } else {
+                    self.line(&format!("    ld ({:06X}h), a", addr));
+                }
+                return;
+            }
+        };
+        self.line("    push bc");
+        self.line("    push de");
+        self.line("    push hl");
+        self.line("    push de");
+        self.line("    pop hl");
+        self.line(&format!("    lxi b, {:04X}h", (displacement as i16) as u16));
+        self.line("    dad b");
+        if load {
+            self.line("    mov a, m");
+        } else {
+            self.line("    mov m, a");
+        }
+        self.line("    xchg");
+        self.line("    pop hl");
+        self.line("    pop de");
+        self.line("    pop bc");
+    }
+
     /// Loads the effective address of a variable byte into HL.
     fn emit_address_into_hl(&mut self, addr: u32) {
+        if is_intel_8080_family(self.cpu) {
+            match frame_displacement(addr) {
+                Some(displacement) => {
+                    self.line("    push de");
+                    self.line("    push bc");
+                    self.line("    push de");
+                    self.line("    pop hl");
+                    self.line(&format!("    lxi b, {:04X}h", (displacement as i16) as u16));
+                    self.line("    dad b");
+                    self.line("    pop bc");
+                    self.line("    pop de");
+                }
+                None => self.line(&format!("    ld hl, {:06X}h", addr)),
+            }
+            return;
+        }
         match frame_displacement(addr) {
             Some(displacement)
                 if displacement != 0
@@ -7899,29 +7687,6 @@ impl Emitter {
             None => self.line(&format!("    ld hl, {:06X}h", addr)),
         }
     }
-
-    fn emit_frame_reserve(&mut self, size: u32) {
-        if size == 0 {
-            return;
-        }
-        // IY is compiler-owned scratch; HL, DE, and BC carry incoming
-        // arguments at function entry, so they must stay untouched.
-        if is_z80_family_16bit(self.cpu) {
-            self.line(&format!(
-                "    ld iy, {:04X}h",
-                (size as i16).wrapping_neg() as u16
-            ));
-        } else {
-            self.line(&format!(
-                "    ld iy, {:06X}h",
-                0x100_0000u32.wrapping_sub(size)
-            ));
-        }
-        self.line("    add iy, sp");
-        self.line("    ld sp, iy");
-        self.line("    ld iy, 000000h");
-    }
-
     /// Frame scratch used to relay wide accesses to storage beyond the
     /// signed 8-bit IX displacement range. Always lives at frame offset 0.
     const FRAME_RELAY_BYTES: u32 = 4;
@@ -8099,9 +7864,18 @@ impl Emitter {
                 )));
             }
             if is_intel_8080_family(self.cpu) {
-                self.line(&format!("    ld hl, {displacement:04X}h"));
-                self.line("    add hl, sp");
-                self.line("    ld a, (hl)");
+                // Read through the DE anchor; the displacement counts from
+                // the saved-HL cell the prologue anchored on.
+                self.line("    push hl");
+                self.line("    push de");
+                self.line("    pop hl");
+                self.line(&format!(
+                    "    lxi b, {:04X}h",
+                    offset as u16 + byte_offset as u16
+                ));
+                self.line("    dad b");
+                self.line("    mov a, m");
+                self.line("    pop hl");
             } else {
                 self.line(&format!("    ld a, (ix+{displacement})"));
             }
@@ -11086,57 +10860,6 @@ fn section_cursor<'a>(cursors: &'a mut [(String, u32)], section: &str) -> &'a mu
     &mut cursors[index].1
 }
 
-fn recursive_call_edges(
-    program: &Program,
-    functions: &HashMap<String, FunctionSig>,
-) -> HashSet<(String, String)> {
-    let graph = function_call_graph(program, functions);
-    let mut edges = HashSet::new();
-    for (caller, callees) in &graph {
-        for callee in callees {
-            if function_reaches(callee, caller, &graph) {
-                edges.insert((caller.clone(), callee.clone()));
-            }
-        }
-    }
-    edges
-}
-
-fn function_call_graph(
-    program: &Program,
-    functions: &HashMap<String, FunctionSig>,
-) -> HashMap<String, Vec<String>> {
-    let mut graph = HashMap::new();
-    for declaration in &program.declarations {
-        let Declaration::Function(function) = declaration else {
-            continue;
-        };
-        let mut calls = Vec::new();
-        collect_stmt_calls(&function.body, &mut calls);
-        collect_stmt_function_references(&function.body, &mut calls);
-        calls.retain(|name| functions.contains_key(name));
-        graph.insert(function.name.clone(), calls);
-    }
-    graph
-}
-
-fn function_reaches(start: &str, target: &str, graph: &HashMap<String, Vec<String>>) -> bool {
-    let mut stack = vec![start.to_owned()];
-    let mut visited = HashSet::new();
-    while let Some(function) = stack.pop() {
-        if !visited.insert(function.clone()) {
-            continue;
-        }
-        if function == target {
-            return true;
-        }
-        if let Some(calls) = graph.get(&function) {
-            stack.extend(calls.iter().cloned());
-        }
-    }
-    false
-}
-
 fn validate_all_function_calls(
     program: &Program,
     functions: &HashMap<String, FunctionSig>,
@@ -11154,16 +10877,9 @@ fn validate_all_function_bodies(
     program: &Program,
     symbols: Symbols,
     options: AssemblyOptions,
-    recursive_call_edges: HashSet<(String, String)>,
     tail_call_edges: HashSet<(String, String)>,
 ) -> Result<(), Diagnostic> {
-    let mut emitter = Emitter::new(
-        symbols,
-        options.clone(),
-        recursive_call_edges,
-        tail_call_edges,
-        None,
-    );
+    let mut emitter = Emitter::new(symbols, options.clone(), tail_call_edges, None);
     emitter.disable_dead_code_elimination();
     if let Some(main) = program.main_function() {
         emitter.emit_function(main)?;
@@ -12036,10 +11752,6 @@ fn collect_expr_function_references(expr: &Expr, references: &mut Vec<String>) {
     }
 }
 
-fn collect_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>) {
-    collect_stmt_calls_with_symbols(stmts, calls, None)
-}
-
 fn collect_reachable_stmt_calls(stmts: &[Stmt], calls: &mut Vec<String>, symbols: &Symbols) {
     collect_stmt_calls_with_symbols(stmts, calls, Some(symbols))
 }
@@ -12230,13 +11942,6 @@ fn function_label(name: &str) -> String {
         }
     }
     label
-}
-
-fn function_pointer_label(name: &str) -> String {
-    format!(
-        "__ezra_fn_ptr_{}",
-        function_label(name).trim_start_matches('_')
-    )
 }
 
 fn function_pointer_constant_label(target: &str) -> String {

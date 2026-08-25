@@ -12,7 +12,7 @@ fn lowered_function_calls(checked: &CheckedEz80Program, function_name: &str) -> 
         })
         .unwrap_or_else(|| panic!("missing lowered function `{function_name}`"));
     let mut calls = Vec::new();
-    collect_stmt_calls(&function.body, &mut calls);
+    collect_stmt_calls_with_symbols(&function.body, &mut calls, None);
     calls
 }
 
@@ -1275,7 +1275,7 @@ fn emits_and_runs_typed_function_pointer_calls_on_16_and_24_bit_targets() {
         )
         .unwrap_or_else(|error| panic!("{} failed to emit: {error}", cpu.as_str()));
         let has_function_pointer_load = match cpu {
-            CpuFamily::I8080 => asm.contains("pop h"),
+            CpuFamily::I8080 => asm.contains("call .L_fn_ptr_capture"),
             _ => asm.contains("ld hl, _add"),
         };
         assert!(has_function_pointer_load, "{asm}");
@@ -1295,7 +1295,7 @@ fn emits_and_runs_typed_function_pointer_calls_on_16_and_24_bit_targets() {
             },
         )
         .unwrap_or_else(|error| panic!("{} failed: {error}\n{asm}", cpu.as_str()));
-        assert!(run.halted, "{}\n{asm}", cpu.as_str());
+        assert!(run.halted, "{} run={:?}`n{asm}", cpu.as_str(), run);
         assert_eq!(run.result_code, 0, "{}\n{asm}", cpu.as_str());
     }
 }

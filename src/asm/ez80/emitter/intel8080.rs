@@ -274,6 +274,12 @@ fn translate_8080_ld(dst: &str, src: &str) -> Result<String, Diagnostic> {
     if is_numeric_asm_operand(src) {
         return Ok(format!("lxi {}, {src}", intel_8080_rp(dst)?));
     }
+    // Symbol/label immediates (function addresses, equates) load through the
+    // same LXI form and resolve at assembly time.
+    if !src.starts_with('(') && intel_8080_reg(src).is_none() && intel_8080_rp_bytes(src).is_none()
+    {
+        return Ok(format!("lxi {}, {src}", intel_8080_rp(dst)?));
+    }
     Err(Diagnostic::new(format!(
         "8080 source codegen cannot translate instruction `ld {dst}, {src}`"
     )))

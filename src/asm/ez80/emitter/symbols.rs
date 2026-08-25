@@ -94,7 +94,6 @@ pub(super) struct Symbols {
     pub(super) readonly_global_pointer_aliases: HashMap<String, u32>,
     pub(super) volatile_ranges: Vec<(u32, u32)>,
     pub(super) functions: HashMap<String, FunctionSig>,
-    pub(super) function_pointer_arg_slots: HashMap<String, Vec<Variable>>,
     static_liveness: Option<StaticLiveness>,
     function_pointer_width: ValueWidth,
     next_addr: u32,
@@ -159,7 +158,6 @@ impl Symbols {
             readonly_global_pointer_aliases: HashMap::new(),
             volatile_ranges: Vec::new(),
             functions: HashMap::new(),
-            function_pointer_arg_slots: HashMap::new(),
             static_liveness: static_liveness.cloned(),
             function_pointer_width: match memory_model_for_cpu(options.cpu)
                 .map(|memory| memory.pointer_width_bits)
@@ -281,6 +279,7 @@ impl Symbols {
                 .map(|param| symbols.type_width(&param.ty))
                 .collect::<Result<Vec<_>, _>>()?;
             let frame_cpu = super::uses_ix_frames(options.cpu);
+            let intel_stack_convention = !extern_asm && super::is_intel_8080_family(options.cpu);
             let registers_cannot_marshal =
                 param_widths.get(2).is_some_and(|third| third.bytes() != 1)
                     && param_widths
@@ -291,14 +290,23 @@ impl Symbols {
                     "extern asm function `{name}` cannot use a byte second argument followed by a wide third argument"
                 )));
             }
-            // Frame CPUs pass the blocked combination on the stack instead of
-            // through static argument cells; the Intel 8080 family keeps the
-            // legacy static slot convention.
-            let uses_arg_slots = !frame_cpu && registers_cannot_marshal;
-            let all_params_on_stack = frame_cpu && registers_cannot_marshal;
+            // Static argument cells are gone: frame CPUs pass the blocked
+            // combination on the stack, and the Intel 8080 family passes every
+            // non-extern parameter on the stack because its EA arithmetic
+            // needs the argument registers free. Extern asm keeps the
+            // register convention.
+            let all_params_on_stack =
+                intel_stack_convention || (frame_cpu && registers_cannot_marshal);
             let mut stack_arg_offsets = vec![None; params.len()];
             let mut stack_arg_bytes = 0u8;
-            let mut stack_offset = symbols.function_pointer_width.bytes().saturating_mul(2);
+            // Intel frames push the incoming BC/DE/HL argument pairs inside
+            // the callee prologue, so caller-pushed arguments sit four words
+            // (three saved pairs plus the return address) above the anchor.
+            let stack_base_words = if intel_stack_convention { 4 } else { 2 };
+            let mut stack_offset = symbols
+                .function_pointer_width
+                .bytes()
+                .saturating_mul(stack_base_words);
             let first_stack_index = if all_params_on_stack { 0 } else { 3 };
             if params.len() > first_stack_index {
                 for (index, width) in param_widths.iter().enumerate().skip(first_stack_index) {
@@ -326,22 +334,14 @@ impl Symbols {
                 Ok(offset)
             });
             let hidden_return_arg_offset = hidden_return_arg_offset.transpose()?;
-            let arg_slots = if uses_arg_slots {
-                param_widths
-                    .iter()
-                    .map(|width| symbols.alloc_var(width.bytes()))
-                    .collect()
-            } else {
-                Vec::new()
-            };
             symbols.functions.insert(
                 name.clone(),
                 FunctionSig {
                     arity: params.len(),
                     params: param_widths,
                     param_types: params.iter().map(|param| param.ty.clone()).collect(),
-                    arg_slots,
-                    uses_arg_slots,
+                    arg_slots: Vec::new(),
+                    uses_arg_slots: false,
                     stack_arg_offsets,
                     stack_arg_bytes,
                     return_width: return_type
@@ -955,47 +955,6 @@ impl Symbols {
             size: offset,
             fields: layout_fields,
         })
-    }
-
-    pub(super) fn function_pointer_arg_slots(
-        &mut self,
-        params: &[Type],
-        return_type: Option<&Type>,
-    ) -> Result<Vec<Variable>, Diagnostic> {
-        let params = params
-            .iter()
-            .map(|param| self.resolved_type(param))
-            .collect::<Result<Vec<_>, _>>()?;
-        let return_type = return_type
-            .map(|return_type| self.resolved_type(return_type))
-            .transpose()?;
-        let key = format!(
-            "{:?}",
-            Type::Function {
-                params: params.clone(),
-                return_type: return_type.clone().map(Box::new),
-            }
-        );
-        if let Some(slots) = self.function_pointer_arg_slots.get(&key) {
-            return Ok(slots.clone());
-        }
-
-        let widths = params
-            .iter()
-            .map(|param| self.type_width(param))
-            .collect::<Result<Vec<_>, _>>()?;
-        let uses_arg_slots = widths.get(2).is_some_and(|third| third.bytes() != 1)
-            && widths.get(1).is_some_and(|second| second.bytes() == 1);
-        let slots = if uses_arg_slots {
-            widths
-                .iter()
-                .map(|width| self.alloc_var(width.bytes()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        self.function_pointer_arg_slots.insert(key, slots.clone());
-        Ok(slots)
     }
 
     pub(super) fn type_width(&self, ty: &Type) -> Result<ValueWidth, Diagnostic> {
