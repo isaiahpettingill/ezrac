@@ -9,7 +9,7 @@ name = "ezra-core"
 version = "0.1.35"
 edition = "2024"
 description = "Core compiler library for the EZRA language"
-license = "BSD-3-Clause"
+license = "0BSD"
 repository = "https://github.com/isaiahpettingill/ezrac"
 
 [lib]

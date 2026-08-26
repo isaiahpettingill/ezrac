@@ -4,6 +4,7 @@
 
 - Added a shared `no_std + alloc` indexed-image decoder and encoder plus a CLI pipeline that converts configured indexed PNG assets into native Game Boy, NES, Sega, C64, TI, ZX Spectrum, Arduboy, and Agon sprite, tile, or bitmap bytes.
 - Added source-generated NES CHR-ROM assets. Tile 0 remains reserved and configured `.assets` tiles are packed from tile 1.
+- Relicensed the EZRA project under 0BSD.
 
 ## 0.1.34
 
