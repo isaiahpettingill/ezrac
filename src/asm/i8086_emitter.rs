@@ -4026,6 +4026,9 @@ impl Emitter {
             ));
         }
         self.validate_inline_asm_clobbers(clobbers)?;
+        let clobbers_bp = clobbers
+            .iter()
+            .any(|clobber| canonical_i8086_clobber(clobber) == "bp");
         let substituted = lines
             .iter()
             .map(|line| substitute_inline_asm_operands(line, &operands))
@@ -4034,8 +4037,14 @@ impl Emitter {
         for input in inputs {
             self.load_inline_asm_input(input)?;
         }
+        if clobbers_bp {
+            self.line("    push bp");
+        }
         for line in substituted {
             self.line(&format!("    {line}"));
+        }
+        if clobbers_bp {
+            self.line("    pop bp");
         }
         for output in outputs {
             self.store_inline_asm_output(output)?;
@@ -4203,10 +4212,12 @@ impl Emitter {
                     "duplicate or overlapping inline asm clobber `{clobber}`"
                 )));
             }
-            if matches!(
-                clobber.as_str(),
-                "sp" | "bp" | "ip" | "cs" | "ds" | "es" | "ss"
-            ) {
+            if clobber == "bp" && self.function_states.last().is_some_and(|state| state.naked) {
+                return Err(Diagnostic::new(format!(
+                    "inline asm cannot clobber ABI-critical register `{clobber}` in naked 8086 functions"
+                )));
+            }
+            if matches!(clobber.as_str(), "sp" | "ip" | "cs" | "ds" | "es" | "ss") {
                 let context = if self.function_states.last().is_some_and(|state| state.naked) {
                     "naked 8086 functions"
                 } else {

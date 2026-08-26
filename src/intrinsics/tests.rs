@@ -218,7 +218,7 @@ fn memory_intrinsics_validate_pointers_lengths_and_results() {
 
     let bad_length = CATALOG.infer_result_types(
         "mem.copy_nonoverlapping",
-        &[ptr_u8(), ptr_u8(), named("u16")],
+        &[ptr_u8(), ptr_u8(), named("i16")],
     );
     assert!(matches!(
         bad_length,

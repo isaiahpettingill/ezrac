@@ -467,7 +467,7 @@ fn emits_and_runs_naked_asm_functions_without_epilogue() {
     let run = run_assembly_test(&asm, 4_000).unwrap();
 
     let raw_debug = asm.split("_raw_debug:").nth(1).unwrap();
-    let raw_debug = raw_debug.split("_main:").next().unwrap();
+    let raw_debug = raw_debug.split("; compiler/runtime label:").next().unwrap();
     assert_eq!(raw_debug.matches("    ret").count(), 1, "{asm}");
     assert!(run.halted, "{asm}");
     assert_eq!(run.result_code, 0, "{asm}");

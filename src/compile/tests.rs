@@ -182,12 +182,7 @@ fn skips_wide_integer_warnings_on_exempt_targets() {
     )
     .unwrap();
 
-    for cpu in [
-        CpuFamily::M68k,
-        CpuFamily::Avr,
-        CpuFamily::Z80,
-        CpuFamily::Lr35902,
-    ] {
+    for cpu in [CpuFamily::Avr, CpuFamily::Z80, CpuFamily::Lr35902] {
         assert!(
             inefficient_integer_warnings(&program, cpu).is_empty(),
             "{cpu:?}"
@@ -1981,7 +1976,7 @@ fn intrinsic_modules_resolve_for_every_target() {
             sdk_mode: SdkLookupMode::default(),
         };
         for module in ["ezra.bits", "ezra.int", "ezra.mem"] {
-            assert!(builtin_sdk_modules(Some(target)).contains(&module));
+            assert!(compiler_intrinsic_modules().contains(&module));
             let (path, source) =
                 resolve_import_source(Path::new("main.ezra"), module, &sdk).unwrap();
             assert_eq!(

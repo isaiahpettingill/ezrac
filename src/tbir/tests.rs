@@ -311,8 +311,7 @@ fn tbir_reports_optimization_markers_and_dump() {
         r#"
                 inline fn helper() -> bool { return !false }
                 fn main() {
-                    return
-                    helper()
+                    let result: bool = helper()
                 }
             "#,
     )

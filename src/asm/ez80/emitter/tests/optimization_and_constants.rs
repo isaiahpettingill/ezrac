@@ -66,7 +66,7 @@ fn emits_target_specific_constant_shifts_and_reduces_power_of_two_multiply() {
 
     let left_word = body("left_word");
     assert_eq!(left_word.matches("    add a, a").count(), 2, "{left_word}");
-    assert_eq!(left_word.matches("    rl a").count(), 2, "{left_word}");
+    assert_eq!(left_word.matches("    rla").count(), 2, "{left_word}");
     assert!(!left_word.contains("shift_loop"), "{left_word}");
 
     let times_eight = body("times_eight");
@@ -75,7 +75,7 @@ fn emits_target_specific_constant_shifts_and_reduces_power_of_two_multiply() {
         3,
         "{times_eight}"
     );
-    assert_eq!(times_eight.matches("    rl a").count(), 3, "{times_eight}");
+    assert_eq!(times_eight.matches("    rla").count(), 3, "{times_eight}");
     assert!(!times_eight.contains("__ezra_mul"), "{times_eight}");
     assert!(!times_eight.contains("shift_loop"), "{times_eight}");
 

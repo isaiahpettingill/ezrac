@@ -268,38 +268,44 @@ fn access_type(
     context: &IntrinsicValidationContext,
     locals: &HashMap<String, Type>,
 ) -> Option<Type> {
-    let mut ty = locals
+    let root_ty = locals
         .get(&path.root)
         .or_else(|| context.values.get(&path.root))
         .cloned();
     let mut qualified = path.root.clone();
-    for segment in &path.segments {
+    let mut qualified_value = None;
+    for (index, segment) in path.segments.iter().enumerate() {
+        let AccessSegment::Field(field) = segment else {
+            break;
+        };
+        qualified.push('.');
+        qualified.push_str(field);
+        if let Some(value) = context.values.get(&qualified) {
+            qualified_value = Some((index + 1, value.clone()));
+        }
+    }
+    let (consumed, mut ty) = match qualified_value {
+        Some(value) => value,
+        None => (0, root_ty?),
+    };
+    for segment in path.segments.iter().skip(consumed) {
         match segment {
             AccessSegment::Field(field) => {
-                qualified.push('.');
-                qualified.push_str(field);
-                if let Some(value) = context.values.get(&qualified) {
-                    ty = Some(value.clone());
-                    continue;
-                }
-                let Type::Named(struct_name) =
-                    resolve_intrinsic_type(ty.as_ref()?, &context.aliases)
-                else {
+                let Type::Named(struct_name) = resolve_intrinsic_type(&ty, &context.aliases) else {
                     return None;
                 };
-                ty = context.structs.get(&struct_name)?.get(field).cloned();
+                ty = context.structs.get(&struct_name)?.get(field).cloned()?;
             }
             AccessSegment::Index(_) => {
-                let Type::Array { element, .. } =
-                    resolve_intrinsic_type(ty.as_ref()?, &context.aliases)
+                let Type::Array { element, .. } = resolve_intrinsic_type(&ty, &context.aliases)
                 else {
                     return None;
                 };
-                ty = Some(*element);
+                ty = *element;
             }
         }
     }
-    ty.map(|ty| resolve_intrinsic_type(&ty, &context.aliases))
+    Some(resolve_intrinsic_type(&ty, &context.aliases))
 }
 
 fn intrinsic_expr_type(
