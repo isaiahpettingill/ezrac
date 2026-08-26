@@ -144,6 +144,7 @@ struct Emitter {
     arduboy_executable: bool,
     frame_size: u32,
     frame_active: bool,
+    temp_cursor: u32,
 }
 
 impl Emitter {
@@ -172,6 +173,7 @@ impl Emitter {
             arduboy_executable: options.arduboy_executable,
             frame_size: 0,
             frame_active: false,
+            temp_cursor: 0,
         }
     }
 
@@ -572,11 +574,6 @@ impl Emitter {
             )));
         }
         let function_ram_base = self.model.next_ram_address();
-        let second_return_pointer = function
-            .second_return_type
-            .as_ref()
-            .map(|_| self.model.allocate(2))
-            .transpose()?;
         let signature = self
             .model
             .functions
@@ -593,6 +590,14 @@ impl Emitter {
         let (locals, local_bytes) =
             plan_function_locals(function, &mut self.model, parameter_bytes)?;
         let frame_size = parameter_bytes + local_bytes;
+        self.temp_cursor = frame_size;
+        self.frame_active = !naked;
+        let second_return_pointer = function
+            .second_return_type
+            .as_ref()
+            .map(|_| self.allocate_temp(2))
+            .transpose()?;
+        let prologue_start = self.out.len();
         self.line(&format!("{}:", function_label(&function.name)));
         self.scopes.push(locals.bindings);
         self.return_labels.push(return_label.clone());
@@ -605,7 +610,7 @@ impl Emitter {
         if interrupt && !naked {
             self.emit_interrupt_prologue();
         }
-        if !naked && frame_size != 0 {
+        if !naked {
             self.emit_frame_prologue(frame_size);
         }
         if let Some(pointer) = second_return_pointer {
@@ -630,8 +635,11 @@ impl Emitter {
             self.copy(slot, storage, size);
         }
         self.frame_size = frame_size;
-        self.frame_active = !naked && frame_size != 0;
         self.emit_block(&function.body)?;
+        self.frame_size = self.temp_cursor;
+        if !naked {
+            self.patch_frame_prologue(prologue_start, self.frame_size)?;
+        }
         self.line(&format!("{return_label}:"));
         if let Some(ty) = &function.return_type {
             for offset in 0..self.model.type_size(ty)? {
@@ -665,6 +673,7 @@ impl Emitter {
         self.scopes.pop();
         self.frame_active = false;
         self.frame_size = 0;
+        self.temp_cursor = 0;
         Ok(())
     }
 
@@ -705,7 +714,7 @@ impl Emitter {
                         ));
                     }
                     let size = self.model.type_size(&ty)?;
-                    let temporary = self.model.allocate(size)?;
+                    let temporary = self.allocate_temp(size)?;
                     self.emit_initializer(temporary, &ty, value)?;
                     self.emit_store_aggregate_place(target, temporary, size)?;
                     return Ok(());
@@ -714,7 +723,7 @@ impl Emitter {
                     self.emit_expr(value, &ty)?;
                 } else {
                     self.emit_load_place(target, width)?;
-                    let left = self.model.allocate(u32::from(width))?;
+                    let left = self.allocate_temp(u32::from(width))?;
                     self.copy(self.r0, left, u32::from(width));
                     self.emit_expr(value, &ty)?;
                     self.copy(self.r0, self.r1, u32::from(width));
@@ -1054,7 +1063,7 @@ impl Emitter {
                     return Ok(());
                 }
                 self.emit_expr(left, &operand_ty)?;
-                let left_storage = self.model.allocate(u32::from(operand_width))?;
+                let left_storage = self.allocate_temp(u32::from(operand_width))?;
                 self.copy(self.r0, left_storage, u32::from(operand_width));
                 self.emit_expr(right, &operand_ty)?;
                 self.copy(self.r0, self.r1, u32::from(operand_width));
@@ -1202,7 +1211,7 @@ impl Emitter {
         let mut evaluated_args = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let ty = &signature.params[index];
-            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            let storage = self.allocate_temp(self.model.type_size(ty)?)?;
             self.emit_initializer(storage, ty, arg)?;
             evaluated_args.push(storage);
         }
@@ -1283,7 +1292,7 @@ impl Emitter {
                 "two-result function has no caller-provided return slot",
             ));
         };
-        let first_value = self.model.allocate(self.model.type_size(&first_type)?)?;
+        let first_value = self.allocate_temp(self.model.type_size(&first_type)?)?;
         let second_width = self.model.type_width(&second_type)?;
         self.emit_expr(first, &first_type)?;
         self.copy(self.r0, first_value, first_value.size);
@@ -1319,7 +1328,7 @@ impl Emitter {
             }
             "mem.poke8" | "ezra.mem.poke8" => {
                 self.emit_expr(&args[0], &Type::Ptr(Box::new(Type::Named("u8".to_owned()))))?;
-                let destination = self.model.allocate(2)?;
+                let destination = self.allocate_temp(2)?;
                 self.copy(self.r0, destination, 2);
                 self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
                 self.set_zp_from_storage(self.pointer_scratch, destination);
@@ -1367,9 +1376,9 @@ impl Emitter {
                 };
                 let argument_slots = params
                     .iter()
-                    .map(|param| self.model.allocate_type(param))
+                    .map(|param| self.allocate_temp(self.model.type_size(param)?))
                     .collect::<Result<Vec<_>, _>>()?;
-                let pointer_storage = self.model.allocate(2)?;
+                let pointer_storage = self.allocate_temp(2)?;
                 (
                     crate::tbir::model::FunctionSignature {
                         params: params.clone(),
@@ -1396,7 +1405,7 @@ impl Emitter {
         let mut evaluated_args = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let ty = &signature.params[index];
-            let storage = self.model.allocate(self.model.type_size(ty)?)?;
+            let storage = self.allocate_temp(self.model.type_size(ty)?)?;
             self.emit_initializer(storage, ty, arg)?;
             evaluated_args.push(storage);
         }
@@ -1467,7 +1476,7 @@ impl Emitter {
             .as_ref()
             .map(|ty| self.model.type_size(ty))
             .transpose()?
-            .map(|size| self.model.allocate(size))
+            .map(|size| self.allocate_temp(size))
             .transpose()?;
         if let Some(return_storage) = return_storage {
             self.copy(self.r0, return_storage, return_storage.size);
@@ -1518,7 +1527,7 @@ impl Emitter {
             .iter()
             .zip(args)
             .map(|(ty, arg)| {
-                let storage = self.model.allocate(self.model.type_size(ty)?)?;
+                let storage = self.allocate_temp(self.model.type_size(ty)?)?;
                 self.emit_initializer(storage, ty, arg)?;
                 Ok(storage)
             })
@@ -1804,7 +1813,7 @@ impl Emitter {
             IntIntrinsic::Divmod => {
                 let second = second_destination
                     .ok_or_else(|| Diagnostic::new("divmod requires two destinations"))?;
-                let quotient = self.model.allocate(u32::from(width))?;
+                let quotient = self.allocate_temp(u32::from(width))?;
                 self.copy(values[0], self.r0, u32::from(width));
                 self.copy(values[1], self.r1, u32::from(width));
                 self.divide(width, false, signed);
@@ -1887,7 +1896,7 @@ impl Emitter {
                     MemIntrinsic::LoadLe16 | MemIntrinsic::LoadBe16 => 2,
                     _ => 3,
                 };
-                let raw = self.model.allocate(width)?;
+                let raw = self.allocate_temp(width)?;
                 self.set_zp_from_storage(self.pointer_scratch, values[0]);
                 for offset in 0..width {
                     self.native_line(&format!(
@@ -1991,7 +2000,7 @@ impl Emitter {
     }
 
     fn intrinsic_count_bits(&mut self, source: Storage, width: u8, leading: bool) {
-        let input = self.model.allocate(u32::from(width)).expect("count input");
+        let input = self.allocate_temp(u32::from(width)).expect("count input");
         self.copy(source, input, u32::from(width));
         self.zero(self.r0);
         let done = self.next_label("count_bits_done");
@@ -2028,7 +2037,7 @@ impl Emitter {
         count: Storage,
         width: u8,
     ) -> Result<(), Diagnostic> {
-        let remaining = self.model.allocate(count.size)?;
+        let remaining = self.allocate_temp(count.size)?;
         self.copy(count, remaining, count.size);
         self.copy(value, self.r0, u32::from(width));
         let loop_label = self.next_label("rotate_loop");
@@ -2064,7 +2073,7 @@ impl Emitter {
     ) -> Result<Storage, Diagnostic> {
         let product_width = left_width + right_width;
         if left_width == 1 && right_width == 1 {
-            let product = self.model.allocate(2)?;
+            let product = self.allocate_temp(2)?;
             self.lda(left.address);
             self.native_line(&format!(
                 "    lds r18, {:04X}h\n    {} r16, r18\n    sts {:04X}h, r0\n    sts {:04X}h, r1\n    clr r1",
@@ -2075,10 +2084,10 @@ impl Emitter {
             ));
             return Ok(product);
         }
-        let product = self.model.allocate(u32::from(product_width))?;
-        let multiplicand = self.model.allocate(u32::from(product_width))?;
-        let multiplier = self.model.allocate(u32::from(right_width))?;
-        let negative = self.model.allocate(1)?;
+        let product = self.allocate_temp(u32::from(product_width))?;
+        let multiplicand = self.allocate_temp(u32::from(product_width))?;
+        let multiplier = self.allocate_temp(u32::from(right_width))?;
+        let negative = self.allocate_temp(1)?;
         self.zero(product);
         self.zero(multiplicand);
         self.copy(left, multiplicand, u32::from(left_width));
@@ -2268,13 +2277,13 @@ impl Emitter {
         }
         let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
         self.emit_expr(&args[0], &pointer)?;
-        let destination = self.model.allocate(2)?;
+        let destination = self.allocate_temp(2)?;
         self.copy(self.r0, destination, 2);
         self.emit_expr(&args[1], &pointer)?;
-        let source = self.model.allocate(2)?;
+        let source = self.allocate_temp(2)?;
         self.copy(self.r0, source, 2);
         self.emit_expr(&args[2], &Type::Named("u16".to_owned()))?;
-        let length = self.model.allocate(2)?;
+        let length = self.allocate_temp(2)?;
         self.copy(self.r0, length, 2);
         let loop_label = self.next_label("memcpy_loop");
         let done = self.next_label("memcpy_done");
@@ -2300,13 +2309,13 @@ impl Emitter {
         }
         let pointer = Type::Ptr(Box::new(Type::Named("u8".to_owned())));
         self.emit_expr(&args[0], &pointer)?;
-        let destination = self.model.allocate(2)?;
+        let destination = self.allocate_temp(2)?;
         self.copy(self.r0, destination, 2);
         self.emit_expr(&args[1], &Type::Named("u8".to_owned()))?;
-        let value = self.model.allocate(1)?;
+        let value = self.allocate_temp(1)?;
         self.copy(self.r0, value, 1);
         self.emit_expr(&args[2], &Type::Named("u16".to_owned()))?;
-        let length = self.model.allocate(2)?;
+        let length = self.allocate_temp(2)?;
         self.copy(self.r0, length, 2);
         let loop_label = self.next_label("memset_loop");
         let done = self.next_label("memset_done");
@@ -2499,8 +2508,8 @@ impl Emitter {
         let loop_label = self.next_label("div_loop");
         let done = self.next_label("div_done");
         let zero = self.next_label("div_zero");
-        let quotient_negative = self.model.allocate(1).expect("division sign");
-        let remainder_negative = self.model.allocate(1).expect("division sign");
+        let quotient_negative = self.allocate_temp(1).expect("division sign");
+        let remainder_negative = self.allocate_temp(1).expect("division sign");
         self.zero(quotient_negative);
         self.zero(remainder_negative);
         if signed {
@@ -2726,7 +2735,7 @@ impl Emitter {
     }
 
     fn emit_store_place(&mut self, place: &Place, width: u8) -> Result<(), Diagnostic> {
-        let saved = self.model.allocate(u32::from(width))?;
+        let saved = self.allocate_temp(u32::from(width))?;
         self.copy(self.r0, saved, u32::from(width));
         match self.place_address(place)? {
             Address::Direct(address) => self.copy(
@@ -2914,7 +2923,7 @@ impl Emitter {
             self.add_pointer_constant(offset);
             return Ok(());
         }
-        let saved_lo = self.model.allocate(2)?;
+        let saved_lo = self.allocate_temp(2)?;
         self.lda(self.pointer_scratch);
         self.sta(saved_lo.address);
         self.lda(self.pointer_scratch + 1);
@@ -3521,9 +3530,41 @@ impl Emitter {
         self.native_line("    push r29");
         self.native_line("    in r28, 3Dh");
         self.native_line("    in r29, 3Eh");
-        self.adjust_y(size, true);
+        self.native_line("    ; __EZRA_FRAME_SIZE__");
         self.native_line("    out 3Dh, r28");
         self.native_line("    out 3Eh, r29");
+        let _ = size;
+    }
+
+    fn allocate_temp(&mut self, size: u32) -> Result<Storage, Diagnostic> {
+        if !self.frame_active {
+            return self.model.allocate(size);
+        }
+        let end = self
+            .temp_cursor
+            .checked_add(size)
+            .ok_or_else(|| Diagnostic::new("AVR frame size overflow"))?;
+        let storage = frame_storage(self.temp_cursor, size);
+        self.temp_cursor = end;
+        Ok(storage)
+    }
+
+    fn patch_frame_prologue(&mut self, start: usize, size: u32) -> Result<(), Diagnostic> {
+        let mut suffix = self.out[start..].to_owned();
+        let marker = "    ; __EZRA_FRAME_SIZE__\n";
+        let position = suffix
+            .find(marker)
+            .ok_or_else(|| Diagnostic::new("internal error: missing AVR frame-size placeholder"))?;
+        let mut replacement = String::new();
+        let mut remaining = size;
+        while remaining != 0 {
+            let amount = remaining.min(63);
+            replacement.push_str(&format!("    sbiw r28, {amount}\n"));
+            remaining -= amount;
+        }
+        suffix.replace_range(position..position + marker.len(), &replacement);
+        self.out.replace_range(start.., &suffix);
+        Ok(())
     }
 
     fn emit_frame_epilogue(&mut self) {
@@ -3564,31 +3605,34 @@ impl Emitter {
         }
     }
 
-    fn emit_frame_address_in_z(&mut self, offset: u32) {
-        self.native_line("    push r30");
-        self.native_line("    push r31");
-        self.native_line("    movw r30, r28");
-        let mut remaining = offset;
-        while remaining != 0 {
-            let amount = remaining.min(63);
-            self.native_line(&format!("    adiw r30, {amount}"));
-            remaining -= amount;
-        }
-    }
-
     fn emit_frame_load(&mut self, offset: u32) {
-        self.emit_frame_address_in_z(offset);
-        self.native_line("    ld r16, Z");
-        self.native_line("    pop r31");
-        self.native_line("    pop r30");
+        self.emit_frame_y_access(offset, true);
         self.native_line("    tst r16");
     }
 
     fn emit_frame_store(&mut self, offset: u32) {
-        self.emit_frame_address_in_z(offset);
-        self.native_line("    st Z, r16");
-        self.native_line("    pop r31");
-        self.native_line("    pop r30");
+        self.emit_frame_y_access(offset, false);
+    }
+
+    fn emit_frame_y_access(&mut self, offset: u32, load: bool) {
+        if offset <= 63 {
+            if load {
+                self.native_line(&format!("    ldd r16, Y+{offset}"));
+            } else {
+                self.native_line(&format!("    std Y+{offset}, r16"));
+            }
+            return;
+        }
+        self.native_line("    push r28");
+        self.native_line("    push r29");
+        self.adjust_y(offset, false);
+        if load {
+            self.native_line("    ld r16, Y");
+        } else {
+            self.native_line("    st Y, r16");
+        }
+        self.native_line("    pop r29");
+        self.native_line("    pop r28");
     }
 
     fn lda_imm(&mut self, value: u8) {
@@ -3603,8 +3647,14 @@ impl Emitter {
 
     fn line(&mut self, line: &str) {
         let translated = translate_avr_line(line, self.pointer_scratch);
-        self.out.push_str(&translated);
-        self.out.push('\n');
+        for translated_line in translated.lines() {
+            if let Some(lowered) = lower_avr_frame_line(translated_line) {
+                self.out.push_str(&lowered);
+            } else {
+                self.out.push_str(translated_line);
+                self.out.push('\n');
+            }
+        }
     }
 
     fn native_line(&mut self, line: &str) {
@@ -3615,9 +3665,56 @@ impl Emitter {
                 &format!("{:04X}h", self.pointer_scratch + offset),
             );
         }
-        self.out.push_str(&relocated);
-        self.out.push('\n');
+        for relocated_line in relocated.lines() {
+            if let Some(lowered) = lower_avr_frame_line(relocated_line) {
+                self.out.push_str(&lowered);
+            } else {
+                self.out.push_str(relocated_line);
+                self.out.push('\n');
+            }
+        }
     }
+}
+
+fn lower_avr_frame_line(line: &str) -> Option<String> {
+    let text = line.trim();
+    let (load, register, address_text) = if let Some(operands) = text.strip_prefix("lds ") {
+        let (register, address) = operands.split_once(',')?;
+        (true, register.trim(), address.trim())
+    } else if let Some(operands) = text.strip_prefix("sts ") {
+        let (address, register) = operands.split_once(',')?;
+        (false, register.trim(), address.trim())
+    } else {
+        return None;
+    };
+    let address_text = address_text
+        .strip_suffix('h')
+        .or_else(|| address_text.strip_suffix('H'))?;
+    let address = u32::from_str_radix(address_text, 16).ok()?;
+    let offset = address.checked_sub(FRAME_ADDRESS_BASE)?;
+    let mut lowered = String::new();
+    if offset <= 63 {
+        if load {
+            lowered.push_str(&format!("    ldd {register}, Y+{offset}\n"));
+        } else {
+            lowered.push_str(&format!("    std Y+{offset}, {register}\n"));
+        }
+    } else {
+        lowered.push_str("    push r28\n    push r29\n");
+        let mut remaining = offset;
+        while remaining != 0 {
+            let amount = remaining.min(63);
+            lowered.push_str(&format!("    adiw r28, {amount}\n"));
+            remaining -= amount;
+        }
+        if load {
+            lowered.push_str(&format!("    ld {register}, Y\n"));
+        } else {
+            lowered.push_str(&format!("    st Y, {register}\n"));
+        }
+        lowered.push_str("    pop r29\n    pop r28\n");
+    }
+    Some(lowered)
 }
 
 const AVR_LOCAL_FIRST_REGISTER: u8 = 2;

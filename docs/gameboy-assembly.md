@@ -206,7 +206,10 @@ Game Boy targets compile `.ezra` source through HIR, TBIR, and the shared
 semantic storage model before LR35902 lowering. The runtime sets `SP` to
 `FFFEh`, calls `_main` from the cartridge entry code, and enters a HALT loop
 when `main` returns. The source ABI uses WRAM storage for scalar values,
-arguments, return values, globals, strings, and embedded bytes; generated
+arguments, return values, globals, strings, and embedded bytes. Each non-naked
+invocation reserves a private stack frame; locals, compiler temporaries, spills,
+call snapshots, and hidden two-result return storage are frame-backed, so
+recursion and callback re-entry do not overwrite another invocation. Generated
 `_name equ` symbols keep globals and embeds available to inline assembly.
 
 The backend supports scalar operators and casts, locals/globals, pointers,

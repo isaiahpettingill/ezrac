@@ -2195,7 +2195,7 @@ impl Emitter {
             // discover its size, then re-emit with the prologue in place.
             self.frame_active = true;
             self.frame_cursor = Self::FRAME_RELAY_BYTES;
-            let saved_out = std::mem::take(&mut self.out);
+            let saved_out = core::mem::take(&mut self.out);
             let saved_label_counter = self.label_counter;
             self.bind_params(function)?;
             let local_plan = self.plan_function_locals(function)?;
@@ -4953,7 +4953,7 @@ impl Emitter {
         if let Some((offset, variable)) = extra {
             arguments.push((offset, variable));
         }
-        arguments.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
+        arguments.sort_by_key(|(offset, _)| core::cmp::Reverse(*offset));
         for (_, variable) in arguments {
             self.emit_push_stack_arg_variable(variable);
         }

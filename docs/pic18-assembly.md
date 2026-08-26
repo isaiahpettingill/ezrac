@@ -31,7 +31,9 @@ The source backend uses the full AVR HIR/TBIR lowering and translates its byte-r
 
 - virtual byte registers `r0..r31` map to access RAM `0x20..0x3f`
 - AVR X and Z pointer operations map through FSR0 and FSR1
-- FSR2 is the compiler data stack
+- FSR2 is the compiler data stack; each non-naked invocation owns a private
+  frame for locals, compiler temporaries, spills, call snapshots, and hidden
+  two-result return storage
 - scalar return bytes follow the existing AVR lowering convention
 - program labels are byte addresses; data pointers are FSR values
 

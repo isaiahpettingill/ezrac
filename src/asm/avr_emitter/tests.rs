@@ -340,6 +340,7 @@ fn lowers_two_result_calls_with_a_hidden_pointer_and_preserves_both_values() {
     assert!(assembly.contains("call _pair"), "{assembly}");
     assert!(assembly.contains("ldi r26,"), "{assembly}");
     assert!(assembly.contains("st z, r16"), "{assembly}");
+    assert!(!assembly.contains("F000"), "{assembly}");
 }
 
 #[test]
